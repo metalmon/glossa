@@ -38,6 +38,9 @@ enum Cmd {
         /// Use the on-disk index for BM25-ranked, stemmed search (run `kb index` first).
         #[arg(long)]
         rank: bool,
+        /// Disable .gitignore/.ignore/hidden filtering (index everything).
+        #[arg(long = "no-ignore")]
+        no_ignore: bool,
     },
     /// Build or update the on-disk index for ranked search.
     Index {
@@ -78,7 +81,7 @@ enum GraphAction {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore } => {
             if rank {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search(&pattern, limit)? {
@@ -93,7 +96,7 @@ fn main() -> anyhow::Result<()> {
                 fixed,
             };
             let re = compile(&pattern, &opts)?;
-            let chunks = collect_chunks(&path, glob.as_deref())?;
+            let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
             for h in search_chunks(&chunks, &re, limit) {
                 println!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet);
             }

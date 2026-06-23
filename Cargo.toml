@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
+ignore = "0.4"
 regex = "1"
 globset = "0.4"
 office_oxide = "0.1"
