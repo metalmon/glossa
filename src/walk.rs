@@ -1,4 +1,6 @@
 use crate::extract::markdown::MarkdownExtractor;
+use crate::extract::office::OfficeExtractor;
+use crate::extract::pdf::PdfExtractor;
 use crate::extract::Extractor;
 use crate::model::Chunk;
 use globset::Glob;
@@ -6,7 +8,11 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 pub fn extractors() -> Vec<Box<dyn Extractor>> {
-    vec![Box::new(MarkdownExtractor)]
+    vec![
+        Box::new(MarkdownExtractor),
+        Box::new(OfficeExtractor),
+        Box::new(PdfExtractor),
+    ]
 }
 
 pub fn collect_chunks(root: &Path, glob: Option<&str>) -> anyhow::Result<Vec<Chunk>> {
