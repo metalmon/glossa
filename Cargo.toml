@@ -1,0 +1,22 @@
+[package]
+name = "glossa"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "glossa"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kb"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+regex = "1"
+globset = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
