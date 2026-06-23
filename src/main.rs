@@ -57,6 +57,14 @@ enum Cmd {
         #[command(subcommand)]
         action: GraphAction,
     },
+    /// Run the MCP server over stdio (for AI agents).
+    Mcp {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Tool profile: reader | editor | full.
+        #[arg(long, default_value = "editor")]
+        profile: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -113,6 +121,17 @@ fn main() -> anyhow::Result<()> {
         Cmd::Reindex { path } => {
             let stats = glossa::index::store::index_dir(&path, true)?;
             println!("reindexed: {} files", stats.added);
+            Ok(())
+        }
+        Cmd::Mcp { path, profile } => {
+            use rmcp::{transport::stdio, ServiceExt};
+            let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile));
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async move {
+                let service = server.serve(stdio()).await?;
+                let _ = service.waiting().await;
+                Ok::<(), anyhow::Error>(())
+            })?;
             Ok(())
         }
         Cmd::Graph { action } => match action {
