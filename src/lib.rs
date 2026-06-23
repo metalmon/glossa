@@ -1,6 +1,7 @@
 pub mod model;
 pub mod extract;
 pub mod query;
+pub mod search;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
