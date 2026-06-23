@@ -1,3 +1,4 @@
+pub mod mcp;
 pub mod model;
 pub mod extract;
 pub mod graph;
