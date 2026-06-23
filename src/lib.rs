@@ -1,5 +1,6 @@
 pub mod mcp;
 pub mod model;
+pub mod root;
 pub mod extract;
 pub mod graph;
 pub mod index;
