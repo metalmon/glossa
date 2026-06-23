@@ -1,6 +1,7 @@
+use crate::graph::ontology::Ontology;
 use crate::index::manifest::FileSig;
 use anyhow::Context;
-use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -63,7 +64,11 @@ impl GraphStore {
 
     pub fn get_node(&self, id: &str) -> anyhow::Result<Option<Node>> {
         let txn = self.db.begin_read()?;
-        let t = txn.open_table(NODES)?;
+        let t = match txn.open_table(NODES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         match t.get(id)? {
             Some(g) => Ok(Some(postcard::from_bytes(g.value()).context("de node")?)),
             None => Ok(None),
@@ -84,14 +89,165 @@ impl GraphStore {
 
     pub fn node_count(&self) -> anyhow::Result<u64> {
         let txn = self.db.begin_read()?;
-        let t = txn.open_table(NODES)?;
-        Ok(t.len()?)
+        match txn.open_table(NODES) {
+            Ok(t) => Ok(t.len()?),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn edge_count(&self) -> anyhow::Result<u64> {
         let txn = self.db.begin_read()?;
-        let t = txn.open_table(EDGES)?;
-        Ok(t.len()?)
+        match txn.open_table(EDGES) {
+            Ok(t) => Ok(t.len()?),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl GraphStore {
+    pub fn upsert(&self, ont: &Ontology, nodes: &[Node], edges: &[Edge]) -> anyhow::Result<()> {
+        // Validate everything BEFORE writing anything.
+        for n in nodes {
+            if n.prov.source_path.is_empty() {
+                anyhow::bail!("node {:?} has empty provenance", n.id);
+            }
+            ont.validate_node(&n.node_type).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        let type_of = |id: &str, batch: &[Node]| -> Option<String> {
+            batch.iter().find(|n| n.id == id).map(|n| n.node_type.clone())
+                .or_else(|| self.get_node(id).ok().flatten().map(|n| n.node_type))
+        };
+        for e in edges {
+            if e.prov.source_path.is_empty() {
+                anyhow::bail!("edge {}->{} has empty provenance", e.from, e.to);
+            }
+            let ft = type_of(&e.from, nodes).unwrap_or_default();
+            let tt = type_of(&e.to, nodes).unwrap_or_default();
+            ont.validate_edge(&e.edge_type, &ft, &tt).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        for n in nodes {
+            self.put_node(n)?;
+        }
+        for e in edges {
+            self.put_edge(e)?;
+        }
+        Ok(())
+    }
+
+    fn all_nodes(&self) -> anyhow::Result<Vec<Node>> {
+        let txn = self.db.begin_read()?;
+        let t = match txn.open_table(NODES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for entry in t.iter()? {
+            let (_, v) = entry?;
+            out.push(postcard::from_bytes(v.value())?);
+        }
+        Ok(out)
+    }
+
+    pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        let needle = name.to_lowercase();
+        let mut ids = Vec::new();
+        for n in self.all_nodes()? {
+            let hit = n.label.to_lowercase() == needle
+                || n.aliases.iter().any(|a| a.to_lowercase() == needle);
+            if hit {
+                ids.push(n.id);
+            }
+        }
+        Ok(ids)
+    }
+}
+
+#[cfg(test)]
+mod upsert_tests {
+    use super::*;
+    use crate::graph::ontology::Ontology;
+
+    fn agent_prov() -> Provenance {
+        Provenance {
+            source_path: "contract.docx".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.9,
+            created_at: 0,
+        }
+    }
+
+    const ONT: &str = r#"
+[entities.Organization]
+props = ["name"]
+[relations.PARTY_TO]
+from = ["Organization"]
+to = ["Document"]
+[validation]
+strict = true
+"#;
+
+    #[test]
+    fn upsert_validates_and_resolve_finds_by_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let org = Node {
+            id: "org:acme".into(),
+            node_type: "Organization".into(),
+            label: "Acme Corp".into(),
+            aliases: vec!["ООО Акме".into(), "ACME".into()],
+            prov: agent_prov(),
+        };
+        let doc = Node {
+            id: "contract.docx".into(),
+            node_type: "Document".into(),
+            label: "contract.docx".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        let edge = Edge {
+            from: "org:acme".into(),
+            to: "contract.docx".into(),
+            edge_type: "PARTY_TO".into(),
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[org, doc], &[edge]).unwrap();
+
+        assert_eq!(g.resolve("ооо акме").unwrap(), vec!["org:acme".to_string()]);
+        assert_eq!(g.resolve("ACME").unwrap(), vec!["org:acme".to_string()]);
+    }
+
+    #[test]
+    fn upsert_rejects_undeclared_type_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let bad = Node {
+            id: "x".into(),
+            node_type: "Alien".into(),
+            label: "x".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        assert!(g.upsert(&ont, &[bad], &[]).is_err());
+        assert_eq!(g.node_count().unwrap(), 0); // nothing written
+    }
+
+    #[test]
+    fn upsert_rejects_empty_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::default();
+        let mut p = agent_prov();
+        p.source_path = String::new();
+        let n = Node { id: "x".into(), node_type: "Document".into(), label: "x".into(), aliases: vec![], prov: p };
+        assert!(g.upsert(&ont, &[n], &[]).is_err());
     }
 }
 
