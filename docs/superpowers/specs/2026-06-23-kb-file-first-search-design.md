@@ -142,7 +142,8 @@ The index stores chunk text for snippet generation; the canonical content remain
 - Honest scope note: for unstructured prose, an auto co-occurrence glossary is a **navigation
   aid + mild recall boost**, not a killer feature. We do not oversell it in v1.
 - **Phase 2/3 (agent-built knowledge graph):** because the product is agent-native, the
-  connected agent can extract entities/relations (GraphRAG-style) by reading documents via
+  connected agent can extract entities/relations (GraphRAG-style) **and cross-document links**
+  (references / supersedes / relates-to / contradicts) by reading documents via
   `read` and **writing them back** through the `graph` MCP tool. This yields graph-of-text
   quality **without bundling an LLM and without server-side network** — the in-the-loop agent
   is the extractor. This is the primary differentiator and where commercial value is added.
@@ -200,9 +201,16 @@ files are processed. Optional filesystem watcher for live updates.
 - **v1:** md/docx/doc/xlsx/xls/pptx/ppt; lexical BM25 + multilingual stemming; lightweight auto
   glossary; modern-office image return; MCP + CLI; incremental index.
 - **Phase 2:** PDF page-level locations + PDF image extraction; legacy-format image extraction;
-  filesystem watcher hardening; agent-built knowledge-graph (`graph`) tool.
-- **Phase 3 (optional):** semantic / hybrid (pluggable embedding provider — local multilingual
-  model or external API — with BM25+vector reranking); deeper GraphRAG-style retrieval.
+  filesystem watcher hardening; **agent-built knowledge graph** via the `graph` tool — the
+  agent reads documents and writes entities/relations **and cross-document links**
+  (references / supersedes / relates-to / contradicts), turning the flat corpus into a
+  navigable graph of connected documents.
+- **Phase 3 — companion skills:** agent playbooks/skills for working with glossa (search →
+  read → build-graph → answer workflows), analogous to the `office-documents` skill in
+  zeroclaw-skills. Ships as a small skill pack so agents use the tool well out of the box.
+- **Phase 4 (optional):** semantic / hybrid (pluggable embedding provider — local multilingual
+  model or external API — with BM25+vector reranking); deeper GraphRAG-style retrieval over
+  the agent-built graph.
 
 ## 9. Dependencies
 `tantivy`, `office_oxide`, `calamine`, `pdf-extract`, `whatlang`, `rusqlite` (bundled),
