@@ -1,2 +1,8 @@
 .superpowers/
 /target
+
+# Local debug knowledge base (real data — never commit)
+kb-test/
+
+# Local index/manifest caches
+.glossa/
