@@ -107,6 +107,25 @@ impl GraphStore {
 }
 
 impl GraphStore {
+    pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {
+        let start = format!("{from}\u{0}");
+        let end = format!("{from}\u{1}");
+        let txn = self.db.begin_read()?;
+        let t = match txn.open_table(EDGES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for entry in t.range(start.as_str()..end.as_str())? {
+            let (_, v) = entry?;
+            out.push(postcard::from_bytes(v.value())?);
+        }
+        Ok(out)
+    }
+}
+
+impl GraphStore {
     pub fn upsert(&self, ont: &Ontology, nodes: &[Node], edges: &[Edge]) -> anyhow::Result<()> {
         // Validate everything BEFORE writing anything.
         for n in nodes {
