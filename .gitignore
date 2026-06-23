@@ -3,6 +3,7 @@
 
 # Local debug knowledge base (real data — never commit)
 kb-test/
+kb-val/
 
 # Local index/manifest caches
 .glossa/
