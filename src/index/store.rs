@@ -142,6 +142,7 @@ impl DocIndex {
 /// `force = true` ignores the manifest and rebuilds every file.
 pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let idx = DocIndex::open_or_create(dir)?;
+    let graph = crate::graph::store::GraphStore::open(dir)?;
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
     let chunks = collect_chunks(dir, None)?;
 
@@ -168,12 +169,15 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
         idx.delete_path(path)?;
         idx.write_chunks(file_chunks)?;
+        graph.delete_by_source(path)?;
+        crate::graph::build::build_structural(&graph, file_chunks, sig)?;
         stats.added += 1;
     }
 
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
             idx.delete_path(old_path)?;
+            graph.delete_by_source(old_path)?;
             stats.removed += 1;
         }
     }
@@ -186,6 +190,17 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
 mod incremental_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn index_dir_builds_structural_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# Intro\nhello\n## Body\nworld\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        assert!(g.node_count().unwrap() >= 2); // Document + at least one Section
+        let intro = g.resolve("Intro").unwrap();
+        assert!(!intro.is_empty());
+    }
 
     #[test]
     fn reindex_picks_up_changes_and_skips_unchanged() {

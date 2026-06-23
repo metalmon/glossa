@@ -107,6 +107,58 @@ impl GraphStore {
 }
 
 impl GraphStore {
+    pub fn delete_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
+        let (node_ids, edge_keys) = {
+            let txn = self.db.begin_read()?;
+            let mut nids = Vec::new();
+            match txn.open_table(NODES) {
+                Ok(t) => {
+                    for entry in t.iter()? {
+                        let (k, v) = entry?;
+                        let n: Node = postcard::from_bytes(v.value())?;
+                        if n.prov.source_path == source_path {
+                            nids.push(k.value().to_string());
+                        }
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let mut eks = Vec::new();
+            match txn.open_table(EDGES) {
+                Ok(t) => {
+                    for entry in t.iter()? {
+                        let (k, v) = entry?;
+                        let e: Edge = postcard::from_bytes(v.value())?;
+                        if e.prov.source_path == source_path {
+                            eks.push(k.value().to_string());
+                        }
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+            (nids, eks)
+        };
+        let removed = node_ids.len() + edge_keys.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut nt = txn.open_table(NODES)?;
+            for id in &node_ids {
+                nt.remove(id.as_str())?;
+            }
+            let mut et = txn.open_table(EDGES)?;
+            for k in &edge_keys {
+                et.remove(k.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
+    }
+
     pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {
         let start = format!("{from}\u{0}");
         let end = format!("{from}\u{1}");
