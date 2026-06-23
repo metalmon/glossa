@@ -28,6 +28,7 @@ mod tests {
         assert_eq!(chunks[0].location, "A");
         assert_eq!(chunks[0].text.trim(), "intro");
         assert_eq!(chunks[1].location, "A > B");
+        assert_eq!(chunks[1].text.trim(), "body b");
         assert_eq!(chunks[2].location, "C");
     }
 
