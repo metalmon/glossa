@@ -1,8 +1,13 @@
 use crate::index::multilang::{default_detector, multilang_analyzer};
+use crate::model::Chunk;
 use anyhow::Context;
 use std::path::Path;
+use tantivy::collector::TopDocs;
+use tantivy::query::QueryParser;
 use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, STORED, STRING};
-use tantivy::{Index, TantivyError};
+use tantivy::schema::Value;
+use tantivy::snippet::SnippetGenerator;
+use tantivy::{doc, Index, TantivyDocument, TantivyError};
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -49,6 +54,91 @@ impl DocIndex {
             .tokenizers()
             .register("multilang", multilang_analyzer(default_detector()));
         Ok(DocIndex { index, fields })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedHit {
+    pub path: String,
+    pub location: String,
+    pub file_type: String,
+    pub snippet: String,
+    pub score: f32,
+}
+
+impl DocIndex {
+    pub fn write_chunks(&self, chunks: &[Chunk]) -> anyhow::Result<()> {
+        let mut writer = self.index.writer(50_000_000)?;
+        for c in chunks {
+            writer.add_document(doc!(
+                self.fields.body => c.text.clone(),
+                self.fields.path => c.doc_path.to_string_lossy().to_string(),
+                self.fields.location => c.location.clone(),
+                self.fields.file_type => c.file_type.clone(),
+            ))?;
+        }
+        writer.commit()?;
+        Ok(())
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RankedHit>> {
+        let reader = self.index.reader()?;
+        let searcher = reader.searcher();
+        let parser = QueryParser::for_index(&self.index, vec![self.fields.body]);
+        let parsed = parser.parse_query(query)?;
+        let top = searcher.search(&parsed, &TopDocs::with_limit(limit).order_by_score())?;
+
+        let snippet_gen = SnippetGenerator::create(&searcher, &*parsed, self.fields.body)?;
+
+        let mut hits = Vec::with_capacity(top.len());
+        for (score, addr) in top {
+            let d: TantivyDocument = searcher.doc(addr)?;
+            let get = |f: tantivy::schema::Field| -> String {
+                d.get_first(f).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            let snippet = snippet_gen.snippet_from_doc(&d).fragment().to_string();
+            hits.push(RankedHit {
+                path: get(self.fields.path),
+                location: get(self.fields.location),
+                file_type: get(self.fields.file_type),
+                snippet,
+                score,
+            });
+        }
+        Ok(hits)
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn chunk(path: &str, text: &str) -> Chunk {
+        Chunk {
+            doc_path: PathBuf::from(path),
+            location: "S".into(),
+            file_type: "md".into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn ranked_search_finds_russian_by_inflected_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            chunk("a.md", "Подписаны договоры на поставку"),
+            chunk("b.md", "unrelated english content"),
+        ])
+        .unwrap();
+
+        // Query uses a different inflection ("договор") than the doc ("договоры").
+        let hits = idx.search("договор", 10).unwrap();
+        assert!(!hits.is_empty(), "stemmed query should match inflected doc");
+        assert_eq!(hits[0].path, "a.md");
+        assert!(hits[0].score > 0.0);
+        assert!(!hits[0].snippet.is_empty());
     }
 }
 
