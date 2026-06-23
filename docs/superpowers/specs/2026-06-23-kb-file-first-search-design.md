@@ -215,7 +215,8 @@ files are processed. Optional filesystem watcher for live updates.
   zeroclaw-skills. Ships as a small skill pack so agents use the tool well out of the box.
 - **Phase 4 (optional):** semantic / hybrid (pluggable embedding provider — local multilingual
   model or external API — with BM25+vector reranking); deeper GraphRAG-style retrieval over
-  the agent-built graph.
+  the agent-built graph; **optional RDF/SHACL export** for semantic-web interop (SHACL shapes
+  generated from `ontology.toml` — see §11).
 
 ## 9. Dependencies
 `tantivy`, `office_oxide`, `calamine`, `pdf-extract`, `whatlang`, `rusqlite` (bundled),
@@ -291,3 +292,20 @@ to   = ["Person", "Organization"]
 [validation]
 strict = true   # reject upserts with types not declared above
 ```
+
+**Validation — native now, SHACL-mappable, optional SHACL export later**
+- v1: a small **native validator** checks every `graph` upsert against `ontology.toml`.
+  No RDF stack in the core (no oxigraph) — keeps the lean single-binary, offline ethos.
+- The constraint vocabulary is intentionally a **subset that maps 1:1 to SHACL Core**, so
+  nothing has to be re-modelled later:
+  | `ontology.toml` | SHACL Core |
+  |---|---|
+  | entity/relation `type` | `sh:class` / `sh:targetClass` |
+  | required + cardinality | `sh:minCount` / `sh:maxCount` |
+  | property datatype | `sh:datatype` |
+  | allowed value set | `sh:in` |
+  | `strict = true` | `sh:closed true` |
+- **Phase 3 (optional interop):** export the graph as RDF and validate with an embedded/external
+  SHACL engine (rudof / pySHACL); SHACL shapes are **generated from `ontology.toml`**. This
+  aligns with the SKOS glossary layer and serves users who need semantic-web interoperability —
+  without forcing RDF/SHACL into the core.
