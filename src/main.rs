@@ -35,13 +35,33 @@ enum Cmd {
         /// Max number of hits.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Use the on-disk index for BM25-ranked, stemmed search (run `kb index` first).
+        #[arg(long)]
+        rank: bool,
+    },
+    /// Build or update the on-disk index for ranked search.
+    Index {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Rebuild the index from scratch.
+    Reindex {
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank } => {
+            if rank {
+                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+                for h in idx.search(&pattern, limit)? {
+                    println!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score);
+                }
+                return Ok(());
+            }
             let opts = QueryOpts {
                 ignore_case,
                 smart_case: !ignore_case, // rg smart-case default
@@ -53,6 +73,19 @@ fn main() -> anyhow::Result<()> {
             for h in search_chunks(&chunks, &re, limit) {
                 println!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet);
             }
+            Ok(())
+        }
+        Cmd::Index { path } => {
+            let stats = glossa::index::store::index_dir(&path, false)?;
+            println!(
+                "indexed: {} added, {} removed, {} unchanged",
+                stats.added, stats.removed, stats.unchanged
+            );
+            Ok(())
+        }
+        Cmd::Reindex { path } => {
+            let stats = glossa::index::store::index_dir(&path, true)?;
+            println!("reindexed: {} files", stats.added);
             Ok(())
         }
     }
