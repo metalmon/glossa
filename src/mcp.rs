@@ -1,3 +1,5 @@
+use crate::graph::agent::apply_upsert;
+use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
 use crate::query::{compile, QueryOpts};
@@ -94,6 +96,14 @@ struct NameArg { name: String }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct Empty {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphUpsertArgs {
+    #[serde(default)]
+    nodes: Vec<crate::graph::agent::NodeSpec>,
+    #[serde(default)]
+    edges: Vec<crate::graph::agent::EdgeSpec>,
+}
+
 #[tool_router]
 impl GlossaServer {
     #[tool(description = "Search the knowledge base (ripgrep syntax). Returns path:location:line: snippet.")]
@@ -154,10 +164,16 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
     }
 
-    #[tool(description = "Upsert agent-built graph nodes/edges (JSON), validated against the ontology.")]
-    async fn graph_upsert(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
-        // Minimal stub: full JSON node/edge payload wiring is a follow-up (editor/full only).
-        Ok(CallToolResult::success(vec![Content::text("graph_upsert: provide nodes/edges payload (see ontology.toml)")]))
+    #[tool(description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance.")]
+    async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let ont = Ontology::load_or_default(&self.root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let (n, e) = apply_upsert(&g, &ont, a.nodes, a.edges, now).map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(format!("upserted {n} nodes, {e} edges"))]))
     }
 
     #[tool(description = "Delete the index + graph for the knowledge base.")]
@@ -183,6 +199,15 @@ impl ServerHandler for GlossaServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_upsert_args_deserialize_from_json() {
+        let json = r#"{"nodes":[{"id":"a","node_type":"Document","label":"a","source_path":"a.md"}],"edges":[]}"#;
+        let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(a.nodes.len(), 1);
+        assert_eq!(a.nodes[0].id, "a");
+        assert!(a.edges.is_empty());
+    }
 
     #[test]
     fn profile_gates_tool_visibility() {
