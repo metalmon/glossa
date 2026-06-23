@@ -7,3 +7,5 @@ pub trait Extractor {
     /// Extract a file's raw bytes into heading/section-scoped chunks.
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>>;
 }
+
+pub mod markdown;
