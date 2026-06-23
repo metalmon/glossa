@@ -18,6 +18,7 @@ walkdir = "2"
 regex = "1"
 globset = "0.4"
 office_oxide = "0.1"
+pdf-extract = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
