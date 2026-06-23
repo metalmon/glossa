@@ -38,6 +38,9 @@ enum Cmd {
         /// Use the on-disk index for BM25-ranked, stemmed search (run `kb index` first).
         #[arg(long)]
         rank: bool,
+        /// Disable .gitignore/.ignore/hidden filtering (index everything).
+        #[arg(long = "no-ignore")]
+        no_ignore: bool,
     },
     /// Build or update the on-disk index for ranked search.
     Index {
@@ -53,6 +56,14 @@ enum Cmd {
     Graph {
         #[command(subcommand)]
         action: GraphAction,
+    },
+    /// Run the MCP server over stdio (for AI agents).
+    Mcp {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Tool profile: reader | editor | full.
+        #[arg(long, default_value = "editor")]
+        profile: String,
     },
 }
 
@@ -78,7 +89,7 @@ enum GraphAction {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore } => {
             if rank {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search(&pattern, limit)? {
@@ -93,7 +104,7 @@ fn main() -> anyhow::Result<()> {
                 fixed,
             };
             let re = compile(&pattern, &opts)?;
-            let chunks = collect_chunks(&path, glob.as_deref())?;
+            let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
             for h in search_chunks(&chunks, &re, limit) {
                 println!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet);
             }
@@ -110,6 +121,17 @@ fn main() -> anyhow::Result<()> {
         Cmd::Reindex { path } => {
             let stats = glossa::index::store::index_dir(&path, true)?;
             println!("reindexed: {} files", stats.added);
+            Ok(())
+        }
+        Cmd::Mcp { path, profile } => {
+            use rmcp::{transport::stdio, ServiceExt};
+            let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile));
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async move {
+                let service = server.serve(stdio()).await?;
+                let _ = service.waiting().await;
+                Ok::<(), anyhow::Error>(())
+            })?;
             Ok(())
         }
         Cmd::Graph { action } => match action {
