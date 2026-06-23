@@ -4,8 +4,8 @@ use crate::extract::pdf::PdfExtractor;
 use crate::extract::Extractor;
 use crate::model::Chunk;
 use globset::Glob;
+use ignore::WalkBuilder;
 use std::path::Path;
-use walkdir::WalkDir;
 
 pub fn extractors() -> Vec<Box<dyn Extractor>> {
     vec![
@@ -15,7 +15,11 @@ pub fn extractors() -> Vec<Box<dyn Extractor>> {
     ]
 }
 
-pub fn collect_chunks(root: &Path, glob: Option<&str>) -> anyhow::Result<Vec<Chunk>> {
+pub fn collect_chunks(
+    root: &Path,
+    glob: Option<&str>,
+    respect_ignore: bool,
+) -> anyhow::Result<Vec<Chunk>> {
     let matcher = match glob {
         Some(g) => Some(Glob::new(g)?.compile_matcher()),
         None => None,
@@ -23,15 +27,22 @@ pub fn collect_chunks(root: &Path, glob: Option<&str>) -> anyhow::Result<Vec<Chu
     let exts = extractors();
     let mut all = Vec::new();
 
-    for entry in WalkDir::new(root) {
-        let entry = match entry {
+    let mut wb = WalkBuilder::new(root);
+    wb.standard_filters(respect_ignore); // gitignore/.ignore/hidden/parents
+    // Apply .gitignore even outside a git repo (e.g. in tests with no .git dir).
+    wb.require_git(!respect_ignore);
+    // Always skip our own store, even when respect_ignore is false.
+    wb.filter_entry(|e| e.file_name() != ".glossa");
+
+    for result in wb.build() {
+        let entry = match result {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("skip (walk error): {e}");
                 continue;
             }
         };
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let path = entry.path();
@@ -45,7 +56,6 @@ pub fn collect_chunks(root: &Path, glob: Option<&str>) -> anyhow::Result<Vec<Chu
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-
         for ex in &exts {
             if ex.file_types().contains(&ext.as_str()) {
                 match std::fs::read(path) {

@@ -144,7 +144,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
-    let chunks = collect_chunks(dir, None)?;
+    let chunks = collect_chunks(dir, None, true)?;
 
     use std::collections::BTreeMap;
     let mut by_path: BTreeMap<String, Vec<crate::model::Chunk>> = BTreeMap::new();
