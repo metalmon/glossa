@@ -18,6 +18,10 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   walker + per-file IO: parallel traversal (rayon), fewer syscalls, mmap/streaming reads, skip-by-size,
   and consider a persistent file list. **Reference for ideas:** `fff` — https://github.com/dmtrKovalenko/fff
   (blazingly-fast parallel file finder in Rust) — mine its traversal/IO approach.
+  - **Blocker for parallel extraction:** `PdfExtractor` uses the process-global panic hook
+    (`take_hook`/`set_hook`) to silence pdf backtraces; that races if `extract` runs on multiple
+    threads. Before parallelizing indexing, drop the hook swap (rely on `catch_unwind` alone) or guard
+    it. Correctness is unaffected today (single-threaded).
 
 ## Technical backlog (carry-forward, non-blocking)
 - **Graph crash-atomicity**: fold one file's node/edge writes into a single redb write txn so a
