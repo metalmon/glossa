@@ -4,7 +4,7 @@ Status as of 2026-06-24: Milestones 1–5 + real `graph_upsert` are merged to `m
 Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shipping targets.
 
 ## What works today
-- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (pdf-extract).
+- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf, **per-page chunks `p.N`**).
 - Search: ripgrep-syntax scan (default) **and** BM25 ranked (`--rank`) with RU/EN stemming.
 - Knowledge graph (redb): provenance-stamped nodes/edges, `ontology.toml` validation, bounded
   traversal (`neighbors`/`path`), deterministic auto layer-1 (Document/Section/CONTAINS) during index.
