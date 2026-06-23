@@ -36,14 +36,14 @@ fn build_schema() -> (Schema, Fields) {
     (sb.build(), Fields { body, path, location, file_type })
 }
 
-fn index_dir(dir: &Path) -> std::path::PathBuf {
+fn index_dir_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".glossa").join("index")
 }
 
 impl DocIndex {
     pub fn open_or_create(dir: &Path) -> anyhow::Result<DocIndex> {
         let (schema, fields) = build_schema();
-        let idx_path = index_dir(dir);
+        let idx_path = index_dir_path(dir);
         std::fs::create_dir_all(&idx_path).with_context(|| format!("create {idx_path:?}"))?;
         let index = match Index::create_in_dir(&idx_path, schema.clone()) {
             Ok(i) => i,
@@ -106,6 +106,102 @@ impl DocIndex {
             });
         }
         Ok(hits)
+    }
+}
+
+use crate::index::manifest::{FileSig, Manifest};
+use crate::walk::collect_chunks;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct IndexStats {
+    pub added: usize,
+    pub removed: usize,
+    pub unchanged: usize,
+}
+
+fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
+    let md = std::fs::metadata(path)?;
+    let mtime_secs = md
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(FileSig { mtime_secs, size: md.len() })
+}
+
+impl DocIndex {
+    pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
+        let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
+        writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
+        writer.commit()?;
+        Ok(())
+    }
+}
+
+/// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
+/// `force = true` ignores the manifest and rebuilds every file.
+pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
+    let idx = DocIndex::open_or_create(dir)?;
+    let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
+    let chunks = collect_chunks(dir, None)?;
+
+    use std::collections::BTreeMap;
+    let mut by_path: BTreeMap<String, Vec<crate::model::Chunk>> = BTreeMap::new();
+    for c in chunks {
+        by_path
+            .entry(c.doc_path.to_string_lossy().to_string())
+            .or_default()
+            .push(c);
+    }
+
+    let mut stats = IndexStats::default();
+    let mut next = Manifest::default();
+    for (path, file_chunks) in &by_path {
+        let sig = match file_sig(Path::new(path)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        next.files.insert(path.clone(), sig);
+        if !force && !manifest.changed(path, sig) {
+            stats.unchanged += 1;
+            continue;
+        }
+        idx.delete_path(path)?;
+        idx.write_chunks(file_chunks)?;
+        stats.added += 1;
+    }
+
+    for old_path in manifest.files.keys() {
+        if !next.files.contains_key(old_path) {
+            idx.delete_path(old_path)?;
+            stats.removed += 1;
+        }
+    }
+
+    next.save(dir)?;
+    Ok(stats)
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn reindex_picks_up_changes_and_skips_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "# T\nдоговоры поставка\n").unwrap();
+
+        let s1 = index_dir(dir.path(), false).unwrap();
+        assert_eq!(s1.added, 1);
+
+        let s2 = index_dir(dir.path(), false).unwrap();
+        assert_eq!(s2.unchanged, 1);
+        assert_eq!(s2.added, 0);
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let hits = idx.search("договор", 10).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("a.md")));
     }
 }
 

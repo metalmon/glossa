@@ -739,6 +739,8 @@ dependencies = [
  "predicates",
  "regex",
  "rust-stemmers",
+ "serde",
+ "serde_json",
  "tantivy",
  "tempfile",
  "walkdir",
