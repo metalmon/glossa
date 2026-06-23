@@ -97,11 +97,15 @@ The indexer walks the KB directory and reads files directly:
 | Format | Library | Notes / location granularity |
 |---|---|---|
 | md | native parser | split by headings; location = heading path |
-| docx, pptx | `zip` (deflate-only) + `quick-xml` | unzip → parse `word/document.xml` / slide `<a:t>`; sections by heading. (Recon: `office_oxide` v0.1.x too immature to be a core dep.) |
-| doc, ppt (legacy OLE2) | `office_oxide` (experimental) or deferred | text only, coarse; no mature pure-Rust legacy parser — may slip to phase 2 if unstable |
-| xlsx, xls, ods | `calamine` | per-sheet; snippet carries `Sheet!Row` (reads legacy + modern) |
+| docx, doc, pptx, ppt | `office_oxide` (behind `Extractor` trait) | text/markdown for all four **including legacy OLE2**; sections by heading. Proven in our Zeroclaw office-tools PR |
+| xlsx, xls, ods | `calamine` | per-sheet + cell coords; snippet carries `Sheet!Row` (legacy + modern) |
 | pdf | `pdf-extract` | v1: whole-doc text (`extract_text_by_pages` exists); page-level + images via `lopdf` in phase 2 |
+| images | `zip` (deflate-only) | pull embedded media (`word|xl|ppt/media/*`) from modern office files (office_oxide drops images) |
 | encoding | `encoding_rs` | Cyrillic / legacy encodings (windows-1251, KOI8-R) |
+
+All extractors sit behind a single `Extractor` trait, so any backend (notably the young
+`office_oxide`) is swappable per format without touching chunking/index — the maturity risk is
+contained, not designed-in.
 
 Failure isolation: a corrupt / encrypted / scanned / unsupported file is **skipped with a
 recorded reason** in the index status; indexing never aborts.
@@ -120,20 +124,31 @@ Each chunk becomes one index document with `{path, location, file_type, text, of
   - Otherwise → fallback: Unicode tokenization + lowercase, no stemming.
   - Same detection path applied at query time.
 - **Default behavior:** auto-detect across **all** supported languages; configurable.
-- **Query ergonomics** (influenced by ugrep, all native to tantivy):
-  - boolean operators (AND/OR/NOT) and phrase queries,
-  - fuzzy / approximate matching (Levenshtein term queries) for typo tolerance,
-  - optional interactive query mode in the CLI (`kb search -i`).
+- **Query syntax = ripgrep (`rg`), 1:1.** Match dialect and core flags are ripgrep's,
+  implemented with the **same `regex` crate ripgrep uses** — the real dialect, not an
+  approximation. Tool/CLI descriptions can simply say *"use ripgrep syntax"* and even weak
+  models get it right.
+  - Surface: regex pattern; `-i`/smart-case, `-w` (word), `-F` (fixed string), `-e` (multiple
+    patterns), `-g`/`--glob` (path filter), `-t`/`--type` (file type), context `-A`/`-B`/`-C`.
+  - **Default semantics = ripgrep** (literal/regex match over document text) → File-First,
+    exact, predictable.
+- **Index as accelerator.** tantivy (+ a trigram term index) narrows candidate chunks so we
+  don't scan the whole corpus; the `regex` engine then confirms matches — the "index
+  accelerates, files are truth" model (cf. ugrep-indexer). The index also stores chunk text
+  for snippets; canonical content stays in the file.
+- **KB modes are explicit flags** (opt-in, so default rg behavior stays pure):
+  - `--rank` → BM25 relevance ranking instead of file order,
+  - `--stem` → multilingual stemming (`MultiLangStemmer`: `lingua` detection → Snowball),
+  - `--expand` → glossary query expansion (related terms).
 
 ```toml
 [search]
+# rg semantics are the default; these tune the opt-in KB modes
 auto_detect = true
 languages = []            # empty = all supported; or a whitelist like ["ru","en"]
 default_language = "ru"   # fallback when detection is low-confidence
-expand_with_glossary = true
+expand_with_glossary = false   # enable per-query with --expand
 ```
-
-The index stores chunk text for snippet generation; the canonical content remains the file.
 
 ### 4.4 Glossary graph
 
@@ -169,7 +184,9 @@ The index stores chunk text for snippet generation; the canonical content remain
 ### 4.6 Interfaces
 
 **MCP tools** (single-word names)
-- `search(query, limit?, file_type?, path_filter?, expand?)` → `[{path, location, snippet, score}]`
+- `search(query, limit?, ...rg_flags)` → `[{path, location, snippet, score}]` — `query` uses
+  **ripgrep syntax**; flags mirror rg (`-i`/`-w`/`-F`/`-g`/`-t`/`-A`/`-B`/`-C`) plus KB flags
+  `--rank`/`--stem`/`--expand`
 - `read(path, range?, include_images?)` → text/markdown + optional image blocks
 - `glossary(term)` → related terms + where it appears
 - `index(dir)` / `reindex()` → (incremental: mtime + content hash; optional watch)
@@ -230,17 +247,19 @@ Recommended stack (versions from mid-2026 recon — pin exact patch at integrati
 | `rust-stemmers` | 1.2 | Snowball stemmers (18 langs incl. ru/en); used by tantivy |
 | `lingua` | 1.8 | offline language detection (feature-gated to enabled langs) |
 | `calamine` | 0.35 | xls/xlsx/xlsb/ods extraction (per-sheet/cell) |
-| `zip` | 8.6 | docx/xlsx/pptx containers — **deflate-only** (`default-features=false`) |
-| `quick-xml` | — | docx/pptx XML text extraction |
+| `office_oxide` | 0.1.x (pinned) | text for docx/doc/pptx/ppt incl. **legacy**; behind `Extractor` trait, swappable |
+| `zip` | 8.6 | embedded image extraction from office files — **deflate-only** (`default-features=false`) |
 | `encoding_rs` | 0.8 | Cyrillic/legacy encodings |
 | `pdf-extract` | 0.10 | PDF text (v1); `lopdf` for page-level + images (phase 2) |
 | `rmcp` | 1.8 | official MCP SDK — **supports image content blocks**; stdio + HTTP/SSE |
 | `rusqlite` | — | glossary graph (bundled SQLite) |
-| `regex` | — | ripgrep-compatible query engine (see §4.3 — pending syntax decision) |
+| `regex` | — | **the** ripgrep regex engine → 1:1 rg syntax (see §4.3) |
 | `tokio` | — | async runtime |
 
 Single static binary; the server makes no network calls. (Optional embedding providers in
-phase 4 may add network — opt-in.) `office_oxide` intentionally **not** a core dep (immature).
+phase 4 may add network — opt-in.) `office_oxide` is young (v0.1.x) — used behind the
+`Extractor` trait, version-pinned, fork/vendor if needed (it is the only crate covering legacy
+.doc/.ppt).
 
 ## 10. Open questions / risks
 - Mixed-language documents detect by dominant language (acceptable for File-First).
@@ -251,8 +270,9 @@ phase 4 may add network — opt-in.) `office_oxide` intentionally **not** a core
 - `office_oxide` does not expose per-element locations; heading-based sectioning is our
   granularity for docx/doc/pptx/ppt.
 - MCP image content blocks confirmed supported by `rmcp` 1.8 (resolved).
-- **Legacy OLE2 (.doc/.ppt)** has no mature pure-Rust parser — `office_oxide` is experimental;
-  legacy support may slip to phase 2 (modern docx/pptx/xls/xlsx are solid via zip+quick-xml/calamine).
+- `office_oxide` is young (v0.1.x) — **mitigation:** behind an `Extractor` trait (swappable per
+  format), version-pinned, fork/vendor if needed. It is the only crate covering **legacy**
+  .doc/.ppt and is proven in our Zeroclaw office-tools PR, so legacy stays in v1.
 - `zip` default features pull in C bzip2/zstd — must build deflate-only to stay pure-Rust.
 - `lingua` full models are large — must feature-gate to the enabled languages.
 - `pdf-extract` is text-only (no images/scanned/OCR); page-level + images need `lopdf` (phase 2).
