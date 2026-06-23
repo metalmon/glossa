@@ -1,5 +1,6 @@
 pub mod model;
 pub mod extract;
+pub mod index;
 pub mod query;
 pub mod search;
 pub mod walk;
