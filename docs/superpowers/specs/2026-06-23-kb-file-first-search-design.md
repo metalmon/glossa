@@ -134,6 +134,9 @@ expand_with_glossary = true
 The index stores chunk text for snippet generation; the canonical content remains the file.
 
 ### 4.4 Glossary graph
+
+> Full node/edge ontology, provenance model, and the domain-schema mechanism: see §11.
+
 - Storage: **SQLite** (`rusqlite`, bundled — keeps single-binary).
 - **v1 (auto, lightweight):** nodes = documents, headings, auto-extracted terms/entities;
   edges = `appears_in`, `co_occurs`. Built during indexing. Used for:
@@ -168,7 +171,8 @@ The index stores chunk text for snippet generation; the canonical content remain
 - `read(path, range?, include_images?)` → text/markdown + optional image blocks
 - `glossary(term)` → related terms + where it appears
 - `index(dir)` / `reindex()` → (incremental: mtime + content hash; optional watch)
-- (phase 2/3) `graph(nodes, edges)` → agent-built knowledge graph upsert
+- (phase 2) `resolve(name)` → fuzzy/alias lookup over existing entities (for entity resolution)
+- (phase 2) `graph(nodes, edges)` → agent-built knowledge graph upsert (validated against `ontology.toml`)
 
 **CLI (mirrors MCP)**
 - `kb index <dir>` · `kb search "<query>" [--type pdf] [--limit N]` · `kb read <path> [--range ..]`
@@ -183,6 +187,7 @@ files are processed. Optional filesystem watcher for live updates.
   index/            # tantivy index
   glossary.db       # SQLite: nodes, edges, file manifest (mtime/hash), index status
   config.toml
+  ontology.toml     # domain schema: allowed entity/relation types + props (see §11)
 ```
 
 ## 6. Errors & observability
@@ -228,3 +233,61 @@ makes no network calls. (Optional embedding providers in phase 3 may add network
 - Confirm the MCP server crate's support for returning image content blocks; otherwise a thin
   custom MCP layer.
 - Repository name (`glossa`) is provisional.
+
+## 11. Knowledge-graph ontology (detail)
+
+Layered so search works without the upper layers; **provenance** and **source-anchoring**
+apply throughout. Files remain the source of truth — the graph only points at them.
+
+**Cross-cutting rules**
+- Every node/edge carries: `origin` ∈ {auto-structural, auto-lexical, agent, curated},
+  `confidence` (0–1), `created_by` (agent/run), `created_at`, `evidence[]` (chunk/section refs).
+- Nodes/edges anchor to source (`path` + `range`); the graph never stores canonical content.
+- Stable IDs across reindex: `Document = hash(path)`, `Section = doc + heading-path`,
+  `Term = lemma`, `Entity = canonical_name (+ aliases)`.
+
+**Layer 1 — Structural (v1, auto, deterministic)**
+- Nodes: `Document`, `Section` (hierarchical), `Sheet`/`Page`/`Slide`.
+- Edges: `CONTAINS`, `NEXT`/`PREV`.
+
+**Layer 2 — Glossary (v1, auto; SKOS semantics)**
+- Node: `Term` (lemma, surface_forms[], doc_freq, score).
+- Edges: `MENTIONS` (Section→Term, freq/positions), `CO_OCCURS` (Term↔Term, weighted),
+  `DEFINED_IN` (Term→Section); SKOS `broader`/`narrower`/`related`.
+
+**Layer 3 — Entities & topics (phase 2, agent-built)**
+- Nodes: `Entity` (type from domain schema, canonical_name, aliases[]),
+  `Topic`/`Community` (summary).
+- Edges: `ABOUT` (Document/Section→Entity/Topic); domain `Entity↔Entity` relations.
+
+**Layer 4 — Cross-document links (phase 2, agent-built)**
+- `Document↔Document`: `REFERENCES`, `SUPERSEDES`/`SUPERSEDED_BY`, `RELATES_TO`,
+  `CONTRADICTS`, `DUPLICATES`, `VERSION_OF`, `DERIVED_FROM`.
+
+**Schema model — fixed core + domain config**
+- Fixed core = layers 1–2 + the provenance fields (always present).
+- Entity/relation types are an **open, typed vocabulary** declared per deployment in
+  `ontology.toml`. `graph` upserts are validated against it; `strict` mode rejects (or warns
+  on) unknown types. Ships with a generic default schema; verticals (legal/medical/eng)
+  override it. This is the portability lever across commercial engagements.
+
+**Entity resolution — server-assisted, agent decides**
+- The server exposes `resolve(name)` (fuzzy + alias lookup over existing canonical names).
+- The agent checks before creating and writes `canonical_name` + `aliases[]`.
+- The server never auto-merges (avoids false merges like «Акме Юр» vs «Акме Мед»).
+
+**`ontology.toml` sketch**
+```toml
+[entities.Person]
+props = ["full_name", "role"]
+
+[entities.Organization]
+props = ["legal_name", "inn"]
+
+[relations.AUTHORED_BY]
+from = ["Document"]
+to   = ["Person", "Organization"]
+
+[validation]
+strict = true   # reject upserts with types not declared above
+```
