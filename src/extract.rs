@@ -8,4 +8,7 @@ pub trait Extractor {
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>>;
 }
 
+pub mod chunk;
 pub mod markdown;
+pub mod office;
+pub mod pdf;
