@@ -153,8 +153,9 @@ expand_with_glossary = false   # enable per-query with --expand
 ### 4.4 Glossary graph
 
 > Full node/edge ontology, provenance model, and the domain-schema mechanism: see §11.
+> Build model, File-First invariants, temporality, traversal, and storage choice: see §12.
 
-- Storage: **SQLite** (`rusqlite`, bundled — keeps single-binary).
+- Storage: **`redb`** — a pure-Rust embedded store (see §12; supersedes the earlier SQLite mention to keep the build C-free).
 - **v1 (auto, lightweight):** nodes = documents, headings, auto-extracted terms/entities;
   edges = `appears_in`, `co_occurs`. Built during indexing. Used for:
   - navigation (term → documents/sections), and
@@ -204,7 +205,8 @@ files are processed. Optional filesystem watcher for live updates.
 ```
 <kb>/.glossa/
   index/            # tantivy index
-  glossary.db       # SQLite: nodes, edges, file manifest (mtime/hash), index status
+  graph.redb        # pure-Rust embedded store: graph nodes + edges (see §12)
+  manifest.json     # per-file mtime+size signatures for incremental (index + graph)
   config.toml
   ontology.toml     # domain schema: allowed entity/relation types + props (see §11)
 ```
@@ -252,7 +254,7 @@ Recommended stack (versions from mid-2026 recon — pin exact patch at integrati
 | `encoding_rs` | 0.8 | Cyrillic/legacy encodings |
 | `pdf-extract` | 0.10 | PDF text (v1); `lopdf` for page-level + images (phase 2) |
 | `rmcp` | 1.8 | official MCP SDK — **supports image content blocks**; stdio + HTTP/SSE |
-| `rusqlite` | — | glossary graph (bundled SQLite) |
+| `redb` | — | pure-Rust embedded store for the graph (NOT rusqlite — bundled SQLite pulls C via cc; see §12) |
 | `regex` | — | **the** ripgrep regex engine → 1:1 rg syntax (see §4.3) |
 | `tokio` | — | async runtime |
 
@@ -356,3 +358,61 @@ strict = true   # reject upserts with types not declared above
 
 > Concrete default + legal-vertical `ontology.toml` examples: see
 > [`2026-06-23-ontology-examples.md`](./2026-06-23-ontology-examples.md).
+
+## 12. Knowledge graph — build model, invariants, temporality, traversal, storage (M4+)
+
+Binding for Milestones 4–5. The graph's value over the directory tree is **cross-document
+links, entities, and term connections that span folders** — a graph, not a tree. We do NOT
+model the folder tree (the path already encodes it; search has `path_filter`); only
+intra-document structure + terms + entities + relations.
+
+### 12.1 Build model — code vs model, by layer
+- **Layers 1–2 (structural + glossary): built by CODE**, deterministically, during `kb index`
+  (Document/Section nodes + `CONTAINS`; optionally terms + `MENTIONS`/`CO_OCCURS`). No model.
+- **Layers 3–4 (entities + cross-document links): built by the connected AGENT** (an LLM via
+  MCP), **not** a model embedded in the server. The Rust server stays 100% code/pure-Rust; it
+  provides storage, ontology validation, traversal, and the `graph`/`resolve`/`read` tools the
+  agent calls.
+- **Weak-model behaviour:** schema-bounded per-document extraction is forgiving (weak models
+  cope); cross-document reasoning is hard and unreliable on weak models. **Nothing breaks** if
+  the agent is weak — lexical/BM25 search + code-built layers 1–2 work without the semantic
+  graph (graceful degradation). High-stakes edges (CONTRADICTS/SUPERSEDES) are confidence-scored
+  **candidates with evidence**, never asserted as truth.
+
+### 12.2 File-First invariants (HARD — implementation must enforce)
+1. Graph is **derived & disposable, never authoritative** — holds no content, only pointers +
+   assertions + confidence. Deleting the graph loses nothing; it rebuilds from files.
+2. **No fact without provenance**: every node/edge carries `source_path` + `range` +
+   `file_sig` (source signature at extraction) + `origin` + `confidence` + `created_at`. If you
+   can't cite a span, it's not in the graph.
+3. **File-level incrementality via provenance ownership**: reindex of file F = drop all graph
+   elements whose provenance is in F, then re-derive/re-extract F only. Elements into F's
+   entities from other files survive. The whole corpus is never re-extracted.
+4. **Don't model the catalog**, and don't model what search already answers.
+5. **Extraction is on-demand / incremental / opt-in** — not a mandatory full-corpus pass.
+6. **Staleness is surfaced, never hidden**: results carry recency + confidence; elements whose
+   `file_sig` no longer matches the file are marked STALE (or dropped), never served as fresh.
+7. **Auto layer (co-occurrence) stays conservative + toggleable** (noise control).
+8. **High-stakes edges need confirmation** (human/strong-model), stored as evidence-bearing
+   candidates.
+9. **No ungrounded global reasoning**: every synthesized claim must trace to spans (avoids the
+   GraphRAG "community-summary drift" failure).
+
+### 12.3 Temporality — two clocks, never conflated
+- **Graph freshness vs files**: enforced by `file_sig` (invariant 2/6).
+- **World validity**: domain facts like `valid_from`/`valid_until` or `SUPERSEDES` are **edge
+  properties**, distinct from graph freshness.
+
+### 12.4 Traversal — bounded primitives, not a query engine
+- Provide `neighbors(node, edge_types?, depth)` and `path(from, to, max_depth)` as **bounded
+  BFS/DFS in code**, returning paths **with provenance**. No Cypher/SPARQL engine in v1.
+- **Multi-hop**: the agent walks these primitives + `read`, **verifying each hop against the
+  source span** — File-First defuses the compounding-error problem of pure-graph multi-hop.
+  Constrain by depth + a confidence threshold.
+
+### 12.5 Storage — pure-Rust embedded (`redb`), NOT SQLite
+- The graph lives in **`redb`** (pure-Rust embedded ACID store) at `<dir>/.glossa/graph.redb`.
+- **This supersedes the earlier SQLite/`rusqlite` mention.** `rusqlite`'s `bundled` feature
+  compiles SQLite's C via `cc`, reintroducing the C/build dependency we deliberately removed in
+  M3 (zstd-sys). `redb` keeps the pure-Rust + single-static-binary + offline property. The store
+  is disposable/rebuildable from files (invariant 1).
