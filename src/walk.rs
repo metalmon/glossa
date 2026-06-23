@@ -17,7 +17,14 @@ pub fn collect_chunks(root: &Path, glob: Option<&str>) -> anyhow::Result<Vec<Chu
     let exts = extractors();
     let mut all = Vec::new();
 
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skip (walk error): {e}");
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }

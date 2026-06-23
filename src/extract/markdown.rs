@@ -18,7 +18,11 @@ fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
     if !rest.is_empty() && !rest.starts_with(' ') {
         return None;
     }
-    Some((hashes, rest.trim().to_string()))
+    let title = rest.trim();
+    if title.is_empty() {
+        return None; // a hashes-only line ("##", "## ") is body, not a heading
+    }
+    Some((hashes, title.to_string()))
 }
 
 fn push_chunk(path: &Path, heading_path: &[String], buf: &mut String, out: &mut Vec<Chunk>) {
@@ -87,5 +91,29 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].location, "");
         assert!(chunks[0].text.contains("#nothashtag"));
+    }
+
+    #[test]
+    fn empty_title_heading_is_body_not_heading() {
+        // A hash run with no title text must not create an empty location segment.
+        let md = "# A\n## \nbody\n";
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
+        // "## " is treated as body, so everything stays under "A".
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].location, "A");
+        assert!(!chunks[0].location.contains(" > "));
+    }
+
+    #[test]
+    fn heading_level_jump_keeps_deterministic_path() {
+        // h1 -> h3 skips the h2 slot; location is "A > C" (no panic, deterministic).
+        let md = "# A\n### C\nbody\n";
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].location, "A > C");
     }
 }
