@@ -97,10 +97,11 @@ The indexer walks the KB directory and reads files directly:
 | Format | Library | Notes / location granularity |
 |---|---|---|
 | md | native parser | split by headings; location = heading path |
-| docx, doc, pptx, ppt | `office_oxide` | markdown/text → sections by heading (legacy = coarser, text only) |
-| xlsx, xls | `calamine` | per-sheet; snippet carries `Sheet!Row` (calamine reads both) |
-| pdf | `pdf-extract` | v1: whole-document text (no page metadata) |
-| encoding | `encoding_rs` | Cyrillic / legacy encodings |
+| docx, pptx | `zip` (deflate-only) + `quick-xml` | unzip → parse `word/document.xml` / slide `<a:t>`; sections by heading. (Recon: `office_oxide` v0.1.x too immature to be a core dep.) |
+| doc, ppt (legacy OLE2) | `office_oxide` (experimental) or deferred | text only, coarse; no mature pure-Rust legacy parser — may slip to phase 2 if unstable |
+| xlsx, xls, ods | `calamine` | per-sheet; snippet carries `Sheet!Row` (reads legacy + modern) |
+| pdf | `pdf-extract` | v1: whole-doc text (`extract_text_by_pages` exists); page-level + images via `lopdf` in phase 2 |
+| encoding | `encoding_rs` | Cyrillic / legacy encodings (windows-1251, KOI8-R) |
 
 Failure isolation: a corrupt / encrypted / scanned / unsupported file is **skipped with a
 recorded reason** in the index status; indexing never aborts.
@@ -112,7 +113,8 @@ Each chunk becomes one index document with `{path, location, file_type, text, of
 ### 4.3 Index (search)
 - **tantivy** — BM25, fast, single embedded index directory; highlighted snippets.
 - **Multilingual stemming** via a custom tokenizer `MultiLangStemmer`:
-  - `whatlang` detects the language of each chunk/text.
+  - `lingua` (feature-gated to the configured languages, for offline short-text accuracy)
+    detects the language of each chunk/text.
   - If the language is in the configured set **and** Snowball-supported (~20 langs: ru, en,
     de, fr, es, it, pt, nl, fi, sv, no, da, hu, ro, tr, el, ar, ta, …) → apply that stemmer.
   - Otherwise → fallback: Unicode tokenization + lowercase, no stemming.
@@ -219,9 +221,26 @@ files are processed. Optional filesystem watcher for live updates.
   generated from `ontology.toml` — see §11).
 
 ## 9. Dependencies
-`tantivy`, `office_oxide`, `calamine`, `pdf-extract`, `whatlang`, `rusqlite` (bundled),
-`zip`, `encoding_rs`, an MCP server crate, async runtime (`tokio`). Single binary; the server
-makes no network calls. (Optional embedding providers in phase 3 may add network — opt-in.)
+
+Recommended stack (versions from mid-2026 recon — pin exact patch at integration):
+
+| Crate | Ver | Role |
+|---|---|---|
+| `tantivy` | 0.26 | embedded BM25 index, tokenizers, fuzzy/phrase/boolean, snippets |
+| `rust-stemmers` | 1.2 | Snowball stemmers (18 langs incl. ru/en); used by tantivy |
+| `lingua` | 1.8 | offline language detection (feature-gated to enabled langs) |
+| `calamine` | 0.35 | xls/xlsx/xlsb/ods extraction (per-sheet/cell) |
+| `zip` | 8.6 | docx/xlsx/pptx containers — **deflate-only** (`default-features=false`) |
+| `quick-xml` | — | docx/pptx XML text extraction |
+| `encoding_rs` | 0.8 | Cyrillic/legacy encodings |
+| `pdf-extract` | 0.10 | PDF text (v1); `lopdf` for page-level + images (phase 2) |
+| `rmcp` | 1.8 | official MCP SDK — **supports image content blocks**; stdio + HTTP/SSE |
+| `rusqlite` | — | glossary graph (bundled SQLite) |
+| `regex` | — | ripgrep-compatible query engine (see §4.3 — pending syntax decision) |
+| `tokio` | — | async runtime |
+
+Single static binary; the server makes no network calls. (Optional embedding providers in
+phase 4 may add network — opt-in.) `office_oxide` intentionally **not** a core dep (immature).
 
 ## 10. Open questions / risks
 - Mixed-language documents detect by dominant language (acceptable for File-First).
@@ -231,8 +250,13 @@ makes no network calls. (Optional embedding providers in phase 3 may add network
   keep failures non-fatal.
 - `office_oxide` does not expose per-element locations; heading-based sectioning is our
   granularity for docx/doc/pptx/ppt.
-- Confirm the MCP server crate's support for returning image content blocks; otherwise a thin
-  custom MCP layer.
+- MCP image content blocks confirmed supported by `rmcp` 1.8 (resolved).
+- **Legacy OLE2 (.doc/.ppt)** has no mature pure-Rust parser — `office_oxide` is experimental;
+  legacy support may slip to phase 2 (modern docx/pptx/xls/xlsx are solid via zip+quick-xml/calamine).
+- `zip` default features pull in C bzip2/zstd — must build deflate-only to stay pure-Rust.
+- `lingua` full models are large — must feature-gate to the enabled languages.
+- `pdf-extract` is text-only (no images/scanned/OCR); page-level + images need `lopdf` (phase 2).
+- Avoid `pdfium-render`/`mupdf` for PDF (native libs break single-binary; mupdf is AGPL).
 - Repository name (`glossa`) is provisional.
 
 ## 11. Knowledge-graph ontology (detail)
@@ -309,3 +333,6 @@ strict = true   # reject upserts with types not declared above
   SHACL engine (rudof / pySHACL); SHACL shapes are **generated from `ontology.toml`**. This
   aligns with the SKOS glossary layer and serves users who need semantic-web interoperability —
   without forcing RDF/SHACL into the core.
+
+> Concrete default + legal-vertical `ontology.toml` examples: see
+> [`2026-06-23-ontology-examples.md`](./2026-06-23-ontology-examples.md).
