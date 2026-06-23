@@ -12,12 +12,24 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   vision content), `glossary`, `neighbors`, `index`, `reindex`, `resolve`, `graph_upsert` (validated,
   provenance-stamped), `purge`. gitignore-aware indexing.
 
+## Performance (search/index speed)
+- **Search is slow on large bases.** The default scan re-walks the whole tree and regex-scans every
+  file on *each* query (no persistent state); `index`/PDF extraction is also heavy. Optimize the
+  walker + per-file IO: parallel traversal (rayon), fewer syscalls, mmap/streaming reads, skip-by-size,
+  and consider a persistent file list. **Reference for ideas:** `fff` — https://github.com/dmtrKovalenko/fff
+  (blazingly-fast parallel file finder in Rust) — mine its traversal/IO approach.
+
 ## Technical backlog (carry-forward, non-blocking)
 - **Graph crash-atomicity**: fold one file's node/edge writes into a single redb write txn so a
   mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex` recovers today.)
 - **`--expand`**: glossary query expansion — needs the layer-2 `Term`/co-occurrence layer (not built).
 - **HTTP/streamable transport** for the MCP server — stdio only today.
-- **PDF page-level locations + PDF image extraction** (needs a page-aware pure-Rust PDF lib).
+- **Image-only PDF pages (scans).** With oxidize-pdf we now chunk PDFs per page (`p.N`) and skip
+  pages with no text layer. Those skipped pages (scanned/image-only) are currently invisible to
+  search — they need handling: extract/render the page image so the connected agent can *vision-read*
+  it (consistent with `read` already returning embedded images as vision content). Pure-Rust offline
+  OCR is hard (tesseract is C), so bet on vision-read, not built-in OCR. Until then, log/surface that
+  a doc had N image-only pages so they aren't silently dropped.
 - **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
 - **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
