@@ -10,3 +10,4 @@ pub trait Extractor {
 
 pub mod chunk;
 pub mod markdown;
+pub mod office;
