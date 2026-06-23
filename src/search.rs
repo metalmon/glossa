@@ -11,6 +11,9 @@ pub struct Hit {
 }
 
 pub fn search_chunks(chunks: &[Chunk], re: &Regex, limit: usize) -> Vec<Hit> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut hits = Vec::new();
     for c in chunks {
         for (i, line) in c.text.lines().enumerate() {
@@ -60,5 +63,13 @@ mod tests {
         let re = Regex::new("cat").unwrap();
         let hits = search_chunks(&chunks, &re, 2);
         assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn limit_zero_returns_no_hits() {
+        let chunks = vec![chunk("cat\ncat\n")];
+        let re = Regex::new("cat").unwrap();
+        let hits = search_chunks(&chunks, &re, 0);
+        assert_eq!(hits.len(), 0);
     }
 }
