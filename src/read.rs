@@ -63,3 +63,102 @@ mod tests {
         assert!(out.contains("alpha"));
     }
 }
+
+// ── Task 3: extract_images ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocImage {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+fn mime_for(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".png") {
+        Some("image/png")
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if lower.ends_with(".gif") {
+        Some("image/gif")
+    } else if lower.ends_with(".bmp") {
+        Some("image/bmp")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+pub fn extract_images(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
+    let bytes = std::fs::read(path)?;
+    let reader = std::io::Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(reader) {
+        Ok(a) => a,
+        Err(_) => return Ok(Vec::new()), // not a zip → no images
+    };
+    let media_names: Vec<String> = archive
+        .file_names()
+        .filter(|n| {
+            n.starts_with("word/media/")
+                || n.starts_with("xl/media/")
+                || n.starts_with("ppt/media/")
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut out = Vec::new();
+    for name in media_names {
+        if out.len() >= max {
+            break;
+        }
+        let Some(mime) = mime_for(&name) else { continue };
+        use std::io::Read;
+        let mut entry = archive.by_name(&name)?;
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf)?;
+        out.push(DocImage { mime: mime.into(), bytes: buf });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    fn make_docx_with_png(path: &Path, png: &[u8]) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = SimpleFileOptions::default();
+        zw.start_file("word/document.xml", opts).unwrap();
+        zw.write_all(b"<w:document/>").unwrap();
+        zw.start_file("word/media/image1.png", opts).unwrap();
+        zw.write_all(png).unwrap();
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn extracts_png_media_from_office_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("withimg.docx");
+        let png = b"\x89PNG\r\n\x1a\n-fake-png-bytes";
+        make_docx_with_png(&p, png);
+
+        let imgs = extract_images(&p, 10).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].mime, "image/png");
+        assert_eq!(imgs[0].bytes, png);
+
+        // max cap respected
+        assert_eq!(extract_images(&p, 0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn non_zip_returns_no_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("plain.md");
+        std::fs::write(&p, b"# H\nhi\n").unwrap();
+        assert!(extract_images(&p, 10).unwrap().is_empty());
+    }
+}

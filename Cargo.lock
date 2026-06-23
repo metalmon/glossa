@@ -766,6 +766,7 @@ dependencies = [
  "tempfile",
  "toml",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

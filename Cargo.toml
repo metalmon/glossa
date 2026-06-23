@@ -26,6 +26,7 @@ serde_json = "1"
 rust-stemmers = "1.2"
 redb = "4.1"
 toml = "0.8"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 postcard = { version = "1", features = ["alloc"] }
 lingua = { version = "1.8", default-features = false, features = ["russian", "english"], optional = true }
 
