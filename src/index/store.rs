@@ -155,6 +155,9 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             .push(c);
     }
 
+    let total = by_path.len();
+    eprintln!("indexing {total} file(s) under {}...", dir.display());
+
     let mut stats = IndexStats::default();
     let mut next = Manifest::default();
     for (path, file_chunks) in &by_path {
@@ -167,6 +170,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             stats.unchanged += 1;
             continue;
         }
+        eprintln!("  + {path}");
         idx.delete_path(path)?;
         idx.write_chunks(file_chunks)?;
         graph.delete_by_source(path)?;
@@ -200,6 +204,19 @@ mod incremental_tests {
         assert!(g.node_count().unwrap() >= 2); // Document + at least one Section
         let intro = g.resolve("Intro").unwrap();
         assert!(!intro.is_empty());
+    }
+
+    #[test]
+    fn index_dir_skips_malformed_pdf_and_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.md"), b"# T\nhello world\n").unwrap();
+        std::fs::write(dir.path().join("bad.pdf"), b"%PDF-1.4\nnot a real pdf").unwrap();
+        // Must complete (not panic); the md is indexed.
+        let stats = index_dir(dir.path(), false).unwrap();
+        assert!(stats.added >= 1);
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let hits = idx.search("hello", 10).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("ok.md")));
     }
 
     #[test]
