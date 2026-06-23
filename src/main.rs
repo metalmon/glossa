@@ -49,6 +49,30 @@ enum Cmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Inspect the knowledge graph.
+    Graph {
+        #[command(subcommand)]
+        action: GraphAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphAction {
+    /// Print node/edge counts.
+    Stats {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Print nodes reachable from NODE_ID.
+    Neighbors {
+        node_id: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        #[arg(long = "type")]
+        types: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,5 +112,20 @@ fn main() -> anyhow::Result<()> {
             println!("reindexed: {} files", stats.added);
             Ok(())
         }
+        Cmd::Graph { action } => match action {
+            GraphAction::Stats { path } => {
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
+                Ok(())
+            }
+            GraphAction::Neighbors { node_id, path, depth, types } => {
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let filter = if types.is_empty() { None } else { Some(types.as_slice()) };
+                for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
+                    println!("{id}");
+                }
+                Ok(())
+            }
+        },
     }
 }
