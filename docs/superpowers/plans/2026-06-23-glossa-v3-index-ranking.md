@@ -6,11 +6,11 @@
 
 **Architecture:** A `tantivy` index lives at `<dir>/.glossa/index`. Documents are the same `Chunk`s the extractors already produce (path/location/file_type/text). The `body` field uses a custom `multilang` tokenizer that lowercases then stems each token with the Snowball stemmer for the language `lingua` detects per text. `kb index` walks the corpus (reusing `walk::collect_chunks`), diffs a small `manifest.json` (mtime+size) to reindex only changed files, and deletes a file's stale docs by its path term before re-adding. `kb search --rank` opens the index, runs a BM25 query, and renders snippets.
 
-**Tech Stack:** Rust; `tantivy = "0.26"` (no `stemmer` feature — we stem via `rust-stemmers` directly), `rust-stemmers = "1.2"`, `lingua = "1.8"` (feature-gated to `russian`+`english`), `serde`/`serde_json` (manifest). All pure Rust, offline.
+**Tech Stack:** Rust; `tantivy = "0.26"` (no `stemmer` feature — we stem via `rust-stemmers` directly), `rust-stemmers = "1.2"`, `serde`/`serde_json` (manifest). Language detection defaults to a **zero-dependency script heuristic** (Cyrillic→Russian, else English — RU/EN are different scripts, so this is free and ~exact). `lingua` is an **optional** dependency behind the `lingua` cargo feature, for distinguishing same-script languages. All pure Rust, offline.
 
 ## Global Constraints
 
-- Pure Rust, single static binary, fully offline (no network, no native/system libs). `lingua` MUST be `default-features = false, features = ["russian","english"]` (its default pulls ~75 embedded models).
+- Pure Rust, single static binary, fully offline (no network, no native/system libs). Default builds embed NO language-detection models — detection is a script heuristic. `lingua` (statistical n-gram models, CPU-only, no GPU; full set ≈ hundreds of MB embedded) is opt-in via the `lingua` feature and, when enabled, MUST stay `default-features = false` with only the needed language features.
 - Index location: `<dir>/.glossa/index/` (tantivy `MmapDirectory`). Manifest: `<dir>/.glossa/manifest.json`.
 - The `body` field is indexed with the `multilang` tokenizer AND stored (snippets require the field to be STORED). `path`/`location`/`file_type` are `STRING | STORED` (exact-match; `path` must be STRING so `delete_term` works).
 - `--rank` = indexed BM25 search (intrinsically stemmed). The default search path (ripgrep scan over files) is unchanged; do not modify `search.rs`/`query.rs`/the default CLI path.
@@ -37,53 +37,74 @@
 
 **Interfaces:**
 - Produces:
-  - `index::multilang::default_detector() -> std::sync::Arc<lingua::LanguageDetector>` (RU+EN)
-  - `index::multilang::multilang_analyzer(detector: Arc<LanguageDetector>) -> tantivy::tokenizer::TextAnalyzer`
+  - `index::multilang::DetectFn = Arc<dyn Fn(&str) -> rust_stemmers::Algorithm + Send + Sync>`
+  - `index::multilang::script_detector() -> DetectFn` (default; Cyrillic→Russian, else English)
+  - `index::multilang::default_detector() -> DetectFn` (returns the script detector)
+  - `#[cfg(feature = "lingua")] index::multilang::lingua_detector() -> DetectFn` (opt-in)
+  - `index::multilang::multilang_analyzer(detect: DetectFn) -> tantivy::tokenizer::TextAnalyzer`
   - `index::multilang::MultiLangStemmer` (a `tantivy::tokenizer::TokenFilter`)
 
 - [ ] **Step 1: Write the failing test**
 
 Create `src/index/multilang.rs`:
 ```rust
-use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
 use rust_stemmers::{Algorithm, Stemmer as RsStemmer};
 use std::sync::Arc;
 use tantivy::tokenizer::{
     LowerCaser, SimpleTokenizer, TextAnalyzer, Token, TokenFilter, TokenStream, Tokenizer,
 };
 
-/// Build a RU+EN language detector once (model build is expensive — share via Arc).
-pub fn default_detector() -> Arc<LanguageDetector> {
-    Arc::new(
-        LanguageDetectorBuilder::from_languages(&[Language::English, Language::Russian]).build(),
-    )
+/// Maps a text to the stemming algorithm to use for it.
+/// Cloneable, thread-safe — required because tantivy tokenizers must be `Clone + Send + Sync + 'static`.
+pub type DetectFn = Arc<dyn Fn(&str) -> Algorithm + Send + Sync>;
+
+/// Default, zero-dependency detector. RU and EN live in different scripts, so a
+/// single Cyrillic char is a reliable, free signal for Russian; everything else → English.
+pub fn script_detector() -> DetectFn {
+    Arc::new(|text: &str| {
+        if text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)) {
+            Algorithm::Russian
+        } else {
+            Algorithm::English
+        }
+    })
 }
 
-fn algorithm_for(lang: Option<Language>) -> Algorithm {
-    match lang {
+/// The detector used by default (script-based; embeds no models, pulls no extra deps).
+pub fn default_detector() -> DetectFn {
+    script_detector()
+}
+
+/// Optional `lingua`-backed detector, for distinguishing same-script languages.
+/// Build with `--features lingua`.
+#[cfg(feature = "lingua")]
+pub fn lingua_detector() -> DetectFn {
+    use lingua::{Language, LanguageDetectorBuilder};
+    let detector =
+        LanguageDetectorBuilder::from_languages(&[Language::English, Language::Russian]).build();
+    Arc::new(move |text: &str| match detector.detect_language_of(text) {
         Some(Language::Russian) => Algorithm::Russian,
         _ => Algorithm::English,
-    }
+    })
 }
 
-/// A tantivy TokenFilter that detects the text's language once, then stems every
-/// token with the matching Snowball stemmer. Tokens must already be lower-cased
-/// (chain LowerCaser before this filter).
+/// A tantivy TokenFilter that picks a stemming algorithm per text (via `detect`),
+/// then stems every token. Tokens must already be lower-cased (chain LowerCaser first).
 #[derive(Clone)]
 pub struct MultiLangStemmer {
-    detector: Arc<LanguageDetector>,
+    detect: DetectFn,
 }
 
 impl MultiLangStemmer {
-    pub fn new(detector: Arc<LanguageDetector>) -> Self {
-        Self { detector }
+    pub fn new(detect: DetectFn) -> Self {
+        Self { detect }
     }
 }
 
 #[derive(Clone)]
 pub struct MultiLangTokenizer<T> {
     inner: T,
-    detector: Arc<LanguageDetector>,
+    detect: DetectFn,
 }
 
 pub struct MultiLangStream<T> {
@@ -97,7 +118,7 @@ impl TokenFilter for MultiLangStemmer {
     fn transform<T: Tokenizer>(self, inner: T) -> MultiLangTokenizer<T> {
         MultiLangTokenizer {
             inner,
-            detector: self.detector,
+            detect: self.detect,
         }
     }
 }
@@ -105,7 +126,7 @@ impl TokenFilter for MultiLangStemmer {
 impl<T: Tokenizer> Tokenizer for MultiLangTokenizer<T> {
     type TokenStream<'a> = MultiLangStream<T::TokenStream<'a>>;
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        let algo = algorithm_for(self.detector.detect_language_of(text));
+        let algo = (self.detect)(text);
         MultiLangStream {
             inner: self.inner.token_stream(text),
             stemmer: RsStemmer::create(algo),
@@ -138,10 +159,10 @@ impl<T: TokenStream> TokenStream for MultiLangStream<T> {
 }
 
 /// Compose the full analyzer: split → lowercase → multilingual stem.
-pub fn multilang_analyzer(detector: Arc<LanguageDetector>) -> TextAnalyzer {
+pub fn multilang_analyzer(detect: DetectFn) -> TextAnalyzer {
     TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
-        .filter(MultiLangStemmer::new(detector))
+        .filter(MultiLangStemmer::new(detect))
         .build()
 }
 
@@ -192,7 +213,13 @@ In `Cargo.toml` under `[dependencies]`:
 ```toml
 tantivy = "0.26"
 rust-stemmers = "1.2"
-lingua = { version = "1.8", default-features = false, features = ["russian", "english"] }
+lingua = { version = "1.8", default-features = false, features = ["russian", "english"], optional = true }
+```
+And a features section:
+```toml
+[features]
+default = []
+lingua = ["dep:lingua"]
 ```
 Create `src/index.rs`:
 ```rust
@@ -208,10 +235,11 @@ pub mod index;
 Run: `cargo test --lib multilang`
 Expected: PASS (2 tests). First build fetches+compiles tantivy/lingua — slow, expected.
 
+The default build pulls NO `lingua` — the script detector is used. Tests run on the default build.
 Verification notes (confirm on first compile, adjust the single line if the crate differs):
 - The GAT trait shapes (`type TokenStream<'a>`, `type Tokenizer<T: Tokenizer>`) are tantivy 0.26.
 - `RsStemmer::create(Algorithm)` + `.stem(&str) -> Cow<str>` (input already lowercased by `LowerCaser`).
-- If `russian`/`english` are not valid `lingua` feature names on this version, check the crate's `Cargo.toml` and use the correct lowercase language feature names.
+- The `#[cfg(feature = "lingua")] lingua_detector()` only compiles under `cargo build --features lingua`; if those `lingua` language feature names differ on this version, fix them there (it does not affect the default build or the tests).
 
 - [ ] **Step 5: Commit**
 
@@ -824,4 +852,4 @@ git commit -m "feat: kb index/reindex + kb search --rank (BM25 stemmed)"
 
 **Type consistency:** `Fields`/`DocIndex` defined in Task 2 and used in Tasks 3-4; `Chunk` fields match M1; `RankedHit`/`IndexStats`/`FileSig`/`Manifest` defined once and consumed consistently; `index_dir(&Path, bool) -> Result<IndexStats>` signature matches its CLI callers in Task 5; `multilang_analyzer`/`default_detector` signatures match between Task 1 and Task 2.
 
-**Dependency note:** new deps are `tantivy 0.26`, `rust-stemmers 1.2`, `lingua 1.8` (feature-gated to russian+english), `serde`/`serde_json` — all pure Rust, offline. `lingua` MUST be feature-gated or it embeds ~75 language models. `tantivy` is used WITHOUT its `stemmer` feature (we stem via `rust-stemmers` directly through the custom filter).
+**Dependency note:** new always-on deps are `tantivy 0.26`, `rust-stemmers 1.2`, `serde`/`serde_json` — all pure Rust, offline. Language detection defaults to the in-house script heuristic (no model data, no extra dep). `lingua 1.8` is OPTIONAL behind the `lingua` feature (off by default) — when enabled it must stay `default-features = false` with only the needed language features, since its full model set is large. `tantivy` is used WITHOUT its `stemmer` feature (we stem via `rust-stemmers` directly through the custom filter). No GPU, no native/system libs anywhere.
