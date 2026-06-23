@@ -11,8 +11,23 @@ impl Extractor for PdfExtractor {
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
-        let pages = pdf_extract::extract_text_from_mem_by_pages(bytes)
-            .map_err(|e| anyhow!("pdf parse failed for {}: {e}", path.display()))?;
+        // pdf-extract can panic on malformed PDFs; catch it so indexing never aborts.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_from_mem_by_pages(bytes)
+        }));
+        std::panic::set_hook(prev);
+
+        let pages = match caught {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                return Err(anyhow!("pdf parse failed for {}: {e}", path.display()))
+            }
+            Err(_) => {
+                return Err(anyhow!("pdf parser panicked for {} (skipped)", path.display()))
+            }
+        };
         let text = pages.join("\n");
         Ok(vec![Chunk {
             doc_path: path.to_path_buf(),
@@ -26,6 +41,14 @@ impl Extractor for PdfExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_pdf_does_not_panic_returns_err() {
+        // Bytes with a PDF header but garbage body — must not abort the process.
+        let bytes = b"%PDF-1.4\ngarbage not a real pdf";
+        let r = PdfExtractor.extract(Path::new("bad.pdf"), bytes);
+        assert!(r.is_err(), "malformed pdf should be an Err, not a panic/empty");
+    }
 
     #[test]
     fn extracts_text_from_pdf_fixture() {
