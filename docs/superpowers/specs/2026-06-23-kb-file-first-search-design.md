@@ -43,6 +43,18 @@ If this were a one-off internal tool, buying-vs-building would favor existing to
 OSS product + commercial base, building is justified **only** as the differentiated package
 above.
 
+### Prior art & influences
+
+- **ugrep** (https://ugrep.com/) — a strong **File-First** validator: it searches files
+  directly (results are `file:line`, no derived source of truth) and treats its optional
+  `ugrep-indexer` as an *accelerator over files* — exactly our "index accelerates, files are
+  truth" model. We borrow its **query ergonomics** (boolean AND/OR/NOT, fuzzy/approximate
+  matching, an optional interactive CLI mode). We **deliberately diverge** on two points:
+  (1) ugrep extracts office/PDF text via *external filters* (pdftotext/pandoc / `ug+`) — we use
+  *native Rust crates* for a zero-dependency single binary; (2) ugrep is grep (regex scan, no
+  ranking/stemming) — we are index-first with BM25 + multilingual stemming for KB-quality
+  ranked retrieval.
+
 ## 2. Goals / non-goals
 
 **Goals (v1)**
@@ -106,6 +118,10 @@ Each chunk becomes one index document with `{path, location, file_type, text, of
   - Otherwise → fallback: Unicode tokenization + lowercase, no stemming.
   - Same detection path applied at query time.
 - **Default behavior:** auto-detect across **all** supported languages; configurable.
+- **Query ergonomics** (influenced by ugrep, all native to tantivy):
+  - boolean operators (AND/OR/NOT) and phrase queries,
+  - fuzzy / approximate matching (Levenshtein term queries) for typo tolerance,
+  - optional interactive query mode in the CLI (`kb search -i`).
 
 ```toml
 [search]
