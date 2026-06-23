@@ -1,0 +1,6 @@
+# Test fixtures are byte-exact (PDF xref offsets, zip) — never normalize line endings.
+tests/fixtures/sample.docx binary
+tests/fixtures/sample.pdf binary
+
+# Reduce Cargo.lock merge churn.
+Cargo.lock merge=union
