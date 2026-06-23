@@ -18,8 +18,7 @@ enum Cmd {
         /// Search pattern (ripgrep regex syntax).
         pattern: String,
         /// Directory to search.
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
         /// Case-insensitive (rg -i).
         #[arg(short = 'i', long = "ignore-case")]
         ignore_case: bool,
@@ -44,13 +43,11 @@ enum Cmd {
     },
     /// Build or update the on-disk index for ranked search.
     Index {
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Rebuild the index from scratch.
     Reindex {
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Inspect the knowledge graph.
     Graph {
@@ -59,8 +56,7 @@ enum Cmd {
     },
     /// Run the MCP server over stdio (for AI agents).
     Mcp {
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
         #[arg(long, default_value = "editor")]
         profile: String,
@@ -71,14 +67,12 @@ enum Cmd {
 enum GraphAction {
     /// Print node/edge counts.
     Stats {
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Print nodes reachable from NODE_ID.
     Neighbors {
         node_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
         #[arg(long, default_value_t = 1)]
         depth: usize,
         #[arg(long = "type")]
@@ -90,6 +84,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore } => {
+            let path = glossa::root::resolve_root(path);
             if rank {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search(&pattern, limit)? {
@@ -111,6 +106,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Index { path } => {
+            let path = glossa::root::resolve_root(path);
             let stats = glossa::index::store::index_dir(&path, false)?;
             println!(
                 "indexed: {} added, {} removed, {} unchanged",
@@ -119,11 +115,13 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Reindex { path } => {
+            let path = glossa::root::resolve_root(path);
             let stats = glossa::index::store::index_dir(&path, true)?;
             println!("reindexed: {} files", stats.added);
             Ok(())
         }
         Cmd::Mcp { path, profile } => {
+            let path = glossa::root::resolve_root(path);
             use rmcp::{transport::stdio, ServiceExt};
             let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile));
             let rt = tokio::runtime::Runtime::new()?;
@@ -136,11 +134,13 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
+                let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
                 Ok(())
             }
             GraphAction::Neighbors { node_id, path, depth, types } => {
+                let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let filter = if types.is_empty() { None } else { Some(types.as_slice()) };
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
