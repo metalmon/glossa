@@ -53,4 +53,11 @@ mod tests {
         assert!(!re.is_match("cat"));
         assert!(re.is_match("Cat"));
     }
+
+    #[test]
+    fn ignore_case_forces_case_insensitive_even_with_uppercase_pattern() {
+        let re = compile("Cat", &QueryOpts { ignore_case: true, ..Default::default() }).unwrap();
+        assert!(re.is_match("cat"));
+        assert!(re.is_match("CAT"));
+    }
 }
