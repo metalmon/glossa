@@ -14,45 +14,73 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
 
 ## Technical backlog (carry-forward, non-blocking)
 - **Graph crash-atomicity**: fold one file's node/edge writes into a single redb write txn so a
-  mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex`
-  recovers today.)
+  mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex` recovers today.)
 - **`--expand`**: glossary query expansion — needs the layer-2 `Term`/co-occurrence layer (not built).
-- **HTTP/streamable transport** for the MCP server (`transport-streamable-http-server`) — stdio only today.
-- **PDF page-level locations + PDF image extraction** (needs a page-aware pure-Rust PDF lib; office
-  images only today).
+- **HTTP/streamable transport** for the MCP server — stdio only today.
+- **PDF page-level locations + PDF image extraction** (needs a page-aware pure-Rust PDF lib).
+- **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
+- **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
 - `read_region` returns empty string for unknown extensions silently; `join("\n")` may double newlines.
-- Bounded-traversal depth semantics doc-comments (`neighbors`=hops vs `path`=node-count).
-- Secondary indexes for `resolve`/`delete_by_source` (currently O(n) scans).
+- Bounded-traversal depth doc-comments; secondary indexes for `resolve`/`delete_by_source` (O(n) today).
 - Cosmetic: `Mcp` enum-variant vs match-arm ordering.
 
-## Product roadmap (staged)
+## Product roadmap
+
+The work splits into **two distinct tracks**. They share one model-agnostic agent-eval harness, but
+the "traces → patterns → domain skills" loop belongs ONLY to Track B.
 
 ### Stage 1 — local bring-up (IN PROGRESS)
 - Build the release binary; connect glossa as an MCP server to the controlling agent (Claude Code).
 - Smoke-test on a real knowledge base (`kb-test/`, git-ignored): `index` → `search`/`--rank` → `graph`.
-- Hand the operator CLI commands to try in the terminal.
+- Operator runs CLI commands in the terminal.
 
-### Stage 2 — RAG benchmarks
-- Run established RAG benchmarks; capture our metrics.
-- Two model tiers: (a) the smart controlling agent (Claude), (b) a weak local model
-  (Qwen3.5-4B via LM Studio) — compare retrieval/answer quality and graph-build quality.
+### Track A — public benchmarks (engine positioning)
+Goal: measure where the **engine** sits vs the field. NOT a domain — no skill loop here.
+- Build a **model-agnostic agent-eval harness**: an MCP *client* that drives a model, lets it call
+  glossa tools, and scores. Swap the model backend: the smart controller (Claude) vs a weak local
+  model (Qwen3.5-4B via LM Studio's OpenAI-compatible API).
+- Datasets + scoring come WITH the public benchmark — use their gold + **their official metric**
+  (Exact Match / F1 against the gold answer string). Do NOT use our LLM-judge here.
+- Gold **supporting-fact spans are provided** by multihop benches → retrieval/groundedness measurable
+  out of the box.
+- Benches: multihop reasoning + exact-fact (HotpotQA, 2WikiMultihopQA, MuSiQue).
+- **Multihop A/B (the key claim):** same questions / same model, graph OFF vs graph ON
+  (no-saturation, code layers 1–2 only → after the agent saturates layers 3–4 via `graph_upsert`).
+  Needs a "graph-off" mode for a clean control.
+- Honest caveat: these benches are English-Wikipedia, clean text — they do NOT exercise our
+  differentiators (office/pdf, Russian, offline, agentic graph) and on paraphrase recall will favor
+  dense-embedding RAG (we are lexical+graph). They validate the **multihop/retrieval engine**, not
+  the product edge. Expect to trail on pure-semantic benches; our bet is multihop+graph+offline.
+- Traces here are for **debugging failures only** — not pattern-mining.
 
-### Stage 3 — multi-hop benchmarks
-- First **without graph saturation** (code-built layers 1–2 only), driven by the smart agent.
-- Then **after saturation** (the agent has built layers 3–4 via `graph_upsert`) — measure the lift.
+### Track B — domain refinement (the product moat)
+Goal: tune glossa to a real domain via your own knowledge base. THIS is where the loop lives.
+- **Curate a domain Q/A set** (laborious, first-class deliverable): question → gold answer → **gold
+  source spans** (which file + location). *Bootstrap:* the smart agent answers each question against
+  the base and records the sources it used → draft gold-spans; human verifies. Include **negative /
+  no-answer cases** to measure false-positive / hallucination rate.
+- **Scoring split:** retrieval metrics (was the right source surfaced?) via **regex/span-match**
+  (works well here) — Recall@k, MRR; answer correctness (free-form) via **LLM-as-judge**; plus
+  **groundedness/citation accuracy** (every answer traces to a real span — our differentiator).
+- **Tracing is external, not in the server:** the eval harness is the MCP *client* mediating
+  model↔glossa, so it already sees every tool call + result (search results carry
+  path:location:line:snippet+score). Log the trace in the harness; keep the server clean. **Reverse-trace:**
+  given a question's gold spans, which queries/hops reach them (optimal-path oracle for diagnosing failures).
+- **Heatmap = static PNG** (pure-Rust plotter, e.g. `plotters`, C-free; open/share anywhere): per
+  question × per step hit/miss, so the operator sees, visually, how retrieval is doing.
+- **Patterns → domain skills:** start trace-assisted **manual** skill authoring (operator + agent read
+  traces); auto pattern-mining is a later nicety, not promised now.
+- **Skill packaging:** a **base ontology + base skill**, refined per domain (legal/medical/eng/…).
+- **CI regression:** once the harness exists, run it on a fixed mini-set so quality can't silently regress.
+- Possible small product adds for this track: a `list` tool (enumerate indexed docs, for systematic
+  saturation), a "graph-off" query mode (for the A/B), richer tool-result metadata.
 
-### Stage 4 — agent skills
-- Ship companion skills teaching agents to use glossa (search → read → build-graph → answer).
-- Pattern: a **base ontology + base skill**, refined per domain (legal/medical/eng/…).
-
-### Stage 5 — testing toolkit + heatmap (domain refinement loop)
-- The test base carries example **questions + correct answers**.
-- Per-step **regex matchers** that check whether the correct answer is found at each retrieval/hop step.
-- **Trace + reverse-trace** of the search path; render the steps on a **heatmap** so the operator can
-  see, visually, how retrieval is doing across questions.
-- Mine **common patterns** across traces → write the **domain skills** from them.
-- Deliver this as a convenient in-repo toolkit + a detailed manual.
+### Ordering
+1. Finish Stage 1 (bring-up) — in flight.
+2. Build the shared agent-eval harness; run **Track A** (engine numbers, Claude then Qwen-4B).
+3. In parallel/after: **Track B** — curate domain Q/A (+ bootstrap gold-spans), external traces,
+   PNG heatmap, patterns → domain skills.
 
 ## Notes
 - Everything stays pure Rust / offline / single binary. The graph is a disposable overlay over files
