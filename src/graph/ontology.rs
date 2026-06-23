@@ -45,6 +45,14 @@ impl Ontology {
         })
     }
 
+    pub fn load_or_default(root: &std::path::Path) -> Ontology {
+        let p = root.join(".glossa").join("ontology.toml");
+        match std::fs::read_to_string(&p) {
+            Ok(s) => Ontology::parse(&s).unwrap_or_default(),
+            Err(_) => Ontology::default(),
+        }
+    }
+
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
         if CORE_NODES.contains(&node_type)
             || self.entity_types.contains(node_type)
@@ -113,5 +121,20 @@ strict = true
         let o = Ontology::default(); // strict = false
         assert!(o.validate_node("Anything").is_ok());
         assert!(o.validate_edge("WHATEVER", "A", "B").is_ok());
+    }
+
+    #[test]
+    fn load_or_default_reads_file_else_default() {
+        let dir = tempfile::tempdir().unwrap();
+        // missing file → default (permissive)
+        let o = Ontology::load_or_default(dir.path());
+        assert!(o.validate_node("Anything").is_ok());
+        // present file → parsed (strict)
+        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+        std::fs::write(dir.path().join(".glossa/ontology.toml"),
+            "[entities.Person]\nprops=[]\n[validation]\nstrict=true\n").unwrap();
+        let o2 = Ontology::load_or_default(dir.path());
+        assert!(o2.validate_node("Person").is_ok());
+        assert!(o2.validate_node("Alien").is_err());
     }
 }
