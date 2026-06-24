@@ -59,13 +59,14 @@ pub struct Windower {
     file_type: String,
     buf: String,
     lines: usize,
+    chars: usize,
     pending: Option<String>, // a completed window not yet emitted (awaiting "is there another?")
     emitted: usize,
 }
 
 impl Windower {
     pub fn new(path: &Path, file_type: &str) -> Self {
-        Windower { path: path.to_path_buf(), file_type: file_type.to_string(), buf: String::new(), lines: 0, pending: None, emitted: 0 }
+        Windower { path: path.to_path_buf(), file_type: file_type.to_string(), buf: String::new(), lines: 0, chars: 0, pending: None, emitted: 0 }
     }
 
     fn flush_pending(&mut self, sink: &mut dyn FnMut(Chunk)) {
@@ -84,18 +85,21 @@ impl Windower {
         if self.buf.trim().is_empty() {
             self.buf.clear();
             self.lines = 0;
+            self.chars = 0;
             return;
         }
         self.flush_pending(sink); // a previous window exists -> we are multi-window
         self.pending = Some(std::mem::take(&mut self.buf));
         self.lines = 0;
+        self.chars = 0;
     }
 
     pub fn push_line(&mut self, line: &str, sink: &mut dyn FnMut(Chunk)) {
         self.buf.push_str(line);
         self.buf.push('\n');
         self.lines += 1;
-        if self.lines >= MAX_LINES || self.buf.chars().count() >= MAX_CHARS {
+        self.chars += line.chars().count() + 1;
+        if self.lines >= MAX_LINES || self.chars >= MAX_CHARS {
             self.close_window(sink);
         }
     }
@@ -139,10 +143,23 @@ pub fn stream_text(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) ->
         let mut decoded = String::with_capacity(chunk_bytes.len() + 16);
         let _ = decoder.decode_to_string(&chunk_bytes, &mut decoded, last);
         pending.push_str(&decoded);
-        // Drain complete lines.
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
-            win.push_line(line.trim_end_matches(['\n', '\r']), sink);
+        // Drain complete lines; also flush a bounded piece when a newline-free run grows past one
+        // window, so a file with few/no newlines (e.g. minified JSON) stays constant-memory.
+        loop {
+            if let Some(nl) = pending.find('\n') {
+                let line: String = pending.drain(..=nl).collect();
+                win.push_line(line.trim_end_matches(['\n', '\r']), sink);
+            } else if pending.chars().count() >= MAX_CHARS {
+                let cut = pending
+                    .char_indices()
+                    .nth(MAX_CHARS)
+                    .map(|(i, _)| i)
+                    .unwrap_or_else(|| pending.len());
+                let piece: String = pending.drain(..cut).collect();
+                win.push_line(&piece, sink);
+            } else {
+                break;
+            }
         }
         if last {
             break;
@@ -309,5 +326,21 @@ mod stream_tests {
         stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.contains("alpha") && out[0].text.contains("omega"));
+    }
+
+    #[test]
+    fn streams_long_line_without_newline_into_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("huge.json");
+        let body = "x".repeat(20_000); // one line, no '\n', far exceeding one window
+        std::fs::write(&p, &body).unwrap();
+        let mut out = Vec::new();
+        stream_text(&p, "json", &mut |c| out.push(c)).unwrap();
+        assert!(out.len() >= 4, "long no-newline line must split into bounded chunks, got {}", out.len());
+        for c in &out {
+            assert!(c.text.chars().count() <= 4100, "each chunk bounded near MAX_CHARS");
+        }
+        let total: usize = out.iter().map(|c| c.text.chars().filter(|ch| *ch == 'x').count()).sum();
+        assert_eq!(total, 20_000, "all content preserved");
     }
 }

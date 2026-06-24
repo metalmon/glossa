@@ -165,6 +165,9 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
         graph.delete_by_source(&path_str)?;
         let mut doc_written = false;
+        // Index/graph write errors are intentionally not propagated here: one bad chunk must not
+        // abort the whole run (matches the prior per-file behavior). The file is still recorded
+        // in the manifest; a failed write is corrected on the next `reindex`.
         crate::extract::extract_file(path, &mut |c| {
             if !doc_written {
                 let _ = crate::graph::build::build_document(&graph, &path_str, sig);
