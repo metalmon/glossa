@@ -36,6 +36,14 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   so it is never dropped and is findable by name. Remaining work: extract/render the page *image* so
   the connected agent can *vision-read* it (like `read` already returns embedded office images as
   vision content). Pure-Rust offline OCR is hard (tesseract is C), so bet on vision-read, not OCR.
+- **File-type coverage (File-First gap).** Indexed today: md/markdown, pdf, office (docx/doc/xlsx/
+  xls/pptx/ppt). NOT indexed: `.txt`, `.json`, `.csv`, `.html`, `.yaml`, `.xml`, source code, …
+  unknown extensions are silently skipped, which violates "never drop a readable file". Plan
+  (by value): (1) **generic UTF-8 text fallback** — any non-binary, valid-UTF-8 file indexed as
+  text (`file_type` = extension); one change covers txt/json/yaml/xml/toml/log/code. (2) CSV/TSV →
+  rows as text (like xlsx). (3) HTML/HTM → strip tags. (4) optional structured JSON (key: value
+  per line) over the fallback. Lower: rtf, epub (zip+html), email eml/msg. Needs walk to stop
+  skipping unknown extensions + per-format extractors + tests.
 - **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
 - **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
@@ -45,10 +53,17 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
 - **eval harness — backend per-question timeout (spec'd, not yet built).** `kb-eval` claude/qwen backends
   block indefinitely; a hung live run never times out. Add `ureq .timeout(...)` + a wait-with-timeout on
   the `claude -p` subprocess (+ a `--timeout` flag), surfacing `failed: timeout`. Do before the first
-  live operator run. (Mock backend / CI unaffected.) Minor: trace logs `{path,location,line}` not
-  `{…,score}`; no `GLOSSA_TRACE` env alias (only `--trace`). DONE: per-question `--timeout-secs` +
-  generic `cli`/`openai` backends. TODO: `OpenAiBackend` silently scores "" if the endpoint returns an
-  error object — surface `v["error"]` instead of `unwrap_or("")`.
+  live operator run. (Mock backend / CI unaffected.) Minor: no `GLOSSA_TRACE` env alias (only
+  `--trace`). DONE: per-question `--timeout-secs` + generic `cli`/`openai` backends; `OpenAiBackend`
+  now surfaces `v["error"]` instead of silently scoring "".
+- **eval `openai` backend is now the agent itself (harness-side tool loop).** LM Studio's
+  OpenAI-compatible *API* does NOT auto-run MCP tools (that is GUI-only), so the backend advertises
+  glossa `search`/`read` as OpenAI function tools, runs the tool-call loop (max 8 rounds), and
+  executes the tools **in-process** (`DocIndex::search` / `read_region`) against the corpus in
+  `--work`, logging each call to `work/.glossa/traces` so retrieval-recall is measured unchanged.
+  Server-agnostic (LM Studio/vLLM/OpenRouter); the model server is just an LLM, no MCP needed for
+  eval. `read` results truncated to 4000 chars to fit small-model context. Possible follow-ups:
+  per-round (not just per-request) wall-clock budget; expose `MAX_ROUNDS`/`READ_CHARS_CAP` as flags.
 
 ## Product roadmap
 
