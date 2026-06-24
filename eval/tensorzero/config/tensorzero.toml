@@ -1,0 +1,55 @@
+# TensorZero config for the glossa HotpotQA eval (Track-B capture + prompt optimization).
+#
+# The PROMPT lives here (variant system_template) so TensorZero owns it and can version,
+# A/B, and optimize it from feedback. The eval harness calls the `answer_hotpot` function
+# with the question as input, EXECUTES the search/read tools against glossa in-process, and
+# POSTs em/f1/retrieved feedback per episode.
+
+# ── Model provider: LM Studio (OpenAI-compatible) on the host, serving Qwen3.5-4B ──
+[models.qwen]
+routing = ["lmstudio"]
+
+[models.qwen.providers.lmstudio]
+type = "openai"
+api_base = "http://host.docker.internal:1234/v1"   # LM Studio on the host
+model_name = "qwen3.5-4b"
+# LM Studio auth is enabled -> read the key from the gateway env (set in .env).
+# If you disable LM Studio auth, change this to:  api_key_location = "none"
+api_key_location = "env::LMSTUDIO_API_KEY"
+
+# ── The agent function: answer a HotpotQA question via glossa search/read ──
+[functions.answer_hotpot]
+type = "chat"
+tools = ["search", "read"]
+
+[functions.answer_hotpot.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "answer_hotpot/system.minijinja"
+# Add more [functions.answer_hotpot.variants.<name>] blocks (with `weight`) to A/B
+# alternative prompts; TensorZero optimization can then propose better variants.
+
+# ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
+[tools.search]
+description = "Full-text BM25 search over the knowledge base. Pass short keywords (not a sentence)."
+parameters = "tools/search.json"
+
+[tools.read]
+description = "Read a document's text, optionally narrowed to a heading/page/sheet location."
+parameters = "tools/read.json"
+
+# ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
+[metrics.em]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+[metrics.f1]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.retrieved]
+type = "boolean"
+optimize = "max"
+level = "episode"

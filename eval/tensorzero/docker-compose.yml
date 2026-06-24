@@ -1,0 +1,48 @@
+# TensorZero gateway + ClickHouse for the glossa eval (Track-B inference capture).
+# Dev-only — not the shipped product. Brings up:
+#   - gateway     -> http://localhost:3000
+#       native inference:  POST /inference
+#       feedback:          POST /feedback
+#       OpenAI-compatible: POST /openai/v1/chat/completions
+#   - clickhouse  -> http://localhost:8123   (observability / optimization store)
+#
+# The gateway proxies to LM Studio (Qwen3.5-4B) running on the HOST at :1234
+# via host.docker.internal. Bring up:  docker compose up -d --wait
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_USER: chuser
+      CLICKHOUSE_PASSWORD: chpassword
+      CLICKHOUSE_DB: tensorzero
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  gateway:
+    image: tensorzero/gateway
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+    command: --config-file /app/config/tensorzero.toml
+    environment:
+      TENSORZERO_CLICKHOUSE_URL: "http://chuser:chpassword@clickhouse:8123/tensorzero"
+      # LM Studio API key (auth is enabled). Put the real value in eval/tensorzero/.env
+      # (git-ignored). If you disable LM Studio auth, set api_key_location = "none" in
+      # config/tensorzero.toml and this can be left empty.
+      LMSTUDIO_API_KEY: ${LMSTUDIO_API_KEY:-}
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  clickhouse-data:
