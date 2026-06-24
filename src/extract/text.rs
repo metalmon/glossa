@@ -1,6 +1,8 @@
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
 use crate::model::Chunk;
 use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Read;
 
 /// Detect the charset of a text file from a prefix (first ~64 KiB). Returns None if the bytes look
 /// binary (a NUL byte, or >10% C0 control bytes other than tab/newline/carriage-return).
@@ -114,6 +116,64 @@ impl Windower {
     }
 }
 
+const PREFIX_BYTES: usize = 64 * 1024;
+const READ_BLOCK: usize = 64 * 1024;
+
+/// Stream-decode a text file (any detected encoding) into windowed chunks. Binary files are skipped.
+pub fn stream_text(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) -> anyhow::Result<()> {
+    let mut file = File::open(path)?;
+    let mut prefix = vec![0u8; PREFIX_BYTES];
+    let n = read_fill(&mut file, &mut prefix)?;
+    prefix.truncate(n);
+    let Some(enc) = detect(&prefix) else { return Ok(()) }; // binary -> skip
+
+    let mut decoder = enc.new_decoder();
+    let mut win = Windower::new(path, file_type);
+    let mut pending = String::new(); // partial trailing line across decode blocks
+    let mut block = vec![0u8; READ_BLOCK];
+
+    // Feed the already-read prefix, then the rest, then a final empty flush.
+    let mut chunk_bytes: Vec<u8> = prefix;
+    loop {
+        let last = chunk_bytes.is_empty();
+        let mut decoded = String::with_capacity(chunk_bytes.len() + 16);
+        let _ = decoder.decode_to_string(&chunk_bytes, &mut decoded, last);
+        pending.push_str(&decoded);
+        // Drain complete lines.
+        while let Some(nl) = pending.find('\n') {
+            let line: String = pending.drain(..=nl).collect();
+            win.push_line(line.trim_end_matches(['\n', '\r']), sink);
+        }
+        if last {
+            break;
+        }
+        let m = read_fill(&mut file, &mut block)?;
+        if m == 0 {
+            chunk_bytes = Vec::new(); // triggers a final last=true pass
+        } else {
+            chunk_bytes = block[..m].to_vec();
+        }
+    }
+    if !pending.is_empty() {
+        win.push_line(pending.trim_end_matches(['\n', '\r']), sink);
+    }
+    win.finish(sink);
+    Ok(())
+}
+
+/// Read repeatedly until `buf` is full or EOF; returns bytes read.
+fn read_fill(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        let n = file.read(&mut buf[total..])?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +246,57 @@ mod window_tests {
         assert_eq!(out[2].location, "part.3");
         let total_lines: usize = out.iter().map(|c| c.text.lines().count()).sum();
         assert_eq!(total_lines, 250); // every line preserved
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn streams_utf8_file_single_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        std::fs::write(&p, b"line one\nline two\n").unwrap();
+        let mut out = Vec::new();
+        stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].text.contains("line one") && out[0].text.contains("line two"));
+        assert_eq!(out[0].location, "");
+    }
+
+    #[test]
+    fn streams_windows_1251_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ru.txt");
+        std::fs::write(&p, [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b'\n']).unwrap(); // "Привет\n"
+        let mut out = Vec::new();
+        stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].text.contains("Привет"));
+    }
+
+    #[test]
+    fn binary_file_yields_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("b.bin");
+        std::fs::write(&p, [0x00u8, 0x01, 0x02, 0x03]).unwrap();
+        let mut out = Vec::new();
+        stream_text(&p, "bin", &mut |c| out.push(c)).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn large_file_streams_all_lines_across_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.txt");
+        let body: String = (0..250).map(|i| format!("row {i}\n")).collect();
+        std::fs::write(&p, body).unwrap();
+        let mut out = Vec::new();
+        stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
+        assert!(out.len() >= 3);
+        let total: usize = out.iter().map(|c| c.text.lines().count()).sum();
+        assert_eq!(total, 250);
+        assert_eq!(out[0].location, "part.1");
     }
 }
