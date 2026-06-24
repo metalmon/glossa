@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Full-text BM25 search over the knowledge base.",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Short keywords to search for (not a full sentence)."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of results (default 10)."
+    }
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}

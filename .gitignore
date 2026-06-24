@@ -14,3 +14,8 @@ eval-data/
 # Eval working corpus + generated result reports
 /eval-corpus/
 /eval-*.json
+
+# TensorZero local secrets + the fullwiki corpus/archive (large/secret, not committed)
+eval/tensorzero/.env
+/wiki-corpus/
+/eval-data/*.tar.bz2
