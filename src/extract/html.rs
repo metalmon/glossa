@@ -2,6 +2,41 @@ use crate::extract::text::{decode_all, Windower};
 use crate::model::Chunk;
 use std::path::Path;
 
+/// Decode the common HTML entities in a single left-to-right pass (never re-scanning decoded text,
+/// so compound entities like `&amp;lt;` decode to the literal `&lt;`, not `<`).
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        // Look for a ';' within the next few chars (entities are short).
+        let semi = after.char_indices().take(12).find(|(_, c)| *c == ';').map(|(i, _)| i);
+        match semi {
+            Some(semi) => {
+                let entity = &after[..=semi];
+                let decoded = match entity {
+                    "&amp;" => "&",
+                    "&lt;" => "<",
+                    "&gt;" => ">",
+                    "&quot;" => "\"",
+                    "&#39;" => "'",
+                    "&nbsp;" => " ",
+                    other => other, // unknown entity: leave verbatim
+                };
+                out.push_str(decoded);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Strip tags from HTML: drop <script>/<style> bodies, remove all tags, decode common entities,
 /// collapse runs of blank lines.
 pub fn strip_html(input: &str) -> String {
@@ -35,16 +70,11 @@ pub fn strip_html(input: &str) -> String {
             }
             continue;
         }
-        out.push(input[i..].chars().next().unwrap());
-        i += input[i..].chars().next().unwrap().len_utf8();
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    let decoded = out
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ");
+    let decoded = decode_entities(&out);
     // Collapse blank-line runs.
     let mut result = String::with_capacity(decoded.len());
     let mut blanks = 0;
@@ -102,5 +132,11 @@ mod tests {
         stream(&p, "html", &mut |c| out.push(c)).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.contains("body text here"));
+    }
+
+    #[test]
+    fn compound_entity_is_not_double_decoded() {
+        assert_eq!(strip_html("a &amp;lt; b").trim(), "a &lt; b");
+        assert_eq!(strip_html("x &amp; y").trim(), "x & y");
     }
 }
