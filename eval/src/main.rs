@@ -5,6 +5,7 @@ use std::time::Duration;
 mod backend;
 mod corpus;
 mod dataset;
+mod prep;
 mod run;
 mod score;
 mod trace_read;
@@ -57,6 +58,18 @@ enum Cmd {
         #[arg(long = "cli-arg")]
         cli_arg: Vec<String>,
     },
+    /// Convert the HotpotQA abstracts tar.bz2 into a glossa-indexable markdown corpus.
+    PrepFullwiki {
+        /// Path to the `...-abstracts.tar.bz2` archive.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Output directory for the markdown shards.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only convert the first N shards (feasibility spike).
+        #[arg(long)]
+        max_shards: Option<usize>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -90,6 +103,11 @@ fn main() -> anyhow::Result<()> {
                 "backend={} questions={} EM={:.3} F1={:.3} retrieval_recall={:.3}\nwrote {}",
                 report.backend, report.rows.len(), report.em_mean, report.f1_mean, report.recall_mean, json_path
             );
+            Ok(())
+        }
+        Cmd::PrepFullwiki { archive, out, max_shards } => {
+            let stats = prep::prep_fullwiki(&archive, &out, max_shards)?;
+            println!("prep-fullwiki: {} shard(s), {} article(s) -> {}", stats.shards, stats.articles, out.display());
             Ok(())
         }
     }
