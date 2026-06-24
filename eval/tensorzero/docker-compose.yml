@@ -10,17 +10,21 @@
 # via host.docker.internal. Bring up:  docker compose up -d --wait
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:24.12-alpine
+    image: clickhouse/clickhouse-server:24.12
     environment:
       CLICKHOUSE_USER: chuser
       CLICKHOUSE_PASSWORD: chpassword
       CLICKHOUSE_DB: tensorzero
     ports:
       - "8123:8123"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
       timeout: 3s
       retries: 30
