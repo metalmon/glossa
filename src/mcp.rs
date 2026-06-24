@@ -32,13 +32,15 @@ impl Profile {
 pub struct GlossaServer {
     root: PathBuf,
     tool_router: ToolRouter<Self>,
+    trace: crate::trace::TraceLog,
 }
 
 const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "resolve"];
 const FULL_TOOLS: &[&str] = &["purge"];
+const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "resolve", "index", "reindex", "purge"];
 
 impl GlossaServer {
-    pub fn new(root: PathBuf, profile: Profile) -> Self {
+    pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
             for t in EDITOR_TOOLS.iter().chain(FULL_TOOLS) {
@@ -49,7 +51,13 @@ impl GlossaServer {
                 router.disable_route(*t);
             }
         }
-        Self { root, tool_router: router }
+        if no_graph {
+            for t in GRAPH_TOOLS {
+                router.disable_route(*t);
+            }
+        }
+        let trace = if trace { crate::trace::TraceLog::to_dir(&root) } else { crate::trace::TraceLog::disabled() };
+        Self { root, tool_router: router, trace }
     }
 
     #[cfg(test)]
@@ -112,6 +120,10 @@ impl GlossaServer {
         let re = compile(&a.query, &opts).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let chunks = collect_chunks(&self.root, None, true).map_err(internal)?;
         let hits = search_chunks(&chunks, &re, a.limit.unwrap_or(50));
+        let trace_hits: Vec<serde_json::Value> = hits.iter().map(|h| serde_json::json!({
+            "path": h.doc_path.display().to_string(), "location": h.location, "line": h.line
+        })).collect();
+        self.trace.log("search", serde_json::json!({"query": a.query}), serde_json::json!(trace_hits));
         let body = hits.iter()
             .map(|h| format!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet))
             .collect::<Vec<_>>().join("\n");
@@ -122,6 +134,7 @@ impl GlossaServer {
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         let path = std::path::PathBuf::from(&a.path);
         let text = read_region(&path, a.location.as_deref()).map_err(internal)?;
+        self.trace.log("read", serde_json::json!({"path": a.path, "location": a.location}), serde_json::json!({"path": a.path}));
         let mut content = vec![Content::text(text)];
         if a.include_images.unwrap_or(true) {
             for img in extract_images(&path, 8).map_err(internal)? {
@@ -212,15 +225,19 @@ mod tests {
     #[test]
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
-        let reader = GlossaServer::new(root.clone(), Profile::Reader).enabled_tools();
+        let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         assert!(!reader.contains(&"index".to_string()) && !reader.contains(&"graph_upsert".to_string()) && !reader.contains(&"purge".to_string()));
 
-        let editor = GlossaServer::new(root.clone(), Profile::Editor).enabled_tools();
+        let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(!editor.contains(&"purge".to_string()));
 
-        let full = GlossaServer::new(root, Profile::Full).enabled_tools();
+        let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
+
+        let ng = GlossaServer::new(root, Profile::Editor, false, true).enabled_tools();
+        assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
+        assert!(!ng.contains(&"neighbors".to_string()) && !ng.contains(&"graph_upsert".to_string()) && !ng.contains(&"index".to_string()));
     }
 }

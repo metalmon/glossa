@@ -80,6 +80,12 @@ enum Cmd {
         /// Tool profile: reader | editor | full.
         #[arg(long, default_value = "editor")]
         profile: String,
+        /// Log every tool call to <root>/.glossa/traces/*.jsonl (for the eval harness).
+        #[arg(long)]
+        trace: bool,
+        /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
+        #[arg(long = "no-graph")]
+        no_graph: bool,
     },
 }
 
@@ -232,10 +238,10 @@ fn main() -> anyhow::Result<()> {
             println!("reindexed: {} files", stats.added);
             Ok(())
         }
-        Cmd::Mcp { path, profile } => {
+        Cmd::Mcp { path, profile, trace, no_graph } => {
             let path = glossa::root::resolve_root(path);
             use rmcp::{transport::stdio, ServiceExt};
-            let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile));
+            let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {
                 let service = server.serve(stdio()).await?;
