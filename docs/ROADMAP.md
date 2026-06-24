@@ -46,7 +46,9 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   block indefinitely; a hung live run never times out. Add `ureq .timeout(...)` + a wait-with-timeout on
   the `claude -p` subprocess (+ a `--timeout` flag), surfacing `failed: timeout`. Do before the first
   live operator run. (Mock backend / CI unaffected.) Minor: trace logs `{path,location,line}` not
-  `{…,score}`; no `GLOSSA_TRACE` env alias (only `--trace`).
+  `{…,score}`; no `GLOSSA_TRACE` env alias (only `--trace`). DONE: per-question `--timeout-secs` +
+  generic `cli`/`openai` backends. TODO: `OpenAiBackend` silently scores "" if the endpoint returns an
+  error object — surface `v["error"]` instead of `unwrap_or("")`.
 
 ## Product roadmap
 
