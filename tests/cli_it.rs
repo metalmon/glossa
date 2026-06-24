@@ -26,3 +26,25 @@ fn kb_search_word_flag_excludes_substring() {
         .success()
         .stdout(predicates::str::is_empty());
 }
+
+#[test]
+fn search_then_read_by_number() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
+
+    // pretty search numbers the hit
+    Command::cargo_bin("kb").unwrap()
+        .current_dir(dir.path())
+        .args(["search", "hello", "--format", "pretty"])
+        .assert()
+        .success()
+        .stdout(contains("[1]").and(contains("note.md")));
+
+    // read by number resolves the recorded hit and prints its text
+    Command::cargo_bin("kb").unwrap()
+        .current_dir(dir.path())
+        .args(["read", "1"])
+        .assert()
+        .success()
+        .stdout(contains("hello world here"));
+}
