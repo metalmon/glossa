@@ -31,30 +31,34 @@ pub struct DisplayHit {
     pub score: Option<f32>, // Some for --rank
 }
 
-fn pad(s: &str, w: usize) -> String {
-    let len = s.chars().count();
-    if len >= w { s.to_string() } else { format!("{s}{}", " ".repeat(w - len)) }
-}
-
-/// Render numbered, aligned, colored log-lines + a footer. Empty → "no results".
+/// Render results as two-line entries — `#N  score  path  · loc`, then the snippet indented below —
+/// so long paths never collide with the snippet. `score` is shown first (for `--rank`). The `#N` is
+/// the result number for `kb read <#>`. Empty → "no results".
 pub fn render_search_pretty(hits: &[DisplayHit]) -> String {
     if hits.is_empty() {
         return "no results".to_string();
     }
     let total = hits.len();
     let idx_w = total.to_string().len();
-    let file_w = hits.iter().map(|h| h.file.chars().count()).max().unwrap_or(0);
-    let loc_w = hits.iter().map(|h| h.location.chars().count()).max().unwrap_or(0);
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
-        let idx = dim(&format!("[{:>w$}]", i + 1, w = idx_w));
-        let file = pad(&h.file, file_w);          // default color
-        let loc = cyan(&pad(&h.location, loc_w)); // color applied AFTER padding (keeps alignment)
-        let mut line = format!("{idx} {file}  {loc}  {}", h.snippet.trim());
+        // Line 1: #N  [score]  path  · location
+        let mut head = dim(&format!("#{:<w$}", i + 1, w = idx_w));
+        head.push_str("  ");
         if let Some(s) = h.score {
-            line.push_str(&dim(&format!("  [{s:.3}]")));
+            head.push_str(&cyan(&format!("{s:.3}")));
+            head.push_str("  ");
         }
-        out.push_str(&line);
+        head.push_str(&h.file);
+        if !h.location.is_empty() {
+            head.push_str(&dim(&format!("  · {}", h.location)));
+        }
+        out.push_str(&head);
+        out.push('\n');
+        // Line 2: snippet, indented and clearly separated from the path.
+        out.push_str("        ");
+        out.push_str(h.snippet.trim());
+        out.push('\n');
         out.push('\n');
     }
     out.push_str(&dim(&format!("{total} results · kb read <#> to open")));
@@ -191,18 +195,19 @@ mod tests {
     }
 
     #[test]
-    fn render_search_pretty_numbers_aligns_scores() {
+    fn render_search_pretty_two_line_score_first() {
         let hits = vec![
             DisplayHit { file: "a.md".into(), location: "p.1".into(), snippet: " hello ".into(), score: None },
-            DisplayHit { file: "longname.pdf".into(), location: "Sec".into(), snippet: "world".into(), score: Some(1.234) },
+            DisplayHit { file: "deep\\longname.pdf".into(), location: "Sec".into(), snippet: "world".into(), score: Some(1.234) },
         ];
         let s = render_search_pretty(&hits);
-        assert!(s.contains("[1] a.md"));
-        assert!(s.contains("[2] longname.pdf"));
-        assert!(s.contains("hello"));              // snippet trimmed
-        assert!(s.contains("[1.234]"));            // score shown for ranked hit
+        // Line 1: number, then (for ranked) score BEFORE the path, then "· location".
+        assert!(s.contains("#1  a.md"));
+        assert!(s.contains("#2  1.234  deep\\longname.pdf"), "score precedes the path");
+        assert!(s.contains("· p.1"));
+        // Line 2: snippet indented, trimmed, on its own line (separated from the path).
+        assert!(s.contains("\n        hello\n"));
         assert!(s.contains("2 results · kb read <#> to open"));
-        assert!(s.contains(&format!("a.md{}  p.1", " ".repeat(8))), "file column must be padded to align");
     }
 
     #[test]
