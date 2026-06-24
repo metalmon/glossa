@@ -5,6 +5,7 @@ use std::time::Duration;
 mod backend;
 mod corpus;
 mod dataset;
+mod prep;
 mod run;
 mod score;
 mod trace_read;
@@ -56,6 +57,21 @@ enum Cmd {
         /// CLI-agent arg template (repeatable; tokens {prompt}, {mcp_config}). Empty = claude preset.
         #[arg(long = "cli-arg")]
         cli_arg: Vec<String>,
+        /// Fullwiki mode: search this pre-built shared corpus index (skip per-question corpus build).
+        #[arg(long)]
+        fullwiki: Option<PathBuf>,
+    },
+    /// Convert the HotpotQA abstracts tar.bz2 into a glossa-indexable markdown corpus.
+    PrepFullwiki {
+        /// Path to the `...-abstracts.tar.bz2` archive.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Output directory for the markdown shards.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only convert the first N shards (feasibility spike).
+        #[arg(long)]
+        max_shards: Option<usize>,
     },
 }
 
@@ -67,7 +83,7 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Run {
             dataset, backend, limit, kb_bin, work, timeout_secs, profile, no_graph,
-            endpoint, model, api_key_env, cli_cmd, cli_arg,
+            endpoint, model, api_key_env, cli_cmd, cli_arg, fullwiki,
         } => {
             use backend::AgentBackend;
             let timeout = Duration::from_secs(timeout_secs);
@@ -83,13 +99,19 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             let name = format!("{backend:?}").to_lowercase();
-            let report = run::run_eval(&dataset, be.as_ref(), &name, limit, &kb_bin, &work)?;
+            let report = run::run_eval(&dataset, be.as_ref(), &name, limit, &kb_bin, &work, fullwiki.as_deref())?;
             let json_path = format!("eval-{}-{}.json", report.backend, glossa::trace::now_ms());
             std::fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
             println!(
-                "backend={} questions={} EM={:.3} F1={:.3} retrieval_recall={:.3}\nwrote {}",
-                report.backend, report.rows.len(), report.em_mean, report.f1_mean, report.recall_mean, json_path
+                "backend={} questions={} EM={:.3} F1={:.3} recall={:.3} R@5={:.3} R@10={:.3} R@20={:.3} MRR={:.3}\nwrote {}",
+                report.backend, report.rows.len(), report.em_mean, report.f1_mean, report.recall_mean,
+                report.recall_at_5_mean, report.recall_at_10_mean, report.recall_at_20_mean, report.mrr_mean, json_path
             );
+            Ok(())
+        }
+        Cmd::PrepFullwiki { archive, out, max_shards } => {
+            let stats = prep::prep_fullwiki(&archive, &out, max_shards)?;
+            println!("prep-fullwiki: {} shard(s), {} article(s) -> {}", stats.shards, stats.articles, out.display());
             Ok(())
         }
     }
