@@ -42,6 +42,11 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
 - `read_region` returns empty string for unknown extensions silently; `join("\n")` may double newlines.
 - Bounded-traversal depth doc-comments; secondary indexes for `resolve`/`delete_by_source` (O(n) today).
 - Cosmetic: `Mcp` enum-variant vs match-arm ordering.
+- **eval harness — backend per-question timeout (spec'd, not yet built).** `kb-eval` claude/qwen backends
+  block indefinitely; a hung live run never times out. Add `ureq .timeout(...)` + a wait-with-timeout on
+  the `claude -p` subprocess (+ a `--timeout` flag), surfacing `failed: timeout`. Do before the first
+  live operator run. (Mock backend / CI unaffected.) Minor: trace logs `{path,location,line}` not
+  `{…,score}`; no `GLOSSA_TRACE` env alias (only `--trace`).
 
 ## Product roadmap
 
