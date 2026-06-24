@@ -60,6 +60,13 @@ enum Cmd {
         /// Fullwiki mode: search this pre-built shared corpus index (skip per-question corpus build).
         #[arg(long)]
         fullwiki: Option<PathBuf>,
+        // --- tensorzero backend ---
+        /// TensorZero gateway base URL (for `--backend tensorzero`).
+        #[arg(long, default_value = "http://localhost:3000")]
+        tensorzero_endpoint: String,
+        /// TensorZero function name to call.
+        #[arg(long, default_value = "answer_hotpot")]
+        tensorzero_function: String,
     },
     /// Convert the HotpotQA abstracts tar.bz2 into a glossa-indexable markdown corpus.
     PrepFullwiki {
@@ -76,7 +83,7 @@ enum Cmd {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum BackendKind { Mock, Cli, Openai }
+enum BackendKind { Mock, Cli, Openai, Tensorzero }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -84,6 +91,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Run {
             dataset, backend, limit, kb_bin, work, timeout_secs, profile, no_graph,
             endpoint, model, api_key_env, cli_cmd, cli_arg, fullwiki,
+            tensorzero_endpoint, tensorzero_function,
         } => {
             use backend::AgentBackend;
             let timeout = Duration::from_secs(timeout_secs);
@@ -97,6 +105,11 @@ fn main() -> anyhow::Result<()> {
                     let args = if cli_arg.is_empty() { backend::cli::CliBackend::claude_preset() } else { cli_arg };
                     Box::new(backend::cli::CliBackend { command: cli_cmd, args, kb_bin: kb_bin.clone(), profile, no_graph, timeout })
                 }
+                BackendKind::Tensorzero => Box::new(backend::tensorzero::TensorZeroBackend {
+                    endpoint: tensorzero_endpoint,
+                    function: tensorzero_function,
+                    timeout,
+                }),
             };
             let name = format!("{backend:?}").to_lowercase();
             let report = run::run_eval(&dataset, be.as_ref(), &name, limit, &kb_bin, &work, fullwiki.as_deref())?;
