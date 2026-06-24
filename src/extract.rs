@@ -12,3 +12,4 @@ pub mod chunk;
 pub mod markdown;
 pub mod office;
 pub mod pdf;
+pub mod text;
