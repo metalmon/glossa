@@ -70,13 +70,27 @@ enum GraphAction {
         path: Option<PathBuf>,
     },
     /// Print nodes reachable from NODE_ID.
-    Neighbors {
+    #[command(visible_alias = "neighbors")]
+    Near {
         node_id: String,
         path: Option<PathBuf>,
         #[arg(long, default_value_t = 1)]
         depth: usize,
         #[arg(long = "type")]
         types: Vec<String>,
+    },
+    /// Show a node: type, label, provenance, and its outgoing edges.
+    Node {
+        node_id: String,
+        path: Option<PathBuf>,
+    },
+    /// Show a path between two node ids (bounded).
+    Path {
+        from: String,
+        to: String,
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = 6)]
+        max_depth: usize,
     },
 }
 
@@ -139,13 +153,32 @@ fn main() -> anyhow::Result<()> {
                 println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
                 Ok(())
             }
-            GraphAction::Neighbors { node_id, path, depth, types } => {
+            GraphAction::Near { node_id, path, depth, types } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let filter = if types.is_empty() { None } else { Some(types.as_slice()) };
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
                     println!("{id}");
                 }
+                Ok(())
+            }
+            GraphAction::Node { node_id, path } => {
+                let path = glossa::root::resolve_root(path);
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                match g.get_node(&node_id)? {
+                    Some(n) => {
+                        let edges = g.outgoing(&node_id)?;
+                        print!("{}", glossa::cli_fmt::render_node(&n, &edges));
+                    }
+                    None => println!("node not found: {node_id}"),
+                }
+                Ok(())
+            }
+            GraphAction::Path { from, to, path, max_depth } => {
+                let path = glossa::root::resolve_root(path);
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
+                println!("{}", glossa::cli_fmt::render_path(found.as_ref(), &from, &to, max_depth));
                 Ok(())
             }
         },

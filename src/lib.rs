@@ -8,6 +8,7 @@ pub mod query;
 pub mod search;
 pub mod walk;
 pub mod read;
+pub mod cli_fmt;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
