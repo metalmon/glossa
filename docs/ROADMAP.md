@@ -4,7 +4,7 @@ Status as of 2026-06-24: Milestones 1–5 + real `graph_upsert` are merged to `m
 Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shipping targets.
 
 ## What works today
-- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf, **per-page chunks `p.N`**).
+- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf **lenient/xref-recovery**, per-page chunks `p.N`, scans indexed by filename).
 - Search: ripgrep-syntax scan (default) **and** BM25 ranked (`--rank`) with RU/EN stemming.
 - Knowledge graph (redb): provenance-stamped nodes/edges, `ontology.toml` validation, bounded
   traversal (`neighbors`/`path`), deterministic auto layer-1 (Document/Section/CONTAINS) during index.
@@ -28,12 +28,11 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex` recovers today.)
 - **`--expand`**: glossary query expansion — needs the layer-2 `Term`/co-occurrence layer (not built).
 - **HTTP/streamable transport** for the MCP server — stdio only today.
-- **Image-only PDF pages (scans).** With oxidize-pdf we now chunk PDFs per page (`p.N`) and skip
-  pages with no text layer. Those skipped pages (scanned/image-only) are currently invisible to
-  search — they need handling: extract/render the page image so the connected agent can *vision-read*
-  it (consistent with `read` already returning embedded images as vision content). Pure-Rust offline
-  OCR is hard (tesseract is C), so bet on vision-read, not built-in OCR. Until then, log/surface that
-  a doc had N image-only pages so they aren't silently dropped.
+- **Image-only PDF pages (scans).** PDFs are chunked per page (`p.N`); pages with no text layer are
+  skipped, and a PDF with *no* extractable text is now indexed **by filename** (location `(no-text)`)
+  so it is never dropped and is findable by name. Remaining work: extract/render the page *image* so
+  the connected agent can *vision-read* it (like `read` already returns embedded office images as
+  vision content). Pure-Rust offline OCR is hard (tesseract is C), so bet on vision-read, not OCR.
 - **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
 - **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.

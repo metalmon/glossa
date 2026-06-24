@@ -1,6 +1,5 @@
 use crate::extract::Extractor;
 use crate::model::Chunk;
-use anyhow::anyhow;
 use std::path::Path;
 
 pub struct PdfExtractor;
@@ -11,27 +10,26 @@ impl Extractor for PdfExtractor {
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
-        use oxidize_pdf::parser::{PdfDocument, PdfReader};
+        use oxidize_pdf::parser::{PdfDocument, PdfReader, ParseOptions};
 
         // Any PDF parser can panic on a malformed file; catch it so indexing never aborts.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let owned = bytes.to_vec();
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let reader = PdfReader::new(std::io::Cursor::new(owned))?;
+            // lenient() enables xref recovery — parses damaged-but-valid PDFs that strict mode rejects.
+            let reader = PdfReader::new_with_options(std::io::Cursor::new(owned), ParseOptions::lenient())?;
             let doc = PdfDocument::new(reader);
             doc.extract_text()
         }));
         std::panic::set_hook(prev);
 
+        // Per-page text chunks; skip pages with no text layer. location = "p.N" (1-based).
         let pages = match caught {
             Ok(Ok(p)) => p,
-            Ok(Err(e)) => return Err(anyhow!("pdf parse failed for {}: {e}", path.display())),
-            Err(_) => return Err(anyhow!("pdf parser panicked for {} (skipped)", path.display())),
+            // Parse error or panic: no pages — fall through to the filename fallback below.
+            Ok(Err(_)) | Err(_) => Vec::new(),
         };
-
-        // One chunk per page; skip pages with no text layer (blank / scanned-image-only).
-        // location = "p.N" (1-based page number).
         let mut out = Vec::new();
         for (i, page) in pages.iter().enumerate() {
             if page.text.trim().is_empty() {
@@ -44,13 +42,24 @@ impl Extractor for PdfExtractor {
                 text: page.text.clone(),
             });
         }
-        if out.is_empty() {
-            return Err(anyhow!(
-                "no extractable text in {} (image-only or unparseable)",
-                path.display()
-            ));
+        if !out.is_empty() {
+            return Ok(out);
         }
-        Ok(out)
+
+        // No extractable text (scanned / image-only) or unparseable: NEVER drop the document —
+        // index it by filename so it's findable by name; the agent can vision-read the image later.
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document")
+            .to_string();
+        eprintln!("  · no text layer, indexed by filename: {}", path.display());
+        Ok(vec![Chunk {
+            doc_path: path.to_path_buf(),
+            location: "(no-text)".into(),
+            file_type: "pdf".into(),
+            text: name,
+        }])
     }
 }
 
@@ -59,11 +68,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn malformed_pdf_does_not_panic_returns_err() {
-        // Bytes with a PDF header but garbage body — must not abort the process.
+    fn unparseable_pdf_is_indexed_by_filename_not_dropped() {
+        // Garbage body: must NOT panic and must NOT be dropped — indexed by filename instead.
         let bytes = b"%PDF-1.4\ngarbage not a real pdf";
-        let r = PdfExtractor.extract(Path::new("bad.pdf"), bytes);
-        assert!(r.is_err(), "malformed pdf should be an Err, not a panic/empty");
+        let chunks = PdfExtractor.extract(Path::new("bad.pdf"), bytes).unwrap();
+        assert_eq!(chunks.len(), 1, "one filename fallback chunk");
+        assert_eq!(chunks[0].location, "(no-text)");
+        assert_eq!(chunks[0].file_type, "pdf");
+        assert!(
+            chunks[0].text.contains("bad"),
+            "fallback chunk text should be the filename stem, got: {}",
+            chunks[0].text
+        );
     }
 
     #[test]
