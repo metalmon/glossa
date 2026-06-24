@@ -14,6 +14,10 @@ pub struct Row {
     pub f1: f32,
     pub retrieval_recall: f32,
     pub failed: Option<String>,
+    /// Per-question glossa tool-call trace (search queries + ranked results + reads). Captured for
+    /// failure analysis; omitted from the JSON when empty (e.g. mock backend).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<glossa::trace::TraceEntry>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +54,7 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
     let base = Row {
         id: q.id.clone(), question: q.question.clone(), gold: q.answer.clone(),
         pred: String::new(), em: false, f1: 0.0, retrieval_recall: 0.0, failed: None,
+        transcript: Vec::new(),
     };
     if backend.needs_corpus() {
         if let Err(e) = corpus::write_corpus(work, q).and_then(|_| corpus::index(work, kb_bin)) {
@@ -62,9 +67,13 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
         Err(e) => return Row { failed: Some(format!("backend: {e}")), ..base },
     };
     let t1 = now_ms();
-    let recall = if backend.needs_corpus() {
+    let entries = if backend.needs_corpus() {
         let dir = work.join(".glossa").join("traces");
-        let entries = trace_read::read_window(&dir, t0, t1).unwrap_or_default();
+        trace_read::read_window(&dir, t0, t1).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let recall = if backend.needs_corpus() {
         score::retrieval_recall(&trace_read::seen_files(&entries), &q.supporting_titles)
     } else {
         0.0
@@ -74,6 +83,7 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
         f1: score::token_f1(&pred, &q.answer),
         retrieval_recall: recall,
         pred,
+        transcript: entries,
         ..base
     }
 }
