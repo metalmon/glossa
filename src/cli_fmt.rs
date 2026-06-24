@@ -202,6 +202,7 @@ mod tests {
         assert!(s.contains("hello"));              // snippet trimmed
         assert!(s.contains("[1.234]"));            // score shown for ranked hit
         assert!(s.contains("2 results · kb read <#> to open"));
+        assert!(s.contains(&format!("a.md{}  p.1", " ".repeat(8))), "file column must be padded to align");
     }
 
     #[test]
