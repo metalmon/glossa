@@ -4,7 +4,7 @@ Status as of 2026-06-24: Milestones 1–5 + real `graph_upsert` are merged to `m
 Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shipping targets.
 
 ## What works today
-- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf **lenient/xref-recovery**, per-page chunks `p.N`, scans indexed by filename).
+- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf **lenient/xref-recovery**, per-page chunks `p.N`, scans indexed by filename), txt/json/yaml/xml/toml/log/source (catch-all text, charset-detected via chardetng+encoding_rs), csv/tsv, html (tag-stripped). Pipeline is streaming (no size limit); binary files silently skipped.
 - Search: ripgrep-syntax scan (default) **and** BM25 ranked (`--rank`) with RU/EN stemming.
 - Knowledge graph (redb): provenance-stamped nodes/edges, `ontology.toml` validation, bounded
   traversal (`neighbors`/`path`), deterministic auto layer-1 (Document/Section/CONTAINS) during index.
@@ -36,14 +36,11 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   so it is never dropped and is findable by name. Remaining work: extract/render the page *image* so
   the connected agent can *vision-read* it (like `read` already returns embedded office images as
   vision content). Pure-Rust offline OCR is hard (tesseract is C), so bet on vision-read, not OCR.
-- **File-type coverage (File-First gap).** Indexed today: md/markdown, pdf, office (docx/doc/xlsx/
-  xls/pptx/ppt). NOT indexed: `.txt`, `.json`, `.csv`, `.html`, `.yaml`, `.xml`, source code, …
-  unknown extensions are silently skipped, which violates "never drop a readable file". Plan
-  (by value): (1) **generic UTF-8 text fallback** — any non-binary, valid-UTF-8 file indexed as
-  text (`file_type` = extension); one change covers txt/json/yaml/xml/toml/log/code. (2) CSV/TSV →
-  rows as text (like xlsx). (3) HTML/HTM → strip tags. (4) optional structured JSON (key: value
-  per line) over the fallback. Lower: rtf, epub (zip+html), email eml/msg. Needs walk to stop
-  skipping unknown extensions + per-format extractors + tests.
+- ~~**File-type coverage (File-First gap).**~~ **DONE.** txt/json/yaml/xml/toml/log/source code
+  (catch-all charset-detected text), csv/tsv, and html (tag-stripped) are now indexed via a
+  streaming pipeline; binary files are silently skipped; unknown extensions no longer dropped.
+  Remaining extractor backlog (lower priority): structured JSON (key: value per chunk), heading-aware
+  HTML chunking, csv-crate row-level indexing, rtf, epub (zip+html), eml/msg.
 - **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
 - **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
