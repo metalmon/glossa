@@ -53,6 +53,48 @@ pub fn build_structural(g: &GraphStore, chunks: &[Chunk], sig: FileSig) -> anyho
     Ok(())
 }
 
+/// Put the Document node for `path` (idempotent).
+pub fn build_document(g: &GraphStore, path: &str, sig: FileSig) -> anyhow::Result<()> {
+    let created_at = now_secs();
+    g.put_node(&Node {
+        id: path.to_string(),
+        node_type: "Document".into(),
+        label: path.to_string(),
+        aliases: vec![],
+        prov: Provenance {
+            source_path: path.to_string(),
+            range: None,
+            file_sig: Some(sig),
+            origin: "auto-structural".into(),
+            confidence: 1.0,
+            created_at,
+        },
+    })
+}
+
+/// Put one Section node + CONTAINS edge for a chunk.
+pub fn build_section(g: &GraphStore, chunk: &Chunk, sig: FileSig) -> anyhow::Result<()> {
+    let path = chunk.doc_path.to_string_lossy().to_string();
+    let created_at = now_secs();
+    let prov = Provenance {
+        source_path: path.clone(),
+        range: Some(chunk.location.clone()),
+        file_sig: Some(sig),
+        origin: "auto-structural".into(),
+        confidence: 1.0,
+        created_at,
+    };
+    let sec_id = format!("{path}#{}", chunk.location);
+    g.put_node(&Node {
+        id: sec_id.clone(),
+        node_type: "Section".into(),
+        label: chunk.location.clone(),
+        aliases: vec![],
+        prov: prov.clone(),
+    })?;
+    g.put_edge(&Edge { from: path, to: sec_id, edge_type: "CONTAINS".into(), prov })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

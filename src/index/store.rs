@@ -110,7 +110,6 @@ impl DocIndex {
 }
 
 use crate::index::manifest::{FileSig, Manifest};
-use crate::walk::collect_chunks;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct IndexStats {
@@ -140,52 +139,57 @@ impl DocIndex {
 
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
 /// `force = true` ignores the manifest and rebuilds every file.
+/// Streams each chunk directly into the tantivy writer + graph (constant memory).
 pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
-    let chunks = collect_chunks(dir, None, true)?;
 
-    use std::collections::BTreeMap;
-    let mut by_path: BTreeMap<String, Vec<crate::model::Chunk>> = BTreeMap::new();
-    for c in chunks {
-        by_path
-            .entry(c.doc_path.to_string_lossy().to_string())
-            .or_default()
-            .push(c);
-    }
-
-    let total = by_path.len();
-    eprintln!("indexing {total} file(s) under {}...", dir.display());
-
+    let mut writer = idx.index.writer(50_000_000)?;
     let mut stats = IndexStats::default();
     let mut next = Manifest::default();
-    for (path, file_chunks) in &by_path {
-        let sig = match file_sig(Path::new(path)) {
+
+    eprintln!("indexing files under {}...", dir.display());
+    crate::walk::walk_files(dir, None, true, &mut |path| {
+        let path_str = path.to_string_lossy().to_string();
+        let sig = match file_sig(path) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => return Ok(()),
         };
-        next.files.insert(path.clone(), sig);
-        if !force && !manifest.changed(path, sig) {
+        next.files.insert(path_str.clone(), sig);
+        if !force && !manifest.changed(&path_str, sig) {
             stats.unchanged += 1;
-            continue;
+            return Ok(());
         }
-        eprintln!("  + {path}");
-        idx.delete_path(path)?;
-        idx.write_chunks(file_chunks)?;
-        graph.delete_by_source(path)?;
-        crate::graph::build::build_structural(&graph, file_chunks, sig)?;
+        eprintln!("  + {path_str}");
+        writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
+        graph.delete_by_source(&path_str)?;
+        let mut doc_written = false;
+        crate::extract::extract_file(path, &mut |c| {
+            if !doc_written {
+                let _ = crate::graph::build::build_document(&graph, &path_str, sig);
+                doc_written = true;
+            }
+            let _ = writer.add_document(doc!(
+                idx.fields.body => c.text.clone(),
+                idx.fields.path => path_str.clone(),
+                idx.fields.location => c.location.clone(),
+                idx.fields.file_type => c.file_type.clone(),
+            ));
+            let _ = crate::graph::build::build_section(&graph, &c, sig);
+        })?;
         stats.added += 1;
-    }
+        Ok(())
+    })?;
 
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
-            idx.delete_path(old_path)?;
+            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, old_path.as_str()));
             graph.delete_by_source(old_path)?;
             stats.removed += 1;
         }
     }
-
+    writer.commit()?;
     next.save(dir)?;
     Ok(stats)
 }
