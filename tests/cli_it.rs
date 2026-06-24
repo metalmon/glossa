@@ -38,7 +38,7 @@ fn search_then_read_by_number() {
         .args(["search", "hello", "--format", "pretty"])
         .assert()
         .success()
-        .stdout(contains("[1]").and(contains("note.md")));
+        .stdout(contains("#1").and(contains("note.md")));
 
     // read by number resolves the recorded hit and prints its text
     Command::cargo_bin("kb").unwrap()
