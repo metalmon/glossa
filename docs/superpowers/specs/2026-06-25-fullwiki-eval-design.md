@@ -106,6 +106,44 @@ prompt sent as messages gives TZ nothing to optimize.
   implementation (use context7/TZ docs). The `tensorzero` backend is **optional** — `openai`/`cli`/`mock`
   and the whole fullwiki measurement work without it.
 
+## Optimization plan (Track B) — one function, optimize its variants
+
+Decision: keep a **single** TZ function `answer_hotpot` (search loop + final answer in one episode) — do
+NOT decompose into separate `research`/`answer` functions. Rationale: in production glossa is a single
+MCP agent driven by **one** system prompt (or one fine-tuned model); TZ optimizes a function by generating
+better **variants** of it (same interface, better prompt/model) and deploying the winner, so one function
+maps 1:1 to the one prod artifact. Decomposition would only pay off if prod itself ran a multi-call
+pipeline, which it does not. (TZ's own multi-hop benchmark did split into two policies — it's a
+prod-shape trade-off, not doctrine.)
+
+The captured episode-level feedback (`em` bool, `f1` float, `retrieved` bool) is exactly what TZ's
+optimization recipes consume. Optimization path:
+
+- **Automated prompt optimization (MIPRO / GEPA)** — optimize the single `answer_hotpot` system prompt
+  end-to-end against `em`/`f1`, no per-step labels. Fixes both search strategy and terse-answer
+  formulation within one prompt.
+- **Supervised fine-tuning / DPO** — fine-tune Qwen3.5-4B on curated trajectories → a fine-tuned variant
+  (the "small model punching above its weight" goal; prod will run Qwen3.6-35B, but a tuned 4B is the bet).
+- **DICL** — inference-time injection of similar good examples; no training.
+
+**Programmatic data curation is the lever for the answer-formulation gap (no function split needed).**
+Our earlier diagnosis: Qwen's misses are answer-span, not retrieval (recall ~1.0). Curate the training/
+optimization set by filtering on feedback:
+- `retrieved = true ∧ (em = false ∨ low f1)` → "retrieval was good, the answer mis-bounded" — the exact
+  failure to optimize against;
+- `retrieved = true ∧ em = true` → gold demonstrations.
+SFT/MIPRO on that curated set concentrates improvement on the final-answer step **inside the one prompt/
+model**. This is how the "optimize the answer step" intent is met without separate functions — via metric-
+filtered data curation, per TZ's distillation/data-curation guidance.
+
+**Deploy:** staged variant rollout (adaptive A/B "bandit" experimentation) — gradually route traffic to
+the optimized variant, scaling on the metric. The winning variant (optimized prompt or fine-tuned 4B) is
+exactly what glossa's MCP agent runs in prod → eval ↔ prod aligned.
+
+Refs: TZ Functions & Variants, Optimization/Recipes, the distillation + programmatic-data-curation post,
+and adaptive A/B (bandits). This section is design rationale; the recipes themselves run later (Track B),
+after the first fullwiki run has banked the labeled episodes.
+
 ## Components / files
 
 - `eval/src/prep.rs` (new) — `prep_fullwiki(archive, out)`: bz2/tar walk + JSON-lines → md-shard writer.
