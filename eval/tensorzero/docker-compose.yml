@@ -48,5 +48,23 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Web admin / observability UI -> http://localhost:4000
+  ui:
+    image: tensorzero/ui
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      # The UI now queries ClickHouse THROUGH the gateway (TENSORZERO_CLICKHOUSE_URL is
+      # deprecated/ignored for the UI), so it only needs the gateway URL.
+      TENSORZERO_GATEWAY_URL: "http://gateway:3000"
+    ports:
+      - "4000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   clickhouse-data:
