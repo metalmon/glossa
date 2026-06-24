@@ -2,6 +2,8 @@ pub mod prompt;
 pub mod mock;
 pub mod cli;
 pub mod openai;
+pub mod glossa_tools;
+pub mod tensorzero;
 
 use crate::dataset::Question;
 use std::path::Path;
