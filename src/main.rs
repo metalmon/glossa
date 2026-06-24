@@ -174,7 +174,10 @@ fn main() -> anyhow::Result<()> {
             }
 
             // Persist for `kb read <#>` (best-effort; ignore IO errors).
-            let _ = glossa::cli_fmt::write_last_search(&path, &records);
+            // Don't clobber the previous search when this one returns no hits.
+            if !records.is_empty() {
+                let _ = glossa::cli_fmt::write_last_search(&path, &records);
+            }
 
             if pretty {
                 print!("{}", glossa::cli_fmt::render_search_pretty(&display));
@@ -186,8 +189,13 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Read { target, location } => {
-            // Numeric target → resolve from the last search; otherwise treat as a path.
-            if let Ok(n) = target.parse::<usize>() {
+            // Precedence: existing path beats result-number beats fallback path open.
+            // A real file named "3" should be opened directly, not treated as result #3.
+            if std::path::Path::new(&target).exists() {
+                // 1. Target is an existing path — open it directly.
+                print_read(std::path::Path::new(&target), location.as_deref())?;
+            } else if let Ok(n) = target.parse::<usize>() {
+                // 2. Target is a number and no file by that name exists — resolve from last search.
                 let root = glossa::root::resolve_root(None);
                 let rec = glossa::cli_fmt::read_last_search(&root)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
@@ -202,9 +210,10 @@ fn main() -> anyhow::Result<()> {
                     }
                     None => println!("no result #{n} (run a search first)"),
                 }
-                return Ok(());
+            } else {
+                // 3. Non-numeric, non-existing path — attempt open (will surface not-found error).
+                print_read(std::path::Path::new(&target), location.as_deref())?;
             }
-            print_read(std::path::Path::new(&target), location.as_deref())?;
             Ok(())
         }
         Cmd::Index { path } => {
