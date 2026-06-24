@@ -13,7 +13,12 @@ pub fn system_prompt() -> &'static str {
      3. For multi-hop questions, find the bridge entity first, then search again using what you found.\n\
      4. Open the most relevant results with read before answering; ground every claim in the text.\n\
      5. If nothing is found after several different queries, give your best answer anyway.\n\
-     Output ONLY your final answer on a single line beginning with `ANSWER:` — keep it as short as possible (a name, entity, number, or yes/no)."
+     ANSWER FORMAT (strict — graded by exact match):\n\
+     - Output ONLY one final line beginning with `ANSWER:` and nothing after it.\n\
+     - The answer must be the SHORTEST exact span that answers the question — usually 1-4 words (a name, place, date, number).\n\
+     - No explanation, no full sentence, no extra context, do not restate the question, no trailing punctuation.\n\
+     - For yes/no questions answer exactly `yes` or `no`.\n\
+     - Examples: `ANSWER: Chief of Protocol` · `ANSWER: yes` · `ANSWER: Animorphs` · `ANSWER: 1972`."
 }
 
 /// The per-question user turn.
