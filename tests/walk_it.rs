@@ -10,7 +10,8 @@ fn collects_chunks_from_markdown_files_in_tree() {
     fs::write(dir.path().join("ignore.txt"), b"not indexed\n").unwrap();
 
     let chunks = collect_chunks(dir.path(), None, true).unwrap();
-    assert_eq!(chunks.len(), 2);
+    // 2 markdown chunks + 1 text chunk (catch-all now indexes .txt files too)
+    assert_eq!(chunks.len(), 3);
     assert!(chunks.iter().any(|c| c.location == "Title"));
     assert!(chunks.iter().any(|c| c.location == "Other"));
 }
