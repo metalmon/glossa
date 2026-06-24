@@ -1,8 +1,6 @@
 use super::{prompt, AgentBackend};
 use crate::dataset::Question;
 use anyhow::{anyhow, bail, Context};
-use glossa::index::store::DocIndex;
-use glossa::read::read_region;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -23,7 +21,6 @@ pub struct OpenAiBackend {
 }
 
 const MAX_ROUNDS: usize = 8;
-const READ_CHARS_CAP: usize = 4000;
 
 impl AgentBackend for OpenAiBackend {
     fn needs_corpus(&self) -> bool {
@@ -168,49 +165,7 @@ fn parse_tool_args(call: &Value) -> Value {
 /// Execute one glossa tool in-process against the corpus in `work`, logging it to the trace
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
 fn execute_tool(name: &str, args: &Value, work: &Path, trace: &TraceLog) -> String {
-    match name {
-        "search" => {
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            let idx = match DocIndex::open_or_create(work) {
-                Ok(i) => i,
-                Err(e) => return format!("search error: {e}"),
-            };
-            match idx.search(query, limit.max(1)) {
-                Ok(hits) => {
-                    let trace_hits: Vec<Value> = hits
-                        .iter()
-                        .map(|h| json!({ "path": h.path, "location": h.location, "score": h.score }))
-                        .collect();
-                    trace.log("search", json!({ "query": query }), json!(trace_hits));
-                    if hits.is_empty() {
-                        return "(no results)".to_string();
-                    }
-                    hits.iter()
-                        .map(|h| format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-                Err(e) => format!("search error: {e}"),
-            }
-        }
-        "read" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let location = args.get("location").and_then(|v| v.as_str());
-            match read_region(Path::new(path), location) {
-                Ok(text) => {
-                    trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
-                    if text.chars().count() > READ_CHARS_CAP {
-                        text.chars().take(READ_CHARS_CAP).collect::<String>() + "\n…(truncated)"
-                    } else {
-                        text
-                    }
-                }
-                Err(e) => format!("read error: {e}"),
-            }
-        }
-        other => format!("unknown tool: {other}"),
-    }
+    crate::backend::glossa_tools::exec(name, args, work, trace).0
 }
 
 #[cfg(test)]
