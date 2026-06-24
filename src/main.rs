@@ -4,6 +4,16 @@ use glossa::search::search_chunks;
 use glossa::walk::collect_chunks;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OutputFormat {
+    /// pretty when stdout is a terminal, rg otherwise
+    Auto,
+    /// ripgrep-compatible: path:location[:line]: snippet
+    Rg,
+    /// numbered, aligned log-lines for humans
+    Pretty,
+}
+
 #[derive(Parser)]
 #[command(name = "kb", about = "File-First knowledge-base search (ripgrep syntax)")]
 struct Cli {
@@ -40,6 +50,16 @@ enum Cmd {
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
         #[arg(long = "no-ignore")]
         no_ignore: bool,
+        /// Output style: auto (pretty in a terminal, rg when piped), rg, or pretty.
+        #[arg(long, value_enum, default_value = "auto")]
+        format: OutputFormat,
+    },
+    /// Read a document's text. TARGET is a path, or a result number from the last search.
+    Read {
+        /// A file path, or a number referencing the last search's Nth result.
+        target: String,
+        /// Optional location (heading / "p.N") to narrow to.
+        location: Option<String>,
     },
     /// Build or update the on-disk index for ranked search.
     Index {
@@ -94,29 +114,97 @@ enum GraphAction {
     },
 }
 
+fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
+    let text = glossa::read::read_region(path, location)?;
+    if glossa::cli_fmt::stdout_is_tty() {
+        let head = match location {
+            Some(l) => format!("── {} · {} ──", path.display(), l),
+            None => format!("── {} ──", path.display()),
+        };
+        println!("{}", glossa::cli_fmt::dim(&head));
+    }
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore, format } => {
             let path = glossa::root::resolve_root(path);
+            let pretty = match format {
+                OutputFormat::Pretty => true,
+                OutputFormat::Rg => false,
+                OutputFormat::Auto => glossa::cli_fmt::stdout_is_tty(),
+            };
+            let mut rg_lines: Vec<String> = Vec::new();
+            let mut display: Vec<glossa::cli_fmt::DisplayHit> = Vec::new();
+            let mut records: Vec<(String, String)> = Vec::new();
+
             if rank {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search(&pattern, limit)? {
-                    println!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score);
+                    rg_lines.push(format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score));
+                    display.push(glossa::cli_fmt::DisplayHit {
+                        file: glossa::cli_fmt::rel_file(&path, &h.path),
+                        location: h.location.clone(),
+                        snippet: h.snippet.clone(),
+                        score: Some(h.score),
+                    });
+                    records.push((h.path.clone(), h.location.clone()));
+                }
+            } else {
+                let opts = QueryOpts { ignore_case, smart_case: !ignore_case, word, fixed };
+                let re = compile(&pattern, &opts)?;
+                let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
+                for h in search_chunks(&chunks, &re, limit) {
+                    let p = h.doc_path.display().to_string();
+                    rg_lines.push(format!("{}:{}:{}: {}", p, h.location, h.line, h.snippet));
+                    display.push(glossa::cli_fmt::DisplayHit {
+                        file: glossa::cli_fmt::rel_file(&path, &p),
+                        location: h.location.clone(),
+                        snippet: h.snippet.clone(),
+                        score: None,
+                    });
+                    records.push((p, h.location.clone()));
+                }
+            }
+
+            // Persist for `kb read <#>` (best-effort; ignore IO errors).
+            let _ = glossa::cli_fmt::write_last_search(&path, &records);
+
+            if pretty {
+                print!("{}", glossa::cli_fmt::render_search_pretty(&display));
+            } else {
+                for l in &rg_lines {
+                    println!("{l}");
+                }
+            }
+            Ok(())
+        }
+        Cmd::Read { target, location } => {
+            // Numeric target → resolve from the last search; otherwise treat as a path.
+            if let Ok(n) = target.parse::<usize>() {
+                let root = glossa::root::resolve_root(None);
+                let rec = glossa::cli_fmt::read_last_search(&root)
+                    .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
+                match rec {
+                    Some((p, loc)) => {
+                        let loc_opt = if loc.is_empty() || loc == "(no-text)" {
+                            None
+                        } else {
+                            Some(loc)
+                        };
+                        print_read(std::path::Path::new(&p), loc_opt.as_deref())?;
+                    }
+                    None => println!("no result #{n} (run a search first)"),
                 }
                 return Ok(());
             }
-            let opts = QueryOpts {
-                ignore_case,
-                smart_case: !ignore_case, // rg smart-case default
-                word,
-                fixed,
-            };
-            let re = compile(&pattern, &opts)?;
-            let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
-            for h in search_chunks(&chunks, &re, limit) {
-                println!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet);
-            }
+            print_read(std::path::Path::new(&target), location.as_deref())?;
             Ok(())
         }
         Cmd::Index { path } => {
