@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+mod dataset;
+
 #[derive(Parser)]
 #[command(name = "kb-eval", about = "glossa agent-eval harness")]
 struct Cli {
