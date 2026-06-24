@@ -1,23 +1,10 @@
-use crate::walk::extractors;
-use anyhow::Context;
 use std::path::Path;
 
 /// Read a document's text, optionally narrowed to a `location` (heading/sheet/page),
 /// matched as a case-insensitive substring of the chunk's `location`.
 pub fn read_region(path: &Path, location: Option<&str>) -> anyhow::Result<String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let mut chunks = Vec::new();
-    for ex in extractors() {
-        if ex.file_types().contains(&ext.as_str()) {
-            chunks = ex.extract(path, &bytes)?;
-            break;
-        }
-    }
+    crate::extract::extract_file(path, &mut |c| chunks.push(c))?;
     let selected: Vec<&str> = match location {
         Some(loc) => {
             let needle = loc.to_lowercase();
@@ -82,6 +69,24 @@ mod tests {
         let one = read_region(&p, Some("p.1")).unwrap();
         assert!(one.contains("alpha"), "exact p.1 must include page-1 text");
         assert!(!one.contains("beta"), "exact p.1 must NOT include p.10 text");
+    }
+
+    #[test]
+    fn reads_plain_txt_via_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("notes.txt");
+        std::fs::write(&p, b"first line\nsecond line\n").unwrap();
+        let out = read_region(&p, None).unwrap();
+        assert!(out.contains("first line") && out.contains("second line"));
+    }
+
+    #[test]
+    fn reads_csv_via_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.csv");
+        std::fs::write(&p, b"name,age\nbob,5\n").unwrap();
+        let out = read_region(&p, None).unwrap();
+        assert!(out.contains("name,age") && out.contains("bob,5"));
     }
 }
 
