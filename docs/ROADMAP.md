@@ -11,6 +11,9 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
 - MCP server (`kb mcp --profile reader|editor|full`): `search`, `read` (text + embedded images as
   vision content), `glossary`, `neighbors`, `index`, `reindex`, `resolve`, `graph_upsert` (validated,
   provenance-stamped), `purge`. gitignore-aware indexing.
+- Human CLI: `search` (rg-format by default; numbered log-lines via `--format pretty`/auto in a TTY),
+  `read <path|result#> [location]` (open a hit by number or a doc/page), `graph stats|near|node|path`
+  (inspect nodes, provenance, edges, paths). `near` aliases `neighbors`.
 
 ## Performance (search/index speed)
 - **Search is slow on large bases.** The default scan re-walks the whole tree and regex-scans every
