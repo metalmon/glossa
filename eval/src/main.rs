@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 mod dataset;
+mod score;
 
 #[derive(Parser)]
 #[command(name = "kb-eval", about = "glossa agent-eval harness")]
