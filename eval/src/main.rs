@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod dataset;
 mod score;
+mod trace_read;
 
 #[derive(Parser)]
 #[command(name = "kb-eval", about = "glossa agent-eval harness")]
