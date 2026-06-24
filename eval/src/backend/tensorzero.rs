@@ -34,7 +34,9 @@ where
 
     for _ in 0..max_rounds {
         let turn = chat(&messages, episode_id.as_deref())?;
-        episode_id = Some(turn.episode_id.clone());
+        if !turn.episode_id.is_empty() {
+            episode_id = Some(turn.episode_id.clone());
+        }
 
         let tool_calls: Vec<&Value> = turn
             .content
@@ -218,5 +220,16 @@ mod tests {
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4).unwrap();
         assert_eq!(out.answer, "ANSWER: yes");
+    }
+
+    #[test]
+    fn empty_episode_id_is_treated_as_none() {
+        let chat = |_: &[Value], _: Option<&str>| Ok(TzTurn {
+            content: vec![json!({ "type": "text", "text": "ANSWER: x" })],
+            episode_id: "".into(),
+        });
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_episode(chat, "q", exec, 4).unwrap();
+        assert_eq!(out.episode_id, None, "an empty episode_id must not become Some(\"\")");
     }
 }
