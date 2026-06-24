@@ -7,3 +7,6 @@ kb-val/
 
 # Local index/manifest caches
 .glossa/
+
+# Eval datasets (public benches — large, not committed)
+eval-data/
