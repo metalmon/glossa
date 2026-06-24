@@ -375,7 +375,7 @@ mod retrieval_at_k_tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p kb-eval --lib score`
+Run: `cargo test -p kb-eval score` (the crate is binary-only — do NOT use `--lib`, there is no lib target)
 Expected: FAIL before the functions exist, PASS after (existing score tests + 3 new).
 
 - [ ] **Step 3: Commit**
@@ -559,7 +559,7 @@ mod fullwiki_tests {
 ```
 `MockBackend::needs_corpus()` is `false`, so no model/network and no per-question indexing runs; `tempfile` is a dev-dependency (fine under `#[cfg(test)]`).
 
-Run: `cargo test -p kb-eval --lib run`
+Run: `cargo test -p kb-eval run` (binary-only crate — do NOT use `--lib`)
 Expected: PASS.
 
 - [ ] **Step 6: Run the full suite**
