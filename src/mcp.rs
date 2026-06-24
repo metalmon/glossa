@@ -2,10 +2,7 @@ use crate::graph::agent::apply_upsert;
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
-use crate::query::{compile, QueryOpts};
 use crate::read::{extract_images, read_region};
-use crate::search::search_chunks;
-use crate::walk::collect_chunks;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -114,18 +111,16 @@ struct GraphUpsertArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Search the knowledge base (ripgrep syntax). Returns path:location:line: snippet.")]
+    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns ranked results as `path:location: snippet  [score]`. If results are empty, run `index` on the base first.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
-        let opts = QueryOpts { smart_case: true, ..Default::default() };
-        let re = compile(&a.query, &opts).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let chunks = collect_chunks(&self.root, None, true).map_err(internal)?;
-        let hits = search_chunks(&chunks, &re, a.limit.unwrap_or(50));
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let hits = idx.search(&a.query, a.limit.unwrap_or(50)).map_err(internal)?;
         let trace_hits: Vec<serde_json::Value> = hits.iter().map(|h| serde_json::json!({
-            "path": h.doc_path.display().to_string(), "location": h.location, "line": h.line
+            "path": h.path, "location": h.location, "score": h.score
         })).collect();
         self.trace.log("search", serde_json::json!({"query": a.query}), serde_json::json!(trace_hits));
         let body = hits.iter()
-            .map(|h| format!("{}:{}:{}: {}", h.doc_path.display(), h.location, h.line, h.snippet))
+            .map(|h| format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score))
             .collect::<Vec<_>>().join("\n");
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
