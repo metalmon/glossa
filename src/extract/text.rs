@@ -299,4 +299,15 @@ mod stream_tests {
         assert_eq!(total, 250);
         assert_eq!(out[0].location, "part.1");
     }
+
+    #[test]
+    fn streams_file_without_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nonl.txt");
+        std::fs::write(&p, b"alpha\nomega").unwrap(); // no trailing newline
+        let mut out = Vec::new();
+        stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].text.contains("alpha") && out[0].text.contains("omega"));
+    }
 }
