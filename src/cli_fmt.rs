@@ -17,6 +17,68 @@ fn paint(code: &str, s: &str) -> String {
 pub fn dim(s: &str) -> String { paint("2", s) }
 pub fn cyan(s: &str) -> String { paint("36", s) }
 pub fn bold(s: &str) -> String { paint("1", s) }
+pub fn magenta(s: &str) -> String { paint("35", s) }
+pub fn green(s: &str) -> String { paint("32", s) }
+
+/// Query tokens to highlight in snippets: alphanumeric runs of length ≥ 2.
+fn query_terms(q: &str) -> Vec<String> {
+    q.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 2)
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Wrap every case-insensitive occurrence of any `term` in `text` using `wrap`. Pure (no TTY),
+/// so it is unit-testable; the color wrapper is applied by `highlight`.
+fn highlight_with(text: &str, terms: &[String], wrap: impl Fn(&str) -> String) -> String {
+    // Case-insensitive matching needs byte offsets that line up between `text` and its lowercase
+    // form; bail (no highlight) if lowercasing changes the byte length (rare: ß, İ, …).
+    let lower = text.to_lowercase();
+    if terms.is_empty() || lower.len() != text.len() {
+        return text.to_string();
+    }
+    let mut marked = vec![false; text.len()];
+    for t in terms {
+        let tl = t.to_lowercase();
+        if tl.len() < 2 {
+            continue;
+        }
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(&tl) {
+            let s = start + pos;
+            let e = s + tl.len();
+            for b in marked.iter_mut().take(e).skip(s) {
+                *b = true;
+            }
+            start = e;
+        }
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        let s = i;
+        let on = marked[i];
+        while i < text.len() && marked[i] == on {
+            i += 1;
+        }
+        let run = &text[s..i]; // run boundaries are term-aligned → valid char boundaries
+        if on {
+            out.push_str(&wrap(run));
+        } else {
+            out.push_str(run);
+        }
+    }
+    out
+}
+
+/// Highlight query terms in a snippet (bold red), only when color is enabled.
+fn highlight(text: &str, terms: &[String]) -> String {
+    if use_color() {
+        highlight_with(text, terms, |m| paint("1;31", m))
+    } else {
+        text.to_string()
+    }
+}
 
 /// True when stdout is an interactive terminal (independent of NO_COLOR — used for format choice).
 pub fn stdout_is_tty() -> bool {
@@ -38,28 +100,32 @@ pub struct DisplayHit {
 /// When `reverse` is true (used for `--rank`), entries print worst-first so the **most relevant hit
 /// sits last, right above the prompt** — no scrolling up — and the footer moves to the top. `#1` still
 /// labels the best hit. Empty → "no results".
-pub fn render_search_pretty(hits: &[DisplayHit], reverse: bool) -> String {
+pub fn render_search_pretty(hits: &[DisplayHit], reverse: bool, query: &str) -> String {
     if hits.is_empty() {
         return "no results".to_string();
     }
     let total = hits.len();
     let idx_w = total.to_string().len();
+    let terms = query_terms(query);
     let footer = dim(&format!("{total} results · kb read <#> to open"));
 
     let entry = |i: usize, h: &DisplayHit| -> String {
-        // Line 1: #N  [score]  path  · location
-        let mut head = dim(&format!("#{:<w$}", i + 1, w = idx_w));
-        head.push_str("  ");
+        // Line 1: #N  [score]  path   (path kept alone so a long path can't orphan the location)
+        let mut l1 = dim(&format!("#{:<w$}", i + 1, w = idx_w));
+        l1.push_str("  ");
         if let Some(s) = h.score {
-            head.push_str(&cyan(&format!("{s:.3}")));
-            head.push_str("  ");
+            l1.push_str(&cyan(&format!("{s:.3}")));
+            l1.push_str("  ");
         }
-        head.push_str(&h.file);
+        l1.push_str(&magenta(&h.file));
+        // Line 2: indented  location  snippet (with the matched term highlighted).
+        let mut l2 = String::from("    ");
         if !h.location.is_empty() {
-            head.push_str(&dim(&format!("  · {}", h.location)));
+            l2.push_str(&green(&h.location));
+            l2.push_str("  ");
         }
-        // Line 2: snippet, indented and clearly separated from the path.
-        format!("{head}\n        {}\n\n", h.snippet.trim())
+        l2.push_str(&highlight(h.snippet.trim(), &terms));
+        format!("{l1}\n{l2}\n\n")
     };
 
     let mut out = String::new();
@@ -218,13 +284,12 @@ mod tests {
             DisplayHit { file: "a.md".into(), location: "p.1".into(), snippet: " hello ".into(), score: None },
             DisplayHit { file: "deep\\longname.pdf".into(), location: "Sec".into(), snippet: "world".into(), score: Some(1.234) },
         ];
-        let s = render_search_pretty(&hits, false);
-        // Line 1: number, then (for ranked) score BEFORE the path, then "· location".
+        let s = render_search_pretty(&hits, false, "hello");
+        // Line 1: number, then (for ranked) score BEFORE the path.
         assert!(s.contains("#1  a.md"));
         assert!(s.contains("#2  1.234  deep\\longname.pdf"), "score precedes the path");
-        assert!(s.contains("· p.1"));
-        // Line 2: snippet indented, trimmed, on its own line (separated from the path).
-        assert!(s.contains("\n        hello\n"));
+        // Line 2: location leads the indented snippet line (page can't orphan off a long path).
+        assert!(s.contains("\n    p.1  hello\n"));
         assert!(s.contains("2 results · kb read <#> to open"));
         // Forward order: #1 printed before #2; footer last.
         assert!(s.find("#1").unwrap() < s.find("#2").unwrap());
@@ -237,7 +302,7 @@ mod tests {
             DisplayHit { file: "best.md".into(), location: "p.1".into(), snippet: "a".into(), score: Some(9.0) },
             DisplayHit { file: "worst.md".into(), location: "p.2".into(), snippet: "b".into(), score: Some(1.0) },
         ];
-        let s = render_search_pretty(&hits, true);
+        let s = render_search_pretty(&hits, true, "");
         // Footer at the top; worst (#2) above best (#1), so #1 is nearest the prompt.
         let f = s.find("2 results").unwrap();
         let p1 = s.find("#1").unwrap();
@@ -248,8 +313,24 @@ mod tests {
     }
 
     #[test]
+    fn highlight_with_wraps_case_insensitive_cyrillic() {
+        let out = highlight_with(
+            "Проведение Поверки и поверка",
+            &["поверк".to_string()],
+            |m| format!("[{m}]"),
+        );
+        assert_eq!(out, "Проведение [Поверк]и и [поверк]а");
+    }
+
+    #[test]
+    fn query_terms_keeps_words_of_len_2_plus() {
+        assert_eq!(query_terms("АБАК ПЛК"), vec!["АБАК".to_string(), "ПЛК".to_string()]);
+        assert!(query_terms("a .").is_empty());
+    }
+
+    #[test]
     fn render_search_pretty_empty_is_no_results() {
-        assert_eq!(render_search_pretty(&[], false), "no results");
+        assert_eq!(render_search_pretty(&[], false, ""), "no results");
     }
 
     #[test]

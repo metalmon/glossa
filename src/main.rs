@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 
             if pretty {
                 // For --rank, print worst→best so the most relevant sits next to the prompt.
-                print!("{}", glossa::cli_fmt::render_search_pretty(&display, rank));
+                print!("{}", glossa::cli_fmt::render_search_pretty(&display, rank, &pattern));
             } else {
                 for l in &rg_lines {
                     println!("{l}");
