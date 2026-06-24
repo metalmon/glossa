@@ -56,7 +56,7 @@ pub fn prep_fullwiki(archive: &Path, out: &Path, max_shards: Option<usize>) -> R
                 continue;
             }
             writeln!(w, "# {title}")?;
-            writeln!(w, "{intro}\n")?;
+            writeln!(w, "{intro}")?;
             shard_articles += 1;
         }
         w.flush()?;
@@ -74,7 +74,7 @@ fn sanitize_shard_name(path: &Path) -> String {
         .collect();
     let n = comps.len();
     let dir = if n >= 2 { comps[n - 2].as_str() } else { "x" };
-    let file = comps.last().map(|s| s.trim_end_matches(".bz2")).unwrap_or("shard");
+    let file = comps.last().map(|s| s.strip_suffix(".bz2").unwrap_or(s)).unwrap_or("shard");
     format!("{dir}_{file}")
 }
 
@@ -171,5 +171,37 @@ mod tests {
         let out = dir.path().join("c");
         let stats = prep_fullwiki(&archive, &out, Some(1)).unwrap();
         assert_eq!(stats.shards, 1, "max_shards=1 stops after one shard");
+    }
+
+    #[test]
+    fn prep_output_indexes_with_title_as_location() {
+        use glossa::extract::markdown::MarkdownExtractor;
+        use glossa::extract::Extractor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let inner_bz = bz(br#"{"title":"Anarchism","text":["Anarchism is a political philosophy."]}"#);
+        let mut tar_buf = Vec::new();
+        {
+            let mut tb = tar::Builder::new(&mut tar_buf);
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(inner_bz.len() as u64);
+            hdr.set_mode(0o644);
+            hdr.set_cksum();
+            tb.append_data(&mut hdr, "enwiki/AA/wiki_00.bz2", &inner_bz[..]).unwrap();
+            tb.finish().unwrap();
+        }
+        let archive = dir.path().join("a.tar.bz2");
+        std::fs::write(&archive, bz(&tar_buf)).unwrap();
+        let out = dir.path().join("c");
+        prep_fullwiki(&archive, &out, None).unwrap();
+
+        let md_path = out.join("AA_wiki_00.md");
+        let bytes = std::fs::read(&md_path).unwrap();
+        let chunks = MarkdownExtractor.extract(&md_path, &bytes).unwrap();
+        assert!(
+            chunks.iter().any(|c| c.location == "Anarchism"),
+            "prep output must index with location == title (Recall@k depends on it); got {:?}",
+            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+        );
     }
 }
