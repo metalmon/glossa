@@ -152,9 +152,9 @@ impl TensorZeroBackend {
 }
 
 /// True if any gold supporting title appears among the titles the agent's searches surfaced.
-/// Returns true trivially when either list is empty (no gold to satisfy, or nothing surfaced yet).
+/// Empty gold is trivially satisfied; an empty `surfaced` with real gold is NOT (it retrieved nothing).
 fn retrieved_any(surfaced: &[String], gold: &[String]) -> bool {
-    if gold.is_empty() || surfaced.is_empty() {
+    if gold.is_empty() {
         return true;
     }
     let surf: Vec<String> = surfaced.iter().map(|s| crate::score::normalize(s)).collect();
@@ -166,10 +166,11 @@ mod retrieved_tests {
     use super::*;
 
     #[test]
-    fn retrieved_matches_normalized_title() {
-        assert!(retrieved_any(&["The Beatles".into()], &["the beatles".into()]));
-        assert!(!retrieved_any(&["X".into()], &["Y".into()]));
-        assert!(retrieved_any(&[], &["anything".into()])); // empty gold -> trivially true
+    fn retrieved_any_semantics() {
+        assert!(retrieved_any(&["The Beatles".into()], &["the beatles".into()])); // normalized match
+        assert!(!retrieved_any(&["X".into()], &["Y".into()]));                     // surfaced, but no match
+        assert!(!retrieved_any(&[], &["anything".into()]));                        // NO search -> not retrieved
+        assert!(retrieved_any(&["whatever".into()], &[]));                         // empty gold -> trivially true
     }
 }
 
