@@ -10,3 +10,7 @@ kb-val/
 
 # Eval datasets (public benches — large, not committed)
 eval-data/
+
+# Eval working corpus + generated result reports
+/eval-corpus/
+/eval-*.json
