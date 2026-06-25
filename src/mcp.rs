@@ -2,7 +2,7 @@ use crate::graph::agent::apply_upsert;
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
-use crate::read::{extract_images, read_region};
+use crate::read::extract_images;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -69,7 +69,7 @@ fn internal(e: anyhow::Error) -> McpError {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchArgs {
-    #[schemars(description = "ripgrep-syntax query")]
+    #[schemars(description = "natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex")]
     query: String,
     #[serde(default)]
     #[schemars(description = "max hits (default 50)")]
@@ -78,11 +78,10 @@ struct SearchArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadArgs {
-    #[schemars(description = "document path")]
+    #[schemars(description = "document path, exactly as shown in a search result")]
     path: String,
-    #[serde(default)]
-    #[schemars(description = "optional location (heading/sheet/page) substring")]
-    location: Option<String>,
+    #[schemars(description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)")]
+    n: u32,
     #[serde(default)]
     #[schemars(description = "include embedded images (default true)")]
     include_images: Option<bool>,
@@ -111,7 +110,7 @@ struct GraphUpsertArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns ranked results as `path:location: snippet  [score]`. If results are empty, run `index` on the base first.")]
+    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns numbered hits in the form `[#n] path · label · snippet  [score]`; use `read(path, n)` to fetch the full text of chunk number `n`. If results are empty, run `index` on the base first.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let hits = idx.search(&a.query, a.limit.unwrap_or(50)).map_err(internal)?;
@@ -119,18 +118,24 @@ impl GlossaServer {
             "path": h.path, "location": h.location, "score": h.score
         })).collect();
         self.trace.log("search", serde_json::json!({"query": a.query}), serde_json::json!(trace_hits));
-        let body = hits.iter()
-            .map(|h| format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score))
-            .collect::<Vec<_>>().join("\n");
+        let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
-    #[tool(description = "Read a document (optionally a location), with embedded images for the agent's vision.")]
+    #[tool(description = "Read a document chunk by its number `n` (the `[#n]` shown in search results; for PDFs this is the page number). Returns the chunk text plus the numbers of the previous/next chunks for context expansion.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let path = std::path::PathBuf::from(&a.path);
-        let text = read_region(&path, a.location.as_deref()).map_err(internal)?;
-        self.trace.log("read", serde_json::json!({"path": a.path, "location": a.location}), serde_json::json!({"path": a.path}));
-        let mut content = vec![Content::text(text)];
+        let chunk = idx.read_chunk_by_ord(&a.path, a.n as u64).map_err(internal)?
+            .ok_or_else(|| McpError::invalid_params(format!("no chunk #{} in {}", a.n, a.path), None))?;
+        self.trace.log("read", serde_json::json!({"path": a.path, "n": a.n}), serde_json::json!({"path": a.path}));
+        let footer = match (chunk.prev, chunk.next) {
+            (Some(p), Some(n)) => format!("\n\n‹ prev #{p} · next #{n} ›"),
+            (None, Some(n)) => format!("\n\n‹ start of document · next #{n} ›"),
+            (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
+            (None, None) => String::new(),
+        };
+        let mut content = vec![Content::text(format!("{}{}", chunk.body, footer))];
         if a.include_images.unwrap_or(true) {
             for img in extract_images(&path, 8).map_err(internal)? {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
@@ -199,7 +204,7 @@ impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.protocol_version = ProtocolVersion::V_2025_06_18;
-        info.instructions = Some("glossa File-First knowledge-base search. Use ripgrep syntax for `search`.".into());
+        info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns numbered hits `[#n]`; `read` opens chunk number `n`.".into());
         info
     }
 }
@@ -215,6 +220,20 @@ mod tests {
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].id, "a");
         assert!(a.edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_by_number_returns_body_and_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let path = dir.path().join("d.md").to_string_lossy().to_string();
+
+        let out = srv.read(Parameters(ReadArgs { path, n: 1, include_images: Some(false) })).await.unwrap();
+        let text = format!("{:?}", out);
+        assert!(text.contains("alpha"), "body present: {text}");
+        assert!(text.contains("#2") || text.contains("next"), "footer offers next: {text}");
     }
 
     #[test]
