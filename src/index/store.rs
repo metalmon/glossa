@@ -441,6 +441,7 @@ mod search_tests {
         let md = RankedHit { path: "d.md".into(), location: "Введение".into(), file_type: "md".into(), ord: 2, snippet: "текст".into(), score: 3.0 };
         assert!(md.display_line().starts_with("[#2] "));
         assert!(md.display_line().contains("Введение"));
+        assert!(!md.display_line().contains("· md ·"), "file_type must not leak as label in non-paged line: {}", md.display_line());
     }
 
     #[test]

@@ -110,7 +110,7 @@ struct GraphUpsertArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns ranked results as `path:location: snippet  [score]`. If results are empty, run `index` on the base first.")]
+    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns numbered hits in the form `[#n] path · label · snippet  [score]`; use `read(path, n)` to fetch the full text of chunk number `n`. If results are empty, run `index` on the base first.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let hits = idx.search(&a.query, a.limit.unwrap_or(50)).map_err(internal)?;
