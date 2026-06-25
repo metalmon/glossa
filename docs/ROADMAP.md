@@ -30,6 +30,12 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
 - **Graph crash-atomicity**: fold one file's node/edge writes into a single redb write txn so a
   mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex` recovers today.)
 - **`--expand`**: glossary query expansion — needs the layer-2 `Term`/co-occurrence layer (not built).
+- **Induction/deduction graph + ontology revision** — design: `docs/superpowers/specs/2026-06-25-induction-deduction-graph.md`.
+  Graph edges = induction (specific→abstract) / deduction (abstract→specific) relations; revise `ontology.toml`
+  with reasoning-typed node/edge classes (Environment/Symptom/Term/Heuristic; INDICATES/DISAMBIGUATES/APPLIES_TO/
+  RESOLVED_BY/…); two prod agents `build_graph` (induction, multi-step research → typed `graph_upsert`) + `answer`
+  (deduction, env-first); optimize Qwen's `build_graph` prompt toward a strong-model **reference graph**
+  (distillation). Near-term seed: typed reference graph from the real-base edge candidates.
 - **HTTP/streamable transport** for the MCP server — stdio only today.
 - **Image-only PDF pages (scans).** PDFs are chunked per page (`p.N`); pages with no text layer are
   skipped, and a PDF with *no* extractable text is now indexed **by filename** (location `(no-text)`)
