@@ -27,6 +27,13 @@ api_base = "http://host.docker.internal:1234/v1"
 model_name = "text-embedding-nomic-embed-text-v1.5"
 api_key_location = "env::LMSTUDIO_API_KEY"
 
+# ── Object storage: required for image/file content blocks (e.g. Zed sending a
+# screenshot to the `coding` function). "disabled" = don't persist the image,
+# but still forward it to the model. Switch to type = "filesystem"/"s3" if you
+# later want inputs stored for observability. ──
+[object_storage]
+type = "disabled"
+
 # ── Coding model: Qwen3.6-35B-A3B via OpenRouter (OpenAI-compatible) ──
 # Separate endpoint, unrelated to the HotpotQA eval. Exposed to Zed (or any
 # OpenAI client) through the gateway's /openai/v1 endpoint as the `coding` function.
@@ -61,6 +68,10 @@ extra_body = [
   { pointer = "/top_k", value = 20 },
   { pointer = "/min_p", value = 0 },
   { pointer = "/reasoning", value = { enabled = false } },
+  # qwen3.6-35b-a3b is multimodal, but only some OpenRouter providers actually
+  # accept image input (AtlasCloud/AkashML reject it with 400). Restrict routing
+  # to the image-capable ones so screenshots from Zed don't hit a text-only host.
+  { pointer = "/provider", value = { only = ["Parasail", "SiliconFlow", "WandB"] } },
 ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
