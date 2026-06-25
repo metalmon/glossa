@@ -74,6 +74,18 @@ struct SearchArgs {
     #[serde(default)]
     #[schemars(description = "max hits (default 50)")]
     limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "only documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)")]
+    glob: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "only this file type, e.g. pdf (-t)")]
+    file_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GlobArgs {
+    #[schemars(description = "shell glob over document paths, e.g. *.pdf or *Safety*")]
+    pattern: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -131,10 +143,10 @@ struct GraphUpsertArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns numbered hits in the form `[#n] path · label · snippet  [score]`; use `read(path, n)` to fetch the full text of chunk number `n`. If results are empty, run `index` on the base first.")]
+    #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns numbered hits in the form `[#n] path · label · snippet  [score]`; use `read(path, n)` to fetch the full text of chunk number `n`. If results are empty, run `index` on the base first. Scope with optional glob/file_type filters.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let hits = idx.search(&a.query, a.limit.unwrap_or(50)).map_err(internal)?;
+        let hits = idx.search_filtered(&a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref()).map_err(internal)?;
         let trace_hits: Vec<serde_json::Value> = hits.iter().map(|h| serde_json::json!({
             "path": h.path, "location": h.location, "score": h.score
         })).collect();
@@ -210,7 +222,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(format!("upserted {n} nodes, {e} edges"))]))
     }
 
-    #[tool(description = "Exact/regex search (ripgrep syntax) over the knowledge base's extracted text, across all formats. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`. Use this for exact tokens, codes, and identifiers that keyword `search` may blur.")]
+    #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let opts = crate::grep::GrepOpts {
@@ -224,6 +236,19 @@ impl GlossaServer {
         self.trace.log("grep", serde_json::json!({"pattern": a.pattern}), serde_json::json!({"hits": hits.len()}));
         let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
         let body = if body.is_empty() { "(no matches)".to_string() } else { body };
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
+    async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let docs = crate::glob::glob_docs(&idx, &a.pattern).map_err(internal)?;
+        self.trace.log("glob", serde_json::json!({"pattern": a.pattern}), serde_json::json!({"docs": docs.len()}));
+        let body = if docs.is_empty() {
+            "(no documents match)".to_string()
+        } else {
+            docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n")
+        };
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -285,6 +310,18 @@ mod tests {
         })).await.unwrap();
         assert!(format!("{:?}", out).contains("maxTsdr"));
         assert!(format!("{:?}", out).contains(":#")); // carries the #n read key
+    }
+
+    #[tokio::test]
+    async fn glob_tool_lists_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("АБАК.md"), "# A\nраз\n# B\nдва\n".as_bytes()).unwrap();
+        std::fs::write(dir.path().join("Other.md"), "# A\nраз\n".as_bytes()).unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "*АБАК*".into() })).await.unwrap());
+        assert!(out.contains("АБАК"), "lists the matching doc: {out}");
+        assert!(!out.contains("Other"), "excludes non-matching: {out}");
     }
 
     #[test]
