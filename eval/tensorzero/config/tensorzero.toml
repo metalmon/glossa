@@ -30,7 +30,7 @@ api_key_location = "env::LMSTUDIO_API_KEY"
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
-tools = ["search", "read"]
+tools = ["search", "read", "grep"]
 
 [functions.answer_hotpot.variants.baseline]
 type = "chat_completion"
@@ -47,6 +47,10 @@ parameters = "tools/search.json"
 [tools.read]
 description = "Read a document's text, optionally narrowed to a heading/page/sheet location."
 parameters = "tools/read.json"
+
+[tools.grep]
+description = "Exact/regex (ripgrep) search over the extracted text. Returns `path:#n: line`; read with read(path, n)."
+parameters = "tools/grep.json"
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
 [metrics.em]
