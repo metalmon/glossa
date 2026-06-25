@@ -67,6 +67,18 @@ enum Cmd {
         /// TensorZero function name to call.
         #[arg(long, default_value = "answer_hotpot")]
         tensorzero_function: String,
+        /// Tag attached to TZ inferences+feedback for filtering runs/experiments (repeatable, KEY=VALUE).
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tag: Vec<String>,
+        /// LLM-judge endpoint (OpenAI-compatible). Empty = judge disabled.
+        #[arg(long, default_value = "")]
+        judge_endpoint: String,
+        /// Judge model id sent to the judge endpoint.
+        #[arg(long, default_value = "qwen3.5-4b")]
+        judge_model: String,
+        /// Env var holding the judge endpoint API key (omit for keyless).
+        #[arg(long)]
+        judge_api_key_env: Option<String>,
     },
     /// Convert the HotpotQA abstracts tar.bz2 into a glossa-indexable markdown corpus.
     PrepFullwiki {
@@ -91,7 +103,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Run {
             dataset, backend, limit, kb_bin, work, timeout_secs, profile, no_graph,
             endpoint, model, api_key_env, cli_cmd, cli_arg, fullwiki,
-            tensorzero_endpoint, tensorzero_function,
+            tensorzero_endpoint, tensorzero_function, tag,
+            judge_endpoint, judge_model, judge_api_key_env,
         } => {
             use backend::AgentBackend;
             let timeout = Duration::from_secs(timeout_secs);
@@ -105,11 +118,23 @@ fn main() -> anyhow::Result<()> {
                     let args = if cli_arg.is_empty() { backend::cli::CliBackend::claude_preset() } else { cli_arg };
                     Box::new(backend::cli::CliBackend { command: cli_cmd, args, kb_bin: kb_bin.clone(), profile, no_graph, timeout })
                 }
-                BackendKind::Tensorzero => Box::new(backend::tensorzero::TensorZeroBackend {
-                    endpoint: tensorzero_endpoint,
-                    function: tensorzero_function,
-                    timeout,
-                }),
+                BackendKind::Tensorzero => {
+                    let mut m = serde_json::Map::new();
+                    for t in &tag {
+                        if let Some((k, v)) = t.split_once('=') {
+                            m.insert(k.trim().to_string(), serde_json::Value::String(v.trim().to_string()));
+                        }
+                    }
+                    Box::new(backend::tensorzero::TensorZeroBackend {
+                        endpoint: tensorzero_endpoint,
+                        function: tensorzero_function,
+                        timeout,
+                        tags: serde_json::Value::Object(m),
+                        judge_endpoint: if judge_endpoint.is_empty() { None } else { Some(judge_endpoint) },
+                        judge_model,
+                        judge_api_key: judge_api_key_env.and_then(|v| std::env::var(v).ok()),
+                    })
+                }
             };
             let name = format!("{backend:?}").to_lowercase();
             let report = run::run_eval(&dataset, be.as_ref(), &name, limit, &kb_bin, &work, fullwiki.as_deref())?;
