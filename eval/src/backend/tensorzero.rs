@@ -74,16 +74,34 @@ where
                 "role": "assistant",
                 "content": [{ "type": "tool_call", "id": id, "name": name, "arguments": args }]
             }));
-            let (result, titles, _images) = exec(name, &args);
+            let (result, titles, images) = exec(name, &args);
             surfaced_titles.extend(titles);
             messages.push(json!({
                 "role": "user",
                 "content": [{ "type": "tool_result", "id": id, "name": name, "result": result }]
             }));
+            if let Some(img_msg) = image_user_message(&images) {
+                messages.push(img_msg);
+            }
         }
     }
     // Out of rounds: best-effort empty answer (the report still scores it).
     Ok(EpisodeOutcome { answer: String::new(), episode_id, surfaced_titles })
+}
+
+/// Build a user message carrying the read's images as TZ image content blocks (vision input),
+/// or None when there are no images. Uses the content-block shape verified by the Task-1 spike.
+fn image_user_message(images: &[glossa::read::DocImage]) -> Option<Value> {
+    if images.is_empty() {
+        return None;
+    }
+    use base64::Engine as _;
+    let mut content = vec![json!({"type": "text", "text": "(images from the chunk you just read)"})];
+    for img in images {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+        content.push(json!({"type": "image", "mime_type": img.mime, "data": b64}));
+    }
+    Some(json!({"role": "user", "content": content}))
 }
 
 use super::{prompt, AgentBackend};
@@ -342,6 +360,17 @@ mod tests {
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4).unwrap();
         assert_eq!(out.episode_id, None, "an empty episode_id must not become Some(\"\")");
+    }
+
+    #[test]
+    fn image_user_message_uses_working_tz_shape() {
+        let imgs = vec![glossa::read::DocImage { mime: "image/png".into(), bytes: vec![1, 2, 3] }];
+        let m = image_user_message(&imgs).unwrap();
+        assert_eq!(m["role"], "user");
+        let blocks = m["content"].as_array().unwrap();
+        // exactly one image block, in the shape Task 1's spike proved works:
+        assert!(blocks.iter().any(|b| b["type"] == "image"));
+        assert!(image_user_message(&[]).is_none());
     }
 
     #[test]
