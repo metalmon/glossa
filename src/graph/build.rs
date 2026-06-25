@@ -125,6 +125,11 @@ pub fn link_parent(g: &GraphStore, child_id: &str, parent_id: &str, sig: FileSig
     Ok(())
 }
 
+/// Link a document to another document it explicitly references.
+pub fn link_reference(g: &GraphStore, src_doc: &str, dst_doc: &str, sig: FileSig) -> anyhow::Result<()> {
+    g.put_edge(&Edge { from: src_doc.to_string(), to: dst_doc.to_string(), edge_type: "REFERENCES".into(), prov: structural_prov(src_doc, sig) })
+}
+
 /// Nearest existing ancestor of `location` among the per-file `seen` (location → sec_id) map:
 /// the longest breadcrumb prefix (split on " > ") that has a Section node. None for top-level / PDF.
 pub fn nearest_ancestor(seen: &std::collections::HashMap<String, String>, location: &str) -> Option<String> {
