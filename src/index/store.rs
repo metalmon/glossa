@@ -4,7 +4,7 @@ use anyhow::Context;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, STORED, STRING};
+use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING};
 use tantivy::schema::Value;
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
@@ -15,6 +15,7 @@ pub struct Fields {
     pub path: Field,
     pub location: Field,
     pub file_type: Field,
+    pub ord: Field,
 }
 
 pub struct DocIndex {
@@ -37,7 +38,8 @@ fn build_schema() -> (Schema, Fields) {
     let path = sb.add_text_field("path", STRING | STORED);
     let location = sb.add_text_field("location", STRING | STORED);
     let file_type = sb.add_text_field("file_type", STRING | STORED);
-    (sb.build(), Fields { body, path, location, file_type })
+    let ord = sb.add_u64_field("ord", INDEXED | STORED);
+    (sb.build(), Fields { body, path, location, file_type, ord })
 }
 
 fn index_dir_path(dir: &Path) -> std::path::PathBuf {
@@ -67,6 +69,7 @@ pub struct RankedHit {
     pub path: String,
     pub location: String,
     pub file_type: String,
+    pub ord: u64,
     pub snippet: String,
     pub score: f32,
 }
@@ -74,12 +77,14 @@ pub struct RankedHit {
 impl DocIndex {
     pub fn write_chunks(&self, chunks: &[Chunk]) -> anyhow::Result<()> {
         let mut writer = self.index.writer(50_000_000)?;
-        for c in chunks {
+        for (i, c) in chunks.iter().enumerate() {
+            let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
             writer.add_document(doc!(
                 self.fields.body => c.text.clone(),
                 self.fields.path => c.doc_path.to_string_lossy().to_string(),
                 self.fields.location => c.location.clone(),
                 self.fields.file_type => c.file_type.clone(),
+                self.fields.ord => ord,
             ))?;
         }
         writer.commit()?;
@@ -102,10 +107,12 @@ impl DocIndex {
                 d.get_first(f).and_then(|v| v.as_str()).unwrap_or("").to_string()
             };
             let snippet = snippet_gen.snippet_from_doc(&d).fragment().to_string();
+            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
             hits.push(RankedHit {
                 path: get(self.fields.path),
                 location: get(self.fields.location),
                 file_type: get(self.fields.file_type),
+                ord,
                 snippet,
                 score,
             });
@@ -149,6 +156,17 @@ impl DocIndex {
             None => Ok(None),
         }
     }
+}
+
+/// The chunk's single canonical number within its document: the page number for PDFs
+/// (parsed from the `p.N` location), otherwise the 1-based sequence position `seq`.
+pub fn chunk_ord(file_type: &str, location: &str, seq: u64) -> u64 {
+    if file_type == "pdf" {
+        if let Some(n) = location.strip_prefix("p.").and_then(|d| d.parse::<u64>().ok()) {
+            return n;
+        }
+    }
+    seq
 }
 
 use crate::index::manifest::{FileSig, Manifest};
@@ -208,6 +226,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
         graph.delete_by_source(&path_str)?;
         let mut doc_written = false;
+        let mut seq = 0u64;
         // Index/graph write errors are intentionally not propagated here: one bad chunk must not
         // abort the whole run (matches the prior per-file behavior). The file is still recorded
         // in the manifest; a failed write is corrected on the next `reindex`.
@@ -216,11 +235,14 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 let _ = crate::graph::build::build_document(&graph, &path_str, sig);
                 doc_written = true;
             }
+            seq += 1;
+            let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
             let _ = writer.add_document(doc!(
                 idx.fields.body => c.text.clone(),
                 idx.fields.path => path_str.clone(),
                 idx.fields.location => c.location.clone(),
                 idx.fields.file_type => c.file_type.clone(),
+                idx.fields.ord => ord,
             ));
             let _ = crate::graph::build::build_section(&graph, &c, sig);
         })?;
@@ -317,6 +339,25 @@ mod search_tests {
         assert_eq!(hits[0].path, "a.md");
         assert!(hits[0].score > 0.0);
         assert!(!hits[0].snippet.is_empty());
+    }
+
+    #[test]
+    fn chunk_ord_uses_page_for_pdf_else_sequence() {
+        assert_eq!(chunk_ord("pdf", "p.21", 5), 21);
+        assert_eq!(chunk_ord("pdf", "p.350", 1), 350);
+        assert_eq!(chunk_ord("md", "Introduction", 3), 3); // non-pdf -> sequence
+        assert_eq!(chunk_ord("pdf", "weird", 7), 7);        // unparseable page -> sequence fallback
+    }
+
+    #[test]
+    fn search_hit_carries_ord() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
+        ]).unwrap();
+        let hits = idx.search("замена", 10).unwrap();
+        assert_eq!(hits[0].ord, 7);
     }
 
     #[test]
