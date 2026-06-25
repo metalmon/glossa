@@ -147,7 +147,7 @@ impl DocIndex {
             Some(g) => Some(crate::glob::glob_to_regex(g)?),
             None => None,
         };
-        let pool = limit.saturating_mul(20).clamp(limit.max(1), 2000);
+        let pool = limit.saturating_mul(20).min(2000).max(limit);
         let hits = self.search(query, pool)?;
         let filtered: Vec<RankedHit> = hits
             .into_iter()
