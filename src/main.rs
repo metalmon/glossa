@@ -41,6 +41,9 @@ enum Cmd {
         /// Only search paths matching GLOB (rg -g).
         #[arg(short = 'g', long = "glob")]
         glob: Option<String>,
+        /// Only this file type, e.g. pdf (-t).
+        #[arg(short = 't', long = "type")]
+        file_type: Option<String>,
         /// Max number of hits.
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -85,6 +88,13 @@ enum Cmd {
         #[arg(short = 'w', long)] word: bool,
         #[arg(short = 'g', long)] glob: Option<String>,
         #[arg(short = 't', long = "type")] file_type: Option<String>,
+    },
+    /// List documents whose path matches a shell glob.
+    Glob {
+        /// glob pattern, e.g. *.pdf or *Safety*
+        pattern: String,
+        /// knowledge-base directory
+        path: std::path::PathBuf,
     },
     /// Run the MCP server over stdio (for AI agents).
     Mcp {
@@ -151,7 +161,7 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, limit, rank, no_ignore, format } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, file_type, limit, rank, no_ignore, format } => {
             let path = glossa::root::resolve_root(path);
             let pretty = match format {
                 OutputFormat::Pretty => true,
@@ -164,7 +174,7 @@ fn main() -> anyhow::Result<()> {
 
             if rank {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                for h in idx.search(&pattern, limit)? {
+                for h in idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())? {
                     rg_lines.push(format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&path, &h.path),
@@ -255,6 +265,13 @@ fn main() -> anyhow::Result<()> {
             let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
                 println!("{}", h.display_line());
+            }
+            Ok(())
+        }
+        Cmd::Glob { pattern, path } => {
+            let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+            for (p, n) in glossa::glob::glob_docs(&idx, &pattern)? {
+                println!("{p}  ({n} chunks)");
             }
             Ok(())
         }
