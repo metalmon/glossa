@@ -69,7 +69,7 @@ fn internal(e: anyhow::Error) -> McpError {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchArgs {
-    #[schemars(description = "ripgrep-syntax query")]
+    #[schemars(description = "natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex")]
     query: String,
     #[serde(default)]
     #[schemars(description = "max hits (default 50)")]
@@ -118,9 +118,7 @@ impl GlossaServer {
             "path": h.path, "location": h.location, "score": h.score
         })).collect();
         self.trace.log("search", serde_json::json!({"query": a.query}), serde_json::json!(trace_hits));
-        let body = hits.iter()
-            .map(|h| format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score))
-            .collect::<Vec<_>>().join("\n");
+        let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -206,7 +204,7 @@ impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.protocol_version = ProtocolVersion::V_2025_06_18;
-        info.instructions = Some("glossa File-First knowledge-base search. Use ripgrep syntax for `search`.".into());
+        info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns numbered hits `[#n]`; `read` opens chunk number `n`.".into());
         info
     }
 }
