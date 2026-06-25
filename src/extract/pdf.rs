@@ -60,12 +60,12 @@ impl Extractor for PdfExtractor {
             // for PDFs where partition finds no structure but raw text exists.
             let opts = ExtractionOptions {
                 preserve_layout: true,
-                space_threshold: 0.3,
-                newline_threshold: 10.0,
+                space_threshold: 0.3,        // horizontal gap > k·char-width → insert a space
+                newline_threshold: 10.0,     // baseline (y) drop → newline
                 merge_hyphenated: true,
                 reconstruct_paragraphs: true,
-                detect_columns: true,
-                include_artifacts: false,
+                detect_columns: true,        // RU technical PDFs are often multi-column
+                include_artifacts: false,    // drop headers/footers/watermarks
                 ..Default::default()
             };
             if let Ok(pages) = doc.extract_text_with_options(opts) {
@@ -81,7 +81,7 @@ impl Extractor for PdfExtractor {
                         text: page.text.clone(),
                     });
                 }
-                return out;
+                return out; // may be empty → outer `if !out.is_empty()` sends it to Layer 3
             }
             Vec::new()
         }));
@@ -153,6 +153,9 @@ mod tests {
     fn extracts_table_as_markdown() {
         let bytes = include_bytes!("../../tests/fixtures/table.pdf");
         let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
+        // Single-page fixture → must traverse the partition path (Layer 1) and land on p.1,
+        // locking the 0-based partition → 1-based `p.N` page mapping the read contract rests on.
+        assert_eq!(chunks[0].location, "p.1");
         let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
         assert!(
             joined.contains('|') && joined.contains("---"),
