@@ -935,6 +935,7 @@ dependencies = [
  "predicates",
  "redb",
  "regex",
+ "regex-syntax",
  "rmcp",
  "rust-stemmers",
  "schemars",
