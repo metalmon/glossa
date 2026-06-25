@@ -37,7 +37,7 @@ pub fn run_grep(idx: &DocIndex, pattern: &str, opts: glossa::grep::GrepOpts, tra
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
-pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::graph::store::GraphStore>, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
     match name {
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -70,6 +70,17 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (Stri
             let (body, titles) = run_grep(idx, pattern, opts, trace);
             (body, titles, Vec::new())
         }
+        "glossary" => {
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let body = match graph { Some(g) => glossa::tools::glossary(g, name, trace), None => "(graph unavailable)".to_string() };
+            (body, Vec::new(), Vec::new())
+        }
+        "neighbors" => {
+            let node_id = args.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+            let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+            let body = match graph { Some(g) => glossa::tools::neighbors(g, node_id, depth, trace), None => "(graph unavailable)".to_string() };
+            (body, Vec::new(), Vec::new())
+        }
         other => (format!("unknown tool: {other}"), Vec::new(), Vec::new()),
     }
 }
@@ -92,10 +103,10 @@ mod tests {
         let trace = TraceLog::disabled();
 
         // integer n
-        let out = exec("read", &json!({"path": "d.pdf", "n": 7}), &idx, &trace).0;
+        let out = exec("read", &json!({"path": "d.pdf", "n": 7}), &idx, None, &trace).0;
         assert!(out.contains("седьмая"), "got: {out}");
         // stray string "p.7" -> digit-strip fallback -> 7
-        let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, &trace).0;
+        let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, None, &trace).0;
         assert!(out2.contains("седьмая"), "digit-strip fallback: {out2}");
     }
 
@@ -107,7 +118,7 @@ mod tests {
             Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
         ]).unwrap();
         let trace = TraceLog::disabled();
-        let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, &trace).0;
+        let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, None, &trace).0;
         assert!(out.contains("maxTsdr"), "got: {out}");
         assert!(out.contains(":#7:"), "carries #n read key: {out}");
     }
@@ -121,9 +132,28 @@ mod tests {
             Chunk { doc_path: PathBuf::from("Other.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена".into() },
         ]).unwrap();
         let trace = TraceLog::disabled();
-        let g = exec("glob", &json!({"pattern": "*АБАК*"}), &idx, &trace).0;
+        let g = exec("glob", &json!({"pattern": "*АБАК*"}), &idx, None, &trace).0;
         assert!(g.contains("АБАК") && !g.contains("Other"), "glob: {g}");
-        let s = exec("search", &json!({"query": "замена", "glob": "*АБАК*"}), &idx, &trace).0;
+        let s = exec("search", &json!({"query": "замена", "glob": "*АБАК*"}), &idx, None, &trace).0;
         assert!(s.contains("АБАК") && !s.contains("Other"), "scoped search: {s}");
+    }
+
+    #[test]
+    fn glossary_with_graph_and_without() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a small markdown file so the indexer has content to build a graph from.
+        std::fs::write(dir.path().join("note.md"), "# Hello\n\nsome content\n").unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+
+        // Unknown name -> "(no matches)" when a real graph is present
+        let result = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, Some(&g), &trace).0;
+        assert_eq!(result, "(no matches)", "expected no matches, got: {result}");
+
+        // graph = None -> "(graph unavailable)" regardless of args
+        let result_no_graph = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, None, &trace).0;
+        assert_eq!(result_no_graph, "(graph unavailable)");
     }
 }

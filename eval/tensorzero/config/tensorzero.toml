@@ -70,12 +70,8 @@ extra_body = [
   { pointer = "/top_k", value = 20 },
   { pointer = "/min_p", value = 0 },
   { pointer = "/reasoning", value = { enabled = false } },
-  # NOTE: output token cap can't be forced here — a request-level max_tokens from the
-  # client (Zed sends 65536) overrides variant extra_body. Cap it client-side instead
-  # (Zed: max_output_tokens). Otherwise prompt + 65536 overflows the 262144 context.
-  # qwen3.6-35b-a3b is multimodal, but only some OpenRouter providers actually
-  # accept image input (AtlasCloud/AkashML reject it with 400). Restrict routing
-  # to the image-capable ones so screenshots from Zed don't hit a text-only host.
+  # Pin to image-capable providers (others reject image input with 400). Verified
+  # to accept base64 images for qwen3.6-35b-a3b.
   { pointer = "/provider", value = { only = ["Parasail", "SiliconFlow", "WandB"] } },
 ]
 
@@ -96,8 +92,9 @@ type = "chat"
 [functions.coding_27b.variants.qwen]
 type = "chat_completion"
 model = "qwen3_27b"
-# Qwen3.6-27B non-thinking / Instruct coding preset (same family as 35B):
-# temp 0.7 / top_p 0.80 / top_k 20 / presence_penalty 1.5.
+# Qwen3.6-27B Instruct coding preset. reasoning MUST be off: Zed's openai_compatible
+# parser chokes on `reasoning` stream deltas and hangs (zed #46794), so we force a
+# content-only stream here.
 temperature = 0.7
 top_p = 0.8
 presence_penalty = 1.5
@@ -105,15 +102,14 @@ extra_body = [
   { pointer = "/top_k", value = 20 },
   { pointer = "/min_p", value = 0 },
   { pointer = "/reasoning", value = { enabled = false } },
-  # Output cap is client-side (Zed: max_output_tokens) — see the `coding` note above.
-  # Image-capable providers for the 27B (Alibaba rejects images with 400).
+  # Pin to image-capable providers for qwen3.6-27b (Alibaba rejects images with 400).
   { pointer = "/provider", value = { only = ["SiliconFlow", "WandB", "DeepInfra", "Chutes"] } },
 ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
-tools = ["search", "read", "grep", "glob"]
+tools = ["search", "read", "grep", "glob", "glossary", "neighbors"]
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
 [functions.answer_hotpot.variants.baseline]
@@ -150,6 +146,14 @@ parameters = "tools/grep.json"
 [tools.glob]
 description = "List knowledge-base documents whose path matches a shell glob (e.g. *.pdf, *Safety*, *АБАК*). Returns `path  (N chunks)` per line — discover what documents exist or find a file by name, then read(path, n) or scope a search/grep to it."
 parameters = "tools/glob.json"
+
+[tools.glossary]
+description = "Resolve a term/name to knowledge-graph node ids whose label/alias matches it."
+parameters = "tools/glossary.json"
+
+[tools.neighbors]
+description = "List knowledge-graph nodes connected to a node id (the graph links documents to their sections)."
+parameters = "tools/neighbors.json"
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
 [metrics.em]
