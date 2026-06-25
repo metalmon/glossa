@@ -255,34 +255,6 @@ impl DocIndex {
         Ok(())
     }
 
-    /// Visit only chunks whose `body` contains `literal` as a whole BM25 token (a cheap superset
-    /// of a substring match when the literal aligns with token boundaries). Returns false without
-    /// visiting anything when `literal` is empty (caller must full-scan instead).
-    pub fn iter_chunks_matching_term(
-        &self,
-        literal: &str,
-        mut f: impl FnMut(&str, u64, &str, &str),
-    ) -> anyhow::Result<bool> {
-        use tantivy::collector::DocSetCollector;
-        if literal.trim().is_empty() {
-            return Ok(false);
-        }
-        let searcher = self.reader.searcher();
-        let parser = QueryParser::for_index(&self.index, vec![self.fields.body]);
-        let query = match parser.parse_query(&format!("\"{}\"", literal.replace('"', " "))) {
-            Ok(q) => q,
-            Err(_) => return Ok(false),
-        };
-        let docs = searcher.search(&query, &DocSetCollector)?;
-        for addr in docs {
-            let d: TantivyDocument = searcher.doc(addr)?;
-            let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
-            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
-            f(s(self.fields.path), ord, s(self.fields.file_type), s(self.fields.body));
-        }
-        Ok(true)
-    }
-
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
         let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
         writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));

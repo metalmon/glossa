@@ -1,6 +1,7 @@
 //! Ripgrep-style literal/regex search over the extracted text stored in the index (File-First:
-//! the index is a disposable accelerator; canonical content is the file). v1 scans all stored
-//! chunk bodies and confirms with the real `regex` engine. The BM25 prefilter is added in v2.
+//! the index is a disposable accelerator; canonical content is the file). v1 always full-scans
+//! all stored chunk bodies and confirms with the real `regex` engine. The trigram accelerator
+//! is added in v2.
 
 use crate::index::store::DocIndex;
 use regex::RegexBuilder;
@@ -54,36 +55,6 @@ fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex>
     Ok(re)
 }
 
-/// The longest exact literal required by every match of `pattern` (used to prefilter via the
-/// word-token index). None when the regex has no useful required literal (-> full scan).
-fn required_literal(pattern: &str, opts: &GrepOpts) -> Option<String> {
-    if opts.ignore_case && pattern.chars().any(|c| c.is_uppercase()) {
-        // mixed-case + case-insensitive: token-level prefilter would be unsound; skip it.
-        return None;
-    }
-    let pat = if opts.fixed { regex::escape(pattern) } else { pattern.to_string() };
-    let hir = regex_syntax::parse(&pat).ok()?;
-    let mut ext = regex_syntax::hir::literal::Extractor::new();
-    ext.kind(regex_syntax::hir::literal::ExtractKind::Prefix);
-    let seq = ext.extract(&hir);
-    let lits = seq.literals()?;
-    // Require an exact, non-cut prefix set so the literal is genuinely required by all matches.
-    if !seq.is_exact() || lits.is_empty() {
-        return None;
-    }
-    // Alternations produce multiple required literals; using just one would silently drop chunks
-    // matched only by the other alternatives. Only allow the prefilter when there is exactly one
-    // required literal.
-    if lits.len() != 1 {
-        return None; // alternations / multiple required literals: full-scan is the only sound choice
-    }
-    // The literal is a required prefix; pick it if it is long enough (>=3 chars) to be a
-    // selective whole-token query. If it doesn't qualify, return None -> full scan.
-    lits.iter()
-        .map(|l| String::from_utf8_lossy(l.as_bytes()).to_string())
-        .find(|s| s.chars().count() >= 3)
-}
-
 pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Vec<GrepHit>> {
     let matcher = build_matcher(pattern, opts)?;
     let glob_re = match &opts.glob { Some(g) => Some(glob_to_regex(g)?), None => None };
@@ -97,13 +68,7 @@ pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Ve
             }
         }
     };
-    let prefiltered = match required_literal(pattern, opts) {
-        Some(lit) => idx.iter_chunks_matching_term(&lit, &mut visit)?,
-        None => false,
-    };
-    if !prefiltered {
-        idx.iter_chunks(&mut visit)?;
-    }
+    idx.iter_chunks(&mut visit)?;
     Ok(hits)
 }
 
@@ -175,6 +140,19 @@ mod tests {
         let hits = grep(&idx, "регистрация", &GrepOpts { ignore_case: true, ..Default::default() }).unwrap();
         let paths: std::collections::BTreeSet<_> = hits.iter().map(|h| h.path.clone()).collect();
         assert_eq!(paths, ["a.md".to_string(), "c.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn grep_substring_inside_token_is_found() {
+        // ripgrep matches substrings; "Tsdr" lives INSIDE the token "maxTsdr" and must be found
+        // (the removed BM25 token-prefilter would have missed this).
+        let (_d, idx) = idx_with(&[
+            ("d.pdf", "p.5", "pdf", "Параметр maxTsdr настраивается."),
+        ]);
+        let hits = grep(&idx, "Tsdr", &GrepOpts::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ord, 5);
+        assert!(hits[0].line.contains("maxTsdr"));
     }
 
     #[test]
