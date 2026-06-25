@@ -321,6 +321,8 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         graph.delete_by_source(&path_str)?;
         let mut doc_written = false;
         let mut seq = 0u64;
+        let mut prev_sec: Option<String> = None;
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         // Index/graph write errors are intentionally not propagated here: one bad chunk must not
         // abort the whole run (matches the prior per-file behavior). The file is still recorded
         // in the manifest; a failed write is corrected on the next `reindex`.
@@ -339,6 +341,15 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 idx.fields.ord => ord,
             ));
             let _ = crate::graph::build::build_section(&graph, &c, sig);
+            let cur_id = crate::graph::build::section_id(&path_str, &c.location);
+            if let Some(prev) = prev_sec.as_deref() {
+                let _ = crate::graph::build::link_sequential(&graph, prev, &cur_id, sig, &path_str);
+            }
+            if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &c.location) {
+                let _ = crate::graph::build::link_parent(&graph, &cur_id, &parent, sig, &path_str);
+            }
+            seen.insert(c.location.clone(), cur_id.clone());
+            prev_sec = Some(cur_id);
         })?;
         stats.added += 1;
         Ok(())
@@ -383,6 +394,26 @@ mod incremental_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let hits = idx.search("hello", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("ok.md")));
+    }
+
+    #[test]
+    fn index_dir_builds_sequential_and_hierarchy_edges() {
+        use crate::graph::build::section_id;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n## C\nbody c\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let p = dir.path().join("a.md").to_string_lossy().to_string();
+        let a = section_id(&p, "A");
+        let ab = section_id(&p, "A > B");
+        let ac = section_id(&p, "A > C");
+        // sequential: A -> A>B -> A>C reachable from A's section via outgoing edges
+        let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
+        assert!(na.contains(&ab), "A neighbors include next/child A>B: {na:?}");
+        // hierarchy: A>B's parent A is reachable
+        let nab = crate::graph::traverse::neighbors(&g, &ab, None, 1).unwrap();
+        assert!(nab.contains(&a), "A>B neighbors include parent A: {nab:?}");
+        assert!(nab.contains(&ac), "A>B neighbors include next sibling A>C: {nab:?}");
     }
 
     #[test]

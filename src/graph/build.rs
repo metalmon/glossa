@@ -9,6 +9,22 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Deterministic Section node id for a chunk location within a document.
+pub fn section_id(path: &str, location: &str) -> String {
+    format!("{path}#{location}")
+}
+
+fn structural_prov(src_path: &str, sig: FileSig) -> Provenance {
+    Provenance {
+        source_path: src_path.to_string(),
+        range: None,
+        file_sig: Some(sig),
+        origin: "auto-structural".into(),
+        confidence: 1.0,
+        created_at: now_secs(),
+    }
+}
+
 /// Build deterministic structural graph (layer 1) for one file's chunks:
 /// a Document node + a Section node per chunk + CONTAINS edges.
 pub fn build_structural(g: &GraphStore, chunks: &[Chunk], sig: FileSig) -> anyhow::Result<()> {
@@ -84,7 +100,7 @@ pub fn build_section(g: &GraphStore, chunk: &Chunk, sig: FileSig) -> anyhow::Res
         confidence: 1.0,
         created_at,
     };
-    let sec_id = format!("{path}#{}", chunk.location);
+    let sec_id = section_id(&path, &chunk.location);
     g.put_node(&Node {
         id: sec_id.clone(),
         node_type: "Section".into(),
@@ -95,6 +111,33 @@ pub fn build_section(g: &GraphStore, chunk: &Chunk, sig: FileSig) -> anyhow::Res
     g.put_edge(&Edge { from: path, to: sec_id, edge_type: "CONTAINS".into(), prov })
 }
 
+/// Link two consecutive sections in document order: prev →NEXT→ cur and cur →PREV→ prev.
+pub fn link_sequential(g: &GraphStore, prev_id: &str, cur_id: &str, sig: FileSig, src_path: &str) -> anyhow::Result<()> {
+    g.put_edge(&Edge { from: prev_id.to_string(), to: cur_id.to_string(), edge_type: "NEXT".into(), prov: structural_prov(src_path, sig) })?;
+    g.put_edge(&Edge { from: cur_id.to_string(), to: prev_id.to_string(), edge_type: "PREV".into(), prov: structural_prov(src_path, sig) })?;
+    Ok(())
+}
+
+/// Link a child section to its nearest ancestor: child →PARENT→ parent and parent →CHILD→ child.
+pub fn link_parent(g: &GraphStore, child_id: &str, parent_id: &str, sig: FileSig, src_path: &str) -> anyhow::Result<()> {
+    g.put_edge(&Edge { from: child_id.to_string(), to: parent_id.to_string(), edge_type: "PARENT".into(), prov: structural_prov(src_path, sig) })?;
+    g.put_edge(&Edge { from: parent_id.to_string(), to: child_id.to_string(), edge_type: "CHILD".into(), prov: structural_prov(src_path, sig) })?;
+    Ok(())
+}
+
+/// Nearest existing ancestor of `location` among the per-file `seen` (location → sec_id) map:
+/// the longest breadcrumb prefix (split on " > ") that has a Section node. None for top-level / PDF.
+pub fn nearest_ancestor(seen: &std::collections::HashMap<String, String>, location: &str) -> Option<String> {
+    let segs: Vec<&str> = location.split(" > ").collect();
+    for k in (1..segs.len()).rev() {
+        let prefix = segs[..k].join(" > ");
+        if let Some(id) = seen.get(&prefix) {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +145,21 @@ mod tests {
 
     fn chunk(path: &str, loc: &str) -> Chunk {
         Chunk { doc_path: PathBuf::from(path), location: loc.into(), file_type: "md".into(), text: "t".into() }
+    }
+
+    #[test]
+    fn nearest_ancestor_picks_longest_existing_prefix() {
+        let mut seen = std::collections::HashMap::new();
+        seen.insert("A".to_string(), "id:A".to_string());
+        seen.insert("A > B".to_string(), "id:AB".to_string());
+        // child "A > B > C": nearest is "A > B"
+        assert_eq!(nearest_ancestor(&seen, "A > B > C").as_deref(), Some("id:AB"));
+        // gap: "A" exists but "A > X" does not -> child "A > X > Y" falls back to "A"
+        assert_eq!(nearest_ancestor(&seen, "A > X > Y").as_deref(), Some("id:A"));
+        // top-level has no ancestor
+        assert_eq!(nearest_ancestor(&seen, "A"), None);
+        // PDF page (no " > ")
+        assert_eq!(nearest_ancestor(&seen, "p.3"), None);
     }
 
     #[test]
