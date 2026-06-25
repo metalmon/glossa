@@ -148,4 +148,15 @@ mod tests {
             chunks[0].text
         );
     }
+
+    #[test]
+    fn extracts_table_as_markdown() {
+        let bytes = include_bytes!("../../tests/fixtures/table.pdf");
+        let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
+        let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains('|') && joined.contains("---"),
+            "expected a GFM pipe table (| … | and a --- separator row), got:\n{joined}"
+        );
+    }
 }
