@@ -11,6 +11,7 @@ impl Extractor for PdfExtractor {
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
         use oxidize_pdf::parser::{PdfDocument, PdfReader, ParseOptions};
+        use oxidize_pdf::text::ExtractionOptions;
 
         // Any PDF parser can panic on a malformed file; catch it so indexing never aborts.
         let prev = std::panic::take_hook();
@@ -20,7 +21,17 @@ impl Extractor for PdfExtractor {
             // lenient() enables xref recovery — parses damaged-but-valid PDFs that strict mode rejects.
             let reader = PdfReader::new_with_options(std::io::Cursor::new(owned), ParseOptions::lenient())?;
             let doc = PdfDocument::new(reader);
-            doc.extract_text()
+            let opts = ExtractionOptions {
+                preserve_layout: true,       // emit newlines + reconstruct spaces from glyph positions
+                space_threshold: 0.3,        // horizontal gap > k·char-width → insert a space
+                newline_threshold: 10.0,     // baseline (y) drop → newline
+                merge_hyphenated: true,
+                reconstruct_paragraphs: true,
+                detect_columns: true,        // RU technical PDFs are often multi-column
+                include_artifacts: false,    // drop headers/footers/watermarks
+                ..Default::default()
+            };
+            doc.extract_text_with_options(opts)
         }));
         std::panic::set_hook(prev);
 
