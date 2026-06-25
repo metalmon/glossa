@@ -146,12 +146,7 @@ impl GlossaServer {
     #[tool(description = "Full-text search over the knowledge base. Pass natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex. Returns numbered hits in the form `[#n] path · label · snippet  [score]`; use `read(path, n)` to fetch the full text of chunk number `n`. If results are empty, run `index` on the base first. Scope with optional glob/file_type filters.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let hits = idx.search_filtered(&a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref()).map_err(internal)?;
-        let trace_hits: Vec<serde_json::Value> = hits.iter().map(|h| serde_json::json!({
-            "path": h.path, "location": h.location, "score": h.score
-        })).collect();
-        self.trace.log("search", serde_json::json!({"query": a.query}), serde_json::json!(trace_hits));
-        let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
+        let (body, _hits) = crate::tools::search(&idx, &a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref(), &self.trace);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -225,31 +220,14 @@ impl GlossaServer {
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let opts = crate::grep::GrepOpts {
-            ignore_case: a.ignore_case.unwrap_or(false),
-            fixed: a.fixed.unwrap_or(false),
-            word: a.word.unwrap_or(false),
-            glob: a.glob,
-            file_type: a.file_type,
-        };
-        let hits = crate::grep::grep(&idx, &a.pattern, &opts).map_err(internal)?;
-        self.trace.log("grep", serde_json::json!({"pattern": a.pattern}), serde_json::json!({"hits": hits.len()}));
-        let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
-        let body = if body.is_empty() { "(no matches)".to_string() } else { body };
-        Ok(CallToolResult::success(vec![Content::text(body)]))
+        let opts = crate::grep::GrepOpts { ignore_case: a.ignore_case.unwrap_or(false), fixed: a.fixed.unwrap_or(false), word: a.word.unwrap_or(false), glob: a.glob, file_type: a.file_type };
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
     }
 
     #[tool(description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let docs = crate::glob::glob_docs(&idx, &a.pattern).map_err(internal)?;
-        self.trace.log("glob", serde_json::json!({"pattern": a.pattern}), serde_json::json!({"docs": docs.len()}));
-        let body = if docs.is_empty() {
-            "(no documents match)".to_string()
-        } else {
-            docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n")
-        };
-        Ok(CallToolResult::success(vec![Content::text(body)]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::glob(&idx, &a.pattern, &self.trace))]))
     }
 
     #[tool(description = "Delete the index + graph for the knowledge base.")]
