@@ -4,17 +4,14 @@ use serde_json::{json, Value};
 
 const READ_CHARS_CAP: usize = 4000;
 
-/// Run a BM25 search against the corpus index; return (model-facing text, surfaced titles).
+/// Run a BM25 search (optionally scoped by path glob / file_type); model-facing numbered text + titles.
 ///
 /// Takes a borrowed `DocIndex` so the caller opens it once per question and reuses it (with its
 /// cached reader) across every search/read in the episode, instead of reopening per tool call.
-pub fn run_search(idx: &DocIndex, query: &str, limit: usize, trace: &TraceLog) -> (String, Vec<String>) {
-    match idx.search(query, limit.max(1)) {
+pub fn run_search(idx: &DocIndex, query: &str, limit: usize, glob: Option<&str>, file_type: Option<&str>, trace: &TraceLog) -> (String, Vec<String>) {
+    match idx.search_filtered(query, limit.max(1), glob, file_type) {
         Ok(hits) => {
-            let trace_hits: Vec<Value> = hits
-                .iter()
-                .map(|h| json!({ "path": h.path, "location": h.location, "score": h.score }))
-                .collect();
+            let trace_hits: Vec<Value> = hits.iter().map(|h| json!({ "path": h.path, "location": h.location, "score": h.score })).collect();
             trace.log("search", json!({ "query": query }), json!(trace_hits));
             let titles: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
             if hits.is_empty() {
@@ -24,6 +21,23 @@ pub fn run_search(idx: &DocIndex, query: &str, limit: usize, trace: &TraceLog) -
             (body, titles)
         }
         Err(e) => (format!("search error: {e}"), Vec::new()),
+    }
+}
+
+/// List documents matching a shell glob; one `path  (N chunks)` per line.
+pub fn run_glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> (String, Vec<String>) {
+    match glossa::glob::glob_docs(idx, pattern) {
+        Ok(docs) => {
+            trace.log("glob", json!({ "pattern": pattern }), json!({ "docs": docs.len() }));
+            let titles: Vec<String> = docs.iter().map(|(p, _)| p.clone()).collect();
+            let body = if docs.is_empty() {
+                "(no documents match)".to_string()
+            } else {
+                docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n")
+            };
+            (body, titles)
+        }
+        Err(e) => (format!("glob error: {e}"), Vec::new()),
     }
 }
 
@@ -85,7 +99,13 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (Stri
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            run_search(idx, query, limit, trace)
+            let glob = args.get("glob").and_then(|v| v.as_str());
+            let file_type = args.get("file_type").and_then(|v| v.as_str());
+            run_search(idx, query, limit, glob, file_type, trace)
+        }
+        "glob" => {
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            run_glob(idx, pattern, trace)
         }
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -143,5 +163,20 @@ mod tests {
         let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, &trace).0;
         assert!(out.contains("maxTsdr"), "got: {out}");
         assert!(out.contains(":#7:"), "carries #n read key: {out}");
+    }
+
+    #[test]
+    fn glob_and_scoped_search_via_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("АБАК.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена".into() },
+            Chunk { doc_path: PathBuf::from("Other.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена".into() },
+        ]).unwrap();
+        let trace = TraceLog::disabled();
+        let g = exec("glob", &json!({"pattern": "*АБАК*"}), &idx, &trace).0;
+        assert!(g.contains("АБАК") && !g.contains("Other"), "glob: {g}");
+        let s = exec("search", &json!({"query": "замена", "glob": "*АБАК*"}), &idx, &trace).0;
+        assert!(s.contains("АБАК") && !s.contains("Other"), "scoped search: {s}");
     }
 }

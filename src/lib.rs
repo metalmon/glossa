@@ -1,3 +1,4 @@
+pub mod glob;
 pub mod grep;
 pub mod mcp;
 pub mod model;

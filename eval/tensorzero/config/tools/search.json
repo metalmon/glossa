@@ -10,7 +10,9 @@
     "limit": {
       "type": "integer",
       "description": "Maximum number of results (default 10)."
-    }
+    },
+    "glob": { "type": "string", "description": "scope to documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)" },
+    "file_type": { "type": "string", "description": "scope to this file type, e.g. pdf (-t)" }
   },
   "required": ["query"],
   "additionalProperties": false

@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "properties": {
+    "pattern": { "type": "string", "description": "shell glob over document paths, e.g. *.pdf or *Safety* or *АБАК*" }
+  },
+  "required": ["pattern"]
+}
