@@ -69,6 +69,28 @@ pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     }
 }
 
+/// Resolve a name/term to graph node ids (the "glossary" lookup). Model text only.
+pub fn glossary(g: &crate::graph::store::GraphStore, name: &str, trace: &TraceLog) -> String {
+    match g.resolve(name) {
+        Ok(ids) => {
+            trace.log("glossary", json!({ "name": name }), json!({ "ids": ids.len() }));
+            if ids.is_empty() { "(no matches)".to_string() } else { ids.join("\n") }
+        }
+        Err(e) => format!("glossary error: {e}"),
+    }
+}
+
+/// Graph neighbors reachable from a node id, up to `depth` hops. Model text only.
+pub fn neighbors(g: &crate::graph::store::GraphStore, node_id: &str, depth: usize, trace: &TraceLog) -> String {
+    match crate::graph::traverse::neighbors(g, node_id, None, depth) {
+        Ok(ids) => {
+            trace.log("neighbors", json!({ "node_id": node_id, "depth": depth }), json!({ "ids": ids.len() }));
+            if ids.is_empty() { "(no neighbors)".to_string() } else { ids.join("\n") }
+        }
+        Err(e) => format!("neighbors error: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +144,79 @@ mod tests {
         assert_eq!(grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t), "(no matches)");
         assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
         assert_eq!(glob(&i, "*nomatch*", &t), "(no documents match)");
+    }
+
+    // ── graph tool tests ────────────────────────────────────────────────────
+
+    use crate::graph::store::{GraphStore, Node, Edge, Provenance};
+    use crate::graph::ontology::Ontology;
+
+    const GRAPH_ONT: &str = r#"
+[entities.Organization]
+props = ["name"]
+[entities.Document]
+props = []
+[relations.PARTY_TO]
+from = ["Organization"]
+to = ["Document"]
+[validation]
+strict = true
+"#;
+
+    fn graph_prov() -> Provenance {
+        Provenance {
+            source_path: "contract.docx".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.9,
+            created_at: 0,
+        }
+    }
+
+    fn graph_fixture() -> (tempfile::TempDir, GraphStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(GRAPH_ONT).unwrap();
+        let org = Node {
+            id: "org:acme".into(),
+            node_type: "Organization".into(),
+            label: "Acme Corp".into(),
+            aliases: vec!["ACME".into()],
+            prov: graph_prov(),
+        };
+        let doc = Node {
+            id: "contract.docx".into(),
+            node_type: "Document".into(),
+            label: "contract.docx".into(),
+            aliases: vec![],
+            prov: graph_prov(),
+        };
+        let edge = Edge {
+            from: "org:acme".into(),
+            to: "contract.docx".into(),
+            edge_type: "PARTY_TO".into(),
+            prov: graph_prov(),
+        };
+        g.upsert(&ont, &[org, doc], &[edge]).unwrap();
+        (dir, g)
+    }
+
+    #[test]
+    fn glossary_resolves_alias_and_returns_sentinel_on_miss() {
+        let (_dir, g) = graph_fixture();
+        let t = TraceLog::disabled();
+        let result = glossary(&g, "ACME", &t);
+        assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
+        assert_eq!(glossary(&g, "nonesuch", &t), "(no matches)");
+    }
+
+    #[test]
+    fn neighbors_returns_connected_and_sentinel_on_isolated() {
+        let (_dir, g) = graph_fixture();
+        let t = TraceLog::disabled();
+        let result = neighbors(&g, "org:acme", 1, &t);
+        assert!(result.contains("contract.docx"), "expected neighbor in result, got: {result}");
+        assert_eq!(neighbors(&g, "isolated", 1, &t), "(no neighbors)");
     }
 }
