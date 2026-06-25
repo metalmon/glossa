@@ -1,6 +1,7 @@
 pub mod glob;
 pub mod grep;
 pub mod mcp;
+pub mod tools;
 pub mod model;
 pub mod root;
 pub mod extract;
