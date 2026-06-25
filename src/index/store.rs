@@ -74,6 +74,16 @@ pub struct RankedHit {
     pub score: f32,
 }
 
+impl RankedHit {
+    /// One search-result line carrying exactly one number — the read key `[#ord]` — and a
+    /// non-numeric label (the heading text, or the file type for paged formats whose location is
+    /// itself a number) so nothing competes with the read key.
+    pub fn display_line(&self) -> String {
+        let label = if self.location.starts_with("p.") { self.file_type.as_str() } else { self.location.as_str() };
+        format!("[#{}] {} · {} · {}  [{:.3}]", self.ord, self.path, label, self.snippet, self.score)
+    }
+}
+
 impl DocIndex {
     pub fn write_chunks(&self, chunks: &[Chunk]) -> anyhow::Result<()> {
         let mut writer = self.index.writer(50_000_000)?;
@@ -418,6 +428,19 @@ mod search_tests {
         assert_eq!(idx.read_chunk("doc.pdf", "p.2").unwrap().as_deref(), Some("second page body"));
         // Unknown location -> None, so the caller falls back to reading the file.
         assert_eq!(idx.read_chunk("doc.pdf", "p.99").unwrap(), None);
+    }
+
+    #[test]
+    fn display_line_is_numbered_with_nonnumeric_label() {
+        let pdf = RankedHit { path: "d.pdf".into(), location: "p.350".into(), file_type: "pdf".into(), ord: 350, snippet: "горячая замена".into(), score: 17.7 };
+        let line = pdf.display_line();
+        assert!(line.starts_with("[#350] "), "numbered key: {line}");
+        assert!(line.contains("pdf"), "non-numeric label for pdf: {line}");
+        assert!(!line.contains("p.350"), "no competing page number: {line}");
+
+        let md = RankedHit { path: "d.md".into(), location: "Введение".into(), file_type: "md".into(), ord: 2, snippet: "текст".into(), score: 3.0 };
+        assert!(md.display_line().starts_with("[#2] "));
+        assert!(md.display_line().contains("Введение"));
     }
 
     #[test]
