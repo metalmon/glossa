@@ -130,6 +130,34 @@ impl DocIndex {
         Ok(hits)
     }
 
+    /// BM25 search scoped by an optional path glob and/or exact file_type. The filters are applied
+    /// AFTER ranking, so a generous candidate pool is fetched when filtering to still fill `limit`.
+    /// Reuses `search` (unfiltered) so ranking semantics stay identical.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        glob: Option<&str>,
+        file_type: Option<&str>,
+    ) -> anyhow::Result<Vec<RankedHit>> {
+        if glob.is_none() && file_type.is_none() {
+            return self.search(query, limit);
+        }
+        let glob_re = match glob {
+            Some(g) => Some(crate::glob::glob_to_regex(g)?),
+            None => None,
+        };
+        let pool = limit.saturating_mul(20).clamp(limit.max(1), 2000);
+        let hits = self.search(query, pool)?;
+        let filtered: Vec<RankedHit> = hits
+            .into_iter()
+            .filter(|h| file_type.map_or(true, |ft| h.file_type == ft))
+            .filter(|h| glob_re.as_ref().map_or(true, |re| re.is_match(&h.path)))
+            .take(limit)
+            .collect();
+        Ok(filtered)
+    }
+
     /// Fetch a single chunk's stored body by exact path + location (an index lookup, no source
     /// re-parse). Returns `None` when no chunk matches, so callers can fall back to reading the
     /// file. This keeps `read` cheap on large bases where a single PDF may be hundreds of pages.
@@ -492,6 +520,28 @@ mod search_tests {
         idx.iter_chunks(|_path, ord, _ft, body| seen.push((ord, body.to_string()))).unwrap();
         seen.sort();
         assert_eq!(seen, vec![(1, "alpha".to_string()), (2, "beta".to_string())]);
+    }
+
+    #[test]
+    fn search_filtered_scopes_by_glob_and_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("a/АБАК.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
+            Chunk { doc_path: PathBuf::from("b/Other.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
+            Chunk { doc_path: PathBuf::from("c/Notes.md"),  location: "S1".into(),  file_type: "md".into(),  text: "горячая замена цпу".into() },
+        ]).unwrap();
+
+        let all = idx.search_filtered("замена", 10, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+        // glob scopes to the matching path only
+        let abak = idx.search_filtered("замена", 10, Some("*АБАК*"), None).unwrap();
+        assert_eq!(abak.len(), 1);
+        assert!(abak[0].path.contains("АБАК"));
+        // file_type scopes to md only
+        let md = idx.search_filtered("замена", 10, None, Some("md")).unwrap();
+        assert_eq!(md.len(), 1);
+        assert_eq!(md[0].file_type, "md");
     }
 }
 
