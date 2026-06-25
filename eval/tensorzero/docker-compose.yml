@@ -43,6 +43,8 @@ services:
       # (git-ignored). If you disable LM Studio auth, set api_key_location = "none" in
       # config/tensorzero.toml and this can be left empty.
       LMSTUDIO_API_KEY: ${LMSTUDIO_API_KEY:-}
+      # OpenRouter key for the `coding` function (qwen3.6-35b-a3b). Set in .env.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     ports:
       - "3000:3000"
     extra_hosts:

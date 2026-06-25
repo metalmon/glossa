@@ -1,8 +1,8 @@
 {
   "type": "object",
   "properties": {
-    "pattern": { "type": "string", "description": "ripgrep-style regex or literal to search for" },
-    "ignore_case": { "type": "boolean", "description": "case-insensitive matching (-i)" },
+    "pattern": { "type": "string", "description": "an exact string to find — a code, version, identifier, parameter name, error message, or exact phrase (e.g. maxTsdr, 5.7.2); ripgrep regex supported" },
+    "ignore_case": { "type": "boolean", "description": "force case-insensitive (-i); matching is smart-case by default" },
     "fixed": { "type": "boolean", "description": "treat pattern as a fixed string, not regex (-F)" },
     "word": { "type": "boolean", "description": "match whole words only (-w)" },
     "glob": { "type": "string", "description": "path glob filter, e.g. *.pdf (-g)" },

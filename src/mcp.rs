@@ -210,7 +210,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(format!("upserted {n} nodes, {e} edges"))]))
     }
 
-    #[tool(description = "Exact/regex search (ripgrep syntax) over the knowledge base's extracted text, across all formats. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`. Use this for exact tokens, codes, and identifiers that keyword `search` may blur.")]
+    #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let opts = crate::grep::GrepOpts {

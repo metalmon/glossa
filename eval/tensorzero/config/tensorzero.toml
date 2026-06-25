@@ -27,10 +27,47 @@ api_base = "http://host.docker.internal:1234/v1"
 model_name = "text-embedding-nomic-embed-text-v1.5"
 api_key_location = "env::LMSTUDIO_API_KEY"
 
+# ── Coding model: Qwen3.6-35B-A3B via OpenRouter (OpenAI-compatible) ──
+# Separate endpoint, unrelated to the HotpotQA eval. Exposed to Zed (or any
+# OpenAI client) through the gateway's /openai/v1 endpoint as the `coding` function.
+[models.qwen3_coder]
+routing = ["openrouter"]
+
+[models.qwen3_coder.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "qwen/qwen3.6-35b-a3b"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# ── Coding function: the sampling params live HERE so clients (Zed) can't fall
+# back to looping defaults. Reference it as model "tensorzero::function_name::coding".
+# Qwen3.6 non-thinking / Instruct preset, tuned against endless repetition
+# (official model-card values; presence_penalty is the main anti-loop lever).
+[functions.coding]
+type = "chat"
+
+[functions.coding.variants.qwen]
+type = "chat_completion"
+model = "qwen3_coder"
+temperature = 0.7
+top_p = 0.8
+presence_penalty = 1.5
+max_tokens = 8192
+# top_k / min_p aren't first-class TensorZero params, and reasoning is disabled
+# for Instruct mode -> pass these straight through to OpenRouter via extra_body.
+# To switch to thinking "precise coding" mode: set reasoning.enabled = true,
+# temperature = 0.6, top_p = 0.95, presence_penalty = 0.0.
+extra_body = [
+  { pointer = "/top_k", value = 20 },
+  { pointer = "/min_p", value = 0 },
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
 tools = ["search", "read", "grep"]
+parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
 [functions.answer_hotpot.variants.baseline]
 type = "chat_completion"
@@ -49,7 +86,7 @@ description = "Read a document's text, optionally narrowed to a heading/page/she
 parameters = "tools/read.json"
 
 [tools.grep]
-description = "Exact/regex (ripgrep) search over the extracted text. Returns `path:#n: line`; read with read(path, n)."
+description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. maxTsdr, 5.7.2, AbakController). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword search). For fuzzy/conceptual lookup, use search. Returns `path:#n: line`; read with read(path, n)."
 parameters = "tools/grep.json"
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
