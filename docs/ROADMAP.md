@@ -41,6 +41,14 @@ Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shippi
   streaming pipeline; binary files are silently skipped; unknown extensions no longer dropped.
   Remaining extractor backlog (lower priority): structured JSON (key: value per chunk), heading-aware
   HTML chunking, csv-crate row-level indexing, rtf, epub (zip+html), eml/msg.
+- **Table extraction fidelity (correctness on table-heavy bases, not cosmetics).** An xlsx cell containing
+  newlines breaks the markdown-table render (a multi-line cell splits the `|...|` rows). **docx tables almost
+  certainly share the root cause** (same office_oxide table rendering) — verify + apply the same per-cell
+  newline normalization. **PDF tables are not reconstructed at all** (oxidize-pdf yields a flat per-page text
+  stream — no column/row structure); real-base tables (CAN K-factor table, Profibus maxTsdr value table) are
+  retrieval-relevant yet BM25-opaque. Tiers: (1) xlsx multi-line cells — cheap; (2) docx tables — verify+fix;
+  (3) PDF table reconstruction (column detection from text x-positions) — hard, high value, separate effort.
+  Surfaced by the kb-val real-base retrieval-path analysis (vocabulary/table opacity was a recurring miss).
 - **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
 - **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
 - `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
