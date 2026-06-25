@@ -369,7 +369,10 @@ mod tests {
         assert_eq!(m["role"], "user");
         let blocks = m["content"].as_array().unwrap();
         // exactly one image block, in the shape Task 1's spike proved works:
-        assert!(blocks.iter().any(|b| b["type"] == "image"));
+        assert!(blocks.iter().any(|b| b["type"] == "image"
+            && b["mime_type"].is_string()
+            && b["data"].is_string()),
+            "image block must use Format A: {{type:image, mime_type, data}}");
         assert!(image_user_message(&[]).is_none());
     }
 
