@@ -32,6 +32,31 @@ pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) ->
     }
 }
 
+/// A read result: the chunk text (with prev/next footer) plus the file's images for vision models.
+pub struct ReadOut {
+    pub text: String,
+    pub images: Vec<crate::read::DocImage>,
+}
+
+/// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
+/// (empty if the source file is absent — body still comes from the index). No truncation.
+pub fn read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
+    let chunk = match idx.read_chunk_by_ord(path, n) {
+        Ok(Some(c)) => c,
+        Ok(None) => return ReadOut { text: format!("no chunk #{n} in {path}"), images: Vec::new() },
+        Err(e) => return ReadOut { text: format!("read error: {e}"), images: Vec::new() },
+    };
+    trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
+    let footer = match (chunk.prev, chunk.next) {
+        (Some(p), Some(nx)) => format!("\n\n‹ prev #{p} · next #{nx} ›"),
+        (None, Some(nx)) => format!("\n\n‹ start of document · next #{nx} ›"),
+        (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
+        (None, None) => String::new(),
+    };
+    let images = crate::read::extract_images(std::path::Path::new(path), 8).unwrap_or_default();
+    ReadOut { text: format!("{}{}", chunk.body, footer), images }
+}
+
 /// List documents by path mask; model text only.
 pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
@@ -70,6 +95,23 @@ mod tests {
         assert!(body.starts_with("[#7] ") && body.contains("maxTsdr"));
         let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t);
         assert_eq!(empty, "(no results)");
+    }
+
+    #[test]
+    fn read_returns_full_body_and_unified_footer() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let big = "Я".repeat(5000); // > old 4000-char cap
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("d.md"), location: "S1".into(), file_type: "md".into(), text: big.clone() },
+            Chunk { doc_path: PathBuf::from("d.md"), location: "S2".into(), file_type: "md".into(), text: "second".into() },
+        ]).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, "d.md", 1, &t);
+        assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
+        assert!(out.text.contains("next #2") && out.text.contains("end of document") == false);
+        assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
+        assert_eq!(read(&i, "d.md", 99, &t).text, "no chunk #99 in d.md");
     }
 
     #[test]

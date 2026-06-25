@@ -2,8 +2,6 @@ use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 
-const READ_CHARS_CAP: usize = 4000;
-
 /// Run a BM25 search (optionally scoped by path glob / file_type); model-facing numbered text + titles.
 ///
 /// Takes a borrowed `DocIndex` so the caller opens it once per question and reuses it (with its
@@ -27,31 +25,10 @@ fn parse_n(v: &Value) -> Option<u64> {
     s.parse::<u64>().ok()
 }
 
-/// Read a chunk by (path, number n) from the index; truncated to fit small-model context.
-pub fn run_read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> String {
-    match idx.read_chunk_by_ord(path, n) {
-        Ok(Some(c)) => {
-            trace.log("read", json!({ "path": path, "n": n }), json!({ "path": path }));
-            let footer = match (c.prev, c.next) {
-                (Some(p), Some(nx)) => format!("\n‹ prev #{p} · next #{nx} ›"),
-                (None, Some(nx)) => format!("\n‹ start · next #{nx} ›"),
-                (Some(p), None) => format!("\n‹ prev #{p} · end ›"),
-                (None, None) => String::new(),
-            };
-            cap_read(c.body) + &footer
-        }
-        Ok(None) => format!("no chunk #{n} in {path}"),
-        Err(e) => format!("read error: {e}"),
-    }
-}
-
-/// Truncate read output to fit a small model's context window.
-fn cap_read(text: String) -> String {
-    if text.chars().count() > READ_CHARS_CAP {
-        text.chars().take(READ_CHARS_CAP).collect::<String>() + "\n…(truncated)"
-    } else {
-        text
-    }
+/// Read a chunk: full text + the chunk's images (for the vision model, delivered by the backend).
+pub fn run_read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> (String, Vec<glossa::read::DocImage>) {
+    let out = glossa::tools::read(idx, path, n, trace);
+    (out.text, out.images)
 }
 
 /// Run a ripgrep-style exact/regex search over the extracted text; one line per match `path:#n: line`.
@@ -59,24 +36,27 @@ pub fn run_grep(idx: &DocIndex, pattern: &str, opts: glossa::grep::GrepOpts, tra
     (glossa::tools::grep(idx, pattern, &opts, trace), Vec::new())
 }
 
-/// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search).
-pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (String, Vec<String>) {
+/// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
+pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
     match name {
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let glob = args.get("glob").and_then(|v| v.as_str());
             let file_type = args.get("file_type").and_then(|v| v.as_str());
-            run_search(idx, query, limit, glob, file_type, trace)
+            let (body, titles) = run_search(idx, query, limit, glob, file_type, trace);
+            (body, titles, Vec::new())
         }
         "glob" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            run_glob(idx, pattern, trace)
+            let (body, titles) = run_glob(idx, pattern, trace);
+            (body, titles, Vec::new())
         }
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let n = args.get("n").and_then(parse_n).unwrap_or(0);
-            (run_read(idx, path, n, trace), Vec::new())
+            let (text, imgs) = run_read(idx, path, n, trace);
+            (text, Vec::new(), imgs)
         }
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -87,9 +67,10 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (Stri
                 glob: args.get("glob").and_then(|v| v.as_str()).map(String::from),
                 file_type: args.get("file_type").and_then(|v| v.as_str()).map(String::from),
             };
-            run_grep(idx, pattern, opts, trace)
+            let (body, titles) = run_grep(idx, pattern, opts, trace);
+            (body, titles, Vec::new())
         }
-        other => (format!("unknown tool: {other}"), Vec::new()),
+        other => (format!("unknown tool: {other}"), Vec::new(), Vec::new()),
     }
 }
 

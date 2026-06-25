@@ -26,7 +26,7 @@ pub fn run_episode<C, X>(
 ) -> anyhow::Result<EpisodeOutcome>
 where
     C: FnMut(&[Value], Option<&str>) -> anyhow::Result<TzTurn>,
-    X: FnMut(&str, &Value) -> (String, Vec<String>),
+    X: FnMut(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>),
 {
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user_question })];
     let mut episode_id: Option<String> = None;
@@ -58,13 +58,23 @@ where
         for call in &tool_calls {
             let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = call.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            // TZ returns `arguments: null` (with the raw string under `raw_arguments`)
+            // when the model emitted unparseable JSON args. Echoing `null` back is
+            // rejected by the input schema ("did not match any variant of
+            // ToolCallWrapper"), so fall back to `raw_arguments` (a string, which TZ
+            // accepts) and finally to `{}`.
+            let args = call
+                .get("arguments")
+                .filter(|v| !v.is_null())
+                .cloned()
+                .or_else(|| call.get("raw_arguments").cloned())
+                .unwrap_or_else(|| json!({}));
             // echo the assistant tool_call, then the tool_result (result MUST be a string)
             messages.push(json!({
                 "role": "assistant",
                 "content": [{ "type": "tool_call", "id": id, "name": name, "arguments": args }]
             }));
-            let (result, titles) = exec(name, &args);
+            let (result, titles, _images) = exec(name, &args);
             surfaced_titles.extend(titles);
             messages.push(json!({
                 "role": "user",
@@ -303,7 +313,8 @@ mod tests {
             assert_eq!(name, "search");
             assert_eq!(args["query"], "corliss");
             ("Meet_Corliss_Archer.md:Meet Corliss Archer: …  [9.0]".to_string(),
-             vec!["Meet Corliss Archer".to_string()])
+             vec!["Meet Corliss Archer".to_string()],
+             Vec::new())
         };
         let out = run_episode(chat, "Question: ...", exec, 8).unwrap();
         assert_eq!(out.answer, "ANSWER: Chief of Protocol");
@@ -317,7 +328,7 @@ mod tests {
             content: vec![json!({ "type": "text", "text": "ANSWER: yes" })],
             episode_id: "e".into(),
         });
-        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4).unwrap();
         assert_eq!(out.answer, "ANSWER: yes");
     }
@@ -328,8 +339,49 @@ mod tests {
             content: vec![json!({ "type": "text", "text": "ANSWER: x" })],
             episode_id: "".into(),
         });
-        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4).unwrap();
         assert_eq!(out.episode_id, None, "an empty episode_id must not become Some(\"\")");
+    }
+
+    #[test]
+    fn echoes_raw_arguments_when_arguments_is_null() {
+        // When the model emits unparseable JSON args, TZ returns `arguments: null`
+        // plus the original string under `raw_arguments`. The echoed assistant
+        // tool_call must carry the raw string (TZ rejects a null `arguments`).
+        let round = RefCell::new(0usize);
+        let seen_round2: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+        let chat = |msgs: &[Value], _eid: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                Ok(TzTurn {
+                    content: vec![json!({
+                        "type": "tool_call", "id": "c1", "name": "read",
+                        "arguments": Value::Null,
+                        "raw_arguments": "{\"path\":\"a.md\",\"n\":8}"
+                    })],
+                    episode_id: "ep".into(),
+                })
+            } else {
+                *seen_round2.borrow_mut() = msgs.to_vec();
+                Ok(TzTurn {
+                    content: vec![json!({ "type": "text", "text": "ANSWER: ok" })],
+                    episode_id: "ep".into(),
+                })
+            }
+        };
+        let exec = |_: &str, _: &Value| ("result".to_string(), Vec::new(), Vec::new());
+        let out = run_episode(chat, "q", exec, 4).unwrap();
+        assert_eq!(out.answer, "ANSWER: ok");
+        let msgs = seen_round2.borrow();
+        // [user question, assistant tool_call, user tool_result]
+        let echoed = &msgs[1]["content"][0];
+        assert_eq!(echoed["type"], "tool_call");
+        assert_eq!(
+            echoed["arguments"],
+            json!("{\"path\":\"a.md\",\"n\":8}"),
+            "null `arguments` must be replaced by the raw_arguments string"
+        );
     }
 }

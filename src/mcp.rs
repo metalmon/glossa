@@ -2,7 +2,6 @@ use crate::graph::agent::apply_upsert;
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
-use crate::read::extract_images;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -153,19 +152,10 @@ impl GlossaServer {
     #[tool(description = "Read a document chunk by its number `n` (the `[#n]` shown in search results; for PDFs this is the page number). Returns the chunk text plus the numbers of the previous/next chunks for context expansion.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let path = std::path::PathBuf::from(&a.path);
-        let chunk = idx.read_chunk_by_ord(&a.path, a.n as u64).map_err(internal)?
-            .ok_or_else(|| McpError::invalid_params(format!("no chunk #{} in {}", a.n, a.path), None))?;
-        self.trace.log("read", serde_json::json!({"path": a.path, "n": a.n}), serde_json::json!({"path": a.path}));
-        let footer = match (chunk.prev, chunk.next) {
-            (Some(p), Some(n)) => format!("\n\n‹ prev #{p} · next #{n} ›"),
-            (None, Some(n)) => format!("\n\n‹ start of document · next #{n} ›"),
-            (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
-            (None, None) => String::new(),
-        };
-        let mut content = vec![Content::text(format!("{}{}", chunk.body, footer))];
+        let out = crate::tools::read(&idx, &a.path, a.n as u64, &self.trace);
+        let mut content = vec![Content::text(out.text)];
         if a.include_images.unwrap_or(true) {
-            for img in extract_images(&path, 8).map_err(internal)? {
+            for img in out.images {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
                 content.push(Content::image(b64, img.mime));
             }
