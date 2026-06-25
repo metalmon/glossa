@@ -1,3 +1,4 @@
+use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -5,11 +6,10 @@ use std::path::Path;
 const READ_CHARS_CAP: usize = 4000;
 
 /// Run a BM25 search against the corpus index; return (model-facing text, surfaced titles).
-pub fn run_search(work: &Path, query: &str, limit: usize, trace: &TraceLog) -> (String, Vec<String>) {
-    let idx = match glossa::index::store::DocIndex::open_or_create(work) {
-        Ok(i) => i,
-        Err(e) => return (format!("search error: {e}"), Vec::new()),
-    };
+///
+/// Takes a borrowed `DocIndex` so the caller opens it once per question and reuses it (with its
+/// cached reader) across every search/read in the episode, instead of reopening per tool call.
+pub fn run_search(idx: &DocIndex, query: &str, limit: usize, trace: &TraceLog) -> (String, Vec<String>) {
     match idx.search(query, limit.max(1)) {
         Ok(hits) => {
             let trace_hits: Vec<Value> = hits
@@ -38,13 +38,11 @@ pub fn run_search(work: &Path, query: &str, limit: usize, trace: &TraceLog) -> (
 /// (a term lookup) instead of re-parsing the whole source file. On a large base a single PDF can
 /// be hundreds of pages, so re-extracting it per read is what leaves the GPU idle between
 /// inference bursts. On an index miss we fall back to re-parsing the file.
-pub fn run_read(work: &Path, path: &str, location: Option<&str>, trace: &TraceLog) -> String {
+pub fn run_read(idx: &DocIndex, path: &str, location: Option<&str>, trace: &TraceLog) -> String {
     if let Some(loc) = location {
-        if let Ok(idx) = glossa::index::store::DocIndex::open_or_create(work) {
-            if let Ok(Some(body)) = idx.read_chunk(path, loc) {
-                trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
-                return cap_read(body);
-            }
+        if let Ok(Some(body)) = idx.read_chunk(path, loc) {
+            trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
+            return cap_read(body);
         }
     }
     match glossa::read::read_region(Path::new(path), location) {
@@ -66,17 +64,17 @@ fn cap_read(text: String) -> String {
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search).
-pub fn exec(name: &str, args: &Value, work: &Path, trace: &TraceLog) -> (String, Vec<String>) {
+pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (String, Vec<String>) {
     match name {
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            run_search(work, query, limit, trace)
+            run_search(idx, query, limit, trace)
         }
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let location = args.get("location").and_then(|v| v.as_str());
-            (run_read(work, path, location, trace), Vec::new())
+            (run_read(idx, path, location, trace), Vec::new())
         }
         other => (format!("unknown tool: {other}"), Vec::new()),
     }
