@@ -62,4 +62,17 @@ mod tests {
         let err = OfficeExtractor.extract(Path::new("x.rtf"), b"junk").unwrap_err();
         assert!(err.to_string().contains("unsupported office extension"));
     }
+
+    #[test]
+    fn extracts_table_as_markdown() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_table.docx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_table.docx"), bytes)
+            .unwrap();
+        let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains('|') && joined.contains("---"),
+            "expected a GFM pipe table from the docx table, got:\n{joined}"
+        );
+    }
 }
