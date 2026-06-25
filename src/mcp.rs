@@ -166,15 +166,13 @@ impl GlossaServer {
     #[tool(description = "List glossary node ids whose label/alias matches a name.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ids = g.resolve(&a.name).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(ids.join("\n"))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&g, &a.name, &self.trace))]))
     }
 
     #[tool(description = "Graph neighbors reachable from a node id.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ids = crate::graph::traverse::neighbors(&g, &a.node_id, None, a.depth.unwrap_or(1)).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(ids.join("\n"))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&g, &a.node_id, a.depth.unwrap_or(1), &self.trace))]))
     }
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
