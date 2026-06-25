@@ -91,6 +91,10 @@ pub struct TensorZeroBackend {
     pub endpoint: String, // e.g. http://localhost:3000
     pub function: String, // e.g. answer_hotpot
     pub timeout: Duration,
+    pub tags: serde_json::Value, // flat {key: value} object attached to /inference + /feedback ({} = none)
+    pub judge_endpoint: Option<String>, // OpenAI-compatible endpoint for the LLM-judge (None = disabled)
+    pub judge_model: String,
+    pub judge_api_key: Option<String>,
 }
 
 impl AgentBackend for TensorZeroBackend {
@@ -102,12 +106,16 @@ impl AgentBackend for TensorZeroBackend {
         let url = format!("{}/inference", self.endpoint.trim_end_matches('/'));
         let function = self.function.clone();
         let timeout = self.timeout;
+        let tags = self.tags.clone();
         // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
         // relative to the gateway's clock — immune to Docker/WSL host↔container clock skew. The same id
         // is sent on every turn, so all inferences group into one episode (telemetry + feedback).
         let eid = backdated_episode_id(30);
         let chat = |messages: &[Value], _episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
-            let body = json!({ "function_name": function, "input": { "messages": messages }, "episode_id": eid });
+            let mut body = json!({ "function_name": function, "input": { "messages": messages }, "episode_id": eid });
+            if tags.as_object().is_some_and(|o| !o.is_empty()) {
+                body["tags"] = tags.clone();
+            }
             let resp = ureq::post(&url)
                 .timeout(timeout)
                 .set("Content-Type", "application/json")
@@ -132,12 +140,27 @@ impl AgentBackend for TensorZeroBackend {
 
         // Post Track-B feedback for this episode (best-effort; never fail the run on feedback error).
         {
+            // dedup surfaced titles by normalized form, first-occurrence order = the merged ranking
+            let mut seen = std::collections::HashSet::new();
+            let ranked: Vec<String> = outcome
+                .surfaced_titles
+                .iter()
+                .filter(|t| seen.insert(crate::score::normalize(t)))
+                .cloned()
+                .collect();
             let em = crate::score::exact_match(&pred, &q.answer);
             let f1 = crate::score::token_f1(&pred, &q.answer);
             let retrieved = retrieved_any(&outcome.surfaced_titles, &q.supporting_titles);
             self.feedback(&eid, "em", json!(em));
             self.feedback(&eid, "f1", json!(f1));
             self.feedback(&eid, "retrieved", json!(retrieved));
+            self.feedback(&eid, "recall_at_5", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 5)));
+            self.feedback(&eid, "recall_at_10", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 10)));
+            self.feedback(&eid, "recall_at_20", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 20)));
+            self.feedback(&eid, "mrr", json!(crate::score::mrr(&ranked, &q.supporting_titles)));
+            if let Some(j) = self.judge_score(&q.question, &q.answer, &pred) {
+                self.feedback(&eid, "judge", json!(j));
+            }
         }
         Ok(pred)
     }
@@ -146,12 +169,53 @@ impl AgentBackend for TensorZeroBackend {
 impl TensorZeroBackend {
     fn feedback(&self, episode_id: &str, metric: &str, value: Value) {
         let url = format!("{}/feedback", self.endpoint.trim_end_matches('/'));
-        let body = json!({ "episode_id": episode_id, "metric_name": metric, "value": value });
+        let mut body = json!({ "episode_id": episode_id, "metric_name": metric, "value": value });
+        if self.tags.as_object().is_some_and(|o| !o.is_empty()) {
+            body["tags"] = self.tags.clone();
+        }
         let _ = ureq::post(&url)
             .timeout(self.timeout)
             .set("Content-Type", "application/json")
             .send_string(&serde_json::to_string(&body).unwrap_or_default());
     }
+
+    /// LLM-judge: rate the candidate answer against the gold reference (0.0–1.0). None if the judge is
+    /// disabled or the call/parse fails. The right correctness metric for free-form answers (token-F1
+    /// is a poor fit for multi-sentence prose).
+    fn judge_score(&self, question: &str, gold: &str, answer: &str) -> Option<f32> {
+        let endpoint = self.judge_endpoint.as_ref()?;
+        let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+        let prompt = format!(
+            "You grade a candidate answer against a reference answer for a technical support question \
+             (industrial automation, АБАК PLC).\nQuestion: {question}\nReference (correct) answer: {gold}\n\
+             Candidate answer: {answer}\nHow correct is the candidate versus the reference? Reply with ONLY \
+             a number from 0.0 (wrong/contradictory) to 1.0 (fully correct/equivalent); partial credit \
+             allowed. Number only."
+        );
+        let body = json!({ "model": self.judge_model, "temperature": 0.0,
+            "messages": [{ "role": "user", "content": prompt }] });
+        let mut req = ureq::post(&url).timeout(self.timeout).set("Content-Type", "application/json");
+        if let Some(k) = &self.judge_api_key {
+            req = req.set("Authorization", &format!("Bearer {k}"));
+        }
+        let text = req.send_string(&serde_json::to_string(&body).ok()?).ok()?.into_string().ok()?;
+        let v: Value = serde_json::from_str(&text).ok()?;
+        let content = v["choices"][0]["message"]["content"].as_str()?;
+        parse_first_float(content).map(|f| f.clamp(0.0, 1.0))
+    }
+}
+
+/// First non-negative float found in a string (e.g. `0.8` from a judge reply). None if absent.
+fn parse_first_float(s: &str) -> Option<f32> {
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    num.parse::<f32>().ok()
 }
 
 /// A UUIDv7 episode id whose embedded timestamp is `secs_back` seconds in the PAST, so the gateway
@@ -191,6 +255,13 @@ mod retrieved_tests {
             .unwrap()
             .as_secs();
         assert!(secs <= now && secs + 120 >= now, "timestamp must be a few seconds in the PAST");
+    }
+
+    #[test]
+    fn parse_first_float_extracts_judge_score() {
+        assert_eq!(parse_first_float("0.8"), Some(0.8));
+        assert_eq!(parse_first_float("Score: 1.0 (fully correct)"), Some(1.0));
+        assert_eq!(parse_first_float("the answer is wrong"), None);
     }
 
     #[test]
