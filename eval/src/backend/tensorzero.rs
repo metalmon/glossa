@@ -163,7 +163,8 @@ impl AgentBackend for TensorZeroBackend {
         // Open the index once per question; the closure reuses it (cached reader) for every
         // search/read round instead of reopening per tool call.
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
-        let exec = |name: &str, args: &Value| crate::backend::glossa_tools::exec(name, args, &idx, &trace);
+        let graph = glossa::graph::store::GraphStore::open(work).ok();
+        let exec = |name: &str, args: &Value| crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &trace);
 
         let user = prompt::user_prompt(q);
         let outcome = run_episode(chat, &user, exec, MAX_ROUNDS)?;
