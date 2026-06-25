@@ -56,7 +56,10 @@ impl AgentBackend for OpenAiBackend {
         };
 
         let trace = TraceLog::to_dir(work);
-        let exec = |name: &str, args: &Value| execute_tool(name, args, work, &trace);
+        // Open the index once per question; the closure reuses it (cached reader) for every
+        // search/read in the agent loop instead of reopening per tool call.
+        let idx = glossa::index::store::DocIndex::open_or_create(work)?;
+        let exec = |name: &str, args: &Value| execute_tool(name, args, &idx, &trace);
 
         let messages = vec![
             json!({ "role": "system", "content": prompt::system_prompt() }),
@@ -164,8 +167,8 @@ fn parse_tool_args(call: &Value) -> Value {
 
 /// Execute one glossa tool in-process against the corpus in `work`, logging it to the trace
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
-fn execute_tool(name: &str, args: &Value, work: &Path, trace: &TraceLog) -> String {
-    crate::backend::glossa_tools::exec(name, args, work, trace).0
+fn execute_tool(name: &str, args: &Value, idx: &glossa::index::store::DocIndex, trace: &TraceLog) -> String {
+    crate::backend::glossa_tools::exec(name, args, idx, trace).0
 }
 
 #[cfg(test)]

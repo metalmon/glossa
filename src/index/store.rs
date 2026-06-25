@@ -7,7 +7,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, STORED, STRING};
 use tantivy::schema::Value;
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, TantivyDocument, TantivyError};
+use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -20,6 +20,10 @@ pub struct Fields {
 pub struct DocIndex {
     pub index: Index,
     pub fields: Fields,
+    /// Long-lived reader, reused across every search/read_chunk. Building a reader reopens the
+    /// segments, so doing it once per call (rather than per query) is what made repeated tool
+    /// calls on a shared index pay an open cost each time. Refreshed after writes via reload().
+    reader: IndexReader,
 }
 
 fn build_schema() -> (Schema, Fields) {
@@ -53,7 +57,8 @@ impl DocIndex {
         index
             .tokenizers()
             .register("multilang", multilang_analyzer(default_detector()));
-        Ok(DocIndex { index, fields })
+        let reader = index.reader()?;
+        Ok(DocIndex { index, fields, reader })
     }
 }
 
@@ -78,12 +83,12 @@ impl DocIndex {
             ))?;
         }
         writer.commit()?;
+        self.reader.reload()?;
         Ok(())
     }
 
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RankedHit>> {
-        let reader = self.index.reader()?;
-        let searcher = reader.searcher();
+        let searcher = self.reader.searcher();
         let parser = QueryParser::for_index(&self.index, vec![self.fields.body]);
         let parsed = parser.parse_query(query)?;
         let top = searcher.search(&parsed, &TopDocs::with_limit(limit).order_by_score())?;
@@ -113,8 +118,7 @@ impl DocIndex {
     /// file. This keeps `read` cheap on large bases where a single PDF may be hundreds of pages.
     pub fn read_chunk(&self, path: &str, location: &str) -> anyhow::Result<Option<String>> {
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-        let reader = self.index.reader()?;
-        let searcher = reader.searcher();
+        let searcher = self.reader.searcher();
         let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
             (
                 Occur::Must,
@@ -171,6 +175,7 @@ impl DocIndex {
         let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
         writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
         writer.commit()?;
+        self.reader.reload()?;
         Ok(())
     }
 }
