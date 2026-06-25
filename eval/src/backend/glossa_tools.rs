@@ -62,6 +62,23 @@ fn cap_read(text: String) -> String {
     }
 }
 
+/// Run a ripgrep-style exact/regex search over the extracted text; one line per match `path:#n: line`.
+pub fn run_grep(idx: &DocIndex, pattern: &str, opts: glossa::grep::GrepOpts, trace: &TraceLog) -> (String, Vec<String>) {
+    match glossa::grep::grep(idx, pattern, &opts) {
+        Ok(hits) => {
+            let titles: Vec<String> = hits.iter().map(|h| format!("#{}", h.ord)).collect();
+            trace.log("grep", json!({ "pattern": pattern }), json!({ "hits": hits.len() }));
+            let body = if hits.is_empty() {
+                "(no matches)".to_string()
+            } else {
+                hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n")
+            };
+            (body, titles)
+        }
+        Err(e) => (format!("grep error: {e}"), Vec::new()),
+    }
+}
+
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search).
 pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (String, Vec<String>) {
     match name {
@@ -74,6 +91,17 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (Stri
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let n = args.get("n").and_then(parse_n).unwrap_or(0);
             (run_read(idx, path, n, trace), Vec::new())
+        }
+        "grep" => {
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let opts = glossa::grep::GrepOpts {
+                ignore_case: args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false),
+                fixed: args.get("fixed").and_then(|v| v.as_bool()).unwrap_or(false),
+                word: args.get("word").and_then(|v| v.as_bool()).unwrap_or(false),
+                glob: args.get("glob").and_then(|v| v.as_str()).map(String::from),
+                file_type: args.get("file_type").and_then(|v| v.as_str()).map(String::from),
+            };
+            run_grep(idx, pattern, opts, trace)
         }
         other => (format!("unknown tool: {other}"), Vec::new()),
     }
@@ -102,5 +130,18 @@ mod tests {
         // stray string "p.7" -> digit-strip fallback -> 7
         let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, &trace).0;
         assert!(out2.contains("седьмая"), "digit-strip fallback: {out2}");
+    }
+
+    #[test]
+    fn grep_tool_finds_exact_token_via_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
+        ]).unwrap();
+        let trace = TraceLog::disabled();
+        let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, &trace).0;
+        assert!(out.contains("maxTsdr"), "got: {out}");
+        assert!(out.contains(":#7:"), "carries #n read key: {out}");
     }
 }

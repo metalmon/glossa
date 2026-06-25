@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "pattern": { "type": "string", "description": "ripgrep-style regex or literal to search for" },
+    "ignore_case": { "type": "boolean", "description": "case-insensitive matching (-i)" },
+    "fixed": { "type": "boolean", "description": "treat pattern as a fixed string, not regex (-F)" },
+    "word": { "type": "boolean", "description": "match whole words only (-w)" },
+    "glob": { "type": "string", "description": "path glob filter, e.g. *.pdf (-g)" },
+    "file_type": { "type": "string", "description": "file type filter, e.g. pdf (-t)" }
+  },
+  "required": ["pattern"]
+}
