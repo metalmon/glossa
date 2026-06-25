@@ -2,7 +2,7 @@ use crate::graph::agent::apply_upsert;
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
-use crate::read::{extract_images, read_region};
+use crate::read::extract_images;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -78,11 +78,10 @@ struct SearchArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadArgs {
-    #[schemars(description = "document path")]
+    #[schemars(description = "document path, exactly as shown in a search result")]
     path: String,
-    #[serde(default)]
-    #[schemars(description = "optional location (heading/sheet/page) substring")]
-    location: Option<String>,
+    #[schemars(description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)")]
+    n: u32,
     #[serde(default)]
     #[schemars(description = "include embedded images (default true)")]
     include_images: Option<bool>,
@@ -125,12 +124,20 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
-    #[tool(description = "Read a document (optionally a location), with embedded images for the agent's vision.")]
+    #[tool(description = "Read a document chunk by its number `n` (the `[#n]` shown in search results; for PDFs this is the page number). Returns the chunk text plus the numbers of the previous/next chunks for context expansion.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let path = std::path::PathBuf::from(&a.path);
-        let text = read_region(&path, a.location.as_deref()).map_err(internal)?;
-        self.trace.log("read", serde_json::json!({"path": a.path, "location": a.location}), serde_json::json!({"path": a.path}));
-        let mut content = vec![Content::text(text)];
+        let chunk = idx.read_chunk_by_ord(&a.path, a.n as u64).map_err(internal)?
+            .ok_or_else(|| McpError::invalid_params(format!("no chunk #{} in {}", a.n, a.path), None))?;
+        self.trace.log("read", serde_json::json!({"path": a.path, "n": a.n}), serde_json::json!({"path": a.path}));
+        let footer = match (chunk.prev, chunk.next) {
+            (Some(p), Some(n)) => format!("\n\n‹ prev #{p} · next #{n} ›"),
+            (None, Some(n)) => format!("\n\n‹ start of document · next #{n} ›"),
+            (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
+            (None, None) => String::new(),
+        };
+        let mut content = vec![Content::text(format!("{}{}", chunk.body, footer))];
         if a.include_images.unwrap_or(true) {
             for img in extract_images(&path, 8).map_err(internal)? {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
@@ -215,6 +222,20 @@ mod tests {
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].id, "a");
         assert!(a.edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_by_number_returns_body_and_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let path = dir.path().join("d.md").to_string_lossy().to_string();
+
+        let out = srv.read(Parameters(ReadArgs { path, n: 1, include_images: Some(false) })).await.unwrap();
+        let text = format!("{:?}", out);
+        assert!(text.contains("alpha"), "body present: {text}");
+        assert!(text.contains("#2") || text.contains("next"), "footer offers next: {text}");
     }
 
     #[test]
