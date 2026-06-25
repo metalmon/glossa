@@ -304,6 +304,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let mut stats = IndexStats::default();
     let mut next = Manifest::default();
 
+    let mut links: Vec<(String, String)> = Vec::new();
     eprintln!("indexing files under {}...", dir.display());
     crate::walk::walk_files(dir, None, true, &mut |path| {
         let path_str = path.to_string_lossy().to_string();
@@ -322,6 +323,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         let mut doc_written = false;
         let mut seq = 0u64;
         let mut prev_sec: Option<String> = None;
+        let mut file_links: Vec<String> = Vec::new();
         let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         // Index/graph write errors are intentionally not propagated here: one bad chunk must not
         // abort the whole run (matches the prior per-file behavior). The file is still recorded
@@ -348,9 +350,13 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &c.location) {
                 let _ = crate::graph::build::link_parent(&graph, &cur_id, &parent, sig, &path_str);
             }
+            file_links.extend(crate::extract::links::extract_links(&c.text));
             seen.insert(c.location.clone(), cur_id.clone());
             prev_sec = Some(cur_id);
         })?;
+        for t in file_links {
+            links.push((path_str.clone(), t));
+        }
         stats.added += 1;
         Ok(())
     })?;
@@ -360,6 +366,24 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, old_path.as_str()));
             graph.delete_by_source(old_path)?;
             stats.removed += 1;
+        }
+    }
+    // Cross-document REFERENCES: resolve collected link targets against indexed documents.
+    let mut by_canon: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+    for p in next.files.keys() {
+        if let Ok(c) = std::fs::canonicalize(p) {
+            by_canon.insert(c, p.clone());
+        }
+    }
+    for (src, target) in &links {
+        let src_dir = std::path::Path::new(src).parent().unwrap_or_else(|| std::path::Path::new("."));
+        if let Ok(canon) = std::fs::canonicalize(src_dir.join(target)) {
+            if let Some(dst) = by_canon.get(&canon) {
+                if dst != src {
+                    let sig = next.files.get(src).copied().unwrap_or(FileSig { mtime_secs: 0, size: 0 });
+                    let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
+                }
+            }
         }
     }
     writer.commit()?;
@@ -414,6 +438,19 @@ mod incremental_tests {
         let nab = crate::graph::traverse::neighbors(&g, &ab, None, 1).unwrap();
         assert!(nab.contains(&a), "A>B neighbors include parent A: {nab:?}");
         assert!(nab.contains(&ac), "A>B neighbors include next sibling A>C: {nab:?}");
+    }
+
+    #[test]
+    fn index_dir_builds_cross_document_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nsee [the manual](b.md) and [ext](https://x.com)\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let a = dir.path().join("a.md").to_string_lossy().to_string();
+        let b = dir.path().join("b.md").to_string_lossy().to_string();
+        let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
+        assert!(na.contains(&b), "a.md REFERENCES b.md: {na:?}");
     }
 
     #[test]
