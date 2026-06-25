@@ -1271,6 +1271,7 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

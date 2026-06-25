@@ -102,11 +102,12 @@ impl AgentBackend for TensorZeroBackend {
         let url = format!("{}/inference", self.endpoint.trim_end_matches('/'));
         let function = self.function.clone();
         let timeout = self.timeout;
-        let chat = |messages: &[Value], episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
-            let mut body = json!({ "function_name": function, "input": { "messages": messages } });
-            if let Some(eid) = episode_id {
-                body["episode_id"] = json!(eid);
-            }
+        // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
+        // relative to the gateway's clock — immune to Docker/WSL host↔container clock skew. The same id
+        // is sent on every turn, so all inferences group into one episode (telemetry + feedback).
+        let eid = backdated_episode_id(30);
+        let chat = |messages: &[Value], _episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
+            let body = json!({ "function_name": function, "input": { "messages": messages }, "episode_id": eid });
             let resp = ureq::post(&url)
                 .timeout(timeout)
                 .set("Content-Type", "application/json")
@@ -130,13 +131,13 @@ impl AgentBackend for TensorZeroBackend {
         let pred = prompt::parse_answer(&outcome.answer);
 
         // Post Track-B feedback for this episode (best-effort; never fail the run on feedback error).
-        if let Some(eid) = &outcome.episode_id {
+        {
             let em = crate::score::exact_match(&pred, &q.answer);
             let f1 = crate::score::token_f1(&pred, &q.answer);
             let retrieved = retrieved_any(&outcome.surfaced_titles, &q.supporting_titles);
-            self.feedback(eid, "em", json!(em));
-            self.feedback(eid, "f1", json!(f1));
-            self.feedback(eid, "retrieved", json!(retrieved));
+            self.feedback(&eid, "em", json!(em));
+            self.feedback(&eid, "f1", json!(f1));
+            self.feedback(&eid, "retrieved", json!(retrieved));
         }
         Ok(pred)
     }
@@ -153,6 +154,18 @@ impl TensorZeroBackend {
     }
 }
 
+/// A UUIDv7 episode id whose embedded timestamp is `secs_back` seconds in the PAST, so the gateway
+/// never rejects it as "in the future" under Docker/WSL host↔container clock skew. Reused across an
+/// episode's turns to keep all inferences grouped.
+fn backdated_episode_id(secs_back: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs().saturating_sub(secs_back);
+    let ts = uuid::Timestamp::from_unix(uuid::NoContext, secs, now.subsec_nanos());
+    uuid::Uuid::new_v7(ts).to_string()
+}
+
 /// True if any gold supporting title appears among the titles the agent's searches surfaced.
 /// Empty gold is trivially satisfied; an empty `surfaced` with real gold is NOT (it retrieved nothing).
 fn retrieved_any(surfaced: &[String], gold: &[String]) -> bool {
@@ -166,6 +179,19 @@ fn retrieved_any(surfaced: &[String], gold: &[String]) -> bool {
 #[cfg(test)]
 mod retrieved_tests {
     use super::*;
+
+    #[test]
+    fn backdated_episode_id_is_valid_past_v7() {
+        let id = backdated_episode_id(30);
+        let u = uuid::Uuid::parse_str(&id).unwrap();
+        assert_eq!(u.get_version_num(), 7, "must be UUIDv7");
+        let (secs, _) = u.get_timestamp().unwrap().to_unix();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(secs <= now && secs + 120 >= now, "timestamp must be a few seconds in the PAST");
+    }
 
     #[test]
     fn retrieved_any_semantics() {
