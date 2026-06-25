@@ -33,18 +33,35 @@ pub fn run_search(work: &Path, query: &str, limit: usize, trace: &TraceLog) -> (
 }
 
 /// Read a document (optionally a location); truncated to fit small-model context.
+///
+/// Fast path: when a `location` is given, serve the chunk's stored body straight from the index
+/// (a term lookup) instead of re-parsing the whole source file. On a large base a single PDF can
+/// be hundreds of pages, so re-extracting it per read is what leaves the GPU idle between
+/// inference bursts. On an index miss we fall back to re-parsing the file.
 pub fn run_read(work: &Path, path: &str, location: Option<&str>, trace: &TraceLog) -> String {
-    let _ = work; // path is absolute in search results
+    if let Some(loc) = location {
+        if let Ok(idx) = glossa::index::store::DocIndex::open_or_create(work) {
+            if let Ok(Some(body)) = idx.read_chunk(path, loc) {
+                trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
+                return cap_read(body);
+            }
+        }
+    }
     match glossa::read::read_region(Path::new(path), location) {
         Ok(text) => {
             trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
-            if text.chars().count() > READ_CHARS_CAP {
-                text.chars().take(READ_CHARS_CAP).collect::<String>() + "\n…(truncated)"
-            } else {
-                text
-            }
+            cap_read(text)
         }
         Err(e) => format!("read error: {e}"),
+    }
+}
+
+/// Truncate read output to fit a small model's context window.
+fn cap_read(text: String) -> String {
+    if text.chars().count() > READ_CHARS_CAP {
+        text.chars().take(READ_CHARS_CAP).collect::<String>() + "\n…(truncated)"
+    } else {
+        text
     }
 }
 
