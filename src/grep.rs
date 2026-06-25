@@ -7,6 +7,7 @@ use regex::RegexBuilder;
 
 #[derive(Debug, Default, Clone)]
 pub struct GrepOpts {
+    /// Case-insensitive matching (ripgrep -i): unconditional when set.
     pub ignore_case: bool,
     pub fixed: bool,
     pub word: bool,
@@ -30,7 +31,7 @@ impl GrepHit {
 
 /// Translate a shell glob (`*`, `?`) into an anchored regex over the whole path.
 fn glob_to_regex(glob: &str) -> Result<regex::Regex, regex::Error> {
-    let mut re = String::from("(?s)^");
+    let mut re = String::from("^");
     for ch in glob.chars() {
         match ch {
             '*' => re.push_str(".*"),
@@ -43,14 +44,13 @@ fn glob_to_regex(glob: &str) -> Result<regex::Regex, regex::Error> {
 }
 
 /// Build the line matcher from the pattern + flags. `-F` escapes the whole pattern, `-w` wraps it
-/// in word boundaries, `-i` (smart-case) folds when the pattern has no uppercase.
+/// in word boundaries, `-i` folds case unconditionally (ripgrep semantics).
 fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
     let mut body = if opts.fixed { regex::escape(pattern) } else { pattern.to_string() };
     if opts.word {
         body = format!(r"\b(?:{body})\b");
     }
-    let smart_case = opts.ignore_case && !pattern.chars().any(|c| c.is_uppercase());
-    let re = RegexBuilder::new(&body).case_insensitive(smart_case).build()?;
+    let re = RegexBuilder::new(&body).case_insensitive(opts.ignore_case).build()?;
     Ok(re)
 }
 
