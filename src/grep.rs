@@ -3,12 +3,14 @@
 //! all stored chunk bodies and confirms with the real `regex` engine. The trigram accelerator
 //! is added in v2.
 
+use crate::glob::glob_to_regex;
 use crate::index::store::DocIndex;
 use regex::RegexBuilder;
 
 #[derive(Debug, Default, Clone)]
 pub struct GrepOpts {
-    /// Case-insensitive matching (ripgrep -i): unconditional when set.
+    /// Force case-insensitive matching (-i). Matching is smart-case by default (case-insensitive
+    /// unless the pattern has an uppercase letter), so -i is only needed to force folding.
     pub ignore_case: bool,
     pub fixed: bool,
     pub word: bool,
@@ -30,28 +32,17 @@ impl GrepHit {
     }
 }
 
-/// Translate a shell glob (`*`, `?`) into an anchored regex over the whole path.
-fn glob_to_regex(glob: &str) -> Result<regex::Regex, regex::Error> {
-    let mut re = String::from("^");
-    for ch in glob.chars() {
-        match ch {
-            '*' => re.push_str(".*"),
-            '?' => re.push('.'),
-            c => re.push_str(&regex::escape(&c.to_string())),
-        }
-    }
-    re.push('$');
-    regex::Regex::new(&re)
-}
-
 /// Build the line matcher from the pattern + flags. `-F` escapes the whole pattern, `-w` wraps it
-/// in word boundaries, `-i` folds case unconditionally (ripgrep semantics).
+/// in word boundaries. Case folding is **smart-case** by default — case-insensitive unless the
+/// pattern contains an uppercase letter — so a lowercase query matches mixed-case text; `-i`
+/// forces folding unconditionally.
 fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
     let mut body = if opts.fixed { regex::escape(pattern) } else { pattern.to_string() };
     if opts.word {
         body = format!(r"\b(?:{body})\b");
     }
-    let re = RegexBuilder::new(&body).case_insensitive(opts.ignore_case).build()?;
+    let smart_case = !pattern.chars().any(|c| c.is_uppercase());
+    let re = RegexBuilder::new(&body).case_insensitive(opts.ignore_case || smart_case).build()?;
     Ok(re)
 }
 
