@@ -101,6 +101,27 @@ struct NameArg { name: String }
 struct Empty {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct GrepArgs {
+    #[schemars(description = "ripgrep-style regex pattern (literal text also works)")]
+    pattern: String,
+    #[serde(default)]
+    #[schemars(description = "case-insensitive matching (-i)")]
+    ignore_case: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "treat the pattern as a fixed string, not a regex (-F)")]
+    fixed: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "match whole words only (-w)")]
+    word: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "only files whose path matches this glob, e.g. *.pdf (-g)")]
+    glob: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "only this file type, e.g. pdf (-t)")]
+    file_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct GraphUpsertArgs {
     #[serde(default)]
     nodes: Vec<crate::graph::agent::NodeSpec>,
@@ -189,6 +210,23 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(format!("upserted {n} nodes, {e} edges"))]))
     }
 
+    #[tool(description = "Exact/regex search (ripgrep syntax) over the knowledge base's extracted text, across all formats. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`. Use this for exact tokens, codes, and identifiers that keyword `search` may blur.")]
+    async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let opts = crate::grep::GrepOpts {
+            ignore_case: a.ignore_case.unwrap_or(false),
+            fixed: a.fixed.unwrap_or(false),
+            word: a.word.unwrap_or(false),
+            glob: a.glob,
+            file_type: a.file_type,
+        };
+        let hits = crate::grep::grep(&idx, &a.pattern, &opts).map_err(internal)?;
+        self.trace.log("grep", serde_json::json!({"pattern": a.pattern}), serde_json::json!({"hits": hits.len()}));
+        let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
+        let body = if body.is_empty() { "(no matches)".to_string() } else { body };
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
     #[tool(description = "Delete the index + graph for the knowledge base.")]
     async fn purge(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
         let g = self.root.join(".glossa");
@@ -234,6 +272,19 @@ mod tests {
         let text = format!("{:?}", out);
         assert!(text.contains("alpha"), "body present: {text}");
         assert!(text.contains("#2") || text.contains("next"), "footer offers next: {text}");
+    }
+
+    #[tokio::test]
+    async fn grep_tool_finds_literal_across_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("d.md"), b"# A\nmaxTsdr 3000\n# B\nother\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let out = srv.grep(Parameters(GrepArgs {
+            pattern: "maxTsdr".into(), ignore_case: None, fixed: None, word: None, glob: None, file_type: None,
+        })).await.unwrap();
+        assert!(format!("{:?}", out).contains("maxTsdr"));
+        assert!(format!("{:?}", out).contains(":#")); // carries the #n read key
     }
 
     #[test]

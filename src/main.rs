@@ -74,6 +74,18 @@ enum Cmd {
         #[command(subcommand)]
         action: GraphAction,
     },
+    /// Exact/regex (ripgrep-style) search over the extracted text.
+    Grep {
+        /// regex or literal pattern
+        pattern: String,
+        /// knowledge-base directory
+        path: std::path::PathBuf,
+        #[arg(short = 'i', long, help = "case-insensitive matching (-i)")] ignore_case: bool,
+        #[arg(short = 'F', long)] fixed: bool,
+        #[arg(short = 'w', long)] word: bool,
+        #[arg(short = 'g', long)] glob: Option<String>,
+        #[arg(short = 't', long = "type")] file_type: Option<String>,
+    },
     /// Run the MCP server over stdio (for AI agents).
     Mcp {
         path: Option<PathBuf>,
@@ -236,6 +248,14 @@ fn main() -> anyhow::Result<()> {
             let path = glossa::root::resolve_root(path);
             let stats = glossa::index::store::index_dir(&path, true)?;
             println!("reindexed: {} files", stats.added);
+            Ok(())
+        }
+        Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
+            let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+            let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
+            for h in glossa::grep::grep(&idx, &pattern, &opts)? {
+                println!("{}", h.display_line());
+            }
             Ok(())
         }
         Cmd::Mcp { path, profile, trace, no_graph } => {
