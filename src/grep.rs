@@ -71,8 +71,14 @@ fn required_literal(pattern: &str, opts: &GrepOpts) -> Option<String> {
     if !seq.is_exact() || lits.is_empty() {
         return None;
     }
-    // The literals are alternative required prefixes; pick the first that is long enough (>=3
-    // chars) to be a selective whole-token query. If none qualifies, return None -> full scan.
+    // Alternations produce multiple required literals; using just one would silently drop chunks
+    // matched only by the other alternatives. Only allow the prefilter when there is exactly one
+    // required literal.
+    if lits.len() != 1 {
+        return None; // alternations / multiple required literals: full-scan is the only sound choice
+    }
+    // The literal is a required prefix; pick it if it is long enough (>=3 chars) to be a
+    // selective whole-token query. If it doesn't qualify, return None -> full scan.
     lits.iter()
         .map(|l| String::from_utf8_lossy(l.as_bytes()).to_string())
         .find(|s| s.chars().count() >= 3)
@@ -169,5 +175,19 @@ mod tests {
         let hits = grep(&idx, "регистрация", &GrepOpts { ignore_case: true, ..Default::default() }).unwrap();
         let paths: std::collections::BTreeSet<_> = hits.iter().map(|h| h.path.clone()).collect();
         assert_eq!(paths, ["a.md".to_string(), "c.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn grep_alternation_prefilter_is_sound() {
+        let (_d, idx) = idx_with(&[
+            ("a.md", "S1", "md", "выполнена регистрация устройства"),
+            ("b.md", "S1", "md", "сторонний компонент"),
+            ("c.md", "S1", "md", "обновлённый компонент системы"),
+        ]);
+        // Alternation: must find BOTH the "регистрация" chunk and a "компонент" chunk — the
+        // prefilter must NOT pick one literal and drop the other's matches.
+        let hits = grep(&idx, "регистрация|компонент", &GrepOpts { ignore_case: true, ..Default::default() }).unwrap();
+        let paths: std::collections::BTreeSet<_> = hits.iter().map(|h| h.path.clone()).collect();
+        assert_eq!(paths, ["a.md".to_string(), "b.md".to_string(), "c.md".to_string()].into_iter().collect());
     }
 }
