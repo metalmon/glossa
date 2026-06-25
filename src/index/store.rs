@@ -240,6 +240,21 @@ fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
 }
 
 impl DocIndex {
+    /// Visit every stored chunk: `f(path, ord, file_type, body)`. Used by grep's full scan.
+    pub fn iter_chunks(&self, mut f: impl FnMut(&str, u64, &str, &str)) -> anyhow::Result<()> {
+        use tantivy::collector::DocSetCollector;
+        use tantivy::query::AllQuery;
+        let searcher = self.reader.searcher();
+        let docs = searcher.search(&AllQuery, &DocSetCollector)?;
+        for addr in docs {
+            let d: TantivyDocument = searcher.doc(addr)?;
+            let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
+            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
+            f(s(self.fields.path), ord, s(self.fields.file_type), s(self.fields.body));
+        }
+        Ok(())
+    }
+
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
         let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
         writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
@@ -463,6 +478,20 @@ mod search_tests {
         assert_eq!(first.next, Some(2));
 
         assert!(idx.read_chunk_by_ord("d.md", 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn iter_chunks_visits_every_stored_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("a.md"), location: "S1".into(), file_type: "md".into(), text: "alpha".into() },
+            Chunk { doc_path: PathBuf::from("a.md"), location: "S2".into(), file_type: "md".into(), text: "beta".into() },
+        ]).unwrap();
+        let mut seen: Vec<(u64, String)> = Vec::new();
+        idx.iter_chunks(|_path, ord, _ft, body| seen.push((ord, body.to_string()))).unwrap();
+        seen.sort();
+        assert_eq!(seen, vec![(1, "alpha".to_string()), (2, "beta".to_string())]);
     }
 }
 
