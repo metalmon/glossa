@@ -66,7 +66,7 @@ extra_body = [
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
-tools = ["search", "read", "grep"]
+tools = ["search", "read", "grep", "glob"]
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
 [functions.answer_hotpot.variants.baseline]
@@ -88,6 +88,10 @@ parameters = "tools/read.json"
 [tools.grep]
 description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. maxTsdr, 5.7.2, AbakController). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword search). For fuzzy/conceptual lookup, use search. Returns `path:#n: line`; read with read(path, n)."
 parameters = "tools/grep.json"
+
+[tools.glob]
+description = "List knowledge-base documents whose path matches a shell glob (e.g. *.pdf, *Safety*, *АБАК*). Returns `path  (N chunks)` per line — discover what documents exist or find a file by name, then read(path, n) or scope a search/grep to it."
+parameters = "tools/glob.json"
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
 [metrics.em]
