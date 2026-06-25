@@ -81,6 +81,13 @@ Observed during real-domain eval runs:
 ### 3.3 `grep(pattern, …flags)` — NEW: ripgrep literal/regex, File-First
 - Exact/regex search via the **`regex` crate (the same engine ripgrep uses)** — `grep` is
   self-documenting to any model. Output `…:#n: matched line` (same `[#n]` read key).
+- **Searches every format uniformly (pdf, doc/docx, xlsx, md, …).** It runs over the **text
+  glossa already extracted** from each file at index time (stored as the chunk `body`), so a
+  regex matches inside a PDF page and a DOCX section the same way. Unlike ugrep — which greps raw
+  files and needs **external filters** (`pdftotext`/`pandoc`) for PDF/office — glossa's native
+  pure-Rust extractors mean grep is offline and filter-free across all formats. **Caveat:** grep
+  matches only *extractable* text; a scanned/image-only PDF with no text layer has nothing to
+  grep (OCR is out of scope — the same limitation ugrep has without OCR).
 - **v1 = no new index** (research §2.A): parse `pattern` → HIR; extract required literals with
   `regex_syntax::hir::literal::Extractor`; **metadata-prefilter** candidate chunks by `path`/
   `file_type` (`-g`/`-t`); **BM25 word-token prefilter** over the existing tantivy `body` *only
