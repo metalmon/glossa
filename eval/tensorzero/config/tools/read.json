@@ -1,17 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "description": "Read a document's text, optionally narrowed to a location.",
   "properties": {
-    "path": {
-      "type": "string",
-      "description": "Document path returned by a search result."
-    },
-    "location": {
-      "type": "string",
-      "description": "Optional heading/page/sheet substring to narrow the read."
-    }
+    "path": { "type": "string", "description": "document path, exactly as shown in a search result" },
+    "n": { "type": "integer", "description": "chunk number to read, exactly as shown in [#n] in a search result (page number for PDFs)" }
   },
-  "required": ["path"],
-  "additionalProperties": false
+  "required": ["path", "n"]
 }

@@ -1,7 +1,6 @@
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
-use std::path::Path;
 
 const READ_CHARS_CAP: usize = 4000;
 
@@ -21,35 +20,35 @@ pub fn run_search(idx: &DocIndex, query: &str, limit: usize, trace: &TraceLog) -
             if hits.is_empty() {
                 return ("(no results)".to_string(), titles);
             }
-            let body = hits
-                .iter()
-                .map(|h| format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n");
             (body, titles)
         }
         Err(e) => (format!("search error: {e}"), Vec::new()),
     }
 }
 
-/// Read a document (optionally a location); truncated to fit small-model context.
-///
-/// Fast path: when a `location` is given, serve the chunk's stored body straight from the index
-/// (a term lookup) instead of re-parsing the whole source file. On a large base a single PDF can
-/// be hundreds of pages, so re-extracting it per read is what leaves the GPU idle between
-/// inference bursts. On an index miss we fall back to re-parsing the file.
-pub fn run_read(idx: &DocIndex, path: &str, location: Option<&str>, trace: &TraceLog) -> String {
-    if let Some(loc) = location {
-        if let Ok(Some(body)) = idx.read_chunk(path, loc) {
-            trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
-            return cap_read(body);
+/// Parse the model's `n` argument: a JSON integer, or any string we strip to its digits
+/// (e.g. "p.7" -> 7). None if no digits are present.
+fn parse_n(v: &Value) -> Option<u64> {
+    if let Some(n) = v.as_u64() { return Some(n); }
+    let s: String = v.as_str()?.chars().filter(|c| c.is_ascii_digit()).collect();
+    s.parse::<u64>().ok()
+}
+
+/// Read a chunk by (path, number n) from the index; truncated to fit small-model context.
+pub fn run_read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> String {
+    match idx.read_chunk_by_ord(path, n) {
+        Ok(Some(c)) => {
+            trace.log("read", json!({ "path": path, "n": n }), json!({ "path": path }));
+            let footer = match (c.prev, c.next) {
+                (Some(p), Some(nx)) => format!("\n‹ prev #{p} · next #{nx} ›"),
+                (None, Some(nx)) => format!("\n‹ start · next #{nx} ›"),
+                (Some(p), None) => format!("\n‹ prev #{p} · end ›"),
+                (None, None) => String::new(),
+            };
+            cap_read(c.body) + &footer
         }
-    }
-    match glossa::read::read_region(Path::new(path), location) {
-        Ok(text) => {
-            trace.log("read", json!({ "path": path, "location": location }), json!({ "path": path }));
-            cap_read(text)
-        }
+        Ok(None) => format!("no chunk #{n} in {path}"),
         Err(e) => format!("read error: {e}"),
     }
 }
@@ -73,9 +72,35 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, trace: &TraceLog) -> (Stri
         }
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let location = args.get("location").and_then(|v| v.as_str());
-            (run_read(idx, path, location, trace), Vec::new())
+            let n = args.get("n").and_then(parse_n).unwrap_or(0);
+            (run_read(idx, path, n, trace), Vec::new())
         }
         other => (format!("unknown tool: {other}"), Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glossa::index::store::DocIndex;
+    use glossa::model::Chunk;
+    use glossa::trace::TraceLog;
+    use std::path::PathBuf;
+
+    #[test]
+    fn read_accepts_integer_or_digit_string_and_returns_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "седьмая страница".into() },
+        ]).unwrap();
+        let trace = TraceLog::disabled();
+
+        // integer n
+        let out = exec("read", &json!({"path": "d.pdf", "n": 7}), &idx, &trace).0;
+        assert!(out.contains("седьмая"), "got: {out}");
+        // stray string "p.7" -> digit-strip fallback -> 7
+        let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, &trace).0;
+        assert!(out2.contains("седьмая"), "digit-strip fallback: {out2}");
     }
 }
