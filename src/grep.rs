@@ -1,6 +1,6 @@
 //! Ripgrep-style literal/regex search over the extracted text stored in the index (File-First:
 //! the index is a disposable accelerator; canonical content is the file). v1 scans all stored
-//! chunk bodies and confirms with the real `regex` engine. The trigram accelerator is Step 2.
+//! chunk bodies and confirms with the real `regex` engine. The BM25 prefilter is added in v2.
 
 use crate::index::store::DocIndex;
 use regex::RegexBuilder;
@@ -54,26 +54,50 @@ fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex>
     Ok(re)
 }
 
+/// The longest exact literal required by every match of `pattern` (used to prefilter via the
+/// word-token index). None when the regex has no useful required literal (-> full scan).
+fn required_literal(pattern: &str, opts: &GrepOpts) -> Option<String> {
+    if opts.ignore_case && pattern.chars().any(|c| c.is_uppercase()) {
+        // mixed-case + case-insensitive: token-level prefilter would be unsound; skip it.
+        return None;
+    }
+    let pat = if opts.fixed { regex::escape(pattern) } else { pattern.to_string() };
+    let hir = regex_syntax::parse(&pat).ok()?;
+    let mut ext = regex_syntax::hir::literal::Extractor::new();
+    ext.kind(regex_syntax::hir::literal::ExtractKind::Prefix);
+    let seq = ext.extract(&hir);
+    let lits = seq.literals()?;
+    // Require an exact, non-cut prefix set so the literal is genuinely required by all matches.
+    if !seq.is_exact() || lits.is_empty() {
+        return None;
+    }
+    // The literals are alternative required prefixes; pick the first that is long enough (>=3
+    // chars) to be a selective whole-token query. If none qualifies, return None -> full scan.
+    lits.iter()
+        .map(|l| String::from_utf8_lossy(l.as_bytes()).to_string())
+        .find(|s| s.chars().count() >= 3)
+}
+
 pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Vec<GrepHit>> {
     let matcher = build_matcher(pattern, opts)?;
-    let glob_re = match &opts.glob {
-        Some(g) => Some(glob_to_regex(g)?),
-        None => None,
-    };
+    let glob_re = match &opts.glob { Some(g) => Some(glob_to_regex(g)?), None => None };
     let mut hits = Vec::new();
-    idx.iter_chunks(|path, ord, file_type, body| {
-        if let Some(ft) = &opts.file_type {
-            if file_type != ft { return; }
-        }
-        if let Some(gr) = &glob_re {
-            if !gr.is_match(path) { return; }
-        }
+    let mut visit = |path: &str, ord: u64, file_type: &str, body: &str| {
+        if let Some(ft) = &opts.file_type { if file_type != ft { return; } }
+        if let Some(gr) = &glob_re { if !gr.is_match(path) { return; } }
         for line in body.lines() {
             if matcher.is_match(line) {
                 hits.push(GrepHit { path: path.to_string(), ord, line: line.trim().to_string() });
             }
         }
-    })?;
+    };
+    let prefiltered = match required_literal(pattern, opts) {
+        Some(lit) => idx.iter_chunks_matching_term(&lit, &mut visit)?,
+        None => false,
+    };
+    if !prefiltered {
+        idx.iter_chunks(&mut visit)?;
+    }
     Ok(hits)
 }
 
@@ -131,5 +155,19 @@ mod tests {
         // -w word boundary: "договор" as a whole word does NOT match inside "договоры"
         let w = grep(&idx, "договор", &GrepOpts { ignore_case: true, word: true, ..Default::default() }).unwrap();
         assert_eq!(w.iter().filter(|h| h.path == "b.md").count(), 0);
+    }
+
+    #[test]
+    fn grep_prefilter_matches_fullscan_results() {
+        // A regex with a long literal token uses the BM25 prefilter; results must equal the
+        // full-scan results (the prefilter is an optimization, never changes correctness).
+        let (_d, idx) = idx_with(&[
+            ("a.md", "S1", "md", "регистрация устройства завершена"),
+            ("b.md", "S1", "md", "несвязанный текст без слова"),
+            ("c.md", "S2", "md", "повторная регистрация устройства"),
+        ]);
+        let hits = grep(&idx, "регистрация", &GrepOpts { ignore_case: true, ..Default::default() }).unwrap();
+        let paths: std::collections::BTreeSet<_> = hits.iter().map(|h| h.path.clone()).collect();
+        assert_eq!(paths, ["a.md".to_string(), "c.md".to_string()].into_iter().collect());
     }
 }
