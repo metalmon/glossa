@@ -17,7 +17,6 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 ignore = "0.4"
 regex = "1"
-regex-syntax = "0.8"
 globset = "0.4"
 office_oxide = "0.1"
 oxidize-pdf = "2"
