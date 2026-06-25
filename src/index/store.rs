@@ -158,6 +158,47 @@ impl DocIndex {
     }
 }
 
+/// A chunk read by its canonical number, with the numbers of its in-document neighbors.
+pub struct ChunkRead {
+    pub body: String,
+    pub prev: Option<u64>,
+    pub next: Option<u64>,
+}
+
+impl DocIndex {
+    /// Fetch a chunk's stored body by exact (path, ord). Reports whether ord-1 / ord+1 exist in
+    /// the same document, so the caller can offer "next/previous chunk" navigation. None if no
+    /// chunk with that (path, ord) is indexed.
+    pub fn read_chunk_by_ord(&self, path: &str, n: u64) -> anyhow::Result<Option<ChunkRead>> {
+        let body = match self.ord_body(path, n)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let prev = if n > 1 && self.ord_body(path, n - 1)?.is_some() { Some(n - 1) } else { None };
+        let next = if self.ord_body(path, n + 1)?.is_some() { Some(n + 1) } else { None };
+        Ok(Some(ChunkRead { body, prev, next }))
+    }
+
+    fn ord_body(&self, path: &str, n: u64) -> anyhow::Result<Option<String>> {
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_u64(self.fields.ord, n), IndexRecordOption::Basic))),
+        ];
+        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        match top.first() {
+            Some((_score, addr)) => {
+                let d: TantivyDocument = searcher.doc(*addr)?;
+                Ok(Some(d.get_first(self.fields.body).and_then(|v| v.as_str()).unwrap_or("").to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 /// The chunk's single canonical number within its document: the page number for PDFs
 /// (parsed from the `p.N` location), otherwise the 1-based sequence position `seq`.
 pub fn chunk_ord(file_type: &str, location: &str, seq: u64) -> u64 {
@@ -377,6 +418,27 @@ mod search_tests {
         assert_eq!(idx.read_chunk("doc.pdf", "p.2").unwrap().as_deref(), Some("second page body"));
         // Unknown location -> None, so the caller falls back to reading the file.
         assert_eq!(idx.read_chunk("doc.pdf", "p.99").unwrap(), None);
+    }
+
+    #[test]
+    fn read_chunk_by_ord_returns_body_and_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let sec = |loc: &str, t: &str| Chunk {
+            doc_path: PathBuf::from("d.md"), location: loc.into(), file_type: "md".into(), text: t.into(),
+        };
+        idx.write_chunks(&[sec("A", "alpha"), sec("B", "bravo"), sec("C", "charlie")]).unwrap();
+
+        let mid = idx.read_chunk_by_ord("d.md", 2).unwrap().unwrap();
+        assert_eq!(mid.body, "bravo");
+        assert_eq!(mid.prev, Some(1));
+        assert_eq!(mid.next, Some(3));
+
+        let first = idx.read_chunk_by_ord("d.md", 1).unwrap().unwrap();
+        assert_eq!(first.prev, None);
+        assert_eq!(first.next, Some(2));
+
+        assert!(idx.read_chunk_by_ord("d.md", 99).unwrap().is_none());
     }
 }
 
