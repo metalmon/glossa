@@ -159,4 +159,13 @@ mod tests {
         let paths: std::collections::BTreeSet<_> = hits.iter().map(|h| h.path.clone()).collect();
         assert_eq!(paths, ["a.md".to_string(), "b.md".to_string(), "c.md".to_string()].into_iter().collect());
     }
+
+    #[test]
+    fn grep_smart_case_default_folds_lowercase_only() {
+        let (_d, idx) = idx_with(&[("d.pdf", "p.1", "pdf", "Контроллер АБАК подключён")]);
+        // lowercase pattern, no -i: smart-case folds case -> matches the uppercase "АБАК"
+        assert_eq!(grep(&idx, "абак", &GrepOpts::default()).unwrap().len(), 1);
+        // pattern WITH an uppercase letter, no -i: smart-case stays case-sensitive -> "Абак" != "АБАК"
+        assert_eq!(grep(&idx, "Абак", &GrepOpts::default()).unwrap().len(), 0);
+    }
 }
