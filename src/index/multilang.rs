@@ -116,6 +116,19 @@ pub fn multilang_analyzer(detect: DetectFn) -> TextAnalyzer {
         .build()
 }
 
+/// Analyze a string into its stemmed, lower-cased terms using the SAME pipeline as the
+/// search index (split → lowercase → multilingual stem). Lets non-index callers (e.g.
+/// graph entity resolution) match query/label terms with search-consistent morphology.
+pub fn analyze_terms(text: &str) -> Vec<String> {
+    let mut analyzer = multilang_analyzer(default_detector());
+    let mut ts = analyzer.token_stream(text);
+    let mut out = Vec::new();
+    while ts.advance() {
+        out.push(ts.token().text.clone());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
