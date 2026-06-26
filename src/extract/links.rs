@@ -10,11 +10,16 @@ use std::sync::OnceLock;
 pub fn extract_links(text: &str) -> Vec<String> {
     static MD: OnceLock<Regex> = OnceLock::new();
     static HTML: OnceLock<Regex> = OnceLock::new();
-    let md = MD.get_or_init(|| Regex::new(r"\[[^\]]*\]\(([^)\s]+)\)").unwrap());
+    // Capture an optional leading `!` so image embeds `![alt](img.png)` can be skipped — they
+    // are not document references.
+    let md = MD.get_or_init(|| Regex::new(r"(!?)\[[^\]]*\]\(([^)\s]+)\)").unwrap());
     let html = HTML.get_or_init(|| Regex::new(r#"(?i)href\s*=\s*["']([^"']+)["']"#).unwrap());
     let mut out = Vec::new();
     for caps in md.captures_iter(text) {
-        if let Some(m) = caps.get(1) { push_if_local(m.as_str(), &mut out); }
+        if caps.get(1).is_some_and(|b| !b.as_str().is_empty()) {
+            continue; // image embed, not a link
+        }
+        if let Some(m) = caps.get(2) { push_if_local(m.as_str(), &mut out); }
     }
     for caps in html.captures_iter(text) {
         if let Some(m) = caps.get(1) { push_if_local(m.as_str(), &mut out); }
@@ -54,5 +59,12 @@ mod tests {
         assert!(links.contains(&"d.md".to_string()), "trailing #anchor stripped");
         assert!(!links.iter().any(|l| l.contains("x.com")), "external excluded");
         assert!(!links.iter().any(|l| l.starts_with('#')), "anchor excluded");
+    }
+
+    #[test]
+    fn image_embeds_are_not_links() {
+        let links = extract_links("![diagram](pic.png) but [real](doc.md)");
+        assert!(links.contains(&"doc.md".to_string()), "real link kept");
+        assert!(!links.iter().any(|l| l.contains("pic.png")), "image embed excluded");
     }
 }

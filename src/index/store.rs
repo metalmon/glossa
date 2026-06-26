@@ -379,7 +379,9 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         let src_dir = std::path::Path::new(src).parent().unwrap_or_else(|| std::path::Path::new("."));
         if let Ok(canon) = std::fs::canonicalize(src_dir.join(target)) {
             if let Some(dst) = by_canon.get(&canon) {
-                if dst != src {
+                // Only link to a real Document node — a file with no extractable chunks is in
+                // `next.files` but never got a node (build_document fires on the first chunk).
+                if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
                     let sig = next.files.get(src).copied().unwrap_or(FileSig { mtime_secs: 0, size: 0 });
                     let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
                 }
@@ -451,6 +453,7 @@ mod incremental_tests {
         let b = dir.path().join("b.md").to_string_lossy().to_string();
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
         assert!(na.contains(&b), "a.md REFERENCES b.md: {na:?}");
+        assert!(!na.iter().any(|n| n.contains("x.com")), "external URL is not a REFERENCES edge: {na:?}");
     }
 
     #[test]
