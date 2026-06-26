@@ -142,25 +142,25 @@ struct GrepArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphUpsertArgs {
     #[serde(default)]
-    nodes: Vec<crate::graph::agent::NodeSpec>,
+    nodes: Vec<crate::graph::ops::UpsertNode>,
     #[serde(default)]
-    edges: Vec<crate::graph::agent::EdgeSpec>,
+    edges: Vec<crate::graph::ops::UpsertEdge>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphDeleteEdge {
-    #[schemars(description = "id or label of the source node")]
+    #[schemars(description = "label of the source node")]
     from: String,
     #[schemars(description = "the edge type, e.g. RESOLVED_BY")]
     edge_type: String,
-    #[schemars(description = "id or label of the target node")]
+    #[schemars(description = "label of the target node")]
     to: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphDeleteArgs {
     #[serde(default)]
-    #[schemars(description = "ids or labels of reasoning nodes to remove")]
+    #[schemars(description = "labels of reasoning nodes to remove")]
     nodes: Vec<String>,
     #[serde(default)]
     edges: Vec<GraphDeleteEdge>,
@@ -168,7 +168,7 @@ struct GraphDeleteArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphUpdateNode {
-    #[schemars(description = "current id (as used in graph_upsert) or label of the node to edit")]
+    #[schemars(description = "current label of the node to edit")]
     label: String,
     #[serde(default)]
     #[schemars(description = "new label, if renaming")]
@@ -239,7 +239,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
     }
 
-    #[tool(description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance. Write each label as a broad, reusable CLASS in the knowledge base's language (not the specifics of one case). A Resolution label names the FIX ACTION — e.g. 'increase the retransmit timeout' — never the concrete value; keep concrete values (numbers, codes) in the document that a MENTIONS edge anchors. Send a node and the edges referencing it in the same call so both endpoints exist; nodes with the same type+label are merged.")]
+    #[tool(description = "Create/update reasoning nodes and directed edges. A node carries a `label` (NO id — the system derives the id and de-duplicates by label) plus `node_type` and `source_path`. Reference nodes in `edges` by their `label` (or a section as `<path>#<n>`). A Resolution label names the fix ACTION, never the literal value; write labels as a broad reusable class in the knowledge base's language. Send a node and the edges referencing it in the same call so both endpoints exist.")]
     async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -252,7 +252,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(out.message)]))
     }
 
-    #[tool(description = "Remove reasoning nodes/edges from the graph by id or label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
+    #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
     async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
@@ -263,7 +263,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its id (as used in graph_upsert) or its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
+    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
     async fn graph_update(&self, Parameters(a): Parameters<GraphUpdateArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ups: Vec<crate::graph::agent::NodeUpdate> = a.nodes
@@ -313,10 +313,10 @@ mod tests {
 
     #[test]
     fn graph_upsert_args_deserialize_from_json() {
-        let json = r#"{"nodes":[{"id":"a","node_type":"Document","label":"a","source_path":"a.md"}],"edges":[]}"#;
+        let json = r#"{"nodes":[{"node_type":"Document","label":"a","source_path":"a.md"}],"edges":[]}"#;
         let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
         assert_eq!(a.nodes.len(), 1);
-        assert_eq!(a.nodes[0].id, "a");
+        assert_eq!(a.nodes[0].label, "a");
         assert!(a.edges.is_empty());
     }
 

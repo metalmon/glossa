@@ -149,15 +149,15 @@ description = "List existing graph nodes whose label matches a concept, one per 
 parameters = "tools/glossary.json"
 
 [tools.graph_delete]
-description = "Remove reasoning nodes/edges from the graph by id or label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
+description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
 parameters = "tools/graph_delete.json"
 
 [tools.graph_update]
-description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its id (as used in graph_upsert) or its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
+description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
 parameters = "tools/graph_update.json"
 
 [tools.graph_upsert]
-description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance. Write each label as a broad, reusable CLASS in the knowledge base's language (not the specifics of one case). A Resolution label names the FIX ACTION — e.g. 'increase the retransmit timeout' — never the concrete value; keep concrete values (numbers, codes) in the document that a MENTIONS edge anchors. Send a node and the edges referencing it in the same call so both endpoints exist; nodes with the same type+label are merged."
+description = "Create/update reasoning nodes and directed edges. A node carries a `label` (NO id — the system derives the id and de-duplicates by label) plus `node_type` and `source_path`. Reference nodes in `edges` by their `label` (or a section as `<path>#<n>`). A Resolution label names the fix ACTION, never the literal value; write labels as a broad reusable class in the knowledge base's language. Send a node and the edges referencing it in the same call so both endpoints exist."
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
