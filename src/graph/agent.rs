@@ -130,35 +130,42 @@ pub struct EdgeRef {
 
 /// Delete nodes and/or edges by label. Node deletion also removes all attached edges.
 /// Returns total entries (nodes + edges) removed.
+/// Resolve a node reference that may be either an id (as assigned in `graph_upsert`) or a label,
+/// to the matching node ids. An exact id wins; otherwise every node whose normalized label matches.
+/// Keeps the CRUD tools consistent — the agent can delete/update a node by the same id it used when
+/// creating it (which is what it naturally does) OR by the human label.
+fn resolve_node_ref(g: &GraphStore, reference: &str) -> anyhow::Result<Vec<String>> {
+    if g.get_node(reference)?.is_some() {
+        return Ok(vec![reference.to_string()]);
+    }
+    let norm = normalize_label(reference);
+    Ok(g
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| normalize_label(&n.label) == norm)
+        .map(|n| n.id)
+        .collect())
+}
+
 pub fn apply_delete(
     g: &GraphStore,
-    node_labels: Vec<String>,
+    node_refs: Vec<String>,
     edges: Vec<EdgeRef>,
 ) -> anyhow::Result<usize> {
     let mut total = 0;
 
-    // Delete every node whose normalized label matches any of the given labels.
-    for label in &node_labels {
-        let norm = normalize_label(label);
-        let matching: Vec<String> = g
-            .all_nodes()?
-            .into_iter()
-            .filter(|n| normalize_label(&n.label) == norm)
-            .map(|n| n.id)
-            .collect();
-        for id in matching {
+    // Delete every node matching each reference (id or label).
+    for reference in &node_refs {
+        for id in resolve_node_ref(g, reference)? {
             total += g.delete_node(&id)?;
         }
     }
 
-    // Delete individual edges identified by label-pairs.
+    // Delete individual edges identified by (id-or-label) endpoint pairs.
     for er in &edges {
-        let from_norm = normalize_label(&er.from);
-        let to_norm = normalize_label(&er.to);
-        let all = g.all_nodes()?;
-        let from_id = all.iter().find(|n| normalize_label(&n.label) == from_norm).map(|n| n.id.clone());
-        let to_id = all.iter().find(|n| normalize_label(&n.label) == to_norm).map(|n| n.id.clone());
-        if let (Some(f), Some(t)) = (from_id, to_id) {
+        let from = resolve_node_ref(g, &er.from)?.into_iter().next();
+        let to = resolve_node_ref(g, &er.to)?.into_iter().next();
+        if let (Some(f), Some(t)) = (from, to) {
             total += g.delete_edge(&f, &er.edge_type, &t)?;
         }
     }
@@ -173,12 +180,12 @@ pub struct NodeUpdate {
     pub new_type: Option<String>,
 }
 
-/// Rename and/or retype nodes in place, identified by their current label.
-/// Skips nodes whose label is not found. Returns the total number of rows updated.
+/// Rename and/or retype nodes in place, identified by id (as used in `graph_upsert`) or current
+/// label. Skips references that resolve to nothing. Returns the total number of rows updated.
 pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<usize> {
     let mut total = 0;
     for u in nodes {
-        if let Some(id) = g.find_by_label(&u.label)? {
+        for id in resolve_node_ref(g, &u.label)? {
             total += g.update_node(&id, u.new_label.as_deref(), u.new_type.as_deref())?;
         }
     }
@@ -313,5 +320,26 @@ strict = true
         // Its RESOLVED_BY edge is also gone
         let out = g.outgoing("sym:test").unwrap();
         assert!(out.is_empty(), "Edges attached to deleted Symptom should be removed");
+    }
+
+    #[test]
+    fn apply_delete_accepts_id_not_just_label() {
+        // The agent assigns ids in graph_upsert and naturally passes the ID to graph_delete.
+        // This used to silently no-op (matched only by label) and the agent retried forever.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        apply_upsert(
+            &g,
+            &ont,
+            vec![node("sym:test", "Symptom", "Тестовый симптом", "test.docx")],
+            vec![],
+            1,
+        )
+        .unwrap();
+
+        let removed = apply_delete(&g, vec!["sym:test".into()], vec![]).unwrap();
+        assert!(removed > 0, "delete-by-id must remove the node (the bug returned 0)");
+        assert!(g.get_node("sym:test").unwrap().is_none(), "node deleted by id");
     }
 }

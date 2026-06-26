@@ -3,7 +3,7 @@
     "GraphUpdateNode": {
       "properties": {
         "label": {
-          "description": "current label of the node to edit",
+          "description": "current id (as used in graph_upsert) or label of the node to edit",
           "type": "string"
         },
         "new_label": {
