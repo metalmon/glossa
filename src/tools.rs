@@ -96,26 +96,72 @@ pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     }
 }
 
-/// Resolve a name/term to graph node ids (the "glossary" lookup). Model text only.
-pub fn glossary(g: &crate::graph::store::GraphStore, name: &str, trace: &TraceLog) -> String {
+/// Render a graph node as a `(path, #ord)` reference string.
+/// Section  → `"path  #ord · label"` (None if `ord_for_location` can't resolve).
+/// Document → `"path  (document)"`.
+/// Other    → `None` (caller decides whether to skip or fall back to the raw id).
+fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> {
+    let tp = node.prov.source_path.as_str();
+    match node.node_type.as_str() {
+        "Section" => idx
+            .ord_for_location(tp, &node.label)
+            .ok()
+            .flatten()
+            .map(|ord| format!("{}  #{} · {}", tp, ord, node.label)),
+        "Document" => Some(format!("{}  (document)", tp)),
+        _ => None,
+    }
+}
+
+/// Resolve a name/term to graph node ids and render each as a `(path, #ord)` ref.
+/// Section nodes render as `"path  #ord · label"`, Documents as `"path  (document)"`,
+/// unresolved ids fall back to the raw id string. Empty → `"(no matches)"`.
+pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, trace: &TraceLog) -> String {
     match g.resolve(name) {
         Ok(ids) => {
             trace.log("glossary", json!({ "name": name }), json!({ "ids": ids.len() }));
-            if ids.is_empty() { "(no matches)".to_string() } else { ids.join("\n") }
+            if ids.is_empty() {
+                return "(no matches)".to_string();
+            }
+            let lines: Vec<String> = ids
+                .iter()
+                .map(|id| match g.get_node(id) {
+                    Ok(Some(node)) => node_ref(idx, &node).unwrap_or_else(|| id.clone()),
+                    _ => id.clone(),
+                })
+                .collect();
+            lines.join("\n")
         }
         Err(e) => format!("glossary error: {e}"),
     }
 }
 
-/// Graph neighbors reachable from a node id, up to `depth` hops. Model text only.
-pub fn neighbors(g: &crate::graph::store::GraphStore, node_id: &str, depth: usize, trace: &TraceLog) -> String {
-    match crate::graph::traverse::neighbors(g, node_id, None, depth) {
-        Ok(ids) => {
-            trace.log("neighbors", json!({ "node_id": node_id, "depth": depth }), json!({ "ids": ids.len() }));
-            if ids.is_empty() { "(no neighbors)".to_string() } else { ids.join("\n") }
-        }
-        Err(e) => format!("neighbors error: {e}"),
+/// Graph structural neighbors of chunk `n` in `path`, rendered in `(path, #ord)` address space.
+/// Walks the section's own outgoing edges plus the parent document's REFERENCES edges.
+/// Section targets render as `"EDGE_TYPE  path  #ord · label"`, Document targets as
+/// `"EDGE_TYPE  path  (document)"`. Out-of-range `n` → `"no chunk #n in path"`.
+/// No linked sections → `"(no linked sections)"`.
+pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, path: &str, n: u64, depth: usize, trace: &TraceLog) -> String {
+    let _ = depth; // v1: direct neighbors only
+    let location = match idx.location_for_ord(path, n) {
+        Ok(Some(l)) => l,
+        Ok(None) => return format!("no chunk #{n} in {path}"),
+        Err(e) => return format!("neighbors error: {e}"),
+    };
+    let sec_id = crate::graph::build::section_id(path, &location);
+    // Section's own edges, plus the parent document's REFERENCES (cross-doc links).
+    let mut edges = g.outgoing(&sec_id).unwrap_or_default();
+    if let Ok(doc_edges) = g.outgoing(path) {
+        edges.extend(doc_edges.into_iter().filter(|e| e.edge_type == "REFERENCES"));
     }
+    let mut lines = Vec::new();
+    for e in &edges {
+        let Ok(Some(node)) = g.get_node(&e.to) else { continue };
+        let Some(ref_str) = node_ref(idx, &node) else { continue };
+        lines.push(format!("{}  {}", e.edge_type, ref_str));
+    }
+    trace.log("neighbors", json!({"path": path, "n": n}), json!({"links": lines.len()}));
+    if lines.is_empty() { "(no linked sections)".to_string() } else { lines.join("\n") }
 }
 
 #[cfg(test)]
@@ -249,18 +295,112 @@ strict = true
     #[test]
     fn glossary_resolves_alias_and_returns_sentinel_on_miss() {
         let (_dir, g) = graph_fixture();
+        let idir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
-        let result = glossary(&g, "ACME", &t);
+        // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
+        let result = glossary(&idx, &g, "ACME", &t);
         assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
-        assert_eq!(glossary(&g, "nonesuch", &t), "(no matches)");
+        assert_eq!(glossary(&idx, &g, "nonesuch", &t), "(no matches)");
+    }
+
+    // ── structural (path, #n) address-space tests ───────────────────────────
+
+    #[test]
+    fn neighbors_speaks_path_ord_address_space() {
+        use crate::index::store::index_dir;
+
+        // Build a nested-heading document: chunk #1 = "A", #2 = "A > B", #3 = "A > C".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n## C\nbody c\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let p = dir.path().join("a.md").to_string_lossy().to_string();
+        let t = TraceLog::disabled();
+
+        // Chunk #1 "A": outgoing edges include NEXT/CHILD to "A > B" which is #2.
+        let n1 = neighbors(&idx, &g, &p, 1, 1, &t);
+        assert!(
+            n1.lines().any(|l| (l.contains("NEXT") || l.contains("CHILD")) && l.contains("#2")),
+            "A's neighbors include a NEXT/CHILD edge to #2: {n1}"
+        );
+
+        // Chunk #2 "A > B": outgoing edges include PARENT/PREV back to "A" which is #1.
+        let n2 = neighbors(&idx, &g, &p, 2, 1, &t);
+        assert!(
+            n2.lines().any(|l| (l.contains("PARENT") || l.contains("PREV")) && l.contains("#1")),
+            "B's neighbors include a PARENT/PREV edge to #1: {n2}"
+        );
+
+        // A returned #ord from n2 should actually be readable.
+        let parent_ord: u64 = n2
+            .lines()
+            .find(|l| l.contains("PARENT") || l.contains("PREV"))
+            .and_then(|l| l.split('#').nth(1))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .expect("could not parse #ord from neighbors output");
+        let read_out = read(&idx, &p, parent_ord, &t);
+        assert!(
+            read_out.text.contains("intro") || !read_out.text.starts_with("no chunk"),
+            "reading #ord from neighbors output succeeds: {}",
+            read_out.text
+        );
+
+        // Out-of-range n.
+        let oor = neighbors(&idx, &g, &p, 999, 1, &t);
+        assert!(oor.starts_with("no chunk #999"), "out-of-range: {oor}");
+
+        // Isolated single-section document → no structural edges.
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir2.path().join("lone.md"), b"# Solo\njust one section\n").unwrap();
+        index_dir(dir2.path(), true).unwrap();
+        let idx2 = DocIndex::open_or_create(dir2.path()).unwrap();
+        let g2 = crate::graph::store::GraphStore::open(dir2.path()).unwrap();
+        let p2 = dir2.path().join("lone.md").to_string_lossy().to_string();
+        let lone = neighbors(&idx2, &g2, &p2, 1, 1, &t);
+        assert_eq!(lone, "(no linked sections)", "isolated section: {lone}");
     }
 
     #[test]
-    fn neighbors_returns_connected_and_sentinel_on_isolated() {
-        let (_dir, g) = graph_fixture();
+    fn neighbors_includes_cross_doc_references() {
+        use crate::index::store::index_dir;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nsee [the manual](b.md)\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let pa = dir.path().join("a.md").to_string_lossy().to_string();
+        let pb = dir.path().join("b.md").to_string_lossy().to_string();
         let t = TraceLog::disabled();
-        let result = neighbors(&g, "org:acme", 1, &t);
-        assert!(result.contains("contract.docx"), "expected neighbor in result, got: {result}");
-        assert_eq!(neighbors(&g, "isolated", 1, &t), "(no neighbors)");
+
+        // Chunk #1 of a.md has a cross-doc REFERENCES edge to b.md (Document).
+        let n1 = neighbors(&idx, &g, &pa, 1, 1, &t);
+        assert!(
+            n1.lines().any(|l| l.contains("REFERENCES") && l.contains(&pb)),
+            "a.md #1 neighbors include REFERENCES to b.md: {n1}"
+        );
+    }
+
+    #[test]
+    fn glossary_renders_section_nodes_as_path_ord() {
+        use crate::index::store::index_dir;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# Intro\nhello\n## Details\nworld\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        // "Intro" is a Section node; glossary should render it as "path  #1 · Intro".
+        let result = glossary(&idx, &g, "Intro", &t);
+        assert!(result.contains("#1"), "section rendered with ord: {result}");
+        assert!(result.contains("Intro"), "section label present: {result}");
+
+        assert_eq!(glossary(&idx, &g, "nonexistentzzz", &t), "(no matches)");
     }
 }
