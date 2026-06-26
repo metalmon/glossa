@@ -138,8 +138,12 @@ fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result
     if max == 0 {
         return Ok(Vec::new());
     }
+    // Unique per call (pid + monotonic counter) so concurrent reads — tool calls now run in
+    // parallel threads — never share a temp dir and clobber each other's files.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir()
-        .join(format!("glossa-img-{}-{}", std::process::id(), page));
+        .join(format!("glossa-img-{}-{}", std::process::id(), uniq));
     let _ = std::fs::create_dir_all(&tmp);
     let result = (|| -> anyhow::Result<Vec<DocImage>> {
         let opts = ExtractImagesOptions {

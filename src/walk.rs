@@ -72,7 +72,7 @@ mod cover_tests {
     use super::*;
 
     #[test]
-    fn collect_indexes_text_json_code_skips_binary() {
+    fn collect_indexes_text_json_code_and_images() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"plain text alpha").unwrap();
         std::fs::write(dir.path().join("b.json"), br#"{"key":"jsonvalue"}"#).unwrap();
