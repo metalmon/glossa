@@ -236,6 +236,50 @@ impl DocIndex {
         }
     }
 
+    /// Resolve chunk number `n` to the `location` string stored in the index for `path`.
+    /// Mirrors `ord_body` but returns the location field instead of the body.
+    /// Returns `None` when no chunk with that (path, ord) pair is indexed.
+    pub fn location_for_ord(&self, path: &str, n: u64) -> anyhow::Result<Option<String>> {
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_u64(self.fields.ord, n), IndexRecordOption::Basic))),
+        ];
+        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        match top.first() {
+            Some((_score, addr)) => {
+                let d: TantivyDocument = searcher.doc(*addr)?;
+                Ok(Some(d.get_first(self.fields.location).and_then(|v| v.as_str()).unwrap_or("").to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve a `location` string to the chunk number (`ord`) stored in the index for `path`.
+    /// Mirrors `read_chunk` (path+location BooleanQuery) but returns the `ord` field.
+    /// Returns `None` when no chunk matches that (path, location) pair.
+    pub fn ord_for_location(&self, path: &str, location: &str) -> anyhow::Result<Option<u64>> {
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
+            (Occur::Must, Box::new(TermQuery::new(
+                tantivy::Term::from_field_text(self.fields.location, location), IndexRecordOption::Basic))),
+        ];
+        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        match top.first() {
+            Some((_score, addr)) => {
+                let d: TantivyDocument = searcher.doc(*addr)?;
+                Ok(d.get_first(self.fields.ord).and_then(|v| v.as_u64()))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// The largest chunk number (`ord`) indexed for `path`, or `None` if no chunk exists for that
     /// exact path. Lets a failed `read` report the document's valid range instead of a dead end.
     pub fn last_chunk_ord(&self, path: &str) -> anyhow::Result<Option<u64>> {
@@ -662,6 +706,18 @@ mod search_tests {
         idx.iter_chunks(|_path, ord, _ft, body| seen.push((ord, body.to_string()))).unwrap();
         seen.sort();
         assert_eq!(seen, vec![(1, "alpha".to_string()), (2, "beta".to_string())]);
+    }
+
+    #[test]
+    fn location_ord_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(dir.path()).unwrap();
+        i.write_chunks(&[
+            crate::model::Chunk { doc_path: "d.md".into(), location: "A > B".into(), file_type: "md".into(), text: "x".into() },
+        ]).unwrap();
+        let n = i.ord_for_location("d.md", "A > B").unwrap().unwrap();
+        assert_eq!(i.location_for_ord("d.md", n).unwrap().as_deref(), Some("A > B"));
+        assert_eq!(i.ord_for_location("d.md", "missing").unwrap(), None);
     }
 
     #[test]
