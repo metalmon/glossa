@@ -96,6 +96,12 @@ enum Cmd {
         /// knowledge-base directory
         path: std::path::PathBuf,
     },
+    /// Regenerate TensorZero tool config from MCP definitions (one source of truth).
+    DumpTzTools {
+        /// Directory containing tensorzero.toml and tools/.
+        #[arg(long, default_value = "eval/tensorzero/config")]
+        config_dir: PathBuf,
+    },
     /// Run the MCP server over stdio (for AI agents).
     Mcp {
         path: Option<PathBuf>,
@@ -273,6 +279,11 @@ fn main() -> anyhow::Result<()> {
             for (p, n) in glossa::glob::glob_docs(&idx, &pattern)? {
                 println!("{p}  ({n} chunks)");
             }
+            Ok(())
+        }
+        Cmd::DumpTzTools { config_dir } => {
+            let n = glossa::tz_export::dump(&config_dir)?;
+            println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
             Ok(())
         }
         Cmd::Mcp { path, profile, trace, no_graph } => {

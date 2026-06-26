@@ -1,7 +1,13 @@
 {
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "pattern": { "type": "string", "description": "shell glob over document paths, e.g. *.pdf or *Safety* or *АБАК*" }
+    "pattern": {
+      "description": "shell glob over document paths, e.g. *.pdf or *Safety*",
+      "type": "string"
+    }
   },
-  "required": ["pattern"]
+  "required": [
+    "pattern"
+  ],
+  "type": "object"
 }
