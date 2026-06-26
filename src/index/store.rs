@@ -296,6 +296,13 @@ impl DocIndex {
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
 pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
+    // force = true is a true from-scratch rebuild: purge the whole index+graph first so stale
+    // entries (deleted files, or docs previously indexed under a different path form) cannot
+    // linger. Incremental delete-by-path alone can't catch those, since `force` ignores the
+    // manifest that records the old paths.
+    if force {
+        let _ = std::fs::remove_dir_all(dir.join(".glossa"));
+    }
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
@@ -454,6 +461,20 @@ mod incremental_tests {
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
         assert!(na.contains(&b), "a.md REFERENCES b.md: {na:?}");
         assert!(!na.iter().any(|n| n.contains("x.com")), "external URL is not a REFERENCES edge: {na:?}");
+    }
+
+    #[test]
+    fn reindex_force_purges_removed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalphaword\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\nbravoword\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        // Delete a.md, then force-reindex: the stale doc must be purged (not just left behind).
+        std::fs::remove_file(dir.path().join("a.md")).unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.search("alphaword", 10).unwrap().is_empty(), "removed file purged on force reindex");
+        assert!(!idx.search("bravoword", 10).unwrap().is_empty(), "kept file still indexed");
     }
 
     #[test]
