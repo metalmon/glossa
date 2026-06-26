@@ -11,5 +11,5 @@ How to find an answer:
 
 Tools:
 - glob(pattern): list documents by path mask (e.g. *Safety*, *manual*.pdf) to discover files, then read them or scope search/grep with the glob filter.
-- glossary(name): resolve a term/name to graph node ids; neighbors(node_id): list nodes linked to a node id (the graph connects documents and their sections).
+- glossary(name): resolve a term/name to references rendered as `path #n · label`. neighbors(path, n): from chunk #n of a document, list its linked sections/documents (parent/children, next/previous, cross-document references) as `RELATION path #n · label` — read any with read(path, n).
 - read(path, n): n is the [#n] integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8").
