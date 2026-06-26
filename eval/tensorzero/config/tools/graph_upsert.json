@@ -1,27 +1,13 @@
 {
   "$defs": {
-    "EdgeSpec": {
+    "UpsertEdge": {
+      "description": "A directed edge identified by node labels (or section refs) at both endpoints.",
       "properties": {
-        "confidence": {
-          "default": null,
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
         "edge_type": {
           "type": "string"
         },
         "from": {
           "type": "string"
-        },
-        "range": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "source_path": {
           "type": "string"
@@ -32,13 +18,14 @@
       },
       "required": [
         "from",
-        "to",
         "edge_type",
+        "to",
         "source_path"
       ],
       "type": "object"
     },
-    "NodeSpec": {
+    "UpsertNode": {
+      "description": "A reasoning node to create/update, identified by label only (no id).\nThe system derives the canonical id from `node_type` + `label` and deduplicates by label.",
       "properties": {
         "aliases": {
           "default": [],
@@ -47,36 +34,17 @@
           },
           "type": "array"
         },
-        "confidence": {
-          "default": null,
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "id": {
-          "type": "string"
-        },
         "label": {
           "type": "string"
         },
         "node_type": {
           "type": "string"
         },
-        "range": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "source_path": {
           "type": "string"
         }
       },
       "required": [
-        "id",
         "node_type",
         "label",
         "source_path"
@@ -89,14 +57,14 @@
     "edges": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/EdgeSpec"
+        "$ref": "#/$defs/UpsertEdge"
       },
       "type": "array"
     },
     "nodes": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/NodeSpec"
+        "$ref": "#/$defs/UpsertNode"
       },
       "type": "array"
     }

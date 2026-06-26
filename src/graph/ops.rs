@@ -5,8 +5,45 @@
 
 use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::GraphStore;
+use crate::graph::store::{GraphStore, normalize_label};
 use crate::index::store::DocIndex;
+
+// ── label-based input types ───────────────────────────────────────────────────
+
+/// A reasoning node to create/update, identified by label only (no id).
+/// The system derives the canonical id from `node_type` + `label` and deduplicates by label.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct UpsertNode {
+    pub node_type: String,
+    pub label: String,
+    pub source_path: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// A directed edge identified by node labels (or section refs) at both endpoints.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct UpsertEdge {
+    pub from: String,
+    pub edge_type: String,
+    pub to: String,
+    pub source_path: String,
+}
+
+/// Derive the canonical node id from its type and label.
+/// Abbrevs: Symptom→"sym", Cause→"cau", Resolution→"res", Task→"tsk", else lowercased type.
+/// The label is normalised (lowercase, collapsed whitespace) and spaces replaced with "-".
+pub fn id_for(node_type: &str, label: &str) -> String {
+    let slug = normalize_label(label).replace(' ', "-");
+    let abbrev = match node_type {
+        "Symptom" => "sym".to_string(),
+        "Cause" => "cau".to_string(),
+        "Resolution" => "res".to_string(),
+        "Task" => "tsk".to_string(),
+        other => other.to_lowercase(),
+    };
+    format!("{abbrev}:{slug}")
+}
 
 // ── label helpers ─────────────────────────────────────────────────────────────
 
@@ -63,79 +100,188 @@ pub struct UpsertOutcome {
 
 /// Validate, resolve, and apply a graph upsert.
 ///
-/// Behaviour is identical for the MCP server and the kb-eval enricher:
-/// 1. `check_label` for each node.
-/// 2. Build `batch_ids` from this call's nodes.
-/// 3. For each edge, resolve `from`/`to` via `resolve_section_ref`; existence-check
-///    each endpoint against `batch_ids` or the live graph.
-/// 4. Build dump lines.
-/// 5. If any errors: return a rejection `UpsertOutcome` (nothing written).
-/// 6. Otherwise call `apply_upsert` and return the result.
+/// The caller provides node LABELS only (no ids). The system derives canonical ids via
+/// `id_for(node_type, label)` and deduplicates by label. Edges reference nodes by their label
+/// (or a section as `<path>#<n>`).
+///
+/// Steps:
+/// 1. `check_label` per node.
+/// 2. Build `label_to_id` map: input nodes first (win), then existing graph nodes (`or_insert`).
+/// 3. Build `Vec<NodeSpec>` using `id_for`.
+/// 4. Resolve each `UpsertEdge` endpoint: section ref → resolved id; otherwise label → id via map.
+/// 5. Build dump lines.
+/// 6. If any errors: return rejection (nothing written), keeping the hint block.
+/// 7. Otherwise call `apply_upsert` and return.
 pub fn graph_upsert(
     idx: &DocIndex,
     g: &GraphStore,
     ont: &Ontology,
-    nodes: Vec<NodeSpec>,
-    mut edges: Vec<EdgeSpec>,
+    nodes: Vec<UpsertNode>,
+    edges: Vec<UpsertEdge>,
     now: u64,
 ) -> UpsertOutcome {
     let mut errs: Vec<String> = Vec::new();
 
     // (1) label checks
     for nd in &nodes {
-        errs.extend(check_label(&nd.id, &nd.label));
+        let id = id_for(&nd.node_type, &nd.label);
+        errs.extend(check_label(&id, &nd.label));
     }
 
-    // (2) batch ids — an edge may reference a node from this same call before it is committed
-    let batch_ids: std::collections::HashSet<String> =
-        nodes.iter().map(|n| n.id.clone()).collect();
+    // (2) label_to_id: input nodes win over existing graph nodes
+    let mut label_to_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Insert input nodes first — they win
+    for nd in &nodes {
+        label_to_id.insert(normalize_label(&nd.label), id_for(&nd.node_type, &nd.label));
+    }
+    // Add existing nodes without overwriting (or_insert)
+    if let Ok(existing) = g.all_nodes() {
+        for n in existing {
+            label_to_id.entry(normalize_label(&n.label)).or_insert(n.id);
+        }
+    }
 
-    // (3) resolve section refs + existence-check endpoints
-    for e in &mut edges {
-        let (of, ot, oet) = (e.from.clone(), e.to.clone(), e.edge_type.clone());
+    // (3) build NodeSpec list
+    let nodespecs: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|nd| NodeSpec {
+            id: id_for(&nd.node_type, &nd.label),
+            node_type: nd.node_type.clone(),
+            label: nd.label.clone(),
+            aliases: nd.aliases.clone(),
+            source_path: nd.source_path.clone(),
+            range: None,
+            confidence: None,
+        })
+        .collect();
+
+    // batch ids — an edge may reference a node from this same call before it is committed
+    let batch_ids: std::collections::HashSet<String> =
+        nodespecs.iter().map(|n| n.id.clone()).collect();
+
+    // (4) resolve edges
+    let mut edgespecs: Vec<EdgeSpec> = Vec::new();
+    for ue in &edges {
+        let (of, ot, oet) = (ue.from.clone(), ue.to.clone(), ue.edge_type.clone());
+        let mut from_resolved: Option<String> = None;
+        let mut to_resolved: Option<String> = None;
         let mut edge_ok = true;
-        match resolve_section_ref(idx, &e.from) {
-            Ok(r) => e.from = r,
+
+        // resolve from endpoint
+        match resolve_section_ref(idx, &ue.from) {
             Err(m) => {
                 errs.push(format!("edge {of} -{oet}-> {ot}: {m}"));
                 edge_ok = false;
             }
+            Ok(v) if v != ue.from => {
+                // numeric section ref resolved to section id
+                from_resolved = Some(v);
+            }
+            Ok(_) => {
+                // treat as node label
+                match label_to_id.get(&normalize_label(&ue.from)) {
+                    Some(id) => from_resolved = Some(id.clone()),
+                    None => {
+                        errs.push(format!(
+                            "edge {of} -{oet}-> {ot}: from endpoint label \"{of}\" has no node — add a node with that label"
+                        ));
+                        edge_ok = false;
+                    }
+                }
+            }
         }
-        match resolve_section_ref(idx, &e.to) {
-            Ok(r) => e.to = r,
+
+        // resolve to endpoint
+        match resolve_section_ref(idx, &ue.to) {
             Err(m) => {
                 errs.push(format!("edge {of} -{oet}-> {ot}: {m}"));
                 edge_ok = false;
             }
+            Ok(v) if v != ue.to => {
+                // numeric section ref resolved to section id
+                to_resolved = Some(v);
+            }
+            Ok(_) => {
+                // treat as node label
+                match label_to_id.get(&normalize_label(&ue.to)) {
+                    Some(id) => to_resolved = Some(id.clone()),
+                    None => {
+                        errs.push(format!(
+                            "edge {of} -{oet}-> {ot}: to endpoint label \"{ot}\" has no node — add a node with that label"
+                        ));
+                        edge_ok = false;
+                    }
+                }
+            }
         }
+
         if edge_ok {
-            for (role, id) in [("from", e.from.clone()), ("to", e.to.clone())] {
-                let exists = batch_ids.contains(&id)
-                    || g.get_node(&id).ok().flatten().is_some();
+            let from_id = from_resolved.unwrap();
+            let to_id = to_resolved.unwrap();
+
+            // post-resolution existence check
+            let mut exists_ok = true;
+            for (role, id) in [("from", from_id.clone()), ("to", to_id.clone())] {
+                let exists =
+                    batch_ids.contains(&id) || g.get_node(&id).ok().flatten().is_some();
                 if !exists {
                     errs.push(format!(
                         "edge {of} -{oet}-> {ot}: {role} endpoint '{id}' is not a known node — create that node (add it to nodes[]) before referencing it"
                     ));
+                    exists_ok = false;
                 }
+            }
+
+            if exists_ok {
+                edgespecs.push(EdgeSpec {
+                    from: from_id,
+                    to: to_id,
+                    edge_type: ue.edge_type.clone(),
+                    source_path: ue.source_path.clone(),
+                    range: None,
+                    confidence: None,
+                });
             }
         }
     }
 
-    // (4) build dump lines (resolved state, for the caller to log)
+    // (5) build dump lines (resolved state, for the caller to log)
     let mut dump = Vec::new();
-    for nd in &nodes {
+    for nd in &nodespecs {
         dump.push(format!("node {} [{}] {}", nd.id, nd.node_type, nd.label));
     }
-    for e in &edges {
+    for e in &edgespecs {
         dump.push(format!("edge {} -{}-> {}", e.from, e.edge_type, e.to));
     }
 
-    // (5) rejection path — nothing is written
+    // (6) rejection path — nothing is written
     if !errs.is_empty() {
+        // Help the model recover from id confusion (it often references a node it created under a
+        // DIFFERENT id, then loops on the rejection): list the reasoning nodes that already exist so
+        // it can reference the right id instead of an invented one. Structural nodes are excluded.
+        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
+        let existing: Vec<String> = g
+            .all_nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
+            .map(|n| format!("{} [{}] {}", n.id, n.node_type, n.label))
+            .take(25)
+            .collect();
+        let hint = if existing.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nExisting reasoning nodes — reference one of THESE ids, do not invent a new id for the same concept:\n- {}",
+                existing.join("\n- ")
+            )
+        };
         return UpsertOutcome {
             message: format!(
-                "graph_upsert REJECTED — nothing was written. Fix these and resend:\n- {}",
-                errs.join("\n- ")
+                "graph_upsert REJECTED — nothing was written. Fix these and resend:\n- {}{}",
+                errs.join("\n- "),
+                hint
             ),
             nodes: 0,
             edges: 0,
@@ -144,8 +290,8 @@ pub fn graph_upsert(
         };
     }
 
-    // (6) apply
-    match apply_upsert(g, ont, nodes, edges, now) {
+    // (7) apply
+    match apply_upsert(g, ont, nodespecs, edgespecs, now) {
         Ok((n, e)) => UpsertOutcome {
             message: format!("upserted {n} nodes, {e} edges"),
             nodes: n,
@@ -200,26 +346,21 @@ to = ["Resolution"]
 strict = true
 "#;
 
-    fn node(id: &str, ty: &str, label: &str, src: &str) -> NodeSpec {
-        NodeSpec {
-            id: id.into(),
-            node_type: ty.into(),
+    fn unode(node_type: &str, label: &str, src: &str) -> UpsertNode {
+        UpsertNode {
+            node_type: node_type.into(),
             label: label.into(),
-            aliases: vec![],
             source_path: src.into(),
-            range: None,
-            confidence: None,
+            aliases: vec![],
         }
     }
 
-    fn edge_spec(from: &str, to: &str, edge_type: &str, src: &str) -> EdgeSpec {
-        EdgeSpec {
+    fn uedge(from: &str, edge_type: &str, to: &str, src: &str) -> UpsertEdge {
+        UpsertEdge {
             from: from.into(),
-            to: to.into(),
             edge_type: edge_type.into(),
+            to: to.into(),
             source_path: src.into(),
-            range: None,
-            confidence: None,
         }
     }
 
@@ -232,10 +373,10 @@ strict = true
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
 
         let nodes = vec![
-            node("sym:loss-1", "Symptom", "Потеря связи", "case1.docx"),
-            node("res:restart-1", "Resolution", "Перезагрузка модуля", "case1.docx"),
+            unode("Symptom", "Потеря связи", "case1.docx"),
+            unode("Resolution", "Перезагрузка модуля", "case1.docx"),
         ];
-        let edges = vec![edge_spec("sym:loss-1", "res:restart-1", "RESOLVED_BY", "case1.docx")];
+        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         assert!(!out.rejected, "should not be rejected: {}", out.message);
@@ -254,10 +395,11 @@ strict = true
 
         // Upsert: Symptom + Resolution + RESOLVED_BY edge.
         let nodes = vec![
-            node("sym:loss-1", "Symptom", "Потеря связи", "case1.docx"),
-            node("res:restart-1", "Resolution", "Перезагрузка модуля", "case1.docx"),
+            unode("Symptom", "Потеря связи", "case1.docx"),
+            unode("Resolution", "Перезагрузка модуля", "case1.docx"),
         ];
-        let edges = vec![edge_spec("sym:loss-1", "res:restart-1", "RESOLVED_BY", "case1.docx")];
+        let edges =
+            vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
         graph_upsert(&idx, &g, &ont, nodes, edges, 1);
 
         // Rename the Symptom node.
@@ -274,18 +416,20 @@ strict = true
         assert!(id.is_some(), "new label not found");
         let id = id.unwrap();
 
-        // (b) the id is the same as before
-        assert_eq!(id, "sym:loss-1", "id changed after rename");
+        // (b) the id is the label-derived id for the original label
+        let expected_id = id_for("Symptom", "Потеря связи");
+        assert_eq!(id, expected_id, "id should be the label-derived id");
 
         // (c) the RESOLVED_BY edge still exists
+        let res_id = id_for("Resolution", "Перезагрузка модуля");
         let out = g.outgoing(&id).unwrap();
         assert!(
-            out.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:restart-1"),
+            out.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
             "RESOLVED_BY edge lost after rename"
         );
     }
 
-    /// Rejection: an edge whose `to` endpoint (`res:`) is neither in the batch nor in the graph.
+    /// Rejection: an edge whose `to` endpoint label is neither in the batch nor in the graph.
     #[test]
     fn rejects_edge_to_unknown_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -293,23 +437,68 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
 
-        // Only the Symptom node — Resolution is missing from the batch and from the graph.
-        let nodes = vec![node("sym:loss-1", "Symptom", "Потеря связи", "case1.docx")];
-        let edges = vec![edge_spec(
-            "sym:loss-1",
-            "res:restart-1",
-            "RESOLVED_BY",
-            "case1.docx",
-        )];
+        // Only the Symptom node — Resolution label is missing from batch and graph.
+        let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
+        let edges =
+            vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         assert!(out.rejected, "should be rejected");
         assert!(
-            out.message.contains("not a known node"),
-            "message should mention 'not a known node': {}",
+            out.message.contains("has no node"),
+            "message should mention 'has no node': {}",
             out.message
         );
         assert_eq!(out.nodes, 0);
         assert_eq!(out.edges, 0);
+    }
+
+    /// Label-based upsert with no ids: ids are derived from labels, RESOLVED_BY edge is wired.
+    #[test]
+    fn label_based_upsert_no_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let nodes = vec![
+            unode("Symptom", "Потеря связи", "case1.docx"),
+            unode("Resolution", "Перезапуск", "case1.docx"),
+        ];
+        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Перезапуск", "case1.docx")];
+
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        assert!(!out.rejected, "should not be rejected: {}", out.message);
+        assert_eq!(out.nodes, 2);
+        assert_eq!(out.edges, 1);
+
+        // Assert the RESOLVED_BY edge connects the label-derived ids.
+        let sym_id = id_for("Symptom", "Потеря связи");
+        let res_id = id_for("Resolution", "Перезапуск");
+        let outgoing = g.outgoing(&sym_id).unwrap();
+        assert!(
+            outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
+            "RESOLVED_BY edge not found from {sym_id} to {res_id}: {outgoing:?}"
+        );
+    }
+
+    /// Edge whose `to` label has no corresponding node is rejected; message names the label.
+    #[test]
+    fn edge_to_undefined_label_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
+        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Неизвестный узел", "case1.docx")];
+
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        assert!(out.rejected, "should be rejected");
+        assert!(
+            out.message.contains("Неизвестный узел"),
+            "message should name the undefined label: {}",
+            out.message
+        );
     }
 }

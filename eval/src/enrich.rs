@@ -6,7 +6,8 @@
 //! `glossa_tools::exec`. This keeps the shared exec signature untouched.
 
 use anyhow::Context;
-use glossa::graph::agent::{EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
+use glossa::graph::agent::{EdgeRef, NodeUpdate};
+use glossa::graph::ops::{UpsertEdge, UpsertNode};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
@@ -82,11 +83,11 @@ pub fn run_enrich(
         // Enrich-specific exec: handles graph_upsert locally, delegates the rest.
         let exec = move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
             if name == "graph_upsert" {
-                let nodes: Vec<NodeSpec> = serde_json::from_value(
+                let nodes: Vec<UpsertNode> = serde_json::from_value(
                     args.get("nodes").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
-                let edges: Vec<EdgeSpec> = serde_json::from_value(
+                let edges: Vec<UpsertEdge> = serde_json::from_value(
                     args.get("edges").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
