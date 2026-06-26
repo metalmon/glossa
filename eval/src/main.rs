@@ -5,6 +5,7 @@ use std::time::Duration;
 mod backend;
 mod corpus;
 mod dataset;
+mod enrich;
 mod prep;
 mod run;
 mod score;
@@ -92,6 +93,25 @@ enum Cmd {
         #[arg(long)]
         max_shards: Option<usize>,
     },
+
+    /// Enrich the knowledge-graph from solved training cases via the `enrich` TZ function.
+    Enrich {
+        /// Path to the training JSON (array of {_id, question, answer}).
+        #[arg(long)]
+        train: PathBuf,
+        /// Corpus root (index + graph live here).
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        /// Enrich the first N cases (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// TensorZero gateway base URL.
+        #[arg(long, default_value = "http://localhost:3000")]
+        tensorzero_endpoint: String,
+        /// TensorZero function name.
+        #[arg(long, default_value = "enrich")]
+        tensorzero_function: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -151,6 +171,9 @@ fn main() -> anyhow::Result<()> {
             let stats = prep::prep_fullwiki(&archive, &out, max_shards)?;
             println!("prep-fullwiki: {} shard(s), {} article(s) -> {}", stats.shards, stats.articles, out.display());
             Ok(())
+        }
+        Cmd::Enrich { train, work, limit, tensorzero_endpoint, tensorzero_function } => {
+            enrich::run_enrich(&train, &work, limit, &tensorzero_endpoint, &tensorzero_function)
         }
     }
 }

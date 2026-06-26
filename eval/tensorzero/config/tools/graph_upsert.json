@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "description": "Nodes to upsert into the reasoning graph.",
+      "items": {
+        "type": "object",
+        "required": ["id", "node_type", "label", "source_path"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Short slug, e.g. sym:profibus-link-loss"
+          },
+          "node_type": {
+            "type": "string",
+            "description": "Ontology node type: Symptom, Cause, Resolution, Task, Parameter, Product, Module, Medium, Standard, Version"
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label (pattern or class, NOT the literal answer text)"
+          },
+          "aliases": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Alternative names for this concept"
+          },
+          "source_path": {
+            "type": "string",
+            "description": "Path to the source document (from search/read results)"
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Directed edges to upsert.",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "edge_type", "source_path"],
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Source node id"
+          },
+          "to": {
+            "type": "string",
+            "description": "Target node id (may be a Section id: <path>#<location>"
+          },
+          "edge_type": {
+            "type": "string",
+            "description": "Ontology edge type: CAUSED_BY, RESOLVED_BY, MENTIONS, SETS, OCCURS_IN, FIXES, OF, HANDLED_AS"
+          },
+          "source_path": {
+            "type": "string",
+            "description": "Path to the document supporting this edge"
+          }
+        }
+      }
+    }
+  }
+}
