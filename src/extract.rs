@@ -11,6 +11,7 @@ pub trait Extractor {
 pub mod chunk;
 pub mod csv_tsv;
 pub mod html;
+pub mod links;
 pub mod markdown;
 pub mod office;
 pub mod pdf;
