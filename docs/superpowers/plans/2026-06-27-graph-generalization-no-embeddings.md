@@ -26,6 +26,18 @@ on graph structure + morphology, never on answer text).
    (разрыв ≈ потеря, сбой ≈ ошибка). Needs a domain synonym map (hand-curated or corpus-mined).
    Last resort before embeddings; only the synonym-expansion path requires curation.
 
+**Near-duplicate MERGE (not just `SIMILAR`) — and it's needed IN-CASE, not only cross-case.**
+Techniques #2–#4 can either add a `SIMILAR` edge OR *merge* two nodes into one (reattaching all
+edges, keeping the others' labels as `aliases`). Merge is the stronger move and is required even
+within a single case: observed in practice, the 4B enricher paraphrases its OWN labels — it creates
+"Изменение maxTsdr и перезапуск службы", then "Изменение maxTsdr в конфигурации…", then references
+the truncated "Изменение maxTsdr" — i.e. several near-duplicate nodes for one concept plus ambiguous
+edge references. The shipped band-aid is edge-time fuzzy resolution (`resolve_endpoint_label` in
+`ops.rs`: exact label → morphology `resolve` → shortest matching reasoning node). The real fix is a
+MERGE pass in `kb graph generalize` that collapses near-dup labels (BM25/morphology overlap above a
+threshold, or an identical shared-evidence anchor) into one canonical node, so routing and edge
+references are unambiguous.
+
 ### Structure over the enriched graph
 6. **Community detection (Louvain / label-propagation / connected-components).** Over the edge
    graph including the `SIMILAR` edges → problem FAMILIES. Store a community id on each node.

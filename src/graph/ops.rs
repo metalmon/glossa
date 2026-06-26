@@ -83,6 +83,28 @@ fn check_label(id: &str, label: &str) -> Vec<String> {
     v
 }
 
+/// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
+/// morphology match against existing reasoning nodes (the small model often paraphrases its own
+/// label — a truncation or wording variant). Returns None when nothing matches.
+fn resolve_endpoint_label(
+    g: &GraphStore,
+    label_to_id: &std::collections::HashMap<String, String>,
+    label: &str,
+) -> Option<String> {
+    if let Some(id) = label_to_id.get(&normalize_label(label)) {
+        return Some(id.clone());
+    }
+    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
+    let ids = g.resolve(label).ok()?;
+    ids.into_iter()
+        .filter_map(|id| g.get_node(&id).ok().flatten())
+        .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
+        // all morphology matches contain the query's terms; the SHORTEST label is the closest
+        // superset of the model's (often truncated) reference.
+        .min_by_key(|n| n.label.split_whitespace().count())
+        .map(|n| n.id)
+}
+
 // ── public API ────────────────────────────────────────────────────────────────
 
 /// Outcome of a `graph_upsert` operation.
@@ -179,9 +201,9 @@ pub fn graph_upsert(
                 from_resolved = Some(v);
             }
             Ok(_) => {
-                // treat as node label
-                match label_to_id.get(&normalize_label(&ue.from)) {
-                    Some(id) => from_resolved = Some(id.clone()),
+                // treat as node label (exact, then fuzzy morphology fallback)
+                match resolve_endpoint_label(g, &label_to_id, &ue.from) {
+                    Some(id) => from_resolved = Some(id),
                     None => {
                         errs.push(format!(
                             "edge {of} -{oet}-> {ot}: from endpoint label \"{of}\" has no node — add a node with that label"
@@ -203,9 +225,9 @@ pub fn graph_upsert(
                 to_resolved = Some(v);
             }
             Ok(_) => {
-                // treat as node label
-                match label_to_id.get(&normalize_label(&ue.to)) {
-                    Some(id) => to_resolved = Some(id.clone()),
+                // treat as node label (exact, then fuzzy morphology fallback)
+                match resolve_endpoint_label(g, &label_to_id, &ue.to) {
+                    Some(id) => to_resolved = Some(id),
                     None => {
                         errs.push(format!(
                             "edge {of} -{oet}-> {ot}: to endpoint label \"{ot}\" has no node — add a node with that label"
@@ -500,5 +522,35 @@ strict = true
             "message should name the undefined label: {}",
             out.message
         );
+    }
+
+    /// The model paraphrases its own label across calls — a truncated reference must resolve
+    /// fuzzily (morphology) to the existing node instead of being rejected.
+    #[test]
+    fn edge_label_resolves_fuzzily_to_paraphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let out1 = graph_upsert(
+            &idx, &g, &ont,
+            vec![
+                unode("Symptom", "Потеря связи Profibus", "c.docx"),
+                unode("Resolution", "Изменение параметра maxTsdr и перезапуск службы", "c.docx"),
+            ],
+            vec![uedge("Потеря связи Profibus", "RESOLVED_BY", "Изменение параметра maxTsdr и перезапуск службы", "c.docx")],
+            1,
+        );
+        assert!(!out1.rejected, "{}", out1.message);
+
+        // Later edge references the Resolution by a TRUNCATED label.
+        let out2 = graph_upsert(
+            &idx, &g, &ont,
+            vec![],
+            vec![uedge("Потеря связи Profibus", "RESOLVED_BY", "Изменение параметра maxTsdr", "c.docx")],
+            2,
+        );
+        assert!(!out2.rejected, "truncated label must resolve fuzzily: {}", out2.message);
     }
 }
