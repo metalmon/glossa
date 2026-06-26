@@ -532,6 +532,17 @@ mod incremental_tests {
         let hits = idx.search("договор", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("a.md")));
     }
+
+    #[test]
+    fn index_dir_indexes_loose_images() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Схемы")).unwrap();
+        std::fs::write(dir.path().join("Схемы").join("profibus.png"), b"\x89PNG\r\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.search("profibus", 10).unwrap().iter().any(|h| h.path.ends_with("profibus.png")),
+            "loose image is searchable by name");
+    }
 }
 
 #[cfg(test)]
