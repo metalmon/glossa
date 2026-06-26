@@ -82,13 +82,14 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
         }
         "glossary" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let body = match graph { Some(g) => glossa::tools::glossary(g, name, trace), None => "(graph unavailable)".to_string() };
+            let body = match graph { Some(g) => glossa::tools::glossary(idx, g, name, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
         "neighbors" => {
-            let node_id = args.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let n = args.get("n").and_then(parse_n).unwrap_or(0);
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-            let body = match graph { Some(g) => glossa::tools::neighbors(g, node_id, depth, trace), None => "(graph unavailable)".to_string() };
+            let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, path, n, depth, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
         other => (format!("unknown tool: {other}"), Vec::new(), Vec::new()),
@@ -165,5 +166,27 @@ mod tests {
         // graph = None -> "(graph unavailable)" regardless of args
         let result_no_graph = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, None, &trace).0;
         assert_eq!(result_no_graph, "(graph unavailable)");
+    }
+
+    /// Parity: MCP surface (tools::neighbors directly) and eval surface (exec dispatch) must
+    /// produce identical output for the same (idx, graph, path, n). Both call the shared fn.
+    #[test]
+    fn neighbors_mcp_and_eval_parity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "# Alpha\nintro\n## Beta\nbody\n").unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+        let path = dir.path().join("p.md").to_string_lossy().to_string();
+
+        // MCP path: call shared fn directly (same call as src/mcp.rs handler).
+        let mcp_out = glossa::tools::neighbors(&idx, &g, &path, 1, 1, &trace);
+        // Eval path: dispatch through exec().
+        let eval_out = exec("neighbors", &json!({"path": path, "n": 1}), &idx, Some(&g), &trace).0;
+
+        assert_eq!(mcp_out, eval_out, "MCP and eval surfaces must render identically");
+        // Sanity: chunk #1 has neighbors (NEXT or CHILD to #2).
+        assert!(mcp_out.contains("#2"), "expected #2 neighbor: {mcp_out}");
     }
 }

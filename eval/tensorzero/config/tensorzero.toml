@@ -145,7 +145,7 @@ description = "List knowledge-base documents whose path matches a shell glob (e.
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "List glossary node ids whose label/alias matches a name."
+description = "Resolve a term or name to indexed references, rendered as `path  #n · label` — read any with `read(path, n)`."
 parameters = "tools/glossary.json"
 
 [tools.grep]
@@ -153,7 +153,7 @@ description = "Find an exact string in the text — a code, version, identifier,
 parameters = "tools/grep.json"
 
 [tools.neighbors]
-description = "Graph neighbors reachable from a node id."
+description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors."
 parameters = "tools/neighbors.json"
 
 [tools.read]

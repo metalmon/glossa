@@ -105,7 +105,10 @@ struct ReadArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NeighborsArgs {
-    node_id: String,
+    #[schemars(description = "document path, exactly as shown in a search result")]
+    path: String,
+    #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
+    n: u64,
     #[serde(default)]
     depth: Option<usize>,
 }
@@ -168,16 +171,18 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "List glossary node ids whose label/alias matches a name.")]
+    #[tool(description = "Resolve a term or name to indexed references, rendered as `path  #n · label` — read any with `read(path, n)`.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&g, &a.name, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &self.trace))]))
     }
 
-    #[tool(description = "Graph neighbors reachable from a node id.")]
+    #[tool(description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&g, &a.node_id, a.depth.unwrap_or(1), &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, &a.path, a.n, a.depth.unwrap_or(1), &self.trace))]))
     }
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
