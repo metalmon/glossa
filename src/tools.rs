@@ -41,20 +41,38 @@ pub struct ReadOut {
 /// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
 /// (empty if the source file is absent — body still comes from the index). No truncation.
 pub fn read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
-    let chunk = match idx.read_chunk_by_ord(path, n) {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            // The requested chunk doesn't exist — tell the model the valid range (or that the
-            // path is wrong) so it can self-correct instead of guessing again.
-            let text = match idx.last_chunk_ord(path) {
-                Ok(Some(max)) => format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
-                Ok(None) => format!("no document indexed at {path} — check the path from a search/glob result"),
-                Err(e) => format!("no chunk #{n} in {path} (range lookup failed: {e})"),
-            };
-            return ReadOut { text, images: Vec::new() };
-        }
+    // Try the exact path first. If the document isn't found, the model may have mangled the path
+    // (e.g. collapsed a double space when copying it) — resolve it tolerantly and retry once.
+    let (path, chunk): (String, _) = match idx.read_chunk_by_ord(path, n) {
+        Ok(Some(c)) => (path.to_string(), c),
+        Ok(None) => match idx.last_chunk_ord(path) {
+            // Document exists; the chunk number is just out of range → report the valid range.
+            Ok(Some(max)) => return ReadOut {
+                text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
+                images: Vec::new(),
+            },
+            // No exact path match — try a whitespace-tolerant resolve, then retry once.
+            Ok(None) => match idx.resolve_path(path).ok().flatten() {
+                Some(real) => match idx.read_chunk_by_ord(&real, n) {
+                    Ok(Some(c)) => (real, c),
+                    _ => {
+                        let text = match idx.last_chunk_ord(&real) {
+                            Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
+                            _ => format!("no document indexed at {path} — check the path from a search/glob result"),
+                        };
+                        return ReadOut { text, images: Vec::new() };
+                    }
+                },
+                None => return ReadOut {
+                    text: format!("no document indexed at {path} — check the path from a search/glob result"),
+                    images: Vec::new(),
+                },
+            },
+            Err(e) => return ReadOut { text: format!("no chunk #{n} in {path} (range lookup failed: {e})"), images: Vec::new() },
+        },
         Err(e) => return ReadOut { text: format!("read error: {e}"), images: Vec::new() },
     };
+    let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
     let footer = match (chunk.prev, chunk.next) {
         (Some(p), Some(nx)) => format!("\n\n‹ prev #{p} · next #{nx} ›"),
@@ -147,6 +165,19 @@ mod tests {
         assert!(oor.contains("no chunk #99 in d.md") && oor.contains("2 chunks") && oor.contains("#1..#2"), "range hint: {oor}");
         // A wrong path reports that the document isn't indexed.
         assert!(read(&i, "nope.md", 1, &t).text.contains("no document indexed at nope.md"));
+    }
+
+    #[test]
+    fn read_tolerates_collapsed_whitespace_in_path() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        // Real file name has a double space; the model copies it back with a single space.
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "safety body".into() },
+        ]).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
+        assert!(out.text.contains("safety body"), "resolved despite collapsed double space: {}", out.text);
     }
 
     #[test]

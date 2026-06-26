@@ -255,6 +255,25 @@ impl DocIndex {
         }
         Ok(max)
     }
+
+    /// Resolve a possibly-mangled `input` path to the real indexed path by collapsing runs of
+    /// whitespace (the model routinely turns a document's double space into a single one when
+    /// copying a path). Returns the exact path only when exactly one indexed document matches the
+    /// normalized form — never guesses between ambiguous candidates.
+    pub fn resolve_path(&self, input: &str) -> anyhow::Result<Option<String>> {
+        fn norm(s: &str) -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let target = norm(input);
+        let mut seen = std::collections::HashSet::new();
+        let mut matches: Vec<String> = Vec::new();
+        self.iter_chunks(|path, _ord, _ft, _body| {
+            if seen.insert(path.to_string()) && norm(path) == target {
+                matches.push(path.to_string());
+            }
+        })?;
+        Ok(if matches.len() == 1 { matches.pop() } else { None })
+    }
 }
 
 /// The chunk's single canonical number within its document: the page number for PDFs
