@@ -72,40 +72,50 @@ fn splice(
 
 /// Generate TZ tool config from the live MCP definitions.
 ///
-/// * Writes `<config_dir>/tools/<name>.json` for each Reader-profile tool.
-/// * Splices the `[tools.*]` TOML blocks between the `GENERATED TOOLS` markers.
-/// * Splices the `tools = [...]` line between the `GENERATED TOOL LIST` markers.
+/// * Writes `<config_dir>/tools/<name>.json` for every Full-profile tool (includes
+///   write tools: `graph_upsert`, `graph_delete`, `index`, `reindex`, `resolve`, `purge`).
+/// * Splices the `[tools.*]` TOML blocks (Full set) between the `GENERATED TOOLS` markers.
+/// * Splices the `tools = [...]` line (Reader set — answer-function tools only) between
+///   the `GENERATED TOOL LIST` markers.
 ///
-/// Returns the number of tools written.
+/// Returns the number of tool JSON files written.
 pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     // 1. Ensure the tools/ sub-directory exists.
     let tools_dir = config_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)
         .with_context(|| format!("create dir {}", tools_dir.display()))?;
 
-    // 2. Instantiate with Reader profile to get the 6 query tools.
-    let srv = crate::mcp::GlossaServer::new(
+    // 2a. Full profile — DEF set: json files + [tools.*] blocks for every tool.
+    let full_srv = crate::mcp::GlossaServer::new(
+        std::path::PathBuf::from("."),
+        crate::mcp::Profile::Full,
+        false,
+        false,
+    );
+    let mut full_tools = full_srv.tool_specs();
+    full_tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // 2b. Reader profile — LIST set: names for the answer-function tools = [...] line.
+    let reader_srv = crate::mcp::GlossaServer::new(
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Reader,
         false,
         false,
     );
-    let mut tools = srv.tool_specs();
+    let mut reader_tools = reader_srv.tool_specs();
+    reader_tools.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // 3. Sort by name for stable, deterministic output.
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
-
-    // 4. Write each tool's JSON schema.
-    for tool in &tools {
+    // 3. Write each tool's JSON schema (from the full set).
+    for tool in &full_tools {
         let json = serde_json::to_string_pretty(&*tool.input_schema)?;
         let out = tools_dir.join(format!("{}.json", tool.name));
         std::fs::write(&out, format!("{}\n", json))
             .with_context(|| format!("write {}", out.display()))?;
     }
 
-    // 5. Build the [tools.*] TOML blocks.
+    // 4. Build the [tools.*] TOML blocks (full set).
     let mut blocks = String::new();
-    for (i, tool) in tools.iter().enumerate() {
+    for (i, tool) in full_tools.iter().enumerate() {
         let desc = tool.description.as_deref().unwrap_or("");
         blocks.push_str(&format!(
             "[tools.{}]\ndescription = {}\nparameters = \"tools/{}.json\"\n",
@@ -113,7 +123,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
             toml_quote(desc),
             tool.name,
         ));
-        if i + 1 < tools.len() {
+        if i + 1 < full_tools.len() {
             blocks.push('\n');
         }
     }
@@ -123,8 +133,8 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         blocks.push('\n');
     }
 
-    // 6. Build the tool-list line.
-    let names: Vec<String> = tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    // 5. Build the tool-list line (reader set — answer-function tools only).
+    let names: Vec<String> = reader_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
     let tool_list = format!("tools = [{}]\n", names.join(", "));
 
     // 7. Splice both regions into tensorzero.toml.
@@ -146,7 +156,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     std::fs::write(&toml_path, &content)
         .with_context(|| format!("write {}", toml_path.display()))?;
 
-    Ok(tools.len())
+    Ok(full_tools.len())
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

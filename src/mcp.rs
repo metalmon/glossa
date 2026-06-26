@@ -1,4 +1,3 @@
-use crate::graph::agent::apply_upsert;
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use crate::index::store::index_dir;
@@ -31,9 +30,9 @@ pub struct GlossaServer {
     trace: crate::trace::TraceLog,
 }
 
-const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "resolve"];
+const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update"];
 const FULL_TOOLS: &[&str] = &["purge"];
-const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "resolve", "index", "reindex", "purge"];
+const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "graph_delete", "graph_update", "resolve", "index", "reindex", "purge"];
 
 impl GlossaServer {
     pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool) -> Self {
@@ -148,9 +147,46 @@ struct GraphUpsertArgs {
     edges: Vec<crate::graph::agent::EdgeSpec>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphDeleteEdge {
+    #[schemars(description = "label of the source node")]
+    from: String,
+    #[schemars(description = "the edge type, e.g. RESOLVED_BY")]
+    edge_type: String,
+    #[schemars(description = "label of the target node")]
+    to: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphDeleteArgs {
+    #[serde(default)]
+    #[schemars(description = "labels of reasoning nodes to remove")]
+    nodes: Vec<String>,
+    #[serde(default)]
+    edges: Vec<GraphDeleteEdge>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphUpdateNode {
+    #[schemars(description = "current label of the node to edit")]
+    label: String,
+    #[serde(default)]
+    #[schemars(description = "new label, if renaming")]
+    new_label: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "new node type, if changing it")]
+    new_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphUpdateArgs {
+    #[serde(default)]
+    nodes: Vec<GraphUpdateNode>,
+}
+
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead.")]
+    #[tool(description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let (body, _hits) = crate::tools::search(&idx, &a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref(), &self.trace);
@@ -171,7 +207,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "Resolve a term or name to indexed references, rendered as `path  #n · label` — read any with `read(path, n)`.")]
+    #[tool(description = "List existing graph nodes whose label matches a concept, one per line as `id [type] label` — reasoning nodes (Symptom/Cause/Resolution/Task) plus structural Section/Document (those also show a `path #n` anchor). Call it BEFORE creating a node to find and REUSE an existing one instead of duplicating; an empty result means nothing matches yet. Matching is morphology-aware over labels/aliases.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -203,16 +239,39 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
     }
 
-    #[tool(description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance.")]
+    #[tool(description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance. Write each label as a broad, reusable CLASS in the knowledge base's language (not the specifics of one case). A Resolution label names the FIX ACTION — e.g. 'increase the retransmit timeout' — never the concrete value; keep concrete values (numbers, codes) in the document that a MENTIONS edge anchors. Send a node and the edges referencing it in the same call so both endpoints exist; nodes with the same type+label are merged.")]
     async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let (n, e) = apply_upsert(&g, &ont, a.nodes, a.edges, now).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!("upserted {n} nodes, {e} edges"))]))
+        let out = crate::graph::ops::graph_upsert(&idx, &g, &ont, a.nodes, a.edges, now);
+        Ok(CallToolResult::success(vec![Content::text(out.message)]))
+    }
+
+    #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
+    async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
+            .into_iter()
+            .map(|e| crate::graph::agent::EdgeRef { from: e.from, edge_type: e.edge_type, to: e.to })
+            .collect();
+        let msg = crate::graph::ops::graph_delete(&g, a.nodes, refs);
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
+    async fn graph_update(&self, Parameters(a): Parameters<GraphUpdateArgs>) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let ups: Vec<crate::graph::agent::NodeUpdate> = a.nodes
+            .into_iter()
+            .map(|n| crate::graph::agent::NodeUpdate { label: n.label, new_label: n.new_label, new_type: n.new_type })
+            .collect();
+        let msg = crate::graph::ops::graph_update(&g, ups);
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]

@@ -146,6 +146,30 @@ enum GraphAction {
         #[arg(long, default_value_t = 6)]
         max_depth: usize,
     },
+    /// Dump all nodes (optionally filtered by type) with their outgoing edges.
+    Dump {
+        path: PathBuf,
+        /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
+        #[arg(long = "type")]
+        node_type: Option<String>,
+        /// output format: text (default), json, dot, graphml
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Import a graph file (JSON), replacing the semantic layer (file = source of truth).
+    Import {
+        file: PathBuf,
+        path: PathBuf,
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Delete all nodes of the given type (and edges touching them) — clean-slate a semantic layer.
+    Prune {
+        path: PathBuf,
+        /// node type to delete, e.g. Symptom (repeatable)
+        #[arg(long = "type", required = true)]
+        node_type: Vec<String>,
+    },
 }
 
 fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
@@ -331,6 +355,78 @@ fn main() -> anyhow::Result<()> {
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
                 println!("{}", glossa::cli_fmt::render_path(found.as_ref(), &from, &to, max_depth));
+                Ok(())
+            }
+            GraphAction::Dump { path, node_type, format } => {
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                match format.as_str() {
+                    "text" => {
+                        let mut nodes = g.all_nodes()?;
+                        nodes.sort_by(|a, b| a.node_type.cmp(&b.node_type).then(a.id.cmp(&b.id)));
+                        for n in &nodes {
+                            if node_type.as_deref().is_some_and(|t| t != n.node_type) {
+                                continue;
+                            }
+                            let al = if n.aliases.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  ({})", n.aliases.join(", "))
+                            };
+                            println!("[{}] {}  {}{}", n.node_type, n.id, n.label, al);
+                            for e in g.outgoing(&n.id)? {
+                                println!("    -{}-> {}", e.edge_type, e.to);
+                            }
+                        }
+                    }
+                    "json" => {
+                        use glossa::graph::io::{collect, to_json};
+                        print!("{}", to_json(&collect(&g, node_type.as_deref())?)?);
+                    }
+                    "dot" => {
+                        use glossa::graph::io::{collect, to_dot};
+                        print!("{}", to_dot(&collect(&g, node_type.as_deref())?));
+                    }
+                    "graphml" => {
+                        use glossa::graph::io::{collect, to_graphml};
+                        print!("{}", to_graphml(&collect(&g, node_type.as_deref())?));
+                    }
+                    other => anyhow::bail!(
+                        "unknown format {:?} — valid formats: text, json, dot, graphml",
+                        other
+                    ),
+                }
+                Ok(())
+            }
+            GraphAction::Import { file, path, format } => {
+                let fmt = format.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
+                    file.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("json")
+                        .to_string()
+                });
+                if fmt != "json" {
+                    anyhow::bail!(
+                        "import supports json only (graphml/dot are export-only)"
+                    );
+                }
+                let contents = std::fs::read_to_string(&file)?;
+                let export = glossa::graph::io::from_json(&contents)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+                let now = glossa::trace::now_ms();
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let (pruned, n, ed) = glossa::graph::io::import_replace_layer(&g, &ont, export, now)?;
+                println!("graph import: pruned {pruned}, +{n} nodes, +{ed} edges");
+                Ok(())
+            }
+            GraphAction::Prune { path, node_type } => {
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let mut total = 0;
+                for t in &node_type {
+                    let n = g.delete_by_type(t)?;
+                    println!("graph prune: removed {n} entries of type {t}");
+                    total += n;
+                }
+                println!("graph prune: {total} total entries removed");
                 Ok(())
             }
         },
