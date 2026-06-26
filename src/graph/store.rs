@@ -285,6 +285,40 @@ impl GraphStore {
         Ok(nodes_deleted + edges_deleted)
     }
 
+    /// Delete only the DOCUMENT-DERIVED layer (origin `auto-*`: structural + lexical), preserving
+    /// the agent/curated reasoning graph. Used by `index_dir(force=true)` so a reindex rebuilds the
+    /// structure from documents without destroying hand/agent-built knowledge. Returns count removed.
+    pub fn delete_auto(&self) -> anyhow::Result<usize> {
+        let c = self.conn.lock().unwrap();
+        c.execute("DELETE FROM nodes WHERE origin LIKE 'auto-%'", [])
+            .context("delete auto nodes")?;
+        let nodes_deleted = c.changes() as usize;
+        c.execute("DELETE FROM edges WHERE origin LIKE 'auto-%'", [])
+            .context("delete auto edges")?;
+        let edges_deleted = c.changes() as usize;
+        Ok(nodes_deleted + edges_deleted)
+    }
+
+    /// Like `delete_by_source`, but only the `auto-*` layer for that path — agent/curated nodes and
+    /// edges referencing the same document are preserved. Used by incremental indexing of a
+    /// changed/removed file.
+    pub fn delete_auto_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "DELETE FROM nodes WHERE source_path = ?1 AND origin LIKE 'auto-%'",
+            rusqlite::params![source_path],
+        )
+        .context("delete auto nodes by source")?;
+        let nodes_deleted = c.changes() as usize;
+        c.execute(
+            "DELETE FROM edges WHERE source_path = ?1 AND origin LIKE 'auto-%'",
+            rusqlite::params![source_path],
+        )
+        .context("delete auto edges by source")?;
+        let edges_deleted = c.changes() as usize;
+        Ok(nodes_deleted + edges_deleted)
+    }
+
     /// Delete every node of `node_type` plus all edges touching those nodes. Returns count removed.
     pub fn delete_by_type(&self, node_type: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();

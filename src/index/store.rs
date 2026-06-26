@@ -403,15 +403,18 @@ impl DocIndex {
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
 pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
-    // force = true is a true from-scratch rebuild: purge the whole index+graph first so stale
-    // entries (deleted files, or docs previously indexed under a different path form) cannot
-    // linger. Incremental delete-by-path alone can't catch those, since `force` ignores the
-    // manifest that records the old paths.
+    // force = true rebuilds the DOCUMENT-DERIVED layer from scratch: clear the tantivy index and
+    // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
+    // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
+    // graph.sqlite is PRESERVED — a reindex must not destroy hand/agent-built knowledge.
     if force {
-        let _ = std::fs::remove_dir_all(dir.join(".glossa"));
+        let _ = std::fs::remove_dir_all(dir.join(".glossa").join("index"));
     }
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
+    if force {
+        graph.delete_auto()?;
+    }
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
 
     let mut writer = idx.index.writer(50_000_000)?;
@@ -433,7 +436,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
         eprintln!("  + {path_str}");
         writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
-        graph.delete_by_source(&path_str)?;
+        graph.delete_auto_by_source(&path_str)?;
         let mut doc_written = false;
         let mut seq = 0u64;
         let mut prev_sec: Option<String> = None;
@@ -478,7 +481,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
             writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, old_path.as_str()));
-            graph.delete_by_source(old_path)?;
+            graph.delete_auto_by_source(old_path)?;
             stats.removed += 1;
         }
     }
@@ -582,6 +585,45 @@ mod incremental_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx.search("alphaword", 10).unwrap().is_empty(), "removed file purged on force reindex");
         assert!(!idx.search("bravoword", 10).unwrap().is_empty(), "kept file still indexed");
+    }
+
+    #[test]
+    fn reindex_preserves_agent_graph_drops_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalphaword\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+
+        // An agent-built reasoning node (origin = "agent"), as the enricher/specialist would add.
+        {
+            let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+            g.put_node(&crate::graph::store::Node {
+                id: "sym:test".into(),
+                node_type: "Symptom".into(),
+                label: "тестовый симптом".into(),
+                aliases: vec![],
+                prov: crate::graph::store::Provenance {
+                    source_path: "a.md".into(),
+                    range: None,
+                    file_sig: None,
+                    origin: "agent".into(),
+                    confidence: 0.9,
+                    created_at: 1,
+                },
+            })
+            .unwrap();
+        }
+
+        // Reindex rebuilds the auto-* structure but must PRESERVE the agent node.
+        index_dir(dir.path(), true).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        assert!(g.get_node("sym:test").unwrap().is_some(), "agent node survives reindex");
+        let autos = g
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.prov.origin == "auto-structural")
+            .count();
+        assert!(autos > 0, "structural (auto) layer was rebuilt");
     }
 
     #[test]
