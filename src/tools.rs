@@ -224,6 +224,9 @@ mod tests {
         let t = TraceLog::disabled();
         let out = read(&i, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
         assert!(out.text.contains("safety body"), "resolved despite collapsed double space: {}", out.text);
+        // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
+        let out2 = read(&i, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
+        assert!(out2.text.contains("safety body"), "resolved despite doubled backslash: {}", out2.text);
     }
 
     #[test]

@@ -306,7 +306,31 @@ impl DocIndex {
     /// normalized form — never guesses between ambiguous candidates.
     pub fn resolve_path(&self, input: &str) -> anyhow::Result<Option<String>> {
         fn norm(s: &str) -> String {
-            s.split_whitespace().collect::<Vec<_>>().join(" ")
+            // Collapse runs of whitespace AND of path separators, and unify `/` and `\` to `\`, so
+            // a model that double-escapes (`\\`) or swaps separators still resolves to the real path.
+            let mut out = String::with_capacity(s.len());
+            let mut prev_sep = false;
+            let mut prev_ws = false;
+            for c in s.chars() {
+                if c == '/' || c == '\\' {
+                    if !prev_sep {
+                        out.push('\\');
+                    }
+                    prev_sep = true;
+                    prev_ws = false;
+                } else if c.is_whitespace() {
+                    if !prev_ws && !out.is_empty() {
+                        out.push(' ');
+                    }
+                    prev_ws = true;
+                    prev_sep = false;
+                } else {
+                    out.push(c);
+                    prev_sep = false;
+                    prev_ws = false;
+                }
+            }
+            out.trim().to_string()
         }
         let target = norm(input);
         let mut seen = std::collections::HashSet::new();
