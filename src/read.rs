@@ -110,12 +110,71 @@ fn mime_for(name: &str) -> Option<&'static str> {
         Some("image/bmp")
     } else if lower.ends_with(".webp") {
         Some("image/webp")
+    } else if lower.ends_with(".tif") || lower.ends_with(".tiff") {
+        Some("image/tiff")
     } else {
         None
     }
 }
 
-pub fn extract_images(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
+pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" => {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            let bytes = std::fs::read(path)?;
+            let mime = mime_for(&format!("x.{ext}")).unwrap_or("application/octet-stream");
+            Ok(vec![DocImage { mime: mime.into(), bytes }])
+        }
+        "pdf" => extract_pdf_page_images(path, page, max),
+        _ => extract_zip_media(path, max),
+    }
+}
+
+fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
+    use oxidize_pdf::operations::{extract_images_from_pages, ExtractImagesOptions};
+    if max == 0 {
+        return Ok(Vec::new());
+    }
+    // Unique per call (pid + monotonic counter) so concurrent reads — tool calls now run in
+    // parallel threads — never share a temp dir and clobber each other's files.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir()
+        .join(format!("glossa-img-{}-{}", std::process::id(), uniq));
+    let _ = std::fs::create_dir_all(&tmp);
+    let result = (|| -> anyhow::Result<Vec<DocImage>> {
+        let opts = ExtractImagesOptions {
+            output_dir: tmp.clone(),
+            create_dir: true,
+            ..Default::default()
+        };
+        // page is 1-based (chunk number); oxidize-pdf uses 0-based page indices
+        let page_0 = page.saturating_sub(1) as usize;
+        let images = extract_images_from_pages(path, &[page_0], opts)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut out = Vec::new();
+        for img in images.into_iter().take(max) {
+            let mime = match img.format {
+                oxidize_pdf::graphics::ImageFormat::Jpeg => "image/jpeg",
+                oxidize_pdf::graphics::ImageFormat::Png => "image/png",
+                oxidize_pdf::graphics::ImageFormat::Tiff => "image/tiff",
+                _ => continue, // Raw / undecodable → skip
+            };
+            if let Ok(b) = std::fs::read(&img.file_path) {
+                out.push(DocImage { mime: mime.into(), bytes: b });
+            }
+        }
+        Ok(out)
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    // A text-only page, malformed PDF, or decode failure → no images, not an error.
+    Ok(result.unwrap_or_default())
+}
+
+fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
     let bytes = std::fs::read(path)?;
     let reader = std::io::Cursor::new(bytes);
     let mut archive = match zip::ZipArchive::new(reader) {
@@ -171,13 +230,13 @@ mod image_tests {
         let png = b"\x89PNG\r\n\x1a\n-fake-png-bytes";
         make_docx_with_png(&p, png);
 
-        let imgs = extract_images(&p, 10).unwrap();
+        let imgs = extract_images(&p, 1, 10).unwrap();
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].mime, "image/png");
         assert_eq!(imgs[0].bytes, png);
 
         // max cap respected
-        assert_eq!(extract_images(&p, 0).unwrap().len(), 0);
+        assert_eq!(extract_images(&p, 1, 0).unwrap().len(), 0);
     }
 
     #[test]
@@ -185,6 +244,18 @@ mod image_tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("plain.md");
         std::fs::write(&p, b"# H\nhi\n").unwrap();
-        assert!(extract_images(&p, 10).unwrap().is_empty());
+        assert!(extract_images(&p, 1, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn loose_image_returns_its_own_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pic.png");
+        let data = b"\x89PNG\r\n\x1a\nDATA";
+        std::fs::write(&p, data).unwrap();
+        let imgs = extract_images(&p, 1, 4).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].mime, "image/png");
+        assert_eq!(imgs[0].bytes, data);
     }
 }

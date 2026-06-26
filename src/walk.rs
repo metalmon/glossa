@@ -1,3 +1,4 @@
+use crate::extract::image::ImageExtractor;
 use crate::extract::markdown::MarkdownExtractor;
 use crate::extract::office::OfficeExtractor;
 use crate::extract::pdf::PdfExtractor;
@@ -9,6 +10,7 @@ use std::path::Path;
 
 pub fn extractors() -> Vec<Box<dyn Extractor>> {
     vec![
+        Box::new(ImageExtractor),
         Box::new(MarkdownExtractor),
         Box::new(OfficeExtractor),
         Box::new(PdfExtractor),
@@ -70,7 +72,7 @@ mod cover_tests {
     use super::*;
 
     #[test]
-    fn collect_indexes_text_json_code_skips_binary() {
+    fn collect_indexes_text_json_code_and_images() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"plain text alpha").unwrap();
         std::fs::write(dir.path().join("b.json"), br#"{"key":"jsonvalue"}"#).unwrap();
@@ -81,7 +83,7 @@ mod cover_tests {
         assert!(joined.contains("alpha"));
         assert!(joined.contains("jsonvalue"));
         assert!(joined.contains("beta"));
-        // the .png is binary -> no chunk from it
-        assert!(chunks.iter().all(|c| c.file_type != "png"));
+        // the .png is indexed by name via ImageExtractor
+        assert!(chunks.iter().any(|c| c.file_type == "png"));
     }
 }

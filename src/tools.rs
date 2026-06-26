@@ -80,7 +80,7 @@ pub fn read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(std::path::Path::new(path), 8).unwrap_or_default();
+    let images = crate::read::extract_images(std::path::Path::new(path), n, 4).unwrap_or_default();
     ReadOut { text: format!("{}{}", chunk.body, footer), images }
 }
 
