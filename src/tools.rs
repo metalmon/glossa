@@ -43,7 +43,16 @@ pub struct ReadOut {
 pub fn read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
     let chunk = match idx.read_chunk_by_ord(path, n) {
         Ok(Some(c)) => c,
-        Ok(None) => return ReadOut { text: format!("no chunk #{n} in {path}"), images: Vec::new() },
+        Ok(None) => {
+            // The requested chunk doesn't exist — tell the model the valid range (or that the
+            // path is wrong) so it can self-correct instead of guessing again.
+            let text = match idx.last_chunk_ord(path) {
+                Ok(Some(max)) => format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
+                Ok(None) => format!("no document indexed at {path} — check the path from a search/glob result"),
+                Err(e) => format!("no chunk #{n} in {path} (range lookup failed: {e})"),
+            };
+            return ReadOut { text, images: Vec::new() };
+        }
         Err(e) => return ReadOut { text: format!("read error: {e}"), images: Vec::new() },
     };
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
@@ -133,7 +142,11 @@ mod tests {
         assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
         assert!(out.text.contains("next #2") && out.text.contains("end of document") == false);
         assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
-        assert_eq!(read(&i, "d.md", 99, &t).text, "no chunk #99 in d.md");
+        // Out-of-range read reports the valid chunk range so the model can self-correct.
+        let oor = read(&i, "d.md", 99, &t).text;
+        assert!(oor.contains("no chunk #99 in d.md") && oor.contains("2 chunks") && oor.contains("#1..#2"), "range hint: {oor}");
+        // A wrong path reports that the document isn't indexed.
+        assert!(read(&i, "nope.md", 1, &t).text.contains("no document indexed at nope.md"));
     }
 
     #[test]

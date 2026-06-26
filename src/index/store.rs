@@ -235,6 +235,26 @@ impl DocIndex {
             None => Ok(None),
         }
     }
+
+    /// The largest chunk number (`ord`) indexed for `path`, or `None` if no chunk exists for that
+    /// exact path. Lets a failed `read` report the document's valid range instead of a dead end.
+    pub fn last_chunk_ord(&self, path: &str) -> anyhow::Result<Option<u64>> {
+        use tantivy::collector::DocSetCollector;
+        use tantivy::query::TermQuery;
+        let searcher = self.reader.searcher();
+        let q = TermQuery::new(
+            tantivy::Term::from_field_text(self.fields.path, path),
+            IndexRecordOption::Basic,
+        );
+        let mut max: Option<u64> = None;
+        for addr in searcher.search(&q, &DocSetCollector)? {
+            let d: TantivyDocument = searcher.doc(addr)?;
+            if let Some(ord) = d.get_first(self.fields.ord).and_then(|v| v.as_u64()) {
+                max = Some(max.map_or(ord, |m| m.max(ord)));
+            }
+        }
+        Ok(max)
+    }
 }
 
 /// The chunk's single canonical number within its document: the page number for PDFs
