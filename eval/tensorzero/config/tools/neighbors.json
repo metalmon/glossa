@@ -1,11 +1,21 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "description": "List graph nodes connected to a node id.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "node_id": { "type": "string", "description": "a graph node id (e.g. from glossary or a search result)" },
-    "depth": { "type": "integer", "description": "how many hops to expand (default 1)" }
+    "depth": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "node_id": {
+      "type": "string"
+    }
   },
-  "required": ["node_id"],
-  "additionalProperties": false
+  "required": [
+    "node_id"
+  ],
+  "type": "object"
 }

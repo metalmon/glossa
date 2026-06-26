@@ -1,19 +1,39 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "description": "Full-text BM25 search over the knowledge base.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "query": {
-      "type": "string",
-      "description": "Short keywords to search for (not a full sentence)."
+    "file_type": {
+      "default": null,
+      "description": "only this file type, e.g. pdf (-t)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "glob": {
+      "default": null,
+      "description": "only documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "limit": {
-      "type": "integer",
-      "description": "Maximum number of results (default 10)."
+      "default": null,
+      "description": "max hits (default 50)",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
     },
-    "glob": { "type": "string", "description": "scope to documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)" },
-    "file_type": { "type": "string", "description": "scope to this file type, e.g. pdf (-t)" }
+    "query": {
+      "description": "natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex",
+      "type": "string"
+    }
   },
-  "required": ["query"],
-  "additionalProperties": false
+  "required": [
+    "query"
+  ],
+  "type": "object"
 }

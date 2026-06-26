@@ -13,6 +13,7 @@ pub mod walk;
 pub mod read;
 pub mod trace;
 pub mod cli_fmt;
+pub mod tz_export;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
