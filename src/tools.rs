@@ -343,8 +343,8 @@ strict = true
             .expect("could not parse #ord from neighbors output");
         let read_out = read(&idx, &p, parent_ord, &t);
         assert!(
-            read_out.text.contains("intro") || !read_out.text.starts_with("no chunk"),
-            "reading #ord from neighbors output succeeds: {}",
+            read_out.text.contains("intro"),
+            "reading #ord from neighbors output returns the parent section's body: {}",
             read_out.text
         );
 
