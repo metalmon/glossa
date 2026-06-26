@@ -20,7 +20,7 @@ pub struct OpenAiBackend {
     pub timeout: Duration,
 }
 
-const MAX_ROUNDS: usize = 8;
+const MAX_ROUNDS: usize = 50;
 
 impl AgentBackend for OpenAiBackend {
     fn needs_corpus(&self) -> bool {
