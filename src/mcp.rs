@@ -171,14 +171,14 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "Look up graph nodes whose label/alias matches a name; renders each as `path  #ord · label` (sections) or `path  (document)`.")]
+    #[tool(description = "Resolve a term or name to indexed references, rendered as `path  #n · label` — read any with `read(path, n)`.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &self.trace))]))
     }
 
-    #[tool(description = "Structural graph neighbors of chunk `n` in `path` (NEXT/PREV/PARENT/CHILD/REFERENCES edges). Returns lines `EDGE_TYPE  path  #ord · label` so each result is directly readable with `read(path, n)`.")]
+    #[tool(description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
