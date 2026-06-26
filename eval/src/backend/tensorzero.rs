@@ -21,12 +21,12 @@ pub struct TzTurn {
 pub fn run_episode<C, X>(
     mut chat: C,
     user_question: &str,
-    mut exec: X,
+    exec: X,
     max_rounds: usize,
 ) -> anyhow::Result<EpisodeOutcome>
 where
     C: FnMut(&[Value], Option<&str>) -> anyhow::Result<TzTurn>,
-    X: FnMut(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>),
+    X: Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync,
 {
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user_question })];
     let mut episode_id: Option<String> = None;
@@ -55,26 +55,59 @@ where
             return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles });
         }
 
-        for call in &tool_calls {
-            let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            // TZ returns `arguments: null` (with the raw string under `raw_arguments`)
-            // when the model emitted unparseable JSON args. Echoing `null` back is
-            // rejected by the input schema ("did not match any variant of
-            // ToolCallWrapper"), so fall back to `raw_arguments` (a string, which TZ
-            // accepts) and finally to `{}`.
-            let args = call
-                .get("arguments")
-                .filter(|v| !v.is_null())
-                .cloned()
-                .or_else(|| call.get("raw_arguments").cloned())
-                .unwrap_or_else(|| json!({}));
-            // echo the assistant tool_call, then the tool_result (result MUST be a string)
-            messages.push(json!({
-                "role": "assistant",
-                "content": [{ "type": "tool_call", "id": id, "name": name, "arguments": args }]
-            }));
-            let (result, titles, images) = exec(name, &args);
+        // Build owned (id, name, args) triples with the raw_arguments fallback applied
+        // BEFORE spawning, so each thread owns its data.
+        // TZ returns `arguments: null` (with the raw string under `raw_arguments`)
+        // when the model emitted unparseable JSON args. Echoing `null` back is
+        // rejected by the input schema ("did not match any variant of
+        // ToolCallWrapper"), so fall back to `raw_arguments` (a string, which TZ
+        // accepts) and finally to `{}`.
+        let calls: Vec<(String, String, Value)> = tool_calls
+            .iter()
+            .map(|call| {
+                let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let args = call
+                    .get("arguments")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .or_else(|| call.get("raw_arguments").cloned())
+                    .unwrap_or_else(|| json!({}));
+                (id, name, args)
+            })
+            .collect();
+
+        // ONE assistant message whose content array contains ALL tool_call blocks
+        // for this round (correctly represents parallel tool calls as a single turn).
+        let tool_call_blocks: Vec<Value> = calls
+            .iter()
+            .map(|(id, name, args)| {
+                json!({ "type": "tool_call", "id": id, "name": name, "arguments": args })
+            })
+            .collect();
+        messages.push(json!({ "role": "assistant", "content": tool_call_blocks }));
+
+        // Execute all calls concurrently, collecting results in original call order.
+        let results: Vec<(String, String, String, Vec<String>, Vec<glossa::read::DocImage>)> =
+            std::thread::scope(|s| {
+                let handles: Vec<_> = calls
+                    .iter()
+                    .map(|(id, name, args)| {
+                        s.spawn(|| {
+                            let (result, titles, images) = exec(name, args);
+                            (id.clone(), name.clone(), result, titles, images)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("tool-call thread panicked"))
+                    .collect()
+            });
+
+        // Push one tool_result user message per call (in original call order),
+        // followed by any image blocks. Result MUST be a string.
+        for (id, name, result, titles, images) in results {
             surfaced_titles.extend(titles);
             messages.push(json!({
                 "role": "user",
@@ -111,7 +144,9 @@ use glossa::trace::TraceLog;
 use std::path::Path;
 use std::time::Duration;
 
-const MAX_ROUNDS: usize = 8;
+// High cap: effectively "no limit" for real episodes, but still bounded to prevent a runaway
+// tool-call loop from spinning forever.
+const MAX_ROUNDS: usize = 50;
 
 /// Drives Qwen through the TensorZero gateway (function `answer_hotpot`), executing glossa tools
 /// in-process, then posts em/f1/retrieved feedback for the episode. The prompt lives in TZ config.
@@ -375,6 +410,80 @@ mod tests {
             && b["data"].is_string()),
             "image block must use Format A: {{type:image, mime_type, data}}");
         assert!(image_user_message(&[]).is_none());
+    }
+
+    /// Two tool_call blocks in a single round must produce ONE assistant message with
+    /// both blocks, TWO separate tool_result user messages, and both execs must fire.
+    #[test]
+    fn parallel_tool_calls_produce_one_assistant_message() {
+        use std::cell::RefCell;
+        use std::sync::{Arc, Mutex};
+
+        let round = RefCell::new(0usize);
+        let captured_msgs: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+
+        let chat = |msgs: &[Value], _eid: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                Ok(TzTurn {
+                    content: vec![
+                        json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": { "query": "alpha" } }),
+                        json!({ "type": "tool_call", "id": "c2", "name": "read",   "arguments": { "path": "b.md" } }),
+                    ],
+                    episode_id: "ep2".into(),
+                })
+            } else {
+                *captured_msgs.borrow_mut() = msgs.to_vec();
+                Ok(TzTurn {
+                    content: vec![json!({ "type": "text", "text": "ANSWER: done" })],
+                    episode_id: "ep2".into(),
+                })
+            }
+        };
+
+        let called_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let names_clone = Arc::clone(&called_names);
+        let exec = move |name: &str, _args: &Value| {
+            names_clone.lock().unwrap().push(name.to_string());
+            ("result".to_string(), vec![format!("title-{name}")], Vec::new())
+        };
+
+        let out = run_episode(chat, "q", exec, 4).unwrap();
+        assert_eq!(out.answer, "ANSWER: done");
+
+        // Both execs must have fired.
+        let mut names = called_names.lock().unwrap().clone();
+        names.sort();
+        assert_eq!(names, vec!["read".to_string(), "search".to_string()]);
+
+        // surfaced_titles collected from both calls.
+        let mut titles = out.surfaced_titles.clone();
+        titles.sort();
+        assert_eq!(titles, vec!["title-read".to_string(), "title-search".to_string()]);
+
+        // Message structure after round 1:
+        //   [0] user question
+        //   [1] assistant { content: [tool_call c1, tool_call c2] }   ← ONE message, TWO blocks
+        //   [2] user { tool_result c1 }
+        //   [3] user { tool_result c2 }
+        let msgs = captured_msgs.borrow();
+        assert_eq!(msgs.len(), 4, "expected [user_q, assistant, tool_result_c1, tool_result_c2]");
+
+        let asst = &msgs[1];
+        assert_eq!(asst["role"], "assistant");
+        let blocks = asst["content"].as_array().expect("content must be array");
+        assert_eq!(blocks.len(), 2, "ONE assistant message must contain BOTH tool_call blocks");
+        assert!(blocks.iter().any(|b| b["type"] == "tool_call" && b["id"] == "c1"), "c1 block missing");
+        assert!(blocks.iter().any(|b| b["type"] == "tool_call" && b["id"] == "c2"), "c2 block missing");
+
+        // Two separate tool_result messages in call order.
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][0]["id"], "c1");
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(msgs[3]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[3]["content"][0]["id"], "c2");
     }
 
     #[test]
