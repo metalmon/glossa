@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "GraphDeleteEdge": {
+      "properties": {
+        "edge_type": {
+          "description": "the edge type, e.g. RESOLVED_BY",
+          "type": "string"
+        },
+        "from": {
+          "description": "label of the source node",
+          "type": "string"
+        },
+        "to": {
+          "description": "label of the target node",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "edge_type",
+        "to"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/GraphDeleteEdge"
+      },
+      "type": "array"
+    },
+    "nodes": {
+      "default": [],
+      "description": "labels of reasoning nodes to remove",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
