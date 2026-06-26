@@ -179,11 +179,31 @@ impl AgentBackend for TensorZeroBackend {
             if tags.as_object().is_some_and(|o| !o.is_empty()) {
                 body["tags"] = tags.clone();
             }
-            let resp = ureq::post(&url)
-                .timeout(timeout)
-                .set("Content-Type", "application/json")
-                .send_string(&serde_json::to_string(&body)?)
-                .map_err(|e| anyhow!("tensorzero /inference failed: {e}"))?;
+            let payload = serde_json::to_string(&body)?;
+            // Retry transient gateway failures (5xx, timeouts, dropped connections) — the local LM
+            // provider occasionally hiccups and would otherwise zero out the whole question.
+            let mut attempt = 0u32;
+            let resp = loop {
+                match ureq::post(&url)
+                    .timeout(timeout)
+                    .set("Content-Type", "application/json")
+                    .send_string(&payload)
+                {
+                    Ok(r) => break r,
+                    Err(e) => {
+                        let retryable = match &e {
+                            ureq::Error::Status(code, _) => *code >= 500,
+                            ureq::Error::Transport(_) => true,
+                        };
+                        attempt += 1;
+                        if retryable && attempt <= 3 {
+                            std::thread::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)));
+                            continue;
+                        }
+                        return Err(anyhow!("tensorzero /inference failed: {e}"));
+                    }
+                }
+            };
             let text = resp.into_string().context("read /inference response")?;
             let v: Value = serde_json::from_str(&text).context("parse /inference json")?;
             if let Some(err) = v.get("error") {
