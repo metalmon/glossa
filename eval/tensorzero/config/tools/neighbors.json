@@ -10,12 +10,20 @@
         "null"
       ]
     },
-    "node_id": {
+    "n": {
+      "description": "chunk number, exactly as shown in `[#n]` in a search result",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "path": {
+      "description": "document path, exactly as shown in a search result",
       "type": "string"
     }
   },
   "required": [
-    "node_id"
+    "path",
+    "n"
   ],
   "type": "object"
 }

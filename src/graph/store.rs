@@ -222,13 +222,26 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// Resolve a name/term to graph node ids. Matching is fuzzy: a node hits when the query's
+    /// stemmed terms are all present in its `label` or one of its `aliases` (same morphology
+    /// pipeline as search), so word order and inflection don't matter. Exact (case-insensitive)
+    /// label/alias equality is always honored too. NOTE: this is morphology- + order-tolerant,
+    /// NOT transliteration-aware — Cyrillic "модбас" still won't match Latin "Modbus".
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        use std::collections::BTreeSet;
         let needle = name.to_lowercase();
+        let query: BTreeSet<String> = crate::index::multilang::analyze_terms(name).into_iter().collect();
+        let terms = |s: &str| -> BTreeSet<String> {
+            crate::index::multilang::analyze_terms(s).into_iter().collect()
+        };
         let mut ids = Vec::new();
         for n in self.all_nodes()? {
-            let hit = n.label.to_lowercase() == needle
+            let exact = n.label.to_lowercase() == needle
                 || n.aliases.iter().any(|a| a.to_lowercase() == needle);
-            if hit {
+            let fuzzy = !query.is_empty()
+                && (query.is_subset(&terms(&n.label))
+                    || n.aliases.iter().any(|a| query.is_subset(&terms(a))));
+            if exact || fuzzy {
                 ids.push(n.id);
             }
         }
@@ -292,6 +305,46 @@ strict = true
 
         assert_eq!(g.resolve("ооо акме").unwrap(), vec!["org:acme".to_string()]);
         assert_eq!(g.resolve("ACME").unwrap(), vec!["org:acme".to_string()]);
+    }
+
+    #[test]
+    fn resolve_fuzzy_matches_reordered_and_inflected() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let n = Node {
+            id: "n:sync".into(),
+            node_type: "Organization".into(),
+            label: "Синхронизация пространства параметров".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[n], &[]).unwrap();
+        // Reordered + different inflection ("пространство" vs "пространства"): exact match
+        // returns nothing, fuzzy (stemmed token subset) must find the node.
+        assert_eq!(
+            g.resolve("пространство синхронизация").unwrap(),
+            vec!["n:sync".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_fuzzy_does_not_match_unrelated_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let n = Node {
+            id: "n:sync".into(),
+            node_type: "Organization".into(),
+            label: "Синхронизация пространства параметров".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[n], &[]).unwrap();
+        // A token NOT present in the label must not match (subset, not overlap).
+        assert!(g.resolve("температура двигателя").unwrap().is_empty());
+        // Empty / punctuation-only query must not match everything.
+        assert!(g.resolve("   ").unwrap().is_empty());
     }
 
     #[test]
