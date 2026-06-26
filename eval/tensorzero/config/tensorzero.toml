@@ -70,9 +70,9 @@ extra_body = [
   { pointer = "/top_k", value = 20 },
   { pointer = "/min_p", value = 0 },
   { pointer = "/reasoning", value = { enabled = false } },
-  # Pin to image-capable providers (others reject image input with 400). Verified
-  # to accept base64 images for qwen3.6-35b-a3b.
-  { pointer = "/provider", value = { only = ["Parasail", "SiliconFlow", "WandB"] } },
+  # NO provider pin: let OpenRouter route across ALL providers for fallback (avoids 429
+  # rate-limits from pinning to a few). Trade-off: images may hit a text-only provider
+  # and 400 — re-add a provider pin if/when vision via this function is needed.
   # Zed does NOT trim context for openai_compatible providers -> a long coding thread
   # (text + tool defs + output) can exceed 262144 and OpenRouter 400s. middle-out lets
   # OpenRouter compress the oversized prompt to fit instead of erroring.
@@ -106,8 +106,8 @@ extra_body = [
   { pointer = "/top_k", value = 20 },
   { pointer = "/min_p", value = 0 },
   { pointer = "/reasoning", value = { enabled = false } },
-  # Pin to image-capable providers for qwen3.6-27b (Alibaba rejects images with 400).
-  { pointer = "/provider", value = { only = ["SiliconFlow", "WandB", "DeepInfra", "Chutes"] } },
+  # NO provider pin: full OpenRouter fallback to avoid 429 (see `coding` note; images
+  # may 400 on a text-only provider — re-add a pin if vision is needed here).
   # Let OpenRouter compress an oversized prompt to fit (Zed doesn't trim) — see `coding`.
   { pointer = "/transforms", value = ["middle-out"] },
 ]
@@ -228,4 +228,25 @@ level = "episode"
 [metrics.judge]
 type = "float"
 optimize = "max"
+level = "episode"
+
+# ── Enricher telemetry (per-case, posted by `kb-eval enrich`) ──
+[metrics.enrich_nodes]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.enrich_edges]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.enrich_errors]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.enrich_rounds]
+type = "float"
+optimize = "min"
 level = "episode"
