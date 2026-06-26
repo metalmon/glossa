@@ -123,10 +123,18 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
+            // Each match shows the node `id` first (so the agent can reference / reuse it),
+            // then its type and label, plus the `(path, #ord)` anchor for Section/Document nodes.
             let lines: Vec<String> = ids
                 .iter()
                 .map(|id| match g.get_node(id) {
-                    Ok(Some(node)) => node_ref(idx, &node).unwrap_or_else(|| id.clone()),
+                    Ok(Some(node)) => {
+                        let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
+                        match node_ref(idx, &node) {
+                            Some(r) => format!("{base}  —  {r}"),
+                            None => base,
+                        }
+                    }
                     _ => id.clone(),
                 })
                 .collect();
