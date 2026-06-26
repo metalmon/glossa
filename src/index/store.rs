@@ -80,7 +80,7 @@ impl RankedHit {
     /// itself a number) so nothing competes with the read key.
     pub fn display_line(&self) -> String {
         let label = if self.location.starts_with("p.") { self.file_type.as_str() } else { self.location.as_str() };
-        format!("[#{}] {} · {} · {}  [{:.3}]", self.ord, self.path, label, self.snippet, self.score)
+        format!("[#{}] {} · {} · {}", self.ord, self.path, label, self.snippet)
     }
 }
 

@@ -38,6 +38,16 @@ pub fn run_grep(idx: &DocIndex, pattern: &str, opts: glossa::grep::GrepOpts, tra
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
 pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::graph::store::GraphStore>, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+    // The raw_arguments fallback (TZ hands back a JSON *string* when the model's args didn't match
+    // the tool schema, e.g. a float where an int was required) would make field lookups see empty
+    // values. Parse it back to an object so path/n/query/… resolve.
+    let parsed;
+    let args = if let Some(s) = args.as_str() {
+        parsed = serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}));
+        &parsed
+    } else {
+        args
+    };
     match name {
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
