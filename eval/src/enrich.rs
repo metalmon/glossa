@@ -6,7 +6,7 @@
 //! `glossa_tools::exec`. This keeps the shared exec signature untouched.
 
 use anyhow::Context;
-use glossa::graph::agent::{apply_upsert, EdgeSpec, NodeSpec};
+use glossa::graph::agent::{EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
@@ -33,20 +33,6 @@ struct TrainCase {
     answer: String,
 }
 
-/// Resolve a section reference of the form `<path>#<n>` (a chunk number the agent has from a
-/// read/search result) into the real Section node id `<path>#<location>`. Anything else (a
-/// reasoning-node slug like `sym:…`, or an already-resolved `<path>#<location>`) passes through.
-fn resolve_section_ref(idx: &DocIndex, s: &str) -> String {
-    if let Some(pos) = s.rfind('#') {
-        if let Ok(n) = s[pos + 1..].parse::<u64>() {
-            let path = &s[..pos];
-            if let Ok(Some(loc)) = idx.location_for_ord(path, n) {
-                return glossa::graph::build::section_id(path, &loc);
-            }
-        }
-    }
-    s.to_string()
-}
 
 pub fn run_enrich(
     train: &Path,
@@ -100,40 +86,64 @@ pub fn run_enrich(
                     args.get("nodes").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
-                let mut edges: Vec<EdgeSpec> = serde_json::from_value(
+                let edges: Vec<EdgeSpec> = serde_json::from_value(
                     args.get("edges").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
-                // Resolve section refs the agent gives as `<path>#<n>` (the (path,#n) it has from
-                // reads) into the real Section node id `<path>#<location>` — it cannot reconstruct
-                // the heading breadcrumb itself. Reasoning-node ids (sym:/res:/…) pass through.
-                for e in &mut edges {
-                    e.from = resolve_section_ref(&idx, &e.from);
-                    e.to = resolve_section_ref(&idx, &e.to);
-                }
-                // Dump what the model proposed so the controller can eyeball graph quality.
-                for nd in &nodes {
-                    eprintln!("    node {} [{}] {}", nd.id, nd.node_type, nd.label);
-                }
-                for e in &edges {
-                    eprintln!("    edge {} -{}-> {}", e.from, e.edge_type, e.to);
-                }
                 let ont = Ontology::load_or_default(&work_iter);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                match apply_upsert(&graph, &ont, nodes, edges, now) {
-                    Ok((n, e)) => {
-                        nc.fetch_add(n, Ordering::Relaxed);
-                        ec.fetch_add(e, Ordering::Relaxed);
-                        (format!("upserted {n} nodes, {e} edges"), vec![], vec![])
-                    }
-                    Err(err) => {
-                        erc.fetch_add(1, Ordering::Relaxed);
-                        (err.to_string(), vec![], vec![])
-                    }
+                let out = glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now);
+                for l in &out.dump {
+                    eprintln!("    {l}");
                 }
+                if out.rejected {
+                    erc.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    nc.fetch_add(out.nodes, Ordering::Relaxed);
+                    ec.fetch_add(out.edges, Ordering::Relaxed);
+                }
+                (out.message, vec![], vec![])
+            } else if name == "graph_delete" {
+                #[derive(serde::Deserialize)]
+                struct DeleteEdgeArg {
+                    from: String,
+                    edge_type: String,
+                    to: String,
+                }
+                let node_labels: Vec<String> = serde_json::from_value(
+                    args.get("nodes").cloned().unwrap_or(json!([])),
+                )
+                .unwrap_or_default();
+                let edge_args: Vec<DeleteEdgeArg> = serde_json::from_value(
+                    args.get("edges").cloned().unwrap_or(json!([])),
+                )
+                .unwrap_or_default();
+                let edge_refs: Vec<EdgeRef> = edge_args
+                    .into_iter()
+                    .map(|e| EdgeRef { from: e.from, edge_type: e.edge_type, to: e.to })
+                    .collect();
+                let msg = glossa::graph::ops::graph_delete(&graph, node_labels, edge_refs);
+                (msg, vec![], vec![])
+            } else if name == "graph_update" {
+                #[derive(serde::Deserialize)]
+                struct UpdateNodeArg {
+                    label: String,
+                    new_label: Option<String>,
+                    new_type: Option<String>,
+                }
+                let update_args: Vec<UpdateNodeArg> = serde_json::from_value(
+                    args.get("nodes").cloned().unwrap_or(json!([])),
+                )
+                .unwrap_or_default();
+                let ups: Vec<NodeUpdate> = update_args
+                    .into_iter()
+                    .map(|u| NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type })
+                    .collect();
+                let msg = glossa::graph::ops::graph_update(&graph, ups);
+                (msg, vec![], vec![])
             } else {
                 glossa_tools::exec(name, args, &idx, Some(&graph), &trace)
             }

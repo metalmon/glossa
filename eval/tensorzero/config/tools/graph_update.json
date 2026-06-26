@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "GraphUpdateNode": {
+      "properties": {
+        "label": {
+          "description": "current label of the node to edit",
+          "type": "string"
+        },
+        "new_label": {
+          "default": null,
+          "description": "new label, if renaming",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_type": {
+          "default": null,
+          "description": "new node type, if changing it",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/GraphUpdateNode"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}

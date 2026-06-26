@@ -116,7 +116,7 @@ extra_body = [
 [functions.answer_hotpot]
 type = "chat"
 # >>> GENERATED TOOL LIST
-tools = ["glob", "glossary", "grep", "neighbors", "read", "search"]
+tools = ["glob", "glossary", "grep", "neighbors", "read", "resolve", "search"]
 # <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
@@ -145,35 +145,59 @@ description = "List knowledge-base documents whose path matches a shell glob (e.
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "Resolve a term or name to indexed references, rendered as `path  #n · label` — read any with `read(path, n)`."
+description = "List existing graph nodes whose label matches a concept, one per line as `id [type] label` — reasoning nodes (Symptom/Cause/Resolution/Task) plus structural Section/Document (those also show a `path #n` anchor). Call it BEFORE creating a node to find and REUSE an existing one instead of duplicating; an empty result means nothing matches yet. Matching is morphology-aware over labels/aliases."
 parameters = "tools/glossary.json"
+
+[tools.graph_delete]
+description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
+parameters = "tools/graph_delete.json"
+
+[tools.graph_update]
+description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
+parameters = "tools/graph_update.json"
+
+[tools.graph_upsert]
+description = "Upsert agent-built graph nodes/edges (validated against ontology.toml). Each node/edge needs id/type/label and a source_path for provenance. Write each label as a broad, reusable CLASS in the knowledge base's language (not the specifics of one case). A Resolution label names the FIX ACTION — e.g. 'increase the retransmit timeout' — never the concrete value; keep concrete values (numbers, codes) in the document that a MENTIONS edge anchors. Send a node and the edges referencing it in the same call so both endpoints exist; nodes with the same type+label are merged."
+parameters = "tools/graph_upsert.json"
 
 [tools.grep]
 description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`."
 parameters = "tools/grep.json"
 
+[tools.index]
+description = "Build/update the index + structural graph for the knowledge base."
+parameters = "tools/index.json"
+
 [tools.neighbors]
 description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors."
 parameters = "tools/neighbors.json"
+
+[tools.purge]
+description = "Delete the index + graph for the knowledge base."
+parameters = "tools/purge.json"
 
 [tools.read]
 description = "Read a document chunk by its number `n` — the `[#n]` from a search/grep result (for PDFs, the page number). Returns the chunk's full text plus the previous/next chunk numbers for context expansion. If `n` is out of range, the reply states the document's valid chunk range."
 parameters = "tools/read.json"
 
+[tools.reindex]
+description = "Rebuild the index + graph from scratch."
+parameters = "tools/reindex.json"
+
+[tools.resolve]
+description = "Resolve a name to existing graph node ids (entity resolution)."
+parameters = "tools/resolve.json"
+
 [tools.search]
-description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead."
+description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
 parameters = "tools/search.json"
 # <<< GENERATED TOOLS
 
-# ── graph_upsert tool (enricher spike — NOT in the generated block so the generator won't clobber it) ──
-[tools.graph_upsert]
-description = "Upsert reasoning nodes and directed edges into the glossa knowledge graph. Nodes represent abstract concepts (Symptom, Cause, Resolution, Task); edges encode causal/resolution/mention relations. Call this AFTER locating supporting evidence with search/read/grep."
-parameters = "tools/graph_upsert.json"
-
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
+# (graph_upsert/graph_delete defs now come from MCP via the GENERATED TOOLS block above.)
 [functions.enrich]
 type = "chat"
-tools = ["search", "read", "grep", "graph_upsert"]
+tools = ["search", "read", "grep", "glossary", "neighbors", "graph_upsert", "graph_update", "graph_delete"]
 parallel_tool_calls = true
 
 [functions.enrich.variants.baseline]
