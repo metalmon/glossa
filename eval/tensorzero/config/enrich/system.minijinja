@@ -20,9 +20,9 @@ You are a knowledge-graph enricher for a technical-support knowledge base. You a
 - `MENTIONS` — any reasoning node → Section (to anchor it to a readable chunk)
 
 ## Section node ids
-When creating a `MENTIONS` edge to a document section, the target node id must be:
-  `<path>#<location-breadcrumb>`
-where `<path>` is the document path from the search/read result and `<location-breadcrumb>` is the heading or chunk label (e.g. `docs/manual.pdf#3.2 Profibus settings`). Set `source_path` to the same `<path>`.
+When creating a `MENTIONS` edge to a document section, set the target to:
+  `<path>#<n>`
+where `<path>` is the document path and `<n>` is the chunk NUMBER — the `[#n]` from a search/grep result, or the `n` you passed to `read` (e.g. `kb-test\БД\manual.pdf#594`). The system resolves it to the real section automatically; do NOT guess a heading or breadcrumb. Set `source_path` to the same `<path>`.
 
 ## Node id convention
 Use short slugs prefixed by type abbreviation:

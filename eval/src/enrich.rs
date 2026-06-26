@@ -33,6 +33,21 @@ struct TrainCase {
     answer: String,
 }
 
+/// Resolve a section reference of the form `<path>#<n>` (a chunk number the agent has from a
+/// read/search result) into the real Section node id `<path>#<location>`. Anything else (a
+/// reasoning-node slug like `sym:…`, or an already-resolved `<path>#<location>`) passes through.
+fn resolve_section_ref(idx: &DocIndex, s: &str) -> String {
+    if let Some(pos) = s.rfind('#') {
+        if let Ok(n) = s[pos + 1..].parse::<u64>() {
+            let path = &s[..pos];
+            if let Ok(Some(loc)) = idx.location_for_ord(path, n) {
+                return glossa::graph::build::section_id(path, &loc);
+            }
+        }
+    }
+    s.to_string()
+}
+
 pub fn run_enrich(
     train: &Path,
     work: &Path,
@@ -81,10 +96,24 @@ pub fn run_enrich(
                     args.get("nodes").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
-                let edges: Vec<EdgeSpec> = serde_json::from_value(
+                let mut edges: Vec<EdgeSpec> = serde_json::from_value(
                     args.get("edges").cloned().unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
+                // Resolve section refs the agent gives as `<path>#<n>` (the (path,#n) it has from
+                // reads) into the real Section node id `<path>#<location>` — it cannot reconstruct
+                // the heading breadcrumb itself. Reasoning-node ids (sym:/res:/…) pass through.
+                for e in &mut edges {
+                    e.from = resolve_section_ref(&idx, &e.from);
+                    e.to = resolve_section_ref(&idx, &e.to);
+                }
+                // Dump what the model proposed so the controller can eyeball graph quality.
+                for nd in &nodes {
+                    eprintln!("    node {} [{}] {}", nd.id, nd.node_type, nd.label);
+                }
+                for e in &edges {
+                    eprintln!("    edge {} -{}-> {}", e.from, e.edge_type, e.to);
+                }
                 let ont = Ontology::load_or_default(&work_iter);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
