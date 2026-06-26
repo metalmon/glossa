@@ -56,6 +56,11 @@ impl GlossaServer {
         Self { root, tool_router: router, trace }
     }
 
+    /// Return the list of enabled tools (for config generation — not test-only).
+    pub fn tool_specs(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router.list_all()
+    }
+
     #[cfg(test)]
     pub fn enabled_tools(&self) -> Vec<String> {
         self.tool_router.list_all().iter().map(|t| t.name.to_string()).collect()

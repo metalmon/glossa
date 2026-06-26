@@ -1,12 +1,53 @@
 {
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "pattern": { "type": "string", "description": "an exact string to find — a code, version, identifier, parameter name, error message, or exact phrase (e.g. maxTsdr, 5.7.2); ripgrep regex supported" },
-    "ignore_case": { "type": "boolean", "description": "force case-insensitive (-i); matching is smart-case by default" },
-    "fixed": { "type": "boolean", "description": "treat pattern as a fixed string, not regex (-F)" },
-    "word": { "type": "boolean", "description": "match whole words only (-w)" },
-    "glob": { "type": "string", "description": "path glob filter, e.g. *.pdf (-g)" },
-    "file_type": { "type": "string", "description": "file type filter, e.g. pdf (-t)" }
+    "file_type": {
+      "default": null,
+      "description": "only this file type, e.g. pdf (-t)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fixed": {
+      "default": null,
+      "description": "treat the pattern as a fixed string, not a regex (-F)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "glob": {
+      "default": null,
+      "description": "only files whose path matches this glob, e.g. *.pdf (-g)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ignore_case": {
+      "default": null,
+      "description": "case-insensitive matching (-i)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "pattern": {
+      "description": "ripgrep-style regex pattern (literal text also works)",
+      "type": "string"
+    },
+    "word": {
+      "default": null,
+      "description": "match whole words only (-w)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
   },
-  "required": ["pattern"]
+  "required": [
+    "pattern"
+  ],
+  "type": "object"
 }

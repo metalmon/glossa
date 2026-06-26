@@ -73,6 +73,10 @@ extra_body = [
   # Pin to image-capable providers (others reject image input with 400). Verified
   # to accept base64 images for qwen3.6-35b-a3b.
   { pointer = "/provider", value = { only = ["Parasail", "SiliconFlow", "WandB"] } },
+  # Zed does NOT trim context for openai_compatible providers -> a long coding thread
+  # (text + tool defs + output) can exceed 262144 and OpenRouter 400s. middle-out lets
+  # OpenRouter compress the oversized prompt to fit instead of erroring.
+  { pointer = "/transforms", value = ["middle-out"] },
 ]
 
 # ── Second coding model: Qwen3.6-27B (dense) via OpenRouter ──
@@ -104,56 +108,62 @@ extra_body = [
   { pointer = "/reasoning", value = { enabled = false } },
   # Pin to image-capable providers for qwen3.6-27b (Alibaba rejects images with 400).
   { pointer = "/provider", value = { only = ["SiliconFlow", "WandB", "DeepInfra", "Chutes"] } },
+  # Let OpenRouter compress an oversized prompt to fit (Zed doesn't trim) — see `coding`.
+  { pointer = "/transforms", value = ["middle-out"] },
 ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
-tools = ["search", "read", "grep", "glob", "glossary", "neighbors"]
+# >>> GENERATED TOOL LIST
+tools = ["glob", "glossary", "grep", "neighbors", "read", "search"]
+# <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
 [functions.answer_hotpot.variants.baseline]
 type = "chat_completion"
 model = "qwen"
 system_template = "answer_hotpot/system.minijinja"
-# Bound generation + anti-loop sampling so the small local model can't run away and
-# trip the gateway/client timeouts. NOTE: this model loops at LOW temperatures, so we
-# use the high-temp preset (temp 1.0 / top_p 0.95 / presence_penalty 1.5) rather than
-# the usual 0.7. presence_penalty curbs repetition; max_tokens caps any runaway turn.
+# Sampling preset tuned to curb the small model's repetition/looping without crushing
+# exploration. top_k/min_p/repetition_penalty are llama.cpp params → passed via extra_body.
+# max_tokens caps any runaway turn.
 max_tokens = 2048
-temperature = 1.0
+temperature = 0.8
 top_p = 0.95
-presence_penalty = 1.5
 extra_body = [
-  { pointer = "/top_k", value = 20 },
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
 ]
 # Add more [functions.answer_hotpot.variants.<name>] blocks (with `weight`) to A/B
 # alternative prompts; TensorZero optimization can then propose better variants.
 
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
-[tools.search]
-description = "Full-text BM25 search over the knowledge base. Pass short keywords (not a sentence)."
-parameters = "tools/search.json"
-
-[tools.read]
-description = "Read a document's text, optionally narrowed to a heading/page/sheet location."
-parameters = "tools/read.json"
-
-[tools.grep]
-description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. maxTsdr, 5.7.2, AbakController). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword search). For fuzzy/conceptual lookup, use search. Returns `path:#n: line`; read with read(path, n)."
-parameters = "tools/grep.json"
-
+# >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
 [tools.glob]
-description = "List knowledge-base documents whose path matches a shell glob (e.g. *.pdf, *Safety*, *АБАК*). Returns `path  (N chunks)` per line — discover what documents exist or find a file by name, then read(path, n) or scope a search/grep to it."
+description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count)."
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "Resolve a term/name to knowledge-graph node ids whose label/alias matches it."
+description = "List glossary node ids whose label/alias matches a name."
 parameters = "tools/glossary.json"
 
+[tools.grep]
+description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`."
+parameters = "tools/grep.json"
+
 [tools.neighbors]
-description = "List knowledge-graph nodes connected to a node id (the graph links documents to their sections)."
+description = "Graph neighbors reachable from a node id."
 parameters = "tools/neighbors.json"
+
+[tools.read]
+description = "Read a document chunk by its number `n` — the `[#n]` from a search/grep result (for PDFs, the page number). Returns the chunk's full text plus the previous/next chunk numbers for context expansion. If `n` is out of range, the reply states the document's valid chunk range."
+parameters = "tools/read.json"
+
+[tools.search]
+description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead."
+parameters = "tools/search.json"
+# <<< GENERATED TOOLS
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
 [metrics.em]
