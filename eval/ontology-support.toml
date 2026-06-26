@@ -1,0 +1,69 @@
+# Support-domain ontology overlay for glossa (technical-support knowledge base).
+#
+# Core node types (Document, Section, Term, Topic) and core edges
+# (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN — the structural
+# indexer writes them directly. This overlay declares the support-specific
+# entities + relations that the reasoning enricher agent populates via
+# `graph_upsert` (validated against this file). `MENTIONS` (any node → Section)
+# stays core, so every reasoning node can point at a readable (path,#n) chunk.
+#
+# Deploy: copy this to <corpus-root>/ontology.toml (e.g. kb-test/ontology.toml).
+
+# ── Entities (the support domain's nouns) ──
+[entities.Symptom]    # an observed problem / question class (kept BROAD for transfer)
+props = []
+[entities.Cause]      # a root cause
+props = []
+[entities.Resolution] # an action / fix / answer-pattern
+props = []
+[entities.Task]       # a how-to intent (a procedure the user wants to perform)
+props = []
+[entities.Parameter]  # a configurable setting (maxTsdr, watchdog, метод вычисления, …)
+props = []
+[entities.Product]    # АБАК ПЛК, ИВК АБАК+, AbakReporter, MasterSCADA, …
+props = []
+[entities.Module]     # FI частотный, ЦПУ, ATB.* платы, K1 исполнение, …
+props = []
+[entities.Medium]     # the operating medium / среда (СУГ, природный газ, нефтепродукты, …)
+props = []
+[entities.Standard]   # МИ 3151, ГОСТ 31369, СТО 5.9, NAMUR, HART, …
+props = []
+[entities.Version]    # a build / firmware version (5.7.2, image-5.7.4, …)
+props = []
+
+# ── Relations (the reasoning spine) ──
+# Troubleshooting: symptom → cause → resolution → parameter.
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+
+[relations.RESOLVED_BY]
+from = ["Symptom", "Cause"]
+to = ["Resolution"]
+
+[relations.SETS]
+from = ["Resolution"]
+to = ["Parameter"]
+
+# the "среда" bridge the operator assumes but no document states plainly
+[relations.HANDLED_AS]
+from = ["Medium"]
+to = ["Medium"]
+
+[relations.FIXES]
+from = ["Version"]
+to = ["Symptom"]
+
+[relations.OF]
+from = ["Parameter"]
+to = ["Module", "Product"]
+
+[relations.OCCURS_IN]
+from = ["Symptom"]
+to = ["Product", "Module"]
+
+# Strict: graph_upsert rejects any node/edge type not declared here, so the 4B
+# enricher can't pollute the graph with invented types. The structural layer
+# (Document/Section/CONTAINS/…) bypasses validation, so it is unaffected.
+[validation]
+strict = true
