@@ -149,18 +149,18 @@ struct GraphUpsertArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphDeleteEdge {
-    #[schemars(description = "label of the source node")]
+    #[schemars(description = "id or label of the source node")]
     from: String,
     #[schemars(description = "the edge type, e.g. RESOLVED_BY")]
     edge_type: String,
-    #[schemars(description = "label of the target node")]
+    #[schemars(description = "id or label of the target node")]
     to: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphDeleteArgs {
     #[serde(default)]
-    #[schemars(description = "labels of reasoning nodes to remove")]
+    #[schemars(description = "ids or labels of reasoning nodes to remove")]
     nodes: Vec<String>,
     #[serde(default)]
     edges: Vec<GraphDeleteEdge>,
@@ -168,7 +168,7 @@ struct GraphDeleteArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphUpdateNode {
-    #[schemars(description = "current label of the node to edit")]
+    #[schemars(description = "current id (as used in graph_upsert) or label of the node to edit")]
     label: String,
     #[serde(default)]
     #[schemars(description = "new label, if renaming")]
@@ -252,7 +252,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(out.message)]))
     }
 
-    #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
+    #[tool(description = "Remove reasoning nodes/edges from the graph by id or label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
     async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
@@ -263,7 +263,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
+    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its id (as used in graph_upsert) or its current label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
     async fn graph_update(&self, Parameters(a): Parameters<GraphUpdateArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ups: Vec<crate::graph::agent::NodeUpdate> = a.nodes
