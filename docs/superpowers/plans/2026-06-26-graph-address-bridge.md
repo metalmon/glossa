@@ -102,7 +102,7 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, path: &str
 
 - [ ] **Step 2: `eval/src/backend/glossa_tools.rs`** — the `neighbors` arm reads `path` (string), `n` (via the existing `parse_n`), `depth` (optional u64→usize, default 1) and calls `glossa::tools::neighbors(idx, g, path, n, depth, trace)` (guard `graph` is `Some`, else `"(graph unavailable)"`). The `glossary` arm passes `idx` too.
 
-- [ ] **Step 3: TZ config** — rewrite `eval/tensorzero/config/tools/neighbors.json` to `{ "properties": { "path": {"type":"string", …}, "n": {"type":"integer", …}, "depth": {"type":"integer", …} }, "required": ["path","n"] }`. Update `[tools.neighbors]` + `[tools.glossary]` descriptions in `tensorzero.toml` to match the MCP strings.
+- [ ] **Step 3: Regenerate TZ config from MCP (do NOT hand-edit)** — `kb dump-tz-tools` now owns `tools/*.json` + the `[tools.*]` descriptions. After the `src/mcp.rs` changes in Step 1 (new `NeighborsArgs{path,n,depth}` + updated `#[tool(description)]` for `neighbors`/`glossary`), stop kb, build it, and run `./target/release/kb.exe dump-tz-tools`. Verify `git diff eval/tensorzero/config` shows ONLY: `tools/neighbors.json` now carries `path`/`n`/`depth` (was `node_id`), and the `[tools.neighbors]`/`[tools.glossary]` descriptions updated to the new contract.
 
 - [ ] **Step 4: Parity test** (existing pattern in `src/tools.rs` or mcp tests): for the same index+graph and `(path, n)`, the MCP-rendered neighbors text == the eval-exec neighbors text. (If a full parity harness is heavy, assert both call the shared fn and a representative render matches a golden string.)
 
