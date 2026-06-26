@@ -86,8 +86,12 @@ pub fn run_enrich(
         // parallel tool calls) can accumulate upsert counts safely.
         let nodes_total = Arc::new(AtomicUsize::new(0));
         let edges_total = Arc::new(AtomicUsize::new(0));
+        let errors_total = Arc::new(AtomicUsize::new(0)); // upserts rejected by the strict ontology
+        let rounds_total = Arc::new(AtomicUsize::new(0)); // /inference calls (episode depth)
         let nc = Arc::clone(&nodes_total);
         let ec = Arc::clone(&edges_total);
+        let erc = Arc::clone(&errors_total);
+        let rc = Arc::clone(&rounds_total);
 
         // Enrich-specific exec: handles graph_upsert locally, delegates the rest.
         let exec = move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
@@ -125,19 +129,24 @@ pub fn run_enrich(
                         ec.fetch_add(e, Ordering::Relaxed);
                         (format!("upserted {n} nodes, {e} edges"), vec![], vec![])
                     }
-                    Err(err) => (err.to_string(), vec![], vec![]),
+                    Err(err) => {
+                        erc.fetch_add(1, Ordering::Relaxed);
+                        (err.to_string(), vec![], vec![])
+                    }
                 }
             } else {
                 glossa_tools::exec(name, args, &idx, Some(&graph), &trace)
             }
         };
 
-        // Per-case episode id (no backdating — telemetry only, no feedback loop here).
+        // Per-case episode id (groups all the case's inferences into one TZ episode).
         let eid = uuid::Uuid::now_v7().to_string();
+        let eid_fb = eid.clone(); // kept for posting per-case feedback after the episode
         let fn_clone = function_name.clone();
         let url_clone = url.clone();
 
         let chat = move |messages: &[Value], _episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
+            rc.fetch_add(1, Ordering::Relaxed);
             let body = json!({
                 "function_name": fn_clone,
                 "input": { "messages": messages },
@@ -200,6 +209,21 @@ pub fn run_enrich(
             ),
             Err(e) => eprintln!("  ! {} failed (skipped): {e:#}", case._id),
         }
+
+        // Per-case telemetry → TZ /feedback (grouped by the case's episode), so enricher
+        // productivity + conformance is visible in the UI. Best-effort; never fail on feedback.
+        let fb_url = format!("{}/feedback", endpoint.trim_end_matches('/'));
+        let post_fb = |metric: &str, value: f64| {
+            let body = json!({ "episode_id": eid_fb, "metric_name": metric, "value": value });
+            let _ = ureq::post(&fb_url)
+                .timeout(std::time::Duration::from_secs(30))
+                .set("Content-Type", "application/json")
+                .send_string(&serde_json::to_string(&body).unwrap_or_default());
+        };
+        post_fb("enrich_nodes", nodes_total.load(Ordering::Relaxed) as f64);
+        post_fb("enrich_edges", edges_total.load(Ordering::Relaxed) as f64);
+        post_fb("enrich_errors", errors_total.load(Ordering::Relaxed) as f64);
+        post_fb("enrich_rounds", rounds_total.load(Ordering::Relaxed) as f64);
     }
 
     Ok(())
