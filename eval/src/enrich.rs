@@ -115,10 +115,30 @@ pub fn run_enrich(
                 "episode_id": eid
             });
             let payload = serde_json::to_string(&body)?;
-            let resp = ureq::post(&url_clone)
-                .set("Content-Type", "application/json")
-                .send_string(&payload)
-                .map_err(|e| anyhow::anyhow!("tensorzero /inference: {e}"))?;
+            // Retry transient gateway failures (5xx, timeouts, dropped connections — e.g. the
+            // gateway being restarted by another task) so one blip doesn't kill a long enrich pass.
+            let mut attempt = 0u32;
+            let resp = loop {
+                match ureq::post(&url_clone)
+                    .timeout(std::time::Duration::from_secs(180))
+                    .set("Content-Type", "application/json")
+                    .send_string(&payload)
+                {
+                    Ok(r) => break r,
+                    Err(e) => {
+                        let retryable = match &e {
+                            ureq::Error::Status(code, _) => *code >= 500,
+                            ureq::Error::Transport(_) => true,
+                        };
+                        attempt += 1;
+                        if retryable && attempt <= 4 {
+                            std::thread::sleep(std::time::Duration::from_millis(800 * u64::from(attempt)));
+                            continue;
+                        }
+                        return Err(anyhow::anyhow!("tensorzero /inference: {e}"));
+                    }
+                }
+            };
             let text = resp.into_string().context("read /inference response")?;
             let v: Value = serde_json::from_str(&text).context("parse /inference json")?;
             if let Some(err) = v.get("error") {
@@ -142,14 +162,15 @@ pub fn run_enrich(
             case.question, case.answer
         );
 
-        let _outcome = run_episode(chat, &user, exec, MAX_ROUNDS)
-            .with_context(|| format!("run_episode for {}", case._id))?;
-
-        println!(
-            "  → nodes={} edges={}",
-            nodes_total.load(Ordering::Relaxed),
-            edges_total.load(Ordering::Relaxed),
-        );
+        // Best-effort per case: a single case failing must not abort the whole enrich pass.
+        match run_episode(chat, &user, exec, MAX_ROUNDS) {
+            Ok(_) => println!(
+                "  → nodes={} edges={}",
+                nodes_total.load(Ordering::Relaxed),
+                edges_total.load(Ordering::Relaxed),
+            ),
+            Err(e) => eprintln!("  ! {} failed (skipped): {e:#}", case._id),
+        }
     }
 
     Ok(())
