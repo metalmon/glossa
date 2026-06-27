@@ -205,16 +205,15 @@ type = "chat_completion"
 model = "qwen"
 system_template = "enrich/system.minijinja"
 max_tokens = 2048
-# Qwen3.5/3.6 NON-THINKING (Instruct) preset, official model-card values — reasoning OFF to avoid
-# the Qwen3.x agentic "empty content / finish_reason=stop / tool_calls=0" early-stop, where the
-# model emits an empty thought+content turn and the episode ends with nothing written.
-temperature = 0.7
-top_p = 0.8
-presence_penalty = 1.5
+# Reasoning OFF — fixes the Qwen3.x agentic empty-turn early-stop (finish_reason=stop, tool_calls=0).
+# Sampling KEEPS the proven anti-loop combo (temp 0.8 + min_p 0.1 + repetition_penalty 1.1): lower
+# temp made the agentic loop repeat rejected calls, and presence_penalty 1.5 alone did not hold it.
+temperature = 0.8
+top_p = 0.95
 extra_body = [
-  { pointer = "/top_k", value = 20 },
-  { pointer = "/min_p", value = 0 },
-  { pointer = "/repetition_penalty", value = 1.0 },
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
   { pointer = "/reasoning", value = { enabled = false } },
 ]
 
