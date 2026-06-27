@@ -9,8 +9,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile { Reader, Editor, Full }
@@ -33,6 +34,12 @@ pub struct GlossaServer {
     /// Epoch-ms of the last file-first freshness scan, shared across cloned handlers. Throttles
     /// `ensure_fresh` so bursty tool calls don't each re-scan the corpus (see `freshen`).
     last_fresh: Arc<AtomicU64>,
+    /// Set when a freshen actually (re)indexed something → the derived graph layer (closure/SIMILAR
+    /// + community/centrality) is stale and a `generalize` pass is owed. Consumed by the debounced
+    /// background maintenance loop, never on the read hot path.
+    dirty: Arc<AtomicBool>,
+    /// Epoch-ms of the last indexing change — the debounce clock for the maintenance loop.
+    last_change: Arc<AtomicU64>,
 }
 
 const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize"];
@@ -60,7 +67,14 @@ impl GlossaServer {
         // Seed `last_fresh` to "now" so the first tool call does NOT scan — startup freshness is done
         // once by the `kb mcp` entry point (main.rs). This also keeps `new()` free of any filesystem
         // access, so unit tests that construct a server with root="." never index the repo.
-        Self { root, tool_router: router, trace, last_fresh: Arc::new(AtomicU64::new(crate::trace::now_ms())) }
+        Self {
+            root,
+            tool_router: router,
+            trace,
+            last_fresh: Arc::new(AtomicU64::new(crate::trace::now_ms())),
+            dirty: Arc::new(AtomicBool::new(false)),
+            last_change: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Return the list of enabled tools (for config generation — not test-only).
@@ -88,7 +102,61 @@ impl GlossaServer {
             return; // another task claimed this window
         }
         let root = self.root.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
+        if let Ok(Ok(stats)) =
+            tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await
+        {
+            if stats.added + stats.removed > 0 {
+                self.mark_dirty();
+            }
+        }
+    }
+
+    /// Mark the derived graph layer stale (a freshen reindexed something) and stamp the change time —
+    /// the debounce clock the maintenance loop waits on before running `generalize`.
+    pub fn mark_dirty(&self) {
+        self.last_change.store(crate::trace::now_ms(), Ordering::Relaxed);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Debounce decision: run the generalize pass only when the graph is `dirty` AND no further
+    /// indexing change has landed for at least `debounce_ms` (the corpus has settled). Pure so it is
+    /// unit-testable without timers.
+    fn maintenance_due(dirty: bool, last_change_ms: u64, now_ms: u64, debounce_ms: u64) -> bool {
+        dirty && now_ms.saturating_sub(last_change_ms) >= debounce_ms
+    }
+
+    /// Recompute the DERIVED graph layer (closure/SIMILAR edges + community/centrality) from what is
+    /// currently stored — the same non-destructive pass as the `graph_generalize` tool. Best-effort.
+    fn run_generalize(&self) {
+        let Ok(g) = GraphStore::open(&self.root) else { return };
+        let ont = Ontology::load_or_default(&self.root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = crate::graph::ops::graph_generalize(&g, &ont, now);
+    }
+
+    /// Background maintenance: after indexing changes settle (debounce), run ONE `generalize` pass to
+    /// refresh the derived layer — off the read hot path, never per-file. Spawned once by `kb mcp`.
+    pub async fn maintenance_loop(self) {
+        const DEBOUNCE_MS: u64 = 5_000;
+        const POLL_MS: u64 = 1_000;
+        loop {
+            tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+            if !Self::maintenance_due(
+                self.dirty.load(Ordering::Relaxed),
+                self.last_change.load(Ordering::Relaxed),
+                crate::trace::now_ms(),
+                DEBOUNCE_MS,
+            ) {
+                continue;
+            }
+            // Clear BEFORE running so a change landing during the pass re-arms it for the next round.
+            self.dirty.store(false, Ordering::Relaxed);
+            let me = self.clone();
+            let _ = tokio::task::spawn_blocking(move || me.run_generalize()).await;
+        }
     }
 
     #[cfg(test)]
@@ -437,6 +505,31 @@ mod tests {
         let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "*АБАК*".into() })).await.unwrap());
         assert!(out.contains("АБАК"), "lists the matching doc: {out}");
         assert!(!out.contains("Other"), "excludes non-matching: {out}");
+    }
+
+    #[test]
+    fn maintenance_due_only_when_dirty_and_quiet() {
+        // never when clean
+        assert!(!GlossaServer::maintenance_due(false, 0, 10_000, 5_000));
+        // dirty but changes still arriving (within the debounce window) → wait
+        assert!(!GlossaServer::maintenance_due(true, 8_000, 10_000, 5_000));
+        // dirty and quiet for >= the debounce window → run
+        assert!(GlossaServer::maintenance_due(true, 2_000, 10_000, 5_000));
+    }
+
+    #[test]
+    fn run_generalize_populates_node_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        srv.run_generalize();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let nodes = g.all_nodes().unwrap();
+        assert!(
+            nodes.iter().any(|n| g.node_meta(&n.id).unwrap().is_some()),
+            "generalize pass populated node_meta (community/centrality)"
+        );
     }
 
     #[test]

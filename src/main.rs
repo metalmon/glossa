@@ -390,11 +390,19 @@ fn main() -> anyhow::Result<()> {
                 // Startup file-first reconcile: bring the index/graph up to date with the corpus once
                 // before serving (cheap when nothing changed). Per-tool freshness is throttled inside
                 // the server. Best-effort — a transient freshen error must not block startup.
-                let _ = glossa::index::store::ensure_fresh(&path);
+                let stats = glossa::index::store::ensure_fresh(&path).unwrap_or_default();
                 use rmcp::{transport::stdio, ServiceExt};
                 let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
+                // If startup indexing changed anything, the derived layer is owed a refresh — the
+                // debounced maintenance loop will run generalize shortly after the corpus settles.
+                if stats.added + stats.removed > 0 {
+                    server.mark_dirty();
+                }
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async move {
+                    // Background, debounced generalize — refreshes the derived graph layer off the
+                    // read hot path (never per-file, never on a query).
+                    tokio::spawn(server.clone().maintenance_loop());
                     let service = server.serve(stdio()).await?;
                     let _ = service.waiting().await;
                     Ok::<(), anyhow::Error>(())
