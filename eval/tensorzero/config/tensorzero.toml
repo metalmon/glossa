@@ -128,7 +128,7 @@ system_template = "answer_hotpot/system.minijinja"
 # exploration. top_k/min_p/repetition_penalty are llama.cpp params → passed via extra_body.
 # max_tokens caps any runaway turn.
 max_tokens = 2048
-temperature = 0.8
+temperature = 1.0
 top_p = 0.95
 extra_body = [
   { pointer = "/top_k", value = 40 },
@@ -214,7 +214,7 @@ max_tokens = 2048
 # Reasoning OFF — fixes the Qwen3.x agentic empty-turn early-stop (finish_reason=stop, tool_calls=0).
 # Sampling KEEPS the proven anti-loop combo (temp 0.8 + min_p 0.1 + repetition_penalty 1.1): lower
 # temp made the agentic loop repeat rejected calls, and presence_penalty 1.5 alone did not hold it.
-temperature = 0.8
+temperature = 1.0
 top_p = 0.95
 extra_body = [
   { pointer = "/top_k", value = 40 },
