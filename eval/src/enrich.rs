@@ -101,10 +101,12 @@ pub fn run_enrich(
                         Err(err) => parse_errs.push(format!("edge[{i}]: {err}")),
                     }
                 }
-                if !parse_errs.is_empty() {
+                // Partial apply: only reject outright if NOTHING parsed; otherwise apply the
+                // parseable items and append the parse errors so the model resends just those.
+                if nodes.is_empty() && edges.is_empty() && !parse_errs.is_empty() {
                     erc.fetch_add(1, Ordering::Relaxed);
                     let msg = format!(
-                        "graph_upsert REJECTED — malformed input, fix and resend:\n- {}",
+                        "graph_upsert REJECTED — every item was malformed, fix and resend:\n- {}",
                         parse_errs.join("\n- ")
                     );
                     eprintln!("    \u{2717} {}", msg.replace('\n', "; "));
@@ -115,7 +117,14 @@ pub fn run_enrich(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let out = glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now);
+                let mut out = glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now);
+                if !parse_errs.is_empty() {
+                    out.message.push_str(&format!(
+                        "\n{} item(s) could not be parsed and were skipped:\n- {}",
+                        parse_errs.len(),
+                        parse_errs.join("\n- ")
+                    ));
+                }
                 for l in &out.dump {
                     eprintln!("    {l}");
                 }
