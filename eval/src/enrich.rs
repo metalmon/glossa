@@ -83,14 +83,33 @@ pub fn run_enrich(
         // Enrich-specific exec: handles graph_upsert locally, delegates the rest.
         let exec = move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
             if name == "graph_upsert" {
-                let nodes: Vec<UpsertNode> = serde_json::from_value(
-                    args.get("nodes").cloned().unwrap_or(json!([])),
-                )
-                .unwrap_or_default();
-                let edges: Vec<UpsertEdge> = serde_json::from_value(
-                    args.get("edges").cloned().unwrap_or(json!([])),
-                )
-                .unwrap_or_default();
+                // Parse element-wise so one malformed node/edge doesn't silently drop the rest:
+                // a blanket `unwrap_or_default()` would yield an empty vec on any error and report a
+                // fake "upserted 0" success, losing the model's valid items without telling it.
+                let mut parse_errs: Vec<String> = Vec::new();
+                let mut nodes: Vec<UpsertNode> = Vec::new();
+                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
+                    match serde_json::from_value::<UpsertNode>(n.clone()) {
+                        Ok(un) => nodes.push(un),
+                        Err(e) => parse_errs.push(format!("node[{i}]: {e}")),
+                    }
+                }
+                let mut edges: Vec<UpsertEdge> = Vec::new();
+                for (i, e) in args.get("edges").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
+                    match serde_json::from_value::<UpsertEdge>(e.clone()) {
+                        Ok(ue) => edges.push(ue),
+                        Err(err) => parse_errs.push(format!("edge[{i}]: {err}")),
+                    }
+                }
+                if !parse_errs.is_empty() {
+                    erc.fetch_add(1, Ordering::Relaxed);
+                    let msg = format!(
+                        "graph_upsert REJECTED — malformed input, fix and resend:\n- {}",
+                        parse_errs.join("\n- ")
+                    );
+                    eprintln!("    \u{2717} {}", msg.replace('\n', "; "));
+                    return (msg, vec![], vec![]);
+                }
                 let ont = Ontology::load_or_default(&work_iter);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
