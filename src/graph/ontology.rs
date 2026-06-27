@@ -18,13 +18,32 @@ struct RawValidation {
     strict: bool,
 }
 
+/// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
+/// (e.g. anchor `Symptom`, relations `[CAUSED_BY, RESOLVED_BY]`). A node survives hygiene if it
+/// lies on a COMPLETE instance of ANY declared spine — so distinct case shapes (causal
+/// troubleshooting vs informational how-to) coexist without one pruning the other.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawSpine {
+    #[serde(default)]
+    anchor: String,
+    #[serde(default)]
+    relations: Vec<String>,
+}
+
+/// Public form of a reasoning spine (see `RawSpine`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spine {
+    pub anchor: String,
+    pub relations: Vec<String>,
+}
+
 /// The `[reasoning]` overlay: domain-specific graph rules, kept OUT of the Rust code so the
 /// engine stays domain-agnostic (support is one overlay among many). All keys optional.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct RawReasoning {
-    /// Ordered relation sequence a node must lie on a COMPLETE instance of to survive hygiene.
+    /// Valid reasoning shapes; a node survives hygiene if on a complete instance of any.
     #[serde(default)]
-    spine: Vec<String>,
+    spines: Vec<RawSpine>,
     /// Transitive-closure composition rules, each `[a, b, result]`.
     #[serde(default)]
     closure: Vec<Vec<String>>,
@@ -67,10 +86,16 @@ impl Ontology {
         })
     }
 
-    /// The reasoning spine — the ordered relation sequence a node must lie on a complete
-    /// instance of to survive the hygiene prune (Task 2). Empty when unset.
-    pub fn spine(&self) -> &[String] {
-        &self.reasoning.spine
+    /// The reasoning spines — the valid shapes a node must lie on a complete instance of to
+    /// survive the hygiene prune. Malformed entries (empty anchor or relations) are dropped.
+    /// Empty when unset.
+    pub fn spines(&self) -> Vec<Spine> {
+        self.reasoning
+            .spines
+            .iter()
+            .filter(|s| !s.anchor.is_empty() && !s.relations.is_empty())
+            .map(|s| Spine { anchor: s.anchor.clone(), relations: s.relations.clone() })
+            .collect()
     }
 
     /// Transitive-closure composition rules as `(a, b, result)` triples. Malformed inner vecs
@@ -98,15 +123,17 @@ impl Ontology {
         }
     }
 
-    /// Entity types that are endpoints (`from` or `to`) of any relation named in `spine`.
+    /// Entity types that are endpoints (`from` or `to`) of any relation named in any spine.
     /// Used by the hygiene pass to tell a "doomed" reasoning node (a spine-type node not on a
-    /// complete chain) from an auxiliary one. Empty when there is no spine.
+    /// complete chain) from an auxiliary one. Empty when there are no spines.
     pub fn spine_types(&self) -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
-        for rel in &self.reasoning.spine {
-            if let Some(r) = self.relations.get(rel) {
-                out.extend(r.from.iter().cloned());
-                out.extend(r.to.iter().cloned());
+        for sp in &self.reasoning.spines {
+            for rel in &sp.relations {
+                if let Some(r) = self.relations.get(rel) {
+                    out.extend(r.from.iter().cloned());
+                    out.extend(r.to.iter().cloned());
+                }
             }
         }
         out
@@ -192,7 +219,10 @@ strict = true
 
     const REASONING_TOML: &str = r#"
 [reasoning]
-spine = ["CAUSED_BY", "RESOLVED_BY"]
+spines = [
+  { anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] },
+  { anchor = "Task", relations = ["RESOLVED_BY"] },
+]
 mentions = "MENTIONS"
 closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"], ["A", "B"]]
 structural = ["Document", "Section"]
@@ -201,7 +231,12 @@ structural = ["Document", "Section"]
     #[test]
     fn reasoning_section_parses() {
         let o = Ontology::parse(REASONING_TOML).unwrap();
-        assert_eq!(o.spine(), &["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        let spines = o.spines();
+        assert_eq!(spines.len(), 2);
+        assert_eq!(spines[0].anchor, "Symptom");
+        assert_eq!(spines[0].relations, vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        assert_eq!(spines[1].anchor, "Task");
+        assert_eq!(spines[1].relations, vec!["RESOLVED_BY".to_string()]);
         assert_eq!(o.mentions(), "MENTIONS");
         assert_eq!(o.structural(), vec!["Document".to_string(), "Section".to_string()]);
     }
@@ -226,7 +261,7 @@ to = ["Cause"]
 from = ["Symptom", "Cause"]
 to = ["Resolution"]
 [reasoning]
-spine = ["CAUSED_BY", "RESOLVED_BY"]
+spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
 "#;
         let o = Ontology::parse(toml).unwrap();
         let types = o.spine_types();
@@ -241,7 +276,7 @@ spine = ["CAUSED_BY", "RESOLVED_BY"]
     #[test]
     fn reasoning_absent_yields_defaults() {
         let o = Ontology::parse(TOML).unwrap(); // TOML has no [reasoning]
-        assert!(o.spine().is_empty());
+        assert!(o.spines().is_empty());
         assert!(o.closure_rules().is_empty());
         assert_eq!(o.mentions(), "MENTIONS");
         assert_eq!(

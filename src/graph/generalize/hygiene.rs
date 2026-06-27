@@ -1,65 +1,38 @@
-//! Degenerate-chain prune — remove reasoning nodes that do NOT lie on a complete ontology
-//! `spine` instance (and auxiliaries left orphaned by that removal), BEFORE the generalization
-//! pass derives edges/communities/centrality over them.
+//! Degenerate-chain prune — remove reasoning nodes that do NOT lie on a complete instance of any
+//! ontology reasoning `spine` (and auxiliaries left orphaned by that removal), BEFORE the
+//! generalization pass derives edges/communities/centrality over them.
 //!
-//! Fully generic: the spine relations, the reasoning ("spine") types, and the structural types
-//! all come from the ontology (`spine()`, `spine_types()`, `structural()`) — no domain literals.
-//! A Cause-less `Symptom→Resolution` is degenerate because it adds nothing over plain search;
-//! the graph's value is the intermediate hop.
+//! Fully generic: the spines (each an anchor node type + ordered relations), the reasoning
+//! ("spine") types, and the structural types all come from the ontology — no domain literals.
+//! Multiple spines coexist: a causal `Symptom -CAUSED_BY-> Cause -RESOLVED_BY-> Resolution` and an
+//! informational `Task -RESOLVED_BY-> Resolution` are BOTH complete, so how-to/reference cases
+//! survive while a Cause-less `Symptom -RESOLVED_BY-> Resolution` (which matches no spine's anchor)
+//! is still pruned — it adds nothing over plain search.
 
 use super::Triple;
+use crate::graph::ontology::Spine;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// Ids to delete: non-structural nodes not on a complete `spine` chain and not transitively
-/// attached to one. `nodes` = `(id, node_type)`; `edges` = `(from, edge_type, to)`. Returns a
-/// sorted, deterministic list. Empty `spine` → empty (no-op).
+/// Ids to delete: non-structural nodes not on a complete instance of ANY `spine`, and not
+/// transitively attached to one. `nodes` = `(id, node_type)`; `edges` = `(from, edge_type, to)`.
+/// Returns a sorted, deterministic list. No spines → empty (no-op).
 pub fn incomplete_nodes(
     nodes: &[(String, String)],
     edges: &[Triple],
-    spine: &[String],
+    spines: &[Spine],
     spine_types: &HashSet<String>,
     structural: &HashSet<String>,
 ) -> Vec<String> {
-    if spine.is_empty() {
+    if spines.is_empty() {
         return Vec::new();
     }
-    let k = spine.len();
     let type_of: HashMap<&str, &str> =
         nodes.iter().map(|(id, ty)| (id.as_str(), ty.as_str())).collect();
 
-    // ── Core survivors: every node on a complete chain v0 -r0-> v1 … -r_{k-1}-> vk. ──
-    // Backward: can_finish[i] = nodes that can complete the suffix r_i..r_{k-1}.
-    let mut can_finish: Vec<HashSet<&str>> = vec![HashSet::new(); k];
-    for i in (0..k).rev() {
-        let rel = &spine[i];
-        for (f, et, t) in edges {
-            if et != rel {
-                continue;
-            }
-            let m_ok = i + 1 == k || can_finish[i + 1].contains(t.as_str());
-            if m_ok {
-                can_finish[i].insert(f.as_str());
-            }
-        }
-    }
-    // Forward: walk valid starts (can_finish[0]) through the spine, collecting every visited node.
+    // ── Core survivors: union, over every declared spine, of the nodes on a complete typed chain. ──
     let mut survivors: HashSet<&str> = HashSet::new();
-    let mut at_prev: HashSet<&str> = can_finish[0].clone();
-    survivors.extend(at_prev.iter().copied());
-    for i in 0..k {
-        let rel = &spine[i];
-        let mut at_next: HashSet<&str> = HashSet::new();
-        for (f, et, t) in edges {
-            if et != rel || !at_prev.contains(f.as_str()) {
-                continue;
-            }
-            let m_ok = i + 1 == k || can_finish[i + 1].contains(t.as_str());
-            if m_ok {
-                at_next.insert(t.as_str());
-            }
-        }
-        survivors.extend(at_next.iter().copied());
-        at_prev = at_next;
+    for spine in spines {
+        survivors.extend(survivors_for_spine(spine, edges, &type_of));
     }
 
     // ── Keep set: BFS from core survivors over non-structural edges, never ENTERING a doomed
@@ -98,6 +71,58 @@ pub fn incomplete_nodes(
     del
 }
 
+/// Nodes on a complete instance of ONE typed spine: the start must have the spine's `anchor` type
+/// AND reach the end through the relation sequence. Returned ids borrow `edges`.
+fn survivors_for_spine<'e>(
+    spine: &Spine,
+    edges: &'e [Triple],
+    type_of: &HashMap<&str, &str>,
+) -> HashSet<&'e str> {
+    let rels = &spine.relations;
+    let k = rels.len();
+    let mut out: HashSet<&str> = HashSet::new();
+    if k == 0 {
+        return out;
+    }
+    // Backward: can_finish[i] = nodes that can complete the suffix rels[i..].
+    let mut can_finish: Vec<HashSet<&str>> = vec![HashSet::new(); k];
+    for i in (0..k).rev() {
+        let rel = &rels[i];
+        for (f, et, t) in edges {
+            if et != rel {
+                continue;
+            }
+            let m_ok = i + 1 == k || can_finish[i + 1].contains(t.as_str());
+            if m_ok {
+                can_finish[i].insert(f.as_str());
+            }
+        }
+    }
+    // Forward: valid starts = nodes of the anchor type that can finish the whole sequence.
+    let mut at_prev: HashSet<&str> = can_finish[0]
+        .iter()
+        .copied()
+        .filter(|n| type_of.get(n).is_some_and(|t| *t == spine.anchor))
+        .collect();
+    out.extend(at_prev.iter().copied());
+    for i in 0..k {
+        let rel = &rels[i];
+        let mut at_next: HashSet<&str> = HashSet::new();
+        for (f, et, t) in edges {
+            if et != rel || !at_prev.contains(f.as_str()) {
+                continue;
+            }
+            let m_ok = i + 1 == k || can_finish[i + 1].contains(t.as_str());
+            if m_ok {
+                at_next.insert(t.as_str());
+            }
+        }
+        out.extend(at_next.iter().copied());
+        at_prev = at_next;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,11 +136,16 @@ mod tests {
     fn e(triples: &[(&str, &str, &str)]) -> Vec<Triple> {
         triples.iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())).collect()
     }
-    fn spine() -> Vec<String> {
-        vec!["CAUSED_BY".into(), "RESOLVED_BY".into()]
+    fn sp(anchor: &str, rels: &[&str]) -> Spine {
+        Spine { anchor: anchor.into(), relations: rels.iter().map(|r| r.to_string()).collect() }
     }
+    // The support overlay: a causal spine and an informational (Task) spine.
+    fn spines() -> Vec<Spine> {
+        vec![sp("Symptom", &["CAUSED_BY", "RESOLVED_BY"]), sp("Task", &["RESOLVED_BY"])]
+    }
+    // RESOLVED_BY.from = [Symptom, Cause, Task] → all four are spine types.
     fn spine_types() -> HashSet<String> {
-        s(&["Symptom", "Cause", "Resolution"])
+        s(&["Symptom", "Cause", "Resolution", "Task"])
     }
     fn structural() -> HashSet<String> {
         s(&["Document", "Section", "Term", "Topic"])
@@ -125,16 +155,25 @@ mod tests {
     fn complete_chain_survives() {
         let nodes = n(&[("S", "Symptom"), ("C", "Cause"), ("R", "Resolution")]);
         let edges = e(&[("S", "CAUSED_BY", "C"), ("C", "RESOLVED_BY", "R")]);
-        assert!(incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()).is_empty());
+        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
+    }
+
+    #[test]
+    fn task_resolution_survives() {
+        // the informational shape: Task -RESOLVED_BY-> Resolution is complete on the Task spine
+        let nodes = n(&[("T", "Task"), ("R", "Resolution")]);
+        let edges = e(&[("T", "RESOLVED_BY", "R")]);
+        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
     }
 
     #[test]
     fn symptom_resolution_no_cause_pruned() {
-        // the ticket-6 case: Symptom straight to Resolution, no Cause hop
+        // a Cause-less Symptom→Resolution matches NEITHER spine (Symptom needs CAUSED_BY first;
+        // the Task spine's anchor is Task, not Symptom) → both pruned.
         let nodes = n(&[("S", "Symptom"), ("R", "Resolution")]);
         let edges = e(&[("S", "RESOLVED_BY", "R")]);
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
             vec!["R".to_string(), "S".to_string()]
         );
     }
@@ -144,24 +183,23 @@ mod tests {
         let nodes = n(&[("S", "Symptom"), ("C", "Cause")]);
         let edges = e(&[("S", "CAUSED_BY", "C")]);
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
             vec!["C".to_string(), "S".to_string()]
         );
     }
 
     #[test]
     fn orphans_and_isolated_pruned() {
-        let nodes = n(&[("C", "Cause"), ("R", "Resolution"), ("S", "Symptom")]);
+        let nodes = n(&[("C", "Cause"), ("R", "Resolution"), ("S", "Symptom"), ("T", "Task")]);
         let edges = e(&[]); // all isolated
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
-            vec!["C".to_string(), "R".to_string(), "S".to_string()]
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
+            vec!["C".to_string(), "R".to_string(), "S".to_string(), "T".to_string()]
         );
     }
 
     #[test]
     fn auxiliary_on_survivor_kept() {
-        // S→C→R complete; R -SETS-> P(Parameter) -OF-> M(Module): both auxiliaries survive
         let nodes = n(&[
             ("S", "Symptom"),
             ("C", "Cause"),
@@ -175,45 +213,43 @@ mod tests {
             ("R", "SETS", "P"),
             ("P", "OF", "M"),
         ]);
-        assert!(incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()).is_empty());
+        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
     }
 
     #[test]
     fn auxiliary_behind_doomed_pruned() {
         // S→R (no Cause → both doomed); R -SETS-> P. P hangs only off a doomed node → pruned.
-        let nodes =
-            n(&[("S", "Symptom"), ("R", "Resolution"), ("P", "Parameter")]);
+        let nodes = n(&[("S", "Symptom"), ("R", "Resolution"), ("P", "Parameter")]);
         let edges = e(&[("S", "RESOLVED_BY", "R"), ("R", "SETS", "P")]);
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
             vec!["P".to_string(), "R".to_string(), "S".to_string()]
         );
     }
 
     #[test]
     fn structural_never_pruned() {
-        // a doomed Symptom MENTIONS a Section — the Section is structural, untouched
         let nodes = n(&[("S", "Symptom"), ("SEC", "Section")]);
         let edges = e(&[("S", "MENTIONS", "SEC")]);
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
             vec!["S".to_string()]
         );
     }
 
     #[test]
-    fn task_culled_for_free() {
-        // Task has no spine relation; its only edge is MENTIONS→Section → never reachable → pruned
+    fn lone_task_without_resolution_pruned() {
+        // a Task whose only edge is MENTIONS→Section is not on the Task spine → pruned; Section kept
         let nodes = n(&[("T", "Task"), ("SEC", "Section")]);
         let edges = e(&[("T", "MENTIONS", "SEC")]);
         assert_eq!(
-            incomplete_nodes(&nodes, &edges, &spine(), &spine_types(), &structural()),
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
             vec!["T".to_string()]
         );
     }
 
     #[test]
-    fn empty_spine_is_noop() {
+    fn no_spines_is_noop() {
         let nodes = n(&[("S", "Symptom")]);
         let edges = e(&[]);
         assert!(incomplete_nodes(&nodes, &edges, &[], &spine_types(), &structural()).is_empty());
