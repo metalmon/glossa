@@ -23,9 +23,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Search files. PATTERN uses ripgrep syntax.
+    /// Search the knowledge base. PATTERN is BM25 keywords (stemmed, morphology-aware) against the
+    /// on-disk index — like the MCP `search` tool. Use `--scan` for a literal ripgrep-regex scan.
     Search {
-        /// Search pattern (ripgrep regex syntax).
+        /// Keywords for BM25 ranked search (or a ripgrep regex with `--scan`).
         pattern: String,
         /// Directory to search.
         path: Option<PathBuf>,
@@ -98,14 +99,10 @@ enum Cmd {
         /// knowledge-base directory
         path: std::path::PathBuf,
     },
-    /// Regenerate TensorZero tool config from MCP definitions (one source of truth).
-    DumpTzTools {
-        /// Directory containing tensorzero.toml and tools/.
-        #[arg(long, default_value = "eval/tensorzero/config")]
-        config_dir: PathBuf,
-    },
-    /// Run the MCP server over stdio (for AI agents).
+    /// Run the MCP server over stdio (for AI agents), or an MCP-related subcommand.
     Mcp {
+        #[command(subcommand)]
+        action: Option<McpAction>,
         path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
         #[arg(long, default_value = "editor")]
@@ -120,15 +117,26 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum McpAction {
+    /// Regenerate TensorZero tool config from the live MCP tool definitions (one source of truth).
+    DumpTzTools {
+        /// Directory containing tensorzero.toml and tools/.
+        #[arg(long, default_value = "eval/tensorzero/config")]
+        config_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum GraphAction {
     /// Print node/edge counts.
     Stats {
         path: Option<PathBuf>,
     },
-    /// Search reasoning nodes by concept (morphology-aware label match) — the entry point for
-    /// exploring the graph. Prints `id [type] label` plus each match's edges.
-    #[command(visible_alias = "find")]
-    Search {
+    /// Find graph nodes by concept (morphology-aware label match) — the SAME `glossary` tool the
+    /// MCP/agent uses, the entry point for exploring the graph. Prints `id [type] label` plus each
+    /// match's edges.
+    #[command(visible_aliases = ["search", "find"])]
+    Glossary {
         /// concept in your own words, e.g. "потеря связи"
         query: String,
         path: Option<PathBuf>,
@@ -368,23 +376,25 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::DumpTzTools { config_dir } => {
-            let n = glossa::tz_export::dump(&config_dir)?;
-            println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
-            Ok(())
-        }
-        Cmd::Mcp { path, profile, trace, no_graph } => {
-            let path = glossa::root::resolve_root(path);
-            use rmcp::{transport::stdio, ServiceExt};
-            let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async move {
-                let service = server.serve(stdio()).await?;
-                let _ = service.waiting().await;
-                Ok::<(), anyhow::Error>(())
-            })?;
-            Ok(())
-        }
+        Cmd::Mcp { action, path, profile, trace, no_graph } => match action {
+            Some(McpAction::DumpTzTools { config_dir }) => {
+                let n = glossa::tz_export::dump(&config_dir)?;
+                println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
+                Ok(())
+            }
+            None => {
+                let path = glossa::root::resolve_root(path);
+                use rmcp::{transport::stdio, ServiceExt};
+                let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async move {
+                    let service = server.serve(stdio()).await?;
+                    let _ = service.waiting().await;
+                    Ok::<(), anyhow::Error>(())
+                })?;
+                Ok(())
+            }
+        },
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
                 let path = glossa::root::resolve_root(path);
@@ -392,7 +402,7 @@ fn main() -> anyhow::Result<()> {
                 println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
                 Ok(())
             }
-            GraphAction::Search { query, path } => {
+            GraphAction::Glossary { query, path } => {
                 let path = glossa::root::resolve_root(path);
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;

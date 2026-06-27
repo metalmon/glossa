@@ -9,7 +9,7 @@ fn kb_search_prints_matching_lines() {
     fs::write(dir.path().join("a.md"), b"# Intro\nthe cat sat\n").unwrap();
 
     let mut cmd = Command::cargo_bin("kb").unwrap();
-    cmd.args(["search", "cat", dir.path().to_str().unwrap()])
+    cmd.args(["search", "--scan", "cat", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(contains("Intro").and(contains("the cat sat")));
@@ -21,7 +21,7 @@ fn kb_search_word_flag_excludes_substring() {
     fs::write(dir.path().join("a.md"), b"# H\ncategory only\n").unwrap();
 
     let mut cmd = Command::cargo_bin("kb").unwrap();
-    cmd.args(["search", "cat", "-w", dir.path().to_str().unwrap()])
+    cmd.args(["search", "--scan", "cat", "-w", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicates::str::is_empty());
@@ -35,7 +35,7 @@ fn search_then_read_by_number() {
     // pretty search numbers the hit
     Command::cargo_bin("kb").unwrap()
         .current_dir(dir.path())
-        .args(["search", "hello", "--format", "pretty"])
+        .args(["search", "--scan", "hello", "--format", "pretty"])
         .assert()
         .success()
         .stdout(contains("#1").and(contains("note.md")));
@@ -55,10 +55,10 @@ fn zero_hit_search_preserves_last_search() {
     std::fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
     // first search records a hit
     Command::cargo_bin("kb").unwrap().current_dir(dir.path())
-        .args(["search", "hello"]).assert().success();
+        .args(["search", "--scan", "hello"]).assert().success();
     // a search with no matches must NOT clobber the recorded hit
     Command::cargo_bin("kb").unwrap().current_dir(dir.path())
-        .args(["search", "zzznomatchxyz"]).assert().success();
+        .args(["search", "--scan", "zzznomatchxyz"]).assert().success();
     // read 1 still resolves the earlier hit
     Command::cargo_bin("kb").unwrap().current_dir(dir.path())
         .args(["read", "1"]).assert().success()
