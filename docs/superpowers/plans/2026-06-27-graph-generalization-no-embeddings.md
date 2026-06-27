@@ -85,6 +85,59 @@ references are unambiguous.
    - **Tier 4 — residual:** structural link-prediction (#4) → synonym dictionary (#5).
 3. Keep only techniques that move the metric.
 
+## Implementation status (2026-06-27)
+The deterministic pass is built and wired (`src/graph/generalize/*`, `apply::generalize`,
+`kb graph generalize [--merge]`, auto-run at the end of `reindex`). 163 tests passing.
+
+- [x] **#1 Morphology** — `TermAnalyzer` (cached stemmers), shared with `resolve`/`glossary`.
+- [x] **#2 BM25-over-labels** — real in-RAM tantivy index (`similarity::label_bm25`), same
+      `multilang` analyzer as search. **Relative threshold (fraction of self-score)**, not absolute:
+      `bm25_min_ratio = 0.3` (SIMILAR edges), `merge_bm25_min_ratio = 0.7` (merge). Corpus/IDF-
+      independent → defaults port across deployments; `0.3 / 0.7` is the safe starting point, tune on data.
+- [x] **#3 Shared-evidence** — `similarity::shared_evidence` (same `MENTIONS` chunk anchor),
+      feeds both merge candidates and SIMILAR.
+- [x] **#4 Link-prediction** — `linkpred::jaccard_pairs` / `adamic_adar_pairs` → SIMILAR.
+- [ ] **#5 Synonym dictionary** — deliberately deferred (needs curation; last resort before embeddings).
+- [x] **#6 Communities** — `community::connected_components` (union-find). See library note below
+      for the Louvain upgrade trigger.
+- [x] **#7 Centrality** — `centrality::degree` + `pagerank`. Surfaced (with community) in
+      `neighbors`/`glossary` via `node_meta` (`· comm N · pr x · deg N`); empty when not yet
+      generalized, so non-generalized output is byte-identical (back-compat).
+- [x] **#8 Transitive closure** — `closure::transitive_closure` with ontology-sourced rules
+      (`[reasoning].closure`); derived edges stamped `origin = "auto-generalized"`.
+- [x] **MERGE** near-dups — `merge::merge_groups` (union-find) + `GraphStore::merge_nodes`
+      (canonical = shortest label, aliases folded, edges reattached). Report-only by default;
+      applied only via `--merge`.
+
+Still open: the **Sequencing** ablations (measure each technique's metric delta on the held-out set)
+have NOT been run yet — the techniques exist; their individual value is not yet proven.
+
+## Graph-library decision: hand-rolled vs petgraph / Louvain
+**Decision (2026-06-27): stay hand-rolled for now; do NOT add petgraph.** Rationale: the graph
+lives in SQLite (`GraphStore`); algorithms run over an edge list pulled into
+`HashMap<String, BTreeSet<String>>`. petgraph works on integer `NodeIndex`, so adopting it means
+building a petgraph graph + bidirectional `String ↔ NodeIndex` maps every pass. Of what we use, only
+union-find is genuinely covered (`petgraph::unionfind`); PageRank, Jaccard/Adamic-Adar link
+prediction, and rule-based closure are NOT in petgraph and stay custom regardless. Our functions are
+small, dependency-free, deterministic, and tested — the right trade for the current scale.
+
+**When to revisit (triggers, not now):**
+- **Louvain/Leiden communities** — the most likely future need. Connected-components degenerates to
+  ONE community once the graph densifies (SIMILAR + shared-evidence + closure cross-link everything).
+  **Trigger:** `communities` in the `reindex`/`generalize` report stabilises at 1–2 on a large graph.
+  Then implement a **deterministic Louvain WITHOUT petgraph** (over the existing `undirected_adjacency`;
+  fix node-iteration order by sorted id for reproducibility — most crates randomise and break
+  determinism), behind the SAME facade `community::connected_components(node_ids, edges) -> HashMap<id,
+  community>`, so `apply.rs`/`node_meta` are untouched. Weighted variant wants edge weights (currently
+  all 1.0); signature unchanged. Skip Leiden (refinement phase) until Louvain proves insufficient.
+- **Betweenness/closeness centrality** — marginal over PageRank for "surface the central concept",
+  and betweenness is O(V·E). Only if a concrete "find bridging concepts between topics" need appears.
+- **Shortest paths / multi-hop** — plausible (the `neighbors depth` param is already stubbed), but
+  unweighted BFS is ~20 lines; no library needed.
+- **SCC on directed cycles** — niche; only as a data-quality lint (contradictory `CAUSED_BY` cycles).
+- General rule: if graph analytics grows beyond this (Louvain + several of the above together), THEN
+  reach for petgraph (+ a Louvain crate) rather than hand-rolling everything.
+
 ## Constraints
 - **No embeddings endpoint dependency** — the whole point: portability to any deployment/agent.
 - Pure-Rust; reuse tantivy (BM25 / morphology / synonym filter) and the existing graph store.
