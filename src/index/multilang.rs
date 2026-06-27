@@ -228,7 +228,7 @@ mod tests {
         // Deterministic fuzz (no rand crate): LCG over a varied char palette.
         let palette: Vec<char> = "abzqAZабяАЯёЁъй059 \t\n.,-=/()#—ßİ²".chars().collect();
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = |st: &mut u64| -> u64 {
+        let next = |st: &mut u64| -> u64 {
             *st = st
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
