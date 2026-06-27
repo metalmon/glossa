@@ -38,7 +38,7 @@ from = ["Symptom"]
 to = ["Cause"]
 
 [relations.RESOLVED_BY]
-from = ["Symptom", "Cause"]
+from = ["Symptom", "Cause", "Task"]   # Task→Resolution = the informational / how-to shape
 to = ["Resolution"]
 
 [relations.SETS]
@@ -70,11 +70,15 @@ strict = true
 
 # ── Reasoning rules (consumed by the generalize + hygiene passes) ──
 # Domain rules live HERE, never in Rust, so the engine stays domain-agnostic.
-#   spine    — the ordered relation path a reasoning node must lie on a COMPLETE instance of to
-#              survive the hygiene prune (Symptom →CAUSED_BY→ Cause →RESOLVED_BY→ Resolution).
+#   spines   — the valid reasoning SHAPES (each = an anchor node type + ordered relations from it).
+#              A node survives the hygiene prune if it lies on a COMPLETE instance of ANY spine, so
+#              distinct case kinds coexist: causal troubleshooting AND informational how-to.
 #   closure  — transitive-closure composition rules [a, b, result]: x-a->y, y-b->z ⇒ x-result->z.
 #   mentions — the anchor edge from a reasoning node to the structural layer (a readable chunk).
 [reasoning]
-spine = ["CAUSED_BY", "RESOLVED_BY"]
+spines = [
+  { anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] },  # troubleshooting: Symptom→Cause→Resolution
+  { anchor = "Task",    relations = ["RESOLVED_BY"] },               # how-to / reference: Task→Resolution
+]
 closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 mentions = "MENTIONS"

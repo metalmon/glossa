@@ -9,7 +9,7 @@
 //!   `opts.apply_merges` is set — it mutates/deletes agent nodes, so the safe default is report-only.
 
 use super::{centrality, closure, community, hygiene, linkpred, merge, similarity, Triple};
-use crate::graph::ontology::Ontology;
+use crate::graph::ontology::{Ontology, Spine};
 use crate::graph::store::{Edge, GraphStore, NodeMeta, Provenance};
 use std::collections::{HashMap, HashSet};
 
@@ -45,8 +45,8 @@ pub struct Opts {
     pub structural: Vec<String>,
     /// Hygiene: delete degenerate reasoning chains (report-only when false). CLI `--prune-incomplete`.
     pub prune_incomplete: bool,
-    /// Hygiene: the ontology reasoning spine; empty → hygiene is a no-op. From `[reasoning].spine`.
-    pub spine: Vec<String>,
+    /// Hygiene: the ontology reasoning spines; empty → hygiene is a no-op. From `[reasoning].spines`.
+    pub spines: Vec<Spine>,
     /// Hygiene: entity types that are endpoints of spine relations (to tell doomed from auxiliary).
     pub spine_types: HashSet<String>,
     pub now: u64,
@@ -69,7 +69,7 @@ impl Opts {
                 .map(|s| s.to_string())
                 .collect(),
             prune_incomplete: false,
-            spine: vec![],
+            spines: vec![],
             spine_types: HashSet::new(),
             now,
         }
@@ -83,7 +83,7 @@ impl Opts {
             mentions_type: ont.mentions().to_string(),
             closure_rules: ont.closure_rules(),
             structural: ont.structural(),
-            spine: ont.spine().to_vec(),
+            spines: ont.spines(),
             spine_types: ont.spine_types(),
             ..Opts::defaults(now)
         }
@@ -129,7 +129,7 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         let doomed = hygiene::incomplete_nodes(
             &id_types,
             &edges,
-            &opts.spine,
+            &opts.spines,
             &opts.spine_types,
             &structural,
         );
@@ -300,7 +300,7 @@ to = ["Section"]
 [validation]
 strict = false
 [reasoning]
-spine = ["CAUSED_BY", "RESOLVED_BY"]
+spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
 closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 "#;
 
