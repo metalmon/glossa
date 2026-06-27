@@ -17,6 +17,7 @@ pub mod apply;
 pub mod centrality;
 pub mod closure;
 pub mod community;
+pub mod hygiene;
 pub mod linkpred;
 pub mod merge;
 pub mod similarity;

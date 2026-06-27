@@ -476,6 +476,28 @@ impl GraphStore {
         Ok(merged)
     }
 
+    /// Delete the given node ids plus every incident edge and `node_meta` row, in one transaction.
+    /// Returns the number of node rows removed. Ids that don't exist are silently skipped.
+    /// Used by the hygiene pass to cull degenerate reasoning chains before generalization.
+    pub fn delete_nodes(&self, ids: &[String]) -> anyhow::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let c = self.conn.lock().unwrap();
+        let txn = c.unchecked_transaction().context("begin delete_nodes txn")?;
+        let mut removed = 0usize;
+        for id in ids {
+            txn.execute("DELETE FROM edges WHERE efrom = ?1 OR eto = ?1", rusqlite::params![id])
+                .context("delete_nodes: incident edges")?;
+            let _ = txn.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![id]);
+            removed += txn
+                .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
+                .context("delete_nodes: node")?;
+        }
+        txn.commit().context("commit delete_nodes")?;
+        Ok(removed)
+    }
+
     /// Replace ALL `node_meta` rows (community / centrality) with `rows` in one transaction —
     /// regenerated wholesale by each generalization run.
     pub fn replace_node_meta(&self, rows: &[(String, NodeMeta)]) -> anyhow::Result<()> {
@@ -914,6 +936,36 @@ mod tests {
         })
         .unwrap();
         assert_eq!(g.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_nodes_cascades_edges_and_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let mk = |id: &str| Node {
+            id: id.into(),
+            node_type: "Symptom".into(),
+            label: id.into(),
+            aliases: vec![],
+            prov: prov(),
+        };
+        g.put_node(&mk("a")).unwrap();
+        g.put_node(&mk("b")).unwrap();
+        g.put_node(&mk("c")).unwrap();
+        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "CAUSED_BY".into(), prov: prov() }).unwrap();
+        g.put_edge(&Edge { from: "b".into(), to: "c".into(), edge_type: "RESOLVED_BY".into(), prov: prov() }).unwrap();
+        g.replace_node_meta(&[("a".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(2) })])
+            .unwrap();
+
+        let removed = g.delete_nodes(&["a".into()]).unwrap();
+        assert_eq!(removed, 1);
+        assert!(g.get_node("a").unwrap().is_none(), "node a deleted");
+        assert!(g.get_node("b").unwrap().is_some() && g.get_node("c").unwrap().is_some(), "b, c survive");
+        assert_eq!(g.edge_count().unwrap(), 1, "incident a->b gone, b->c survives");
+        assert!(g.node_meta("a").unwrap().is_none(), "a's meta gone");
+        // empty / missing ids are no-ops
+        assert_eq!(g.delete_nodes(&[]).unwrap(), 0);
+        assert_eq!(g.delete_nodes(&["zzz".into()]).unwrap(), 0);
     }
 
     #[test]
