@@ -18,6 +18,24 @@ struct RawValidation {
     strict: bool,
 }
 
+/// The `[reasoning]` overlay: domain-specific graph rules, kept OUT of the Rust code so the
+/// engine stays domain-agnostic (support is one overlay among many). All keys optional.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawReasoning {
+    /// Ordered relation sequence a node must lie on a COMPLETE instance of to survive hygiene.
+    #[serde(default)]
+    spine: Vec<String>,
+    /// Transitive-closure composition rules, each `[a, b, result]`.
+    #[serde(default)]
+    closure: Vec<Vec<String>>,
+    /// Anchor edge from a reasoning node to the structural layer. Defaults to "MENTIONS".
+    #[serde(default)]
+    mentions: Option<String>,
+    /// Override of the structural (never-reasoning) types. Defaults to the core nodes.
+    #[serde(default)]
+    structural: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawOntology {
     #[serde(default)]
@@ -26,6 +44,8 @@ struct RawOntology {
     relations: BTreeMap<String, RawRelation>,
     #[serde(default)]
     validation: RawValidation,
+    #[serde(default)]
+    reasoning: RawReasoning,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +53,7 @@ pub struct Ontology {
     entity_types: std::collections::BTreeSet<String>,
     relations: BTreeMap<String, RawRelation>,
     strict: bool,
+    reasoning: RawReasoning,
 }
 
 impl Ontology {
@@ -42,7 +63,39 @@ impl Ontology {
             entity_types: raw.entities.keys().cloned().collect(),
             relations: raw.relations,
             strict: raw.validation.strict,
+            reasoning: raw.reasoning,
         })
+    }
+
+    /// The reasoning spine — the ordered relation sequence a node must lie on a complete
+    /// instance of to survive the hygiene prune (Task 2). Empty when unset.
+    pub fn spine(&self) -> &[String] {
+        &self.reasoning.spine
+    }
+
+    /// Transitive-closure composition rules as `(a, b, result)` triples. Malformed inner vecs
+    /// (length != 3) are skipped — that is a config error, not graph data.
+    pub fn closure_rules(&self) -> Vec<(String, String, String)> {
+        self.reasoning
+            .closure
+            .iter()
+            .filter(|r| r.len() == 3)
+            .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
+            .collect()
+    }
+
+    /// The anchor edge type from a reasoning node to the structural layer. "MENTIONS" when unset.
+    pub fn mentions(&self) -> &str {
+        self.reasoning.mentions.as_deref().unwrap_or("MENTIONS")
+    }
+
+    /// The structural (never-reasoning) types. Declared override, else the core nodes.
+    pub fn structural(&self) -> Vec<String> {
+        if self.reasoning.structural.is_empty() {
+            CORE_NODES.iter().map(|s| s.to_string()).collect()
+        } else {
+            self.reasoning.structural.clone()
+        }
     }
 
     pub fn load_or_default(root: &std::path::Path) -> Ontology {
@@ -121,6 +174,47 @@ strict = true
         let o = Ontology::default(); // strict = false
         assert!(o.validate_node("Anything").is_ok());
         assert!(o.validate_edge("WHATEVER", "A", "B").is_ok());
+    }
+
+    const REASONING_TOML: &str = r#"
+[reasoning]
+spine = ["CAUSED_BY", "RESOLVED_BY"]
+mentions = "MENTIONS"
+closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"], ["A", "B"]]
+structural = ["Document", "Section"]
+"#;
+
+    #[test]
+    fn reasoning_section_parses() {
+        let o = Ontology::parse(REASONING_TOML).unwrap();
+        assert_eq!(o.spine(), &["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        assert_eq!(o.mentions(), "MENTIONS");
+        assert_eq!(o.structural(), vec!["Document".to_string(), "Section".to_string()]);
+    }
+
+    #[test]
+    fn closure_rules_skip_malformed() {
+        // the `["A","B"]` inner (len 2) must be dropped; the valid triple kept
+        let o = Ontology::parse(REASONING_TOML).unwrap();
+        assert_eq!(
+            o.closure_rules(),
+            vec![("CAUSED_BY".into(), "RESOLVED_BY".into(), "RESOLVED_BY".into())]
+        );
+    }
+
+    #[test]
+    fn reasoning_absent_yields_defaults() {
+        let o = Ontology::parse(TOML).unwrap(); // TOML has no [reasoning]
+        assert!(o.spine().is_empty());
+        assert!(o.closure_rules().is_empty());
+        assert_eq!(o.mentions(), "MENTIONS");
+        assert_eq!(
+            o.structural(),
+            vec!["Document", "Section", "Term", "Topic"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
