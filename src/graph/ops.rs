@@ -69,20 +69,6 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-/// Label discipline (language-agnostic): a label should be a concise, broad class — a
-/// generalisable problem/fix pattern, not the specifics of one case. The label's *language* is a
-/// deployment concern stated in the agent prompt, not enforced here. Returns the list of
-/// violations for `id`/`label`, empty when the label is fine.
-fn check_label(id: &str, label: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    if label.split_whitespace().count() > 12 {
-        v.push(format!(
-            "node '{id}': label has >12 words — generalise to a broad problem class, not the case specifics: \"{label}\""
-        ));
-    }
-    v
-}
-
 /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
 /// morphology match against existing reasoning nodes (the small model often paraphrases its own
 /// label — a truncation or wording variant). Returns None when nothing matches.
@@ -132,7 +118,7 @@ pub struct UpsertOutcome {
 /// (or a section as `<path>#<n>`).
 ///
 /// Steps:
-/// 1. `check_label` per node.
+/// 1. Validate each node's `source_path` is a real indexed document (reject hallucinated paths).
 /// 2. Build `label_to_id` map: input nodes first (win), then existing graph nodes (`or_insert`).
 /// 3. Build `Vec<NodeSpec>` using `id_for`.
 /// 4. Resolve each `UpsertEdge` endpoint: section ref → resolved id; otherwise label → id via map.
@@ -149,13 +135,9 @@ pub fn graph_upsert(
 ) -> UpsertOutcome {
     let mut errs: Vec<String> = Vec::new();
 
-    // (1) label checks
-    for nd in &nodes {
-        let id = id_for(&nd.node_type, &nd.label);
-        errs.extend(check_label(&id, &nd.label));
-    }
-
-    // (1b) source_path must be a real indexed document — reject hallucinated paths
+    // (1) source_path must be a real indexed document — reject hallucinated paths
+    // (label length is NOT gated — a long label is a minor quality issue guided by the prompt;
+    // rejecting the whole upsert over it would football the model and lose the entire case.)
     for nd in &nodes {
         if !idx.has_document(&nd.source_path).unwrap_or(false) {
             errs.push(format!(
