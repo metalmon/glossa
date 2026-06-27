@@ -276,9 +276,30 @@ fn main() -> anyhow::Result<()> {
                         let loc_opt = if loc.is_empty() || loc == "(no-text)" {
                             None
                         } else {
-                            Some(loc)
+                            Some(loc.clone())
                         };
-                        print_read(std::path::Path::new(&p), loc_opt.as_deref())?;
+                        // The stored path is the INDEX key — it carries the corpus-root prefix from
+                        // index time, so it does NOT resolve as a filesystem path from an arbitrary
+                        // cwd (e.g. running `kb read 1` from inside the corpus dir → os error 3).
+                        // Read the chunk straight from the index (cwd-independent, like MCP `read`);
+                        // fall back to opening the file only when the chunk isn't indexed.
+                        let from_index = loc_opt.as_deref().and_then(|l| {
+                            glossa::index::store::DocIndex::open_or_create(&root)
+                                .ok()
+                                .and_then(|idx| idx.read_chunk(&p, l).ok().flatten())
+                        });
+                        match from_index {
+                            Some(body) => {
+                                if glossa::cli_fmt::stdout_is_tty() {
+                                    println!("{}", glossa::cli_fmt::dim(&format!("── {p} · {loc} ──")));
+                                }
+                                print!("{body}");
+                                if !body.ends_with('\n') {
+                                    println!();
+                                }
+                            }
+                            None => print_read(std::path::Path::new(&p), loc_opt.as_deref())?,
+                        }
                     }
                     None => println!("no result #{n} (run a search first)"),
                 }
