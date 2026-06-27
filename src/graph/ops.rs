@@ -365,7 +365,17 @@ pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, ed
         EdgeRef { from, edge_type: e.edge_type, to }
     }).collect();
     match apply_delete(g, node_labels, edges) {
-        Ok(n) => format!("deleted {n} graph entries"),
+        Ok((n, notes)) => {
+            let mut m = format!("deleted {n} graph entries");
+            if !notes.is_empty() {
+                m.push_str(&format!(
+                    "\n{} reference(s) matched nothing (nothing deleted for these):\n- {}",
+                    notes.len(),
+                    notes.join("\n- ")
+                ));
+            }
+            m
+        }
         Err(e) => format!("graph_delete error: {e}"),
     }
 }
@@ -374,7 +384,13 @@ pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, ed
 /// The node id and all its edges are preserved. Returns a human-readable result string.
 pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
     match apply_update(g, nodes) {
-        Ok(n) => format!("updated {n} nodes"),
+        Ok((n, notes)) => {
+            let mut m = format!("updated {n} nodes");
+            if !notes.is_empty() {
+                m.push_str(&format!("\n{} skipped:\n- {}", notes.len(), notes.join("\n- ")));
+            }
+            m
+        }
         Err(e) => format!("graph_update error: {e}"),
     }
 }
@@ -615,6 +631,30 @@ strict = true
             out.message.contains("missing `to`"),
             "message clearly names the problem: {}",
             out.message
+        );
+    }
+
+    /// Clear feedback: delete/update report references that matched nothing instead of a silent
+    /// "deleted 0" / "updated 0" that left the model guessing.
+    #[test]
+    fn delete_and_update_report_unmatched_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let _ = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Потеря связи", "case1.docx")], vec![], 1);
+
+        let del = graph_delete(&idx, &g, vec!["Несуществующий".into()], vec![]);
+        assert!(del.contains("matched nothing"), "delete names the unmatched ref: {del}");
+
+        let upd = graph_update(
+            &g,
+            vec![NodeUpdate { label: "Несуществующий".into(), new_label: Some("X".into()), new_type: None }],
+        );
+        assert!(
+            upd.contains("skipped") && upd.contains("matched nothing"),
+            "update reports the skipped ref: {upd}"
         );
     }
 
