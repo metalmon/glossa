@@ -56,8 +56,10 @@ impl GraphStore {
              CREATE TABLE IF NOT EXISTS nodes (
                id TEXT PRIMARY KEY, node_type TEXT NOT NULL, label TEXT NOT NULL,
                aliases TEXT NOT NULL, source_path TEXT NOT NULL, range TEXT,
-               file_sig TEXT, origin TEXT NOT NULL, confidence REAL NOT NULL, created_at INTEGER NOT NULL);
+               file_sig TEXT, origin TEXT NOT NULL, confidence REAL NOT NULL, created_at INTEGER NOT NULL,
+               label_norm TEXT NOT NULL DEFAULT '');
              CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+             CREATE INDEX IF NOT EXISTS idx_nodes_label_norm ON nodes(label_norm);
              CREATE TABLE IF NOT EXISTS edges (
                efrom TEXT NOT NULL, eto TEXT NOT NULL, edge_type TEXT NOT NULL,
                source_path TEXT NOT NULL, range TEXT, file_sig TEXT, origin TEXT NOT NULL,
@@ -140,8 +142,8 @@ impl GraphStore {
             .context("ser file_sig")?;
         c.execute(
             "INSERT OR REPLACE INTO nodes \
-             (id, node_type, label, aliases, source_path, range, file_sig, origin, confidence, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, node_type, label, aliases, source_path, range, file_sig, origin, confidence, created_at, label_norm) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 node.id,
                 node.node_type,
@@ -153,6 +155,7 @@ impl GraphStore {
                 node.prov.origin,
                 node.prov.confidence as f64,
                 node.prov.created_at as i64,
+                normalize_label(&node.label),
             ],
         )
         .context("insert node")?;
@@ -231,6 +234,22 @@ impl GraphStore {
         let mut out = Vec::new();
         for r in rows {
             out.push(r.context("read edge row")?);
+        }
+        Ok(out)
+    }
+
+    /// All node ids whose normalized label equals `norm` — served by `idx_nodes_label_norm`
+    /// (indexed exact lookup, O(log N)), used by the exact paths of `resolve`/`find_by_label*`.
+    fn ids_by_label_norm_c(c: &Connection, norm: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = c
+            .prepare("SELECT id FROM nodes WHERE label_norm = ?1")
+            .context("prepare ids_by_label_norm")?;
+        let rows = stmt
+            .query_map(rusqlite::params![norm], |r| r.get::<_, String>(0))
+            .context("query ids_by_label_norm")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.context("read id row")?);
         }
         Ok(out)
     }
@@ -378,14 +397,17 @@ impl GraphStore {
 
     /// Return the id of the first node (any type) whose normalized label matches.
     pub fn find_by_label(&self, label: &str) -> anyhow::Result<Option<String>> {
-        let norm = normalize_label(label);
         let c = self.conn.lock().unwrap();
-        for n in Self::all_nodes_c(&c)? {
-            if normalize_label(&n.label) == norm {
-                return Ok(Some(n.id));
-            }
-        }
-        Ok(None)
+        Ok(Self::ids_by_label_norm_c(&c, &normalize_label(label))?
+            .into_iter()
+            .next())
+    }
+
+    /// All node ids whose normalized label equals `normalize_label(label)` — indexed exact lookup
+    /// (O(log N)). Lets callers resolve a label to existing node(s) without loading the whole graph.
+    pub fn ids_by_label_norm(&self, label: &str) -> anyhow::Result<Vec<String>> {
+        let c = self.conn.lock().unwrap();
+        Self::ids_by_label_norm_c(&c, &normalize_label(label))
     }
 
     /// Update the `label` and/or `node_type` of the node with the given id in place.
@@ -399,15 +421,15 @@ impl GraphStore {
         match (new_label, new_type) {
             (Some(lbl), Some(typ)) => {
                 c.execute(
-                    "UPDATE nodes SET label = ?1, node_type = ?2 WHERE id = ?3",
-                    rusqlite::params![lbl, typ, id],
+                    "UPDATE nodes SET label = ?1, label_norm = ?2, node_type = ?3 WHERE id = ?4",
+                    rusqlite::params![lbl, normalize_label(lbl), typ, id],
                 )
                 .context("update_node label+type")?;
             }
             (Some(lbl), None) => {
                 c.execute(
-                    "UPDATE nodes SET label = ?1 WHERE id = ?2",
-                    rusqlite::params![lbl, id],
+                    "UPDATE nodes SET label = ?1, label_norm = ?2 WHERE id = ?3",
+                    rusqlite::params![lbl, normalize_label(lbl), id],
                 )
                 .context("update_node label")?;
             }
@@ -425,14 +447,18 @@ impl GraphStore {
 
     /// Return the id of the first node with matching node_type and normalized label.
     pub fn find_by_label_type(&self, label: &str, node_type: &str) -> anyhow::Result<Option<String>> {
-        let norm = normalize_label(label);
         let c = self.conn.lock().unwrap();
-        for n in Self::all_nodes_c(&c)? {
-            if n.node_type == node_type && normalize_label(&n.label) == norm {
-                return Ok(Some(n.id));
-            }
+        let mut stmt = c
+            .prepare("SELECT id FROM nodes WHERE label_norm = ?1 AND node_type = ?2 LIMIT 1")
+            .context("prepare find_by_label_type")?;
+        match stmt.query_row(
+            rusqlite::params![normalize_label(label), node_type],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        Ok(None)
     }
 
     /// Delete a node by id AND every edge that references it. Returns (#nodes + #edges) removed.
@@ -508,29 +534,32 @@ impl GraphStore {
     /// NOT transliteration-aware — Cyrillic "модбас" still won't match Latin "Modbus".
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
         use std::collections::BTreeSet;
-        let needle = name.to_lowercase();
-        // Build the stemmers ONCE per call and reuse a scratch set across every candidate label/
-        // alias. The previous version rebuilt a tokenizer+stemmer per string via `analyze_terms`,
-        // which made this O(nodes) call dominate enrichment (graph_upsert resolves every paraphrased
-        // edge endpoint through here). TermAnalyzer is proven-equivalent to analyze_terms.
+        let c = self.conn.lock().unwrap();
+        // Fast path: exact (normalized) label match via the label_norm index — the common case
+        // during enrichment. Returns ALL nodes sharing that normalized label (near-dups expected).
+        let exact = Self::ids_by_label_norm_c(&c, &normalize_label(name))?;
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        // Fallback: morphology/order-tolerant fuzzy over all nodes. Also covers an exactly-matching
+        // ALIAS (the query's terms are a subset of that alias's terms). Stemmers built ONCE per call
+        // (TermAnalyzer, proven-equivalent to analyze_terms); scratch set reused across labels.
         let analyzer = crate::index::multilang::TermAnalyzer::new();
         let mut query: BTreeSet<String> = BTreeSet::new();
         analyzer.terms(name, &mut query);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut cand: BTreeSet<String> = BTreeSet::new();
-        let c = self.conn.lock().unwrap();
         let mut ids = Vec::new();
         for n in Self::all_nodes_c(&c)? {
-            let exact = n.label.to_lowercase() == needle
-                || n.aliases.iter().any(|a| a.to_lowercase() == needle);
-            let fuzzy = !query.is_empty() && {
-                analyzer.terms(&n.label, &mut cand);
-                query.is_subset(&cand)
-                    || n.aliases.iter().any(|a| {
-                        analyzer.terms(a, &mut cand);
-                        query.is_subset(&cand)
-                    })
-            };
-            if exact || fuzzy {
+            analyzer.terms(&n.label, &mut cand);
+            let hit = query.is_subset(&cand)
+                || n.aliases.iter().any(|a| {
+                    analyzer.terms(a, &mut cand);
+                    query.is_subset(&cand)
+                });
+            if hit {
                 ids.push(n.id);
             }
         }
@@ -594,6 +623,30 @@ strict = true
 
         assert_eq!(g.resolve("ооо акме").unwrap(), vec!["org:acme".to_string()]);
         assert_eq!(g.resolve("ACME").unwrap(), vec!["org:acme".to_string()]);
+    }
+
+    #[test]
+    fn update_node_keeps_label_norm_index_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let n = Node {
+            id: "org:x".into(),
+            node_type: "Organization".into(),
+            label: "Старое Имя".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[n], &[]).unwrap();
+        // exact lookup served by the label_norm index
+        assert_eq!(g.resolve("Старое Имя").unwrap(), vec!["org:x".to_string()]);
+        assert_eq!(g.find_by_label("старое имя").unwrap(), Some("org:x".to_string()));
+
+        // rename → label_norm must follow, otherwise the index goes stale
+        g.update_node("org:x", Some("Новое Имя"), None).unwrap();
+        assert_eq!(g.find_by_label("Новое Имя").unwrap(), Some("org:x".to_string()));
+        assert_eq!(g.find_by_label("Старое Имя").unwrap(), None);
+        assert_eq!(g.resolve("новое имя").unwrap(), vec!["org:x".to_string()]);
     }
 
     #[test]
