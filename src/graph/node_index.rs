@@ -8,9 +8,9 @@ use crate::index::multilang::{default_detector, multilang_analyzer};
 use anyhow::Context;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING};
-use tantivy::{Index, IndexReader, TantivyDocument, TantivyError};
+use tantivy::{Index, IndexReader, TantivyDocument, TantivyError, Term};
 
 pub struct NodeIndex {
     index: Index,
@@ -74,17 +74,41 @@ impl NodeIndex {
         Ok(())
     }
 
-    /// BM25 search over node text; returns node ids best-first (OR semantics — any shared term
-    /// contributes, ranked by overlap and term rarity). A query that parses to nothing (only
-    /// stopwords/punctuation) or fails to parse returns empty.
+    /// BM25 search over node text; returns node ids best-first. Returns EVERY node that shares at
+    /// least one query term (recall first), ranked by BM25 — so a node matching several rare query
+    /// terms outranks one matching a single generic word ("АБАК", in most labels), and the caller
+    /// sees the strongest matches at the top. A query that tokenizes to nothing returns empty.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
+        // Tokenize the query with the index's own analyzer so query terms match indexed terms
+        // (same morphology + language detection as index time).
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(mut analyzer) = self.index.tokenizers().get("multilang") {
+            let mut stream = analyzer.token_stream(query);
+            while stream.advance() {
+                let t = stream.token().text.clone();
+                if !terms.contains(&t) {
+                    terms.push(t);
+                }
+            }
+        }
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+            .iter()
+            .map(|t| {
+                let q: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(self.text, t),
+                    IndexRecordOption::WithFreqs,
+                ));
+                (Occur::Should, q)
+            })
+            .collect();
+        // OR semantics (match any term); BM25 does the ranking. No minimum-should-match floor —
+        // surface everything that fits and let the ranking (and the reader) judge relevance.
+        let bq = BooleanQuery::new(clauses);
         let searcher = self.reader.searcher();
-        let parser = QueryParser::for_index(&self.index, vec![self.text]);
-        let parsed = match parser.parse_query(query) {
-            Ok(q) => q,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let top = searcher.search(&parsed, &TopDocs::with_limit(limit.max(1)).order_by_score())?;
+        let top = searcher.search(&bq, &TopDocs::with_limit(limit.max(1)).order_by_score())?;
         let mut ids = Vec::with_capacity(top.len());
         for (_score, addr) in top {
             let d: TantivyDocument = searcher.doc(addr)?;
