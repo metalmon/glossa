@@ -205,12 +205,17 @@ type = "chat_completion"
 model = "qwen"
 system_template = "enrich/system.minijinja"
 max_tokens = 2048
-temperature = 0.8
-top_p = 0.95
+# Qwen3.5/3.6 NON-THINKING (Instruct) preset, official model-card values — reasoning OFF to avoid
+# the Qwen3.x agentic "empty content / finish_reason=stop / tool_calls=0" early-stop, where the
+# model emits an empty thought+content turn and the episode ends with nothing written.
+temperature = 0.7
+top_p = 0.8
+presence_penalty = 1.5
 extra_body = [
-  { pointer = "/top_k", value = 40 },
-  { pointer = "/min_p", value = 0.1 },
-  { pointer = "/repetition_penalty", value = 1.1 },
+  { pointer = "/top_k", value = 20 },
+  { pointer = "/min_p", value = 0 },
+  { pointer = "/repetition_penalty", value = 1.0 },
+  { pointer = "/reasoning", value = { enabled = false } },
 ]
 
 # ── Feedback metrics emitted by the harness after scoring each question (episode-level) ──
