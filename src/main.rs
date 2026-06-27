@@ -47,9 +47,11 @@ enum Cmd {
         /// Max number of hits.
         #[arg(long, default_value_t = 100)]
         limit: usize,
-        /// Use the on-disk index for BM25-ranked, stemmed search (run `kb index` first).
+        /// Literal regex scan over raw file content instead of the BM25 index — slow (it reads and
+        /// re-extracts every file) and not stemmed. The DEFAULT search uses the on-disk index for
+        /// fast BM25-ranked results, matching the MCP `search` tool (run `kb index` first).
         #[arg(long)]
-        rank: bool,
+        scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
         #[arg(long = "no-ignore")]
         no_ignore: bool,
@@ -201,7 +203,7 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, file_type, limit, rank, no_ignore, format } => {
+        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, file_type, limit, scan, no_ignore, format } => {
             let path = glossa::root::resolve_root(path);
             let pretty = match format {
                 OutputFormat::Pretty => true,
@@ -212,7 +214,7 @@ fn main() -> anyhow::Result<()> {
             let mut display: Vec<glossa::cli_fmt::DisplayHit> = Vec::new();
             let mut records: Vec<(String, String)> = Vec::new();
 
-            if rank {
+            if !scan {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())? {
                     rg_lines.push(format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score));
@@ -248,8 +250,9 @@ fn main() -> anyhow::Result<()> {
             }
 
             if pretty {
-                // For --rank, print worst→best so the most relevant sits next to the prompt.
-                print!("{}", glossa::cli_fmt::render_search_pretty(&display, rank, &pattern));
+                // Index (default) results are ranked → print worst→best so the most relevant sits
+                // next to the prompt; the literal `--scan` results are kept in file order.
+                print!("{}", glossa::cli_fmt::render_search_pretty(&display, !scan, &pattern));
             } else {
                 for l in &rg_lines {
                     println!("{l}");
