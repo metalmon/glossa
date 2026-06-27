@@ -7,7 +7,7 @@
 # `graph_upsert` (validated against this file). `MENTIONS` (any node → Section)
 # stays core, so every reasoning node can point at a readable (path,#n) chunk.
 #
-# Deploy: copy this to <corpus-root>/ontology.toml (e.g. kb-test/ontology.toml).
+# Deploy: copy this to <corpus-root>/.glossa/ontology.toml (e.g. kb-test/.glossa/ontology.toml).
 
 # ── Entities (the support domain's nouns) ──
 [entities.Symptom]    # an observed problem / question class (kept BROAD for transfer)
@@ -67,3 +67,14 @@ to = ["Product", "Module"]
 # (Document/Section/CONTAINS/…) bypasses validation, so it is unaffected.
 [validation]
 strict = true
+
+# ── Reasoning rules (consumed by the generalize + hygiene passes) ──
+# Domain rules live HERE, never in Rust, so the engine stays domain-agnostic.
+#   spine    — the ordered relation path a reasoning node must lie on a COMPLETE instance of to
+#              survive the hygiene prune (Symptom →CAUSED_BY→ Cause →RESOLVED_BY→ Resolution).
+#   closure  — transitive-closure composition rules [a, b, result]: x-a->y, y-b->z ⇒ x-result->z.
+#   mentions — the anchor edge from a reasoning node to the structural layer (a readable chunk).
+[reasoning]
+spine = ["CAUSED_BY", "RESOLVED_BY"]
+closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
+mentions = "MENTIONS"

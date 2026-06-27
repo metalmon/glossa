@@ -300,7 +300,8 @@ fn main() -> anyhow::Result<()> {
             // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
             // merges are only reported, never applied here (use `kb graph generalize --merge`).
             let g = glossa::graph::store::GraphStore::open(&path)?;
-            let opts = glossa::graph::generalize::apply::Opts::defaults(glossa::trace::now_ms());
+            let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+            let opts = glossa::graph::generalize::apply::Opts::from_ontology(&ont, glossa::trace::now_ms());
             let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
             println!(
                 "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
@@ -350,8 +351,9 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Generalize { path, merge } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let mut opts =
-                    glossa::graph::generalize::apply::Opts::defaults(glossa::trace::now_ms());
+                    glossa::graph::generalize::apply::Opts::from_ontology(&ont, glossa::trace::now_ms());
                 opts.apply_merges = merge;
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
                 println!(

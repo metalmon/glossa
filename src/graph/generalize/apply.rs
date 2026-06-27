@@ -9,11 +9,10 @@
 //!   `opts.apply_merges` is set — it mutates/deletes agent nodes, so the safe default is report-only.
 
 use super::{centrality, closure, community, linkpred, merge, similarity, Triple};
+use crate::graph::ontology::Ontology;
 use crate::graph::store::{Edge, GraphStore, NodeMeta, Provenance};
 use std::collections::HashMap;
 
-/// Node types that are document structure, not reasoning — excluded from merge/similar.
-const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
 const SIMILAR: &str = "SIMILAR";
 const DERIVED_ORIGIN: &str = "auto-generalized";
 
@@ -38,11 +37,18 @@ pub struct Opts {
     /// defaults port across deployments — tune on real data, but `0.3 / 0.7` is the safe starting point.
     pub merge_bm25_min_ratio: f64,
     /// Edge type whose target chunk is a reasoning node's evidence anchor (shared-evidence merge).
+    /// Sourced from the ontology's `[reasoning].mentions` (was a hardcoded "MENTIONS").
     pub mentions_type: String,
+    /// Transitive-closure composition rules `(a, b, result)`, from `[reasoning].closure`.
+    pub closure_rules: Vec<(String, String, String)>,
+    /// Structural (never-reasoning) types excluded from merge/similar, from `[reasoning].structural`.
+    pub structural: Vec<String>,
     pub now: u64,
 }
 
 impl Opts {
+    /// Test/default tunables with NO domain rules — empty closure, default structural set,
+    /// `"MENTIONS"`. Production builds via `from_ontology`.
     pub fn defaults(now: u64) -> Self {
         Opts {
             apply_merges: false,
@@ -51,13 +57,25 @@ impl Opts {
             bm25_top_k: 5,
             merge_bm25_min_ratio: 0.7,
             mentions_type: "MENTIONS".into(),
+            closure_rules: vec![],
+            structural: ["Document", "Section", "Term", "Topic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             now,
         }
     }
-}
 
-fn default_rules() -> Vec<closure::Rule> {
-    vec![closure::Rule::new("CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY")]
+    /// Source the domain rules (closure, mentions anchor, structural types) from the ontology's
+    /// `[reasoning]` section; other tunables keep their defaults.
+    pub fn from_ontology(ont: &Ontology, now: u64) -> Self {
+        Opts {
+            mentions_type: ont.mentions().to_string(),
+            closure_rules: ont.closure_rules(),
+            structural: ont.structural(),
+            ..Opts::defaults(now)
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -92,7 +110,10 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         let type_of: HashMap<String, String> =
             nodes.iter().map(|n| (n.id.clone(), n.node_type.clone())).collect();
         let reasoning = |id: &str| {
-            type_of.get(id).map(|t| !STRUCTURAL.contains(&t.as_str())).unwrap_or(false)
+            type_of
+                .get(id)
+                .map(|t| !opts.structural.iter().any(|s| s == t))
+                .unwrap_or(false)
         };
         let anchors: Vec<(String, String)> = g
             .all_edges()?
@@ -151,8 +172,10 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     // clear our own prior derived edges so a re-run doesn't accumulate duplicates
     g.delete_edges_by_origin(DERIVED_ORIGIN)?;
 
-    // (#8) transitive closure → inferred edges
-    for (f, t, to) in closure::transitive_closure(&edges, &default_rules()) {
+    // (#8) transitive closure → inferred edges (rules from the ontology's [reasoning].closure)
+    let rules: Vec<closure::Rule> =
+        opts.closure_rules.iter().map(|(a, b, r)| closure::Rule::new(a, b, r)).collect();
+    for (f, t, to) in closure::transitive_closure(&edges, &rules) {
         g.put_edge(&Edge { from: f, edge_type: t, to, prov: derived_prov(opts.now, 1.0) })?;
         report.inferred_edges += 1;
     }
@@ -175,7 +198,7 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     }
     let labels: Vec<(String, String)> = nodes
         .iter()
-        .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
+        .filter(|n| !opts.structural.iter().any(|s| s == &n.node_type))
         .map(|n| (n.id.clone(), n.label.clone()))
         .collect();
     for (a, b, s) in similarity::label_bm25(&labels, opts.bm25_min_ratio, opts.bm25_top_k)? {
@@ -240,6 +263,31 @@ from = ["Symptom"]
 to = ["Section"]
 [validation]
 strict = false
+[reasoning]
+closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
+"#;
+
+    // Same ontology but WITHOUT a [reasoning] section — drives the back-compat (no-op closure) test.
+    const ONT_NO_REASONING: &str = r#"
+[entities.Symptom]
+props = ["name"]
+[entities.Cause]
+props = ["name"]
+[entities.Resolution]
+props = ["name"]
+[entities.Section]
+props = ["name"]
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[relations.RESOLVED_BY]
+from = ["Cause", "Symptom"]
+to = ["Resolution"]
+[relations.MENTIONS]
+from = ["Symptom"]
+to = ["Section"]
+[validation]
+strict = false
 "#;
 
     fn prov() -> Provenance {
@@ -281,7 +329,8 @@ strict = false
         ];
         g.upsert(&ont, &nodes, &edges).unwrap();
 
-        let rep = generalize(&g, &Opts::defaults(100)).unwrap();
+        // closure rule now comes from the ontology's [reasoning].closure, not a hardcode
+        let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
         assert_eq!(rep.inferred_edges, 1, "closure should infer S RESOLVED_BY R");
         assert!(rep.merge_candidates >= 1, "S and S2 share a chunk → merge candidate");
         assert_eq!(rep.merged_nodes, 0, "merge must NOT apply by default");
@@ -294,6 +343,30 @@ strict = false
         assert!(g.node_meta("sym:s").unwrap().is_some());
         // both symptoms still exist (no merge)
         assert!(g.get_node("sym:s2").unwrap().is_some());
+    }
+
+    #[test]
+    fn generalize_back_compat_no_reasoning() {
+        // An ontology with no [reasoning] section → empty closure rules → no inferred edges,
+        // proving back-compat: deployments that never declared reasoning rules are unaffected.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT_NO_REASONING).unwrap();
+        let nodes = vec![
+            node("sym:s", "Symptom", "Потеря связи"),
+            node("cau:c", "Cause", "Малый maxTsdr"),
+            node("res:r", "Resolution", "Поднять maxTsdr"),
+        ];
+        let edges = vec![
+            edge("sym:s", "CAUSED_BY", "cau:c"),
+            edge("cau:c", "RESOLVED_BY", "res:r"),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
+        assert_eq!(rep.inferred_edges, 0, "no [reasoning].closure → no inferred edges");
+        // the direct S->R shortcut must NOT have been created
+        assert!(!g.outgoing("sym:s").unwrap().iter().any(|e| e.edge_type == "RESOLVED_BY"));
     }
 
     #[test]
