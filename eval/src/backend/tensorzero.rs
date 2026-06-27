@@ -222,7 +222,10 @@ impl AgentBackend for TensorZeroBackend {
         // search/read round instead of reopening per tool call.
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
         let graph = glossa::graph::store::GraphStore::open(work).ok();
-        let exec = |name: &str, args: &Value| crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &trace);
+        // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/neighbors render
+        // the reasoning chain identically to the MCP surface.
+        let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(work));
+        let exec = |name: &str, args: &Value| crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
 
         let user = prompt::user_prompt(q);
         let outcome = run_episode(chat, &user, exec, MAX_ROUNDS)?;

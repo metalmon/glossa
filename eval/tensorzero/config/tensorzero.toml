@@ -138,6 +138,28 @@ extra_body = [
 # Add more [functions.answer_hotpot.variants.<name>] blocks (with `weight`) to A/B
 # alternative prompts; TensorZero optimization can then propose better variants.
 
+# ── Control arm for the graph ablation: the SAME prompt and sampling as answer_hotpot, but with
+# the reasoning-graph tools (glossary/neighbors/resolve) removed and the graph paragraph dropped
+# from the prompt — so the small model is never told to call a tool it doesn't have. The ablation
+# knob is exactly this: tool list + matching prompt. Run with `--tensorzero-function answer_hotpot_nograph`.
+[functions.answer_hotpot_nograph]
+type = "chat"
+tools = ["glob", "grep", "read", "search"]
+parallel_tool_calls = true
+
+[functions.answer_hotpot_nograph.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "answer_hotpot_nograph/system.minijinja"
+max_tokens = 2048
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
 [tools.glob]
@@ -145,7 +167,7 @@ description = "List knowledge-base documents whose path matches a shell glob (e.
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "List existing graph nodes whose label matches a concept, one per line as `id [type] label` — reasoning nodes (Symptom/Cause/Resolution/Task) plus structural Section/Document (those also show a `path #n` anchor). Call it BEFORE creating a node to find and REUSE an existing one instead of duplicating; an empty result means nothing matches yet. Matching is morphology-aware over labels/aliases."
+description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
 parameters = "tools/glossary.json"
 
 [tools.graph_delete]
@@ -173,7 +195,7 @@ description = "Build/update the index + structural graph for the knowledge base.
 parameters = "tools/index.json"
 
 [tools.neighbors]
-description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors."
+description = "Related cases for a node — its SIMILAR cross-links (other cases that share evidence), from the generalization layer. Pass a reasoning-node `node` id copied from a `glossary` line, or a chunk `path` + `n`. Each related node renders with a `read path #n` anchor. Empty → no related cases. (For a node's own cause→resolution chain, use `glossary`.)"
 parameters = "tools/neighbors.json"
 
 [tools.purge]
