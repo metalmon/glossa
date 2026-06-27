@@ -129,7 +129,8 @@ pub struct EdgeRef {
 }
 
 /// Delete nodes and/or edges by label. Node deletion also removes all attached edges.
-/// Returns total entries (nodes + edges) removed.
+/// Returns (total entries removed, notes about references that matched nothing — so the caller can
+/// tell the model what was a no-op instead of a silent "deleted 0").
 /// Resolve a node reference that may be either an id (as assigned in `graph_upsert`) or a label,
 /// to the matching node ids. An exact id wins; otherwise every node whose normalized label matches.
 /// Keeps the CRUD tools consistent — the agent can delete/update a node by the same id it used when
@@ -151,26 +152,44 @@ pub fn apply_delete(
     g: &GraphStore,
     node_refs: Vec<String>,
     edges: Vec<EdgeRef>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<(usize, Vec<String>)> {
     let mut total = 0;
+    let mut notes: Vec<String> = Vec::new();
 
-    // Delete every node matching each reference (id or label).
+    // Delete every node matching each reference (id or label); note refs that matched nothing.
     for reference in &node_refs {
-        for id in resolve_node_ref(g, reference)? {
+        let ids = resolve_node_ref(g, reference)?;
+        if ids.is_empty() {
+            notes.push(format!("node \"{reference}\" matched nothing"));
+        }
+        for id in ids {
             total += g.delete_node(&id)?;
         }
     }
 
-    // Delete individual edges identified by (id-or-label) endpoint pairs.
+    // Delete individual edges by (id-or-label) endpoint pairs; note ones that matched no edge/node.
     for er in &edges {
         let from = resolve_node_ref(g, &er.from)?.into_iter().next();
         let to = resolve_node_ref(g, &er.to)?.into_iter().next();
-        if let (Some(f), Some(t)) = (from, to) {
-            total += g.delete_edge(&f, &er.edge_type, &t)?;
+        match (from, to) {
+            (Some(f), Some(t)) => {
+                let n = g.delete_edge(&f, &er.edge_type, &t)?;
+                total += n;
+                if n == 0 {
+                    notes.push(format!(
+                        "edge {} -{}-> {} matched no existing edge",
+                        er.from, er.edge_type, er.to
+                    ));
+                }
+            }
+            _ => notes.push(format!(
+                "edge {} -{}-> {}: an endpoint matched no node",
+                er.from, er.edge_type, er.to
+            )),
         }
     }
 
-    Ok(total)
+    Ok((total, notes))
 }
 
 /// Spec for an in-place node edit: change label and/or type while keeping the id and all edges.
@@ -182,18 +201,24 @@ pub struct NodeUpdate {
 
 /// Rename and/or retype nodes in place, identified by id (as used in `graph_upsert`) or current
 /// label. Skips references that resolve to nothing. Returns the total number of rows updated.
-pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<usize> {
+pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<(usize, Vec<String>)> {
     let mut total = 0;
+    let mut notes: Vec<String> = Vec::new();
     for u in nodes {
         let ids = resolve_node_ref(g, &u.label)?;
         // Only rename when the reference is UNAMBIGUOUS. Renaming several distinct nodes that merely
         // share a label (e.g. same label, different node_type) would give them all the new label and
-        // corrupt label identity — skip those rather than mangle the graph.
-        if ids.len() == 1 {
-            total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?;
+        // corrupt label identity — skip those (and SAY SO) rather than mangle the graph.
+        match ids.len() {
+            0 => notes.push(format!("node \"{}\" matched nothing — nothing renamed", u.label)),
+            1 => total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?,
+            n => notes.push(format!(
+                "node \"{}\" is ambiguous ({n} nodes share that label) — rename skipped to avoid corrupting identity",
+                u.label
+            )),
         }
     }
-    Ok(total)
+    Ok((total, notes))
 }
 
 #[cfg(test)]
@@ -342,7 +367,7 @@ strict = true
         )
         .unwrap();
 
-        let removed = apply_delete(&g, vec!["sym:test".into()], vec![]).unwrap();
+        let (removed, _) = apply_delete(&g, vec!["sym:test".into()], vec![]).unwrap();
         assert!(removed > 0, "delete-by-id must remove the node (the bug returned 0)");
         assert!(g.get_node("sym:test").unwrap().is_none(), "node deleted by id");
     }
