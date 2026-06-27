@@ -46,18 +46,18 @@ enum Cmd {
         #[arg(short = 't', long = "type")]
         file_type: Option<String>,
         /// Max number of hits.
-        #[arg(long, default_value_t = 100)]
+        #[arg(short = 'l', long, default_value_t = 100)]
         limit: usize,
         /// Literal regex scan over raw file content instead of the BM25 index — slow (it reads and
         /// re-extracts every file) and not stemmed. The DEFAULT search uses the on-disk index for
         /// fast BM25-ranked results, matching the MCP `search` tool (run `kb index` first).
-        #[arg(long)]
+        #[arg(short = 's', long)]
         scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
-        #[arg(long = "no-ignore")]
+        #[arg(short = 'u', long = "no-ignore")]
         no_ignore: bool,
         /// Output style: auto (pretty in a terminal, rg when piped), rg, or pretty.
-        #[arg(long, value_enum, default_value = "auto")]
+        #[arg(short = 'f', long, value_enum, default_value = "auto")]
         format: OutputFormat,
     },
     /// Read a document's text. TARGET is a path, or a result number from the last search.
@@ -105,13 +105,13 @@ enum Cmd {
         action: Option<McpAction>,
         path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
-        #[arg(long, default_value = "editor")]
+        #[arg(short = 'p', long, default_value = "editor")]
         profile: String,
         /// Log every tool call to <root>/.glossa/traces/*.jsonl (for the eval harness).
-        #[arg(long)]
+        #[arg(short = 't', long)]
         trace: bool,
         /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
-        #[arg(long = "no-graph")]
+        #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
     },
 }
@@ -121,7 +121,7 @@ enum McpAction {
     /// Regenerate TensorZero tool config from the live MCP tool definitions (one source of truth).
     DumpTzTools {
         /// Directory containing tensorzero.toml and tools/.
-        #[arg(long, default_value = "eval/tensorzero/config")]
+        #[arg(short = 'd', long, default_value = "eval/tensorzero/config")]
         config_dir: PathBuf,
     },
 }
@@ -146,9 +146,9 @@ enum GraphAction {
     Ls {
         path: Option<PathBuf>,
         /// list nodes of this type, e.g. Symptom (omit for a per-type summary)
-        #[arg(long = "type")]
+        #[arg(short = 't', long = "type")]
         node_type: Option<String>,
-        #[arg(long, default_value_t = 50)]
+        #[arg(short = 'l', long, default_value_t = 50)]
         limit: usize,
     },
     /// Run the deterministic generalization pass: transitive closure, SIMILAR links, communities
@@ -156,9 +156,9 @@ enum GraphAction {
     /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
     Generalize {
         path: Option<PathBuf>,
-        #[arg(long, help = "also collapse near-duplicate nodes (destructive)")]
+        #[arg(short = 'm', long, help = "also collapse near-duplicate nodes (destructive)")]
         merge: bool,
-        #[arg(long, help = "delete degenerate reasoning chains off the ontology spine (destructive)")]
+        #[arg(short = 'p', long, help = "delete degenerate reasoning chains off the ontology spine (destructive)")]
         prune_incomplete: bool,
     },
     /// Print nodes reachable from NODE_ID.
@@ -166,9 +166,9 @@ enum GraphAction {
     Near {
         node_id: String,
         path: Option<PathBuf>,
-        #[arg(long, default_value_t = 1)]
+        #[arg(short = 'd', long, default_value_t = 1)]
         depth: usize,
-        #[arg(long = "type")]
+        #[arg(short = 't', long = "type")]
         types: Vec<String>,
     },
     /// Show a node: type, label, provenance, and its outgoing edges.
@@ -181,31 +181,31 @@ enum GraphAction {
         from: String,
         to: String,
         path: Option<PathBuf>,
-        #[arg(long, default_value_t = 6)]
+        #[arg(short = 'd', long, default_value_t = 6)]
         max_depth: usize,
     },
     /// Dump all nodes (optionally filtered by type) with their outgoing edges.
     Dump {
         path: PathBuf,
         /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
-        #[arg(long = "type")]
+        #[arg(short = 't', long = "type")]
         node_type: Option<String>,
         /// output format: text (default), json, dot, graphml
-        #[arg(long, default_value = "text")]
+        #[arg(short = 'f', long, default_value = "text")]
         format: String,
     },
     /// Import a graph file (JSON), replacing the semantic layer (file = source of truth).
     Import {
         file: PathBuf,
         path: PathBuf,
-        #[arg(long)]
+        #[arg(short = 'f', long)]
         format: Option<String>,
     },
     /// Delete all nodes of the given type (and edges touching them) — clean-slate a semantic layer.
     Prune {
         path: PathBuf,
         /// node type to delete, e.g. Symptom (repeatable)
-        #[arg(long = "type", required = true)]
+        #[arg(short = 't', long = "type", required = true)]
         node_type: Vec<String>,
     },
 }
