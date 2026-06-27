@@ -9,6 +9,8 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile { Reader, Editor, Full }
@@ -28,6 +30,9 @@ pub struct GlossaServer {
     root: PathBuf,
     tool_router: ToolRouter<Self>,
     trace: crate::trace::TraceLog,
+    /// Epoch-ms of the last file-first freshness scan, shared across cloned handlers. Throttles
+    /// `ensure_fresh` so bursty tool calls don't each re-scan the corpus (see `freshen`).
+    last_fresh: Arc<AtomicU64>,
 }
 
 const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize"];
@@ -52,12 +57,38 @@ impl GlossaServer {
             }
         }
         let trace = if trace { crate::trace::TraceLog::to_dir(&root) } else { crate::trace::TraceLog::disabled() };
-        Self { root, tool_router: router, trace }
+        // Seed `last_fresh` to "now" so the first tool call does NOT scan — startup freshness is done
+        // once by the `kb mcp` entry point (main.rs). This also keeps `new()` free of any filesystem
+        // access, so unit tests that construct a server with root="." never index the repo.
+        Self { root, tool_router: router, trace, last_fresh: Arc::new(AtomicU64::new(crate::trace::now_ms())) }
     }
 
     /// Return the list of enabled tools (for config generation — not test-only).
     pub fn tool_specs(&self) -> Vec<rmcp::model::Tool> {
         self.tool_router.list_all()
+    }
+
+    /// File-first freshness: bring the index/graph up to date with the corpus before serving a
+    /// read. Cheap (a `stat`-scan short-circuits when nothing changed) and THROTTLED — at most one
+    /// scan per window across concurrent calls, claimed via CAS so only one task runs it. Heavy
+    /// extraction (when files did change) runs on a blocking thread so it never stalls the async
+    /// executor. Best-effort: a freshness error never fails the tool — we serve on the prior index.
+    async fn freshen(&self) {
+        const FRESH_WINDOW_MS: u64 = 1500;
+        let now = crate::trace::now_ms();
+        let last = self.last_fresh.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < FRESH_WINDOW_MS {
+            return;
+        }
+        if self
+            .last_fresh
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return; // another task claimed this window
+        }
+        let root = self.root.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
     }
 
     #[cfg(test)]
@@ -205,6 +236,7 @@ struct GraphUpdateArgs {
 impl GlossaServer {
     #[tool(description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let (body, _hits) = crate::tools::search(&idx, &a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref(), &self.trace);
         Ok(CallToolResult::success(vec![Content::text(body)]))
@@ -212,6 +244,7 @@ impl GlossaServer {
 
     #[tool(description = "Read a document chunk by its number `n` — the `[#n]` from a search/grep result (for PDFs, the page number). Returns the chunk's full text plus the previous/next chunk numbers for context expansion. If `n` is out of range, the reply states the document's valid chunk range.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let out = crate::tools::read(&idx, &a.path, a.n as u64, &self.trace);
         let mut content = vec![Content::text(out.text)];
@@ -226,6 +259,7 @@ impl GlossaServer {
 
     #[tool(description = "List existing graph nodes whose label matches a concept, one per line as `id [type] label` — reasoning nodes (Symptom/Cause/Resolution/Task) plus structural Section/Document (those also show a `path #n` anchor). Call it BEFORE creating a node to find and REUSE an existing one instead of duplicating; an empty result means nothing matches yet. Matching is morphology-aware over labels/aliases.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &self.trace))]))
@@ -233,6 +267,7 @@ impl GlossaServer {
 
     #[tool(description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, &a.path, a.n, a.depth.unwrap_or(1), &self.trace))]))
@@ -258,6 +293,7 @@ impl GlossaServer {
 
     #[tool(description = "Create/update reasoning nodes and directed edges. A node carries a `label` (NO id — the system derives the id and de-duplicates by label) plus `node_type` and `source_path`. Reference nodes in `edges` by their `label` (or a section as `<path>#<n>`). A Resolution label names the fix ACTION, never the literal value; write labels as a broad reusable class in the knowledge base's language. Send a node and the edges referencing it in the same call so both endpoints exist.")]
     async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
@@ -271,6 +307,7 @@ impl GlossaServer {
 
     #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
     async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
@@ -306,6 +343,7 @@ impl GlossaServer {
 
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let opts = crate::grep::GrepOpts { ignore_case: a.ignore_case.unwrap_or(false), fixed: a.fixed.unwrap_or(false), word: a.word.unwrap_or(false), glob: a.glob, file_type: a.file_type };
         Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
@@ -313,6 +351,7 @@ impl GlossaServer {
 
     #[tool(description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::glob(&idx, &a.pattern, &self.trace))]))
     }
