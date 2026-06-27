@@ -152,6 +152,10 @@ parameters = "tools/glossary.json"
 description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
 parameters = "tools/graph_delete.json"
 
+[tools.graph_generalize]
+description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
+parameters = "tools/graph_generalize.json"
+
 [tools.graph_update]
 description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
 parameters = "tools/graph_update.json"
@@ -194,10 +198,12 @@ parameters = "tools/search.json"
 # <<< GENERATED TOOLS
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
-# (graph_upsert/graph_delete defs now come from MCP via the GENERATED TOOLS block above.)
+# (the enricher is a read+edit agent → its tool list is the Editor profile, generated from MCP.)
 [functions.enrich]
 type = "chat"
-tools = ["search", "read", "grep", "glossary", "neighbors", "graph_upsert", "graph_update", "graph_delete"]
+# >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
+tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search"]
+# <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 
 [functions.enrich.variants.baseline]

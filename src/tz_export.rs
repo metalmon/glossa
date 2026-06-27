@@ -86,8 +86,10 @@ fn splice(
 /// * Writes `<config_dir>/tools/<name>.json` for every Full-profile tool (includes
 ///   write tools: `graph_upsert`, `graph_delete`, `index`, `reindex`, `resolve`, `purge`).
 /// * Splices the `[tools.*]` TOML blocks (Full set) between the `GENERATED TOOLS` markers.
-/// * Splices the `tools = [...]` line (Reader set — answer-function tools only) between
+/// * Splices the `tools = [...]` line (Reader set — the answer_hotpot function) between
 ///   the `GENERATED TOOL LIST` markers.
+/// * Splices the `tools = [...]` line (Editor set — the enrich function, a read+edit agent)
+///   between the `GENERATED ENRICH TOOL LIST` markers.
 ///
 /// Returns the number of tool JSON files written.
 pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
@@ -115,6 +117,17 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     );
     let mut reader_tools = reader_srv.tool_specs();
     reader_tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // 2c. Editor profile — LIST set for the ENRICH function. The enricher reads AND edits the
+    // graph, so its tools are exactly the Editor profile (kept 1:1 with MCP, not hand-maintained).
+    let editor_srv = crate::mcp::GlossaServer::new(
+        std::path::PathBuf::from("."),
+        crate::mcp::Profile::Editor,
+        false,
+        false,
+    );
+    let mut editor_tools = editor_srv.tool_specs();
+    editor_tools.sort_by(|a, b| a.name.cmp(&b.name));
 
     // 3. Write each tool's JSON schema (from the full set).
     for tool in &full_tools {
@@ -144,9 +157,13 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         blocks.push('\n');
     }
 
-    // 5. Build the tool-list line (reader set — answer-function tools only).
+    // 5. Build the tool-list line (reader set — the answer_hotpot function).
     let names: Vec<String> = reader_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
     let tool_list = format!("tools = [{}]\n", names.join(", "));
+
+    // 5b. Build the tool-list line (editor set — the enrich function).
+    let enrich_names: Vec<String> = editor_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    let enrich_list = format!("tools = [{}]\n", enrich_names.join(", "));
 
     // 7. Splice both regions into tensorzero.toml.
     let toml_path = config_dir.join("tensorzero.toml");
@@ -163,6 +180,12 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         "# >>> GENERATED TOOL LIST",
         "# <<< GENERATED TOOL LIST",
         &tool_list,
+    )?;
+    let content = splice(
+        &content,
+        "# >>> GENERATED ENRICH TOOL LIST",
+        "# <<< GENERATED ENRICH TOOL LIST",
+        &enrich_list,
     )?;
     std::fs::write(&toml_path, &content)
         .with_context(|| format!("write {}", toml_path.display()))?;
@@ -196,6 +219,12 @@ type = \"chat\"\n\
 # >>> GENERATED TOOL LIST\n\
 tools = [\"old\"]\n\
 # <<< GENERATED TOOL LIST\n\
+\n\
+[functions.enrich]\n\
+type = \"chat\"\n\
+# >>> GENERATED ENRICH TOOL LIST\n\
+tools = [\"old\"]\n\
+# <<< GENERATED ENRICH TOOL LIST\n\
 \n\
 [metrics.em]\n\
 type = \"boolean\"\n";
@@ -257,6 +286,18 @@ type = \"boolean\"\n";
         assert!(
             toml_out.contains("# <<< GENERATED TOOL LIST"),
             "list end marker missing"
+        );
+
+        // (f) the enrich list is generated from the Editor profile — it carries an editor-only
+        // write tool (graph_upsert, absent from the Reader/answer_hotpot list) and keeps its markers.
+        assert!(
+            toml_out.contains("\"graph_upsert\""),
+            "enrich list missing editor-only 'graph_upsert'"
+        );
+        assert!(
+            toml_out.contains("# >>> GENERATED ENRICH TOOL LIST")
+                && toml_out.contains("# <<< GENERATED ENRICH TOOL LIST"),
+            "enrich list markers missing"
         );
     }
 
