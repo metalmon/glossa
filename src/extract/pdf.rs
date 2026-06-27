@@ -28,8 +28,40 @@ impl Extractor for PdfExtractor {
             };
             let doc = PdfDocument::new(reader);
 
-            // Layer 1: partition into typed elements (paragraphs, headings, TABLES) and
-            // render per-page markdown. Tables become GFM pipe tables.
+            // Layer 1 (primary): plain layout-text reconstruction (preserve_layout rebuilds
+            // spaces+newlines). oxidize-pdf's table PARTITION — the old primary — mis-detects
+            // multi-column RU prose as tables and mangles words ("Выгр у зка", false pipe cells);
+            // the flat layout text is clean for BOTH prose and tables, so it goes first.
+            let opts = ExtractionOptions {
+                preserve_layout: true,
+                space_threshold: 0.3,        // horizontal gap > k·char-width → insert a space
+                newline_threshold: 10.0,     // baseline (y) drop → newline
+                merge_hyphenated: true,
+                reconstruct_paragraphs: true,
+                detect_columns: true,        // RU technical PDFs are often multi-column
+                include_artifacts: false,    // drop headers/footers/watermarks
+                ..Default::default()
+            };
+            if let Ok(pages) = doc.extract_text_with_options(opts) {
+                let mut out = Vec::new();
+                for (i, page) in pages.iter().enumerate() {
+                    if page.text.trim().is_empty() {
+                        continue;
+                    }
+                    out.push(Chunk {
+                        doc_path: path_buf.clone(),
+                        location: format!("p.{}", i + 1),
+                        file_type: "pdf".into(),
+                        text: page.text.clone(),
+                    });
+                }
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+
+            // Layer 2 (fallback): structural partition → per-page markdown (GFM tables), used ONLY
+            // when layout-text found nothing — a PDF that exposes structure but no flat text stream.
             if let Ok(elements) = doc.partition() {
                 if !elements.is_empty() {
                     let mut by_page: BTreeMap<u32, Vec<Element>> = BTreeMap::new();
@@ -54,34 +86,6 @@ impl Extractor for PdfExtractor {
                         return out;
                     }
                 }
-            }
-
-            // Layer 2: layout-text fallback (preserve_layout reconstructs spaces+newlines)
-            // for PDFs where partition finds no structure but raw text exists.
-            let opts = ExtractionOptions {
-                preserve_layout: true,
-                space_threshold: 0.3,        // horizontal gap > k·char-width → insert a space
-                newline_threshold: 10.0,     // baseline (y) drop → newline
-                merge_hyphenated: true,
-                reconstruct_paragraphs: true,
-                detect_columns: true,        // RU technical PDFs are often multi-column
-                include_artifacts: false,    // drop headers/footers/watermarks
-                ..Default::default()
-            };
-            if let Ok(pages) = doc.extract_text_with_options(opts) {
-                let mut out = Vec::new();
-                for (i, page) in pages.iter().enumerate() {
-                    if page.text.trim().is_empty() {
-                        continue;
-                    }
-                    out.push(Chunk {
-                        doc_path: path_buf.clone(),
-                        location: format!("p.{}", i + 1),
-                        file_type: "pdf".into(),
-                        text: page.text.clone(),
-                    });
-                }
-                return out; // may be empty → outer `if !out.is_empty()` sends it to Layer 3
             }
             Vec::new()
         }));
@@ -150,16 +154,17 @@ mod tests {
     }
 
     #[test]
-    fn extracts_table_as_markdown() {
+    fn extracts_table_content_as_flat_text() {
         let bytes = include_bytes!("../../tests/fixtures/table.pdf");
         let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
-        // Single-page fixture → must traverse the partition path (Layer 1) and land on p.1,
-        // locking the 0-based partition → 1-based `p.N` page mapping the read contract rests on.
+        // Layout-text is the primary path now: a table is flattened to readable rows on p.1 (its
+        // cell VALUES are preserved). The markdown-table partition is a fallback because oxidize-pdf
+        // mis-detects multi-column prose as tables and mangles the words. p.1 also locks the
+        // 1-based `p.N` page mapping the read contract rests on.
         assert_eq!(chunks[0].location, "p.1");
         let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(
-            joined.contains('|') && joined.contains("---"),
-            "expected a GFM pipe table (| … | and a --- separator row), got:\n{joined}"
-        );
+        for cell in ["Parametr", "Znachenie", "Tsvet", "Siniy"] {
+            assert!(joined.contains(cell), "table cell '{cell}' missing from:\n{joined}");
+        }
     }
 }
