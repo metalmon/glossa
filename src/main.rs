@@ -23,10 +23,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Search the knowledge base. PATTERN is BM25 keywords (stemmed, morphology-aware) against the
-    /// on-disk index — like the MCP `search` tool. Use `--scan` for a literal ripgrep-regex scan.
+    /// Search the knowledge base (BM25-ranked keywords over the index).
     Search {
-        /// Keywords for BM25 ranked search (or a ripgrep regex with `--scan`).
+        /// keywords (or a ripgrep regex with `--scan`)
         pattern: String,
         /// Directory to search.
         path: Option<PathBuf>,
@@ -48,9 +47,7 @@ enum Cmd {
         /// Max number of hits.
         #[arg(short = 'l', long, default_value_t = 100)]
         limit: usize,
-        /// Literal regex scan over raw file content instead of the BM25 index — slow (it reads and
-        /// re-extracts every file) and not stemmed. The DEFAULT search uses the on-disk index for
-        /// fast BM25-ranked results, matching the MCP `search` tool (run `kb index` first).
+        /// literal ripgrep-regex scan of raw files instead of the BM25 index (slow, not stemmed)
         #[arg(short = 's', long)]
         scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
@@ -132,17 +129,14 @@ enum GraphAction {
     Stats {
         path: Option<PathBuf>,
     },
-    /// Find graph nodes by concept (morphology-aware label match) — the SAME `glossary` tool the
-    /// MCP/agent uses, the entry point for exploring the graph. Prints `id [type] label` plus each
-    /// match's edges.
+    /// Find graph nodes by concept (the `glossary` tool) — prints `id [type] label` + edges.
     #[command(visible_aliases = ["search", "find"])]
     Glossary {
         /// concept in your own words, e.g. "потеря связи"
         query: String,
         path: Option<PathBuf>,
     },
-    /// Browse the graph: with no `--type`, a count per node type; with `--type T`, the nodes of
-    /// that type as `id [type] label`.
+    /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
         path: Option<PathBuf>,
         /// list nodes of this type, e.g. Symptom (omit for a per-type summary)
