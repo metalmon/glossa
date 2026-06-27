@@ -270,6 +270,15 @@ impl GraphStore {
 
     pub fn delete_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
+        // Cascade first: drop edges that REFERENCE nodes from this source (regardless of the edge's
+        // own source_path) so none is left dangling at a deleted node — same as delete_by_type.
+        c.execute(
+            "DELETE FROM edges WHERE efrom IN (SELECT id FROM nodes WHERE source_path = ?1) \
+             OR eto IN (SELECT id FROM nodes WHERE source_path = ?1)",
+            rusqlite::params![source_path],
+        )
+        .context("delete edges referencing source nodes")?;
+        let ref_edges = c.changes() as usize;
         c.execute(
             "DELETE FROM nodes WHERE source_path = ?1",
             rusqlite::params![source_path],
@@ -282,7 +291,7 @@ impl GraphStore {
         )
         .context("delete edges by source")?;
         let edges_deleted = c.changes() as usize;
-        Ok(nodes_deleted + edges_deleted)
+        Ok(nodes_deleted + ref_edges + edges_deleted)
     }
 
     /// Delete only the DOCUMENT-DERIVED layer (origin `auto-*`: structural + lexical), preserving
@@ -341,6 +350,25 @@ impl GraphStore {
     pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {
         let c = self.conn.lock().unwrap();
         Self::outgoing_c(&c, from)
+    }
+
+    /// Edges pointing INTO `to` (`eto = to`). Used by export to capture inbound edges too.
+    pub fn incoming(&self, to: &str) -> anyhow::Result<Vec<Edge>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT efrom, eto, edge_type, source_path, range, file_sig, origin, confidence, \
+                 created_at FROM edges WHERE eto = ?1",
+            )
+            .context("prepare incoming")?;
+        let rows = stmt
+            .query_map(rusqlite::params![to], Self::row_to_edge)
+            .context("query incoming")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     pub fn all_nodes(&self) -> anyhow::Result<Vec<Node>> {
@@ -481,19 +509,27 @@ impl GraphStore {
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
         use std::collections::BTreeSet;
         let needle = name.to_lowercase();
-        let query: BTreeSet<String> =
-            crate::index::multilang::analyze_terms(name).into_iter().collect();
-        let terms = |s: &str| -> BTreeSet<String> {
-            crate::index::multilang::analyze_terms(s).into_iter().collect()
-        };
+        // Build the stemmers ONCE per call and reuse a scratch set across every candidate label/
+        // alias. The previous version rebuilt a tokenizer+stemmer per string via `analyze_terms`,
+        // which made this O(nodes) call dominate enrichment (graph_upsert resolves every paraphrased
+        // edge endpoint through here). TermAnalyzer is proven-equivalent to analyze_terms.
+        let analyzer = crate::index::multilang::TermAnalyzer::new();
+        let mut query: BTreeSet<String> = BTreeSet::new();
+        analyzer.terms(name, &mut query);
+        let mut cand: BTreeSet<String> = BTreeSet::new();
         let c = self.conn.lock().unwrap();
         let mut ids = Vec::new();
         for n in Self::all_nodes_c(&c)? {
             let exact = n.label.to_lowercase() == needle
                 || n.aliases.iter().any(|a| a.to_lowercase() == needle);
-            let fuzzy = !query.is_empty()
-                && (query.is_subset(&terms(&n.label))
-                    || n.aliases.iter().any(|a| query.is_subset(&terms(a))));
+            let fuzzy = !query.is_empty() && {
+                analyzer.terms(&n.label, &mut cand);
+                query.is_subset(&cand)
+                    || n.aliases.iter().any(|a| {
+                        analyzer.terms(a, &mut cand);
+                        query.is_subset(&cand)
+                    })
+            };
             if exact || fuzzy {
                 ids.push(n.id);
             }

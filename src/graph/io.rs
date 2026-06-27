@@ -24,6 +24,8 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
     let mut nodes: Vec<NodeSpec> = Vec::new();
     let mut edges: Vec<EdgeSpec> = Vec::new();
 
+    let mut seen: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
     for n in &all {
         type_set.insert(n.node_type.clone());
         nodes.push(NodeSpec {
@@ -35,15 +37,20 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
             range: n.prov.range.clone(),
             confidence: Some(n.prov.confidence),
         });
-        for e in g.outgoing(&n.id)? {
-            edges.push(EdgeSpec {
-                from: e.from,
-                to: e.to,
-                edge_type: e.edge_type,
-                source_path: e.prov.source_path,
-                range: e.prov.range,
-                confidence: Some(e.prov.confidence),
-            });
+        // Both OUTBOUND and INBOUND edges touching this node, deduped — so an edge whose other
+        // endpoint is a non-exported node survives a replace-layer round-trip (prune+reimport).
+        for e in g.outgoing(&n.id)?.into_iter().chain(g.incoming(&n.id)?) {
+            let key = (e.from.clone(), e.edge_type.clone(), e.to.clone());
+            if seen.insert(key) {
+                edges.push(EdgeSpec {
+                    from: e.from,
+                    to: e.to,
+                    edge_type: e.edge_type,
+                    source_path: e.prov.source_path,
+                    range: e.prov.range,
+                    confidence: Some(e.prov.confidence),
+                });
+            }
         }
     }
 

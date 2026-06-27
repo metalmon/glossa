@@ -185,8 +185,12 @@ pub struct NodeUpdate {
 pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<usize> {
     let mut total = 0;
     for u in nodes {
-        for id in resolve_node_ref(g, &u.label)? {
-            total += g.update_node(&id, u.new_label.as_deref(), u.new_type.as_deref())?;
+        let ids = resolve_node_ref(g, &u.label)?;
+        // Only rename when the reference is UNAMBIGUOUS. Renaming several distinct nodes that merely
+        // share a label (e.g. same label, different node_type) would give them all the new label and
+        // corrupt label identity — skip those rather than mangle the graph.
+        if ids.len() == 1 {
+            total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?;
         }
     }
     Ok(total)

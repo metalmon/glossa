@@ -133,20 +133,29 @@ pub fn run_enrich(
                     edge_type: String,
                     to: String,
                 }
-                let node_labels: Vec<String> = serde_json::from_value(
-                    args.get("nodes").cloned().unwrap_or(json!([])),
-                )
-                .unwrap_or_default();
-                let edge_args: Vec<DeleteEdgeArg> = serde_json::from_value(
-                    args.get("edges").cloned().unwrap_or(json!([])),
-                )
-                .unwrap_or_default();
-                let edge_refs: Vec<EdgeRef> = edge_args
-                    .into_iter()
-                    .map(|e| EdgeRef { from: e.from, edge_type: e.edge_type, to: e.to })
-                    .collect();
-                let msg = glossa::graph::ops::graph_delete(&graph, node_labels, edge_refs);
-                (msg, vec![], vec![])
+                // Element-wise parse: a malformed item must REJECT, not silently no-op.
+                let mut parse_errs: Vec<String> = Vec::new();
+                let mut node_labels: Vec<String> = Vec::new();
+                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
+                    match serde_json::from_value::<String>(n.clone()) {
+                        Ok(s) => node_labels.push(s),
+                        Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                    }
+                }
+                let mut edge_refs: Vec<EdgeRef> = Vec::new();
+                for (i, e) in args.get("edges").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
+                    match serde_json::from_value::<DeleteEdgeArg>(e.clone()) {
+                        Ok(d) => edge_refs.push(EdgeRef { from: d.from, edge_type: d.edge_type, to: d.to }),
+                        Err(err) => parse_errs.push(format!("edges[{i}]: {err}")),
+                    }
+                }
+                if !parse_errs.is_empty() {
+                    erc.fetch_add(1, Ordering::Relaxed);
+                    (format!("graph_delete REJECTED — malformed input, fix and resend:\n- {}", parse_errs.join("\n- ")), vec![], vec![])
+                } else {
+                    let msg = glossa::graph::ops::graph_delete(&graph, node_labels, edge_refs);
+                    (msg, vec![], vec![])
+                }
             } else if name == "graph_update" {
                 #[derive(serde::Deserialize)]
                 struct UpdateNodeArg {
@@ -154,16 +163,21 @@ pub fn run_enrich(
                     new_label: Option<String>,
                     new_type: Option<String>,
                 }
-                let update_args: Vec<UpdateNodeArg> = serde_json::from_value(
-                    args.get("nodes").cloned().unwrap_or(json!([])),
-                )
-                .unwrap_or_default();
-                let ups: Vec<NodeUpdate> = update_args
-                    .into_iter()
-                    .map(|u| NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type })
-                    .collect();
-                let msg = glossa::graph::ops::graph_update(&graph, ups);
-                (msg, vec![], vec![])
+                let mut parse_errs: Vec<String> = Vec::new();
+                let mut ups: Vec<NodeUpdate> = Vec::new();
+                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
+                    match serde_json::from_value::<UpdateNodeArg>(n.clone()) {
+                        Ok(u) => ups.push(NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type }),
+                        Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                    }
+                }
+                if !parse_errs.is_empty() {
+                    erc.fetch_add(1, Ordering::Relaxed);
+                    (format!("graph_update REJECTED — malformed input, fix and resend:\n- {}", parse_errs.join("\n- ")), vec![], vec![])
+                } else {
+                    let msg = glossa::graph::ops::graph_update(&graph, ups);
+                    (msg, vec![], vec![])
+                }
             } else {
                 glossa_tools::exec(name, args, &idx, Some(&graph), &trace)
             }
