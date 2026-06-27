@@ -377,6 +377,22 @@ pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
     }
 }
 
+/// Recompute the graph's DERIVED layer (transitive-closure edges, SIMILAR links, communities,
+/// centrality) non-destructively and report the counts. Shared by the MCP `graph_generalize`
+/// tool and the eval enricher so both emit identical output. `prune_incomplete`/`apply_merges`
+/// stay off (from_ontology defaults), so it never deletes or merges — pruning is a CLI action.
+pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
+    let opts = crate::graph::generalize::apply::Opts::from_ontology(ont, now);
+    match crate::graph::generalize::apply::generalize(g, &opts) {
+        Ok(r) => format!(
+            "generalized: prune_candidates={} inferred_edges={} similar_edges={} \
+             communities={} merge_candidates={}",
+            r.prune_candidates, r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+        ),
+        Err(e) => format!("graph_generalize error: {e}"),
+    }
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
