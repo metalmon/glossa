@@ -87,7 +87,7 @@ mod tests {
         let edges = vec![e("a", "b"), e("a", "h1"), e("b", "h1")];
         // a,b are directly linked → must not appear despite the shared neighbour h1
         let pairs = jaccard_pairs(&edges, 0.0);
-        assert!(!pairs.iter().any(|(a, b, _)| (a == "a" && b == "b")));
+        assert!(!pairs.iter().any(|(a, b, _)| a == "a" && b == "b"));
     }
 
     #[test]
