@@ -123,6 +123,14 @@ enum GraphAction {
     Stats {
         path: Option<PathBuf>,
     },
+    /// Run the deterministic generalization pass: transitive closure, SIMILAR links, communities
+    /// and centrality (written as derived `auto-generalized` edges + `node_meta`). With `--merge`,
+    /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
+    Generalize {
+        path: Option<PathBuf>,
+        #[arg(long, help = "also collapse near-duplicate nodes (destructive)")]
+        merge: bool,
+    },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
     Near {
@@ -288,6 +296,16 @@ fn main() -> anyhow::Result<()> {
             let path = glossa::root::resolve_root(path);
             let stats = glossa::index::store::index_dir(&path, true)?;
             println!("reindexed: {} files", stats.added);
+            // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
+            // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
+            // merges are only reported, never applied here (use `kb graph generalize --merge`).
+            let g = glossa::graph::store::GraphStore::open(&path)?;
+            let opts = glossa::graph::generalize::apply::Opts::defaults(glossa::trace::now_ms());
+            let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
+            println!(
+                "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
+                r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+            );
             Ok(())
         }
         Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
@@ -327,6 +345,24 @@ fn main() -> anyhow::Result<()> {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
+                Ok(())
+            }
+            GraphAction::Generalize { path, merge } => {
+                let path = glossa::root::resolve_root(path);
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let mut opts =
+                    glossa::graph::generalize::apply::Opts::defaults(glossa::trace::now_ms());
+                opts.apply_merges = merge;
+                let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
+                println!(
+                    "generalize: inferred_edges={} similar_edges={} communities={} \
+                     merge_candidates={} merged_nodes={}",
+                    r.inferred_edges,
+                    r.similar_edges,
+                    r.communities,
+                    r.merge_candidates,
+                    r.merged_nodes
+                );
                 Ok(())
             }
             GraphAction::Near { node_id, path, depth, types } => {

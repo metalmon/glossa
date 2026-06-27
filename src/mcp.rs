@@ -254,12 +254,13 @@ impl GlossaServer {
 
     #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
     async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
             .into_iter()
             .map(|e| crate::graph::agent::EdgeRef { from: e.from, edge_type: e.edge_type, to: e.to })
             .collect();
-        let msg = crate::graph::ops::graph_delete(&g, a.nodes, refs);
+        let msg = crate::graph::ops::graph_delete(&idx, &g, a.nodes, refs);
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 

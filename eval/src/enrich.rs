@@ -153,7 +153,7 @@ pub fn run_enrich(
                     erc.fetch_add(1, Ordering::Relaxed);
                     (format!("graph_delete REJECTED — malformed input, fix and resend:\n- {}", parse_errs.join("\n- ")), vec![], vec![])
                 } else {
-                    let msg = glossa::graph::ops::graph_delete(&graph, node_labels, edge_refs);
+                    let msg = glossa::graph::ops::graph_delete(&idx, &graph, node_labels, edge_refs);
                     (msg, vec![], vec![])
                 }
             } else if name == "graph_update" {

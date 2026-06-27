@@ -65,9 +65,24 @@ references are unambiguous.
 ## Sequencing — measure each, do not optimise blind
 1. Ablate the BASE reasoning graph first (graph vs `--no-graph` on the 14 held-out) — does the
    approach help at all?
-2. Then layer each technique and ablate its DELTA. Suggested order by cheap-and-high-value:
-   shared-evidence linking (#3) + BM25-over-labels (#2) → communities (#6) → centrality (#7) →
-   transitive closure (#8) → structural link-prediction (#4) → synonym dictionary (#5).
+2. Then layer each technique and ablate its DELTA, **in dependency order — refined for the 4B
+   self-paraphrase pattern** (dominant defect: 3+ near-dup nodes per concept + shared chunk
+   anchors; plus multi-hop fixes the 4B won't chain). **Dedup FIRST**: closure / communities /
+   centrality / link-prediction are garbage-in-garbage-out over a graph full of near-dups —
+   communities cluster the dups, centrality splits a hub's weight across copies, closure misses
+   because edges are scattered. So order by dependency, NOT by cheapness:
+   - **Tier 1 — kill the dominant defect (expect the biggest jump):** MERGE near-dups, signal =
+     identical chunk anchor (#3) and/or BM25/morphology label overlap (#2/#1) above a threshold →
+     collapse to one canonical node (aliases kept, edges reattached). This is the real fix that
+     replaces the edge-time band-aid (`resolve_endpoint_label`). Shared-evidence linking (#3) is
+     the same step (it both merges and adds `SIMILAR` for no-shared-word paraphrases). → moves
+     `retrieved` / `recall@k` / `em` / `f1`.
+   - **Tier 2 — completeness for the weak model:** transitive closure (#8) — PROMOTED above
+     communities: on clean edges it makes `Symptom RESOLVED_BY Resolution` reachable in ONE hop,
+     so the 4B doesn't have to chain. Then BM25-over-labels (#2) for shared-word paraphrases that
+     sit on different chunks. → `em` / `f1` / `judge`.
+   - **Tier 3 — structure, only AFTER the graph is deduped:** communities (#6) → centrality (#7).
+   - **Tier 4 — residual:** structural link-prediction (#4) → synonym dictionary (#5).
 3. Keep only techniques that move the metric.
 
 ## Constraints
