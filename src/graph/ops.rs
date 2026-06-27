@@ -155,6 +155,24 @@ pub fn graph_upsert(
         errs.extend(check_label(&id, &nd.label));
     }
 
+    // (1b) source_path must be a real indexed document — reject hallucinated paths
+    for nd in &nodes {
+        if !idx.has_document(&nd.source_path).unwrap_or(false) {
+            errs.push(format!(
+                "node \"{}\": source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
+                nd.label, nd.source_path
+            ));
+        }
+    }
+    for ue in &edges {
+        if !idx.has_document(&ue.source_path).unwrap_or(false) {
+            errs.push(format!(
+                "edge {} -{}>  {}: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
+                ue.from, ue.edge_type, ue.to, ue.source_path
+            ));
+        }
+    }
+
     // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes. Existing
     // nodes are no longer loaded wholesale (that was O(N) per upsert); an edge endpoint naming an
     // existing node is resolved on demand via the label_norm index in `resolve_endpoint_label`.
@@ -332,8 +350,18 @@ pub fn graph_upsert(
 }
 
 /// Delete reasoning nodes and/or edges by label.
+/// Edge endpoints that look like `<path>#<n>` section refs are resolved to their canonical
+/// Section node id (symmetry with `graph_upsert`). On resolution error the original string
+/// is kept so a bad anchor simply doesn't match — deletion is best-effort.
 /// Returns a human-readable result string.
-pub fn graph_delete(g: &GraphStore, node_labels: Vec<String>, edges: Vec<EdgeRef>) -> String {
+pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, edges: Vec<EdgeRef>) -> String {
+    let edges: Vec<EdgeRef> = edges.into_iter().map(|e| {
+        let from_orig = e.from;
+        let to_orig = e.to;
+        let from = resolve_section_ref(idx, &from_orig).unwrap_or(from_orig);
+        let to = resolve_section_ref(idx, &to_orig).unwrap_or(to_orig);
+        EdgeRef { from, edge_type: e.edge_type, to }
+    }).collect();
     match apply_delete(g, node_labels, edges) {
         Ok(n) => format!("deleted {n} graph entries"),
         Err(e) => format!("graph_delete error: {e}"),
@@ -386,6 +414,17 @@ strict = true
         }
     }
 
+    /// Index a stub document so `has_document` accepts `path` as a valid source_path.
+    fn write_doc(idx: &DocIndex, path: &str) {
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: path.into(),
+            location: "S1".into(),
+            file_type: "md".into(),
+            text: "stub content".into(),
+        }])
+        .unwrap();
+    }
+
     /// Happy path: Symptom + Resolution + RESOLVED_BY in one batch — accepted and written.
     #[test]
     fn happy_path_symptom_resolution_resolved_by() {
@@ -393,6 +432,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
 
         let nodes = vec![
             unode("Symptom", "Потеря связи", "case1.docx"),
@@ -414,6 +454,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
 
         // Upsert: Symptom + Resolution + RESOLVED_BY edge.
         let nodes = vec![
@@ -458,6 +499,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
 
         // Only the Symptom node — Resolution label is missing from batch and graph.
         let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
@@ -482,6 +524,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
 
         let nodes = vec![
             unode("Symptom", "Потеря связи", "case1.docx"),
@@ -511,6 +554,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
 
         let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
         let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Неизвестный узел", "case1.docx")];
@@ -532,6 +576,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "c.docx");
 
         let out1 = graph_upsert(
             &idx, &g, &ont,
@@ -552,5 +597,114 @@ strict = true
             2,
         );
         assert!(!out2.rejected, "truncated label must resolve fuzzily: {}", out2.message);
+    }
+
+    /// Fix 1 — node with a source_path not in the index is rejected; a real path is accepted.
+    #[test]
+    fn rejects_node_with_fake_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        // Index only one real document.
+        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+
+        // Node with a hallucinated path — must be rejected.
+        let out = graph_upsert(
+            &idx, &g, &ont,
+            vec![unode("Symptom", "Потеря связи", "case_support_001")],
+            vec![],
+            1,
+        );
+        assert!(out.rejected, "hallucinated source_path must be rejected: {}", out.message);
+        assert!(
+            out.message.contains("is not a document"),
+            "message should say 'is not a document': {}",
+            out.message
+        );
+
+        // Same node but with the real indexed path — must be accepted.
+        let out_real = graph_upsert(
+            &idx, &g, &ont,
+            vec![unode("Symptom", "Потеря связи", "kb-test\\Доп.данные\\real.pdf")],
+            vec![],
+            2,
+        );
+        assert!(!out_real.rejected, "real source_path must be accepted: {}", out_real.message);
+    }
+
+    /// Fix 2 — graph_delete resolves `<path>#<n>` section refs (symmetry with upsert).
+    #[test]
+    fn graph_delete_resolves_section_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        // Index a real document with a known location so we can resolve chunk refs.
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "real.md".into(),
+            location: "Introduction".into(),
+            file_type: "md".into(),
+            text: "section content".into(),
+        }])
+        .unwrap();
+
+        // Upsert two reasoning nodes + RESOLVED_BY edge.
+        let out = graph_upsert(
+            &idx, &g, &ont,
+            vec![
+                unode("Symptom", "Test Symptom", "real.md"),
+                unode("Resolution", "Test Fix", "real.md"),
+            ],
+            vec![uedge("Test Symptom", "RESOLVED_BY", "Test Fix", "real.md")],
+            1,
+        );
+        assert!(!out.rejected, "{}", out.message);
+
+        // Delete by label-based endpoints — basic case.
+        let msg = graph_delete(
+            &idx, &g,
+            vec![],
+            vec![EdgeRef {
+                from: "Test Symptom".into(),
+                edge_type: "RESOLVED_BY".into(),
+                to: "Test Fix".into(),
+            }],
+        );
+        assert!(msg.contains("deleted"), "basic label delete: {msg}");
+
+        let sym_id = id_for("Symptom", "Test Symptom");
+        let outgoing = g.outgoing(&sym_id).unwrap();
+        assert!(
+            !outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY"),
+            "RESOLVED_BY edge should be deleted: {outgoing:?}"
+        );
+
+        // Section ref resolution: `real.md#1` resolves to `real.md#Introduction`.
+        // There is no edge with that endpoint, so 0 entries deleted — but must NOT panic/error.
+        let msg2 = graph_delete(
+            &idx, &g,
+            vec![],
+            vec![EdgeRef {
+                from: "Test Symptom".into(),
+                edge_type: "RESOLVED_BY".into(),
+                to: "real.md#1".into(),
+            }],
+        );
+        assert!(!msg2.contains("error"), "section ref resolution must not produce error: {msg2}");
+
+        // Non-existent chunk ref: resolve_section_ref errors, original kept, no panic.
+        let msg3 = graph_delete(
+            &idx, &g,
+            vec![],
+            vec![EdgeRef {
+                from: "Test Symptom".into(),
+                edge_type: "RESOLVED_BY".into(),
+                to: "real.md#999".into(),
+            }],
+        );
+        assert!(!msg3.contains("error"), "non-existent chunk ref must not produce error: {msg3}");
     }
 }

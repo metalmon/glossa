@@ -292,6 +292,19 @@ impl DocIndex {
         }
     }
 
+    /// Return `true` iff the index contains at least one chunk whose `path` field equals `path`.
+    /// Used by `graph_upsert` to reject hallucinated `source_path` values.
+    pub fn has_document(&self, path: &str) -> anyhow::Result<bool> {
+        use tantivy::query::TermQuery;
+        let searcher = self.reader.searcher();
+        let q = TermQuery::new(
+            tantivy::Term::from_field_text(self.fields.path, path),
+            IndexRecordOption::Basic,
+        );
+        let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score())?;
+        Ok(!top.is_empty())
+    }
+
     /// Resolve a `location` string to the chunk number (`ord`) stored in the index for `path`.
     /// Mirrors `read_chunk` (path+location BooleanQuery) but returns the `ord` field.
     /// Returns `None` when no chunk matches that (path, location) pair.

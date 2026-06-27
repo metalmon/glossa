@@ -42,6 +42,15 @@ pub fn normalize_label(s: &str) -> String {
     s.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Derived per-node attributes from the generalization pass (community id + centrality), stored in
+/// the `node_meta` side table so they can be regenerated freely without touching `nodes`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodeMeta {
+    pub community: Option<i64>,
+    pub pagerank: Option<f64>,
+    pub degree: Option<i64>,
+}
+
 pub struct GraphStore {
     conn: Mutex<Connection>,
 }
@@ -66,7 +75,9 @@ impl GraphStore {
                confidence REAL NOT NULL, created_at INTEGER NOT NULL,
                PRIMARY KEY (efrom, edge_type, eto));
              CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(efrom);
-             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(eto);",
+             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(eto);
+             CREATE TABLE IF NOT EXISTS node_meta (
+               id TEXT PRIMARY KEY, community INTEGER, pagerank REAL, degree INTEGER);",
         )
         .context("init schema")?;
         Ok(GraphStore { conn: Mutex::new(conn) })
@@ -364,6 +375,142 @@ impl GraphStore {
         .context("delete nodes by type")?;
         let nodes_deleted = c.changes() as usize;
         Ok(edges_deleted + nodes_deleted)
+    }
+
+    fn all_edges_c(c: &Connection) -> anyhow::Result<Vec<Edge>> {
+        let mut stmt = c
+            .prepare(
+                "SELECT efrom, eto, edge_type, source_path, range, file_sig, origin, confidence, \
+                 created_at FROM edges",
+            )
+            .context("prepare all_edges")?;
+        let rows = stmt.query_map([], Self::row_to_edge).context("query all_edges")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Every edge in the graph (used by the generalization pass to read topology).
+    pub fn all_edges(&self) -> anyhow::Result<Vec<Edge>> {
+        let c = self.conn.lock().unwrap();
+        Self::all_edges_c(&c)
+    }
+
+    /// Delete every edge with this EXACT origin (e.g. `auto-generalized`) — lets the generalization
+    /// pass clear ONLY its own derived edges before regenerating, unlike `delete_auto` which also
+    /// drops the document-structural `auto-*` layer. Returns count removed.
+    pub fn delete_edges_by_origin(&self, origin: &str) -> anyhow::Result<usize> {
+        let c = self.conn.lock().unwrap();
+        c.execute("DELETE FROM edges WHERE origin = ?1", rusqlite::params![origin])
+            .context("delete edges by origin")?;
+        Ok(c.changes() as usize)
+    }
+
+    /// Collapse `dups` into `canonical`: fold each dup's label + aliases into the canonical node's
+    /// aliases (deduped), rewrite every edge touching a dup to the canonical id (self-edges and
+    /// resulting duplicates dropped), and delete the dup nodes (+ their `node_meta`). One transaction.
+    /// Returns the number of dup nodes actually merged. Ids equal to `canonical` or absent are skipped.
+    pub fn merge_nodes(&self, canonical: &str, dups: &[String]) -> anyhow::Result<usize> {
+        use std::collections::HashSet;
+        let dupset: HashSet<&str> =
+            dups.iter().map(|s| s.as_str()).filter(|d| *d != canonical).collect();
+        if dupset.is_empty() {
+            return Ok(0);
+        }
+        let c = self.conn.lock().unwrap();
+        let txn = c.unchecked_transaction().context("begin merge txn")?;
+        let mut canon = match Self::get_node_c(&txn, canonical)? {
+            Some(n) => n,
+            None => return Ok(0),
+        };
+        let mut merged = 0usize;
+        for dup in &dupset {
+            let Some(dn) = Self::get_node_c(&txn, dup)? else {
+                continue;
+            };
+            let mut incoming = vec![dn.label.clone()];
+            incoming.extend(dn.aliases.clone());
+            for a in incoming {
+                let an = normalize_label(&a);
+                if an.is_empty() || an == normalize_label(&canon.label) {
+                    continue;
+                }
+                if canon.aliases.iter().any(|x| normalize_label(x) == an) {
+                    continue;
+                }
+                canon.aliases.push(a);
+            }
+            merged += 1;
+        }
+        // rewrite edges touching any dup → canonical (re-insert dedups via INSERT OR REPLACE)
+        for e in Self::all_edges_c(&txn)? {
+            let from_dup = dupset.contains(e.from.as_str());
+            let to_dup = dupset.contains(e.to.as_str());
+            if !from_dup && !to_dup {
+                continue;
+            }
+            txn.execute(
+                "DELETE FROM edges WHERE efrom = ?1 AND edge_type = ?2 AND eto = ?3",
+                rusqlite::params![e.from, e.edge_type, e.to],
+            )
+            .context("merge: delete old edge")?;
+            let nf = if from_dup { canonical } else { e.from.as_str() };
+            let nt = if to_dup { canonical } else { e.to.as_str() };
+            if nf == nt {
+                continue; // drop self-edge created by the rewrite
+            }
+            let mut ne = e.clone();
+            ne.from = nf.to_string();
+            ne.to = nt.to_string();
+            Self::put_edge_c(&txn, &ne)?;
+        }
+        for dup in &dupset {
+            txn.execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![dup])
+                .context("merge: delete dup node")?;
+            let _ = txn.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![dup]);
+        }
+        Self::put_node_c(&txn, &canon)?;
+        txn.commit().context("commit merge")?;
+        Ok(merged)
+    }
+
+    /// Replace ALL `node_meta` rows (community / centrality) with `rows` in one transaction —
+    /// regenerated wholesale by each generalization run.
+    pub fn replace_node_meta(&self, rows: &[(String, NodeMeta)]) -> anyhow::Result<()> {
+        let c = self.conn.lock().unwrap();
+        let txn = c.unchecked_transaction().context("begin node_meta txn")?;
+        txn.execute("DELETE FROM node_meta", []).context("clear node_meta")?;
+        for (id, m) in rows {
+            txn.execute(
+                "INSERT OR REPLACE INTO node_meta (id, community, pagerank, degree) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, m.community, m.pagerank, m.degree],
+            )
+            .context("insert node_meta")?;
+        }
+        txn.commit().context("commit node_meta")?;
+        Ok(())
+    }
+
+    /// Derived attributes for a node, or None if the generalization pass hasn't recorded any.
+    pub fn node_meta(&self, id: &str) -> anyhow::Result<Option<NodeMeta>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare("SELECT community, pagerank, degree FROM node_meta WHERE id = ?1")
+            .context("prepare node_meta")?;
+        match stmt.query_row(rusqlite::params![id], |r| {
+            Ok(NodeMeta {
+                community: r.get(0)?,
+                pagerank: r.get(1)?,
+                degree: r.get(2)?,
+            })
+        }) {
+            Ok(m) => Ok(Some(m)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {

@@ -113,6 +113,29 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
     }
 }
 
+/// Compact community/centrality annotation drawn from `node_meta` (populated by
+/// `kb graph generalize` / auto-run at the end of `reindex`). Returns "" when no meta exists yet,
+/// so output is byte-identical on graphs that haven't been generalized. Format:
+/// `"  · comm 3 · pr 0.142 · deg 5"` — only the parts that are present.
+fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
+    let Ok(Some(m)) = g.node_meta(id) else { return String::new() };
+    let mut parts = Vec::new();
+    if let Some(c) = m.community {
+        parts.push(format!("comm {c}"));
+    }
+    if let Some(pr) = m.pagerank {
+        parts.push(format!("pr {pr:.3}"));
+    }
+    if let Some(d) = m.degree {
+        parts.push(format!("deg {d}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  · {}", parts.join(" · "))
+    }
+}
+
 /// Resolve a name/term to graph node ids and render each as a `(path, #ord)` ref.
 /// Section nodes render as `"path  #ord · label"`, Documents as `"path  (document)"`,
 /// unresolved ids fall back to the raw id string. Empty → `"(no matches)"`.
@@ -130,10 +153,11 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
-                        match node_ref(idx, &node) {
+                        let line = match node_ref(idx, &node) {
                             Some(r) => format!("{base}  —  {r}"),
                             None => base,
-                        }
+                        };
+                        format!("{line}{}", meta_suffix(g, &node.id))
                     }
                     _ => id.clone(),
                 })
@@ -166,7 +190,7 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, path: &str
     for e in &edges {
         let Ok(Some(node)) = g.get_node(&e.to) else { continue };
         let Some(ref_str) = node_ref(idx, &node) else { continue };
-        lines.push(format!("{}  {}", e.edge_type, ref_str));
+        lines.push(format!("{}  {}{}", e.edge_type, ref_str, meta_suffix(g, &e.to)));
     }
     trace.log("neighbors", json!({"path": path, "n": n}), json!({"links": lines.len()}));
     if lines.is_empty() { "(no linked sections)".to_string() } else { lines.join("\n") }
@@ -313,6 +337,42 @@ strict = true
         let result = glossary(&idx, &g, "ACME", &t);
         assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
         assert_eq!(glossary(&idx, &g, "nonesuch", &t), "(no matches)");
+    }
+
+    #[test]
+    fn glossary_surfaces_community_centrality_after_generalize() {
+        let (_dir, g) = graph_fixture();
+        let idir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(idir.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        // Before the pass there is no node_meta → output is unannotated (back-compat).
+        let before = glossary(&idx, &g, "ACME", &t);
+        assert!(!before.contains("comm "), "no meta annotation before generalize: {before}");
+
+        // Run the generalization pass → community/centrality land in node_meta.
+        let opts = crate::graph::generalize::apply::Opts::defaults(1);
+        crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
+
+        let after = glossary(&idx, &g, "ACME", &t);
+        assert!(after.contains("org:acme"), "still shows the node id: {after}");
+        assert!(after.contains("comm "), "glossary surfaces community after generalize: {after}");
+    }
+
+    #[test]
+    fn neighbors_surface_node_meta_after_generalize() {
+        use crate::index::store::index_dir;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let opts = crate::graph::generalize::apply::Opts::defaults(1);
+        crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
+        let p = dir.path().join("a.md").to_string_lossy().to_string();
+        let t = TraceLog::disabled();
+        let out = neighbors(&idx, &g, &p, 1, 1, &t);
+        assert!(out.contains("comm "), "neighbors surface community after generalize: {out}");
     }
 
     // ── structural (path, #n) address-space tests ───────────────────────────
