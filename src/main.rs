@@ -125,6 +125,24 @@ enum GraphAction {
     Stats {
         path: Option<PathBuf>,
     },
+    /// Search reasoning nodes by concept (morphology-aware label match) — the entry point for
+    /// exploring the graph. Prints `id [type] label` plus each match's edges.
+    #[command(visible_alias = "find")]
+    Search {
+        /// concept in your own words, e.g. "потеря связи"
+        query: String,
+        path: Option<PathBuf>,
+    },
+    /// Browse the graph: with no `--type`, a count per node type; with `--type T`, the nodes of
+    /// that type as `id [type] label`.
+    Ls {
+        path: Option<PathBuf>,
+        /// list nodes of this type, e.g. Symptom (omit for a per-type summary)
+        #[arg(long = "type")]
+        node_type: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Run the deterministic generalization pass: transitive closure, SIMILAR links, communities
     /// and centrality (written as derived `auto-generalized` edges + `node_meta`). With `--merge`,
     /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
@@ -372,6 +390,43 @@ fn main() -> anyhow::Result<()> {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
+                Ok(())
+            }
+            GraphAction::Search { query, path } => {
+                let path = glossa::root::resolve_root(path);
+                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let trace = glossa::trace::TraceLog::disabled();
+                println!("{}", glossa::tools::glossary(&idx, &g, &query, &trace));
+                Ok(())
+            }
+            GraphAction::Ls { path, node_type, limit } => {
+                let path = glossa::root::resolve_root(path);
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let nodes = g.all_nodes()?;
+                match node_type {
+                    None => {
+                        // per-type summary — the browse overview
+                        let mut counts: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
+                        for n in &nodes {
+                            *counts.entry(n.node_type.clone()).or_default() += 1;
+                        }
+                        for (t, c) in &counts {
+                            println!("{t}: {c}");
+                        }
+                        println!("\n(use --type <T> to list nodes, or `kb graph search <query>`)");
+                    }
+                    Some(t) => {
+                        let matched: Vec<_> = nodes.iter().filter(|n| n.node_type == t).collect();
+                        for n in matched.iter().take(limit) {
+                            println!("{}  [{}]  {}", n.id, n.node_type, n.label);
+                        }
+                        if matched.len() > limit {
+                            println!("… {} more (--limit to show more)", matched.len() - limit);
+                        }
+                    }
+                }
                 Ok(())
             }
             GraphAction::Generalize { path, merge, prune_incomplete } => {
