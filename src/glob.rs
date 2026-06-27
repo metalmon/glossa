@@ -16,7 +16,7 @@ pub fn glob_to_regex(glob: &str) -> Result<regex::Regex, regex::Error> {
         }
     }
     re.push('$');
-    regex::Regex::new(&re)
+    regex::RegexBuilder::new(&re).case_insensitive(cfg!(target_os = "windows")).build()
 }
 
 /// List the DISTINCT document paths whose path matches `pattern`, each with its highest chunk

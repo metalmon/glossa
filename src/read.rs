@@ -198,9 +198,12 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
         }
         let Some(mime) = mime_for(&name) else { continue };
         use std::io::Read;
-        let mut entry = archive.by_name(&name)?;
+        let mut entry = match archive.by_name(&name) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        if entry.read_to_end(&mut buf).is_err() { continue; }
         out.push(DocImage { mime: mime.into(), bytes: buf });
     }
     Ok(out)

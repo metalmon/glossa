@@ -96,7 +96,11 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
         Vec::new()
     };
     let recall = if backend.needs_corpus() {
-        score::retrieval_recall(&trace_read::seen_files(&entries), &q.supporting_titles)
+        score::retrieval_recall(
+            &trace_read::seen_files(&entries),
+            &trace_read::seen_locations(&entries),
+            &q.supporting_titles,
+        )
     } else {
         0.0
     };

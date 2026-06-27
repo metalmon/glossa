@@ -27,14 +27,18 @@ fn splice(
     end_prefix: &str,
     replacement: &str,
 ) -> anyhow::Result<String> {
+    let nl = if content.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = content.lines().collect();
     let mut start_idx = None;
     let mut end_idx = None;
 
     for (i, line) in lines.iter().enumerate() {
-        if start_idx.is_none() && line.starts_with(start_prefix) {
+        // Only treat a line as a marker when it starts with `#` (markers are TOML comments).
+        // This prevents content lines like `description = "# >>> GENERATED ..."` from
+        // being mis-matched on a second chained splice call.
+        if start_idx.is_none() && line.trim_start().starts_with('#') && line.starts_with(start_prefix) {
             start_idx = Some(i);
-        } else if start_idx.is_some() && end_idx.is_none() && line.starts_with(end_prefix) {
+        } else if start_idx.is_some() && end_idx.is_none() && line.trim_start().starts_with('#') && line.starts_with(end_prefix) {
             end_idx = Some(i);
         }
     }
@@ -52,18 +56,25 @@ fn splice(
         )
     })?;
 
-    let mut result = String::with_capacity(content.len() + replacement.len());
+    // Normalise the replacement to use the dominant line ending of the source file.
+    let replacement_nl: std::borrow::Cow<str> = if nl == "\r\n" {
+        std::borrow::Cow::Owned(replacement.replace("\r\n", "\n").replace('\n', "\r\n"))
+    } else {
+        std::borrow::Cow::Borrowed(replacement)
+    };
+
+    let mut result = String::with_capacity(content.len() + replacement_nl.len());
     // Include the start marker line itself.
     for line in &lines[..=start] {
         result.push_str(line);
-        result.push('\n');
+        result.push_str(nl);
     }
     // The new content between the markers.
-    result.push_str(replacement);
+    result.push_str(&replacement_nl);
     // The end marker line and everything after it.
     for line in &lines[end..] {
         result.push_str(line);
-        result.push('\n');
+        result.push_str(nl);
     }
     Ok(result)
 }
@@ -247,5 +258,37 @@ type = \"boolean\"\n";
             toml_out.contains("# <<< GENERATED TOOL LIST"),
             "list end marker missing"
         );
+    }
+
+    #[test]
+    fn splice_marker_in_content_does_not_corrupt_second_call() {
+        // A replacement block whose text contains the literal marker phrase must not
+        // be mis-matched as a marker on a subsequent splice call.
+        let content = "\
+# >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand\n\
+[tools.old]\n\
+description = \"old\"\n\
+# <<< GENERATED TOOLS\n";
+        // First splice: replace content between the markers.
+        // The new text intentionally embeds the start-marker phrase inside a description.
+        let replacement = "description = \"# >>> GENERATED TOOLS fake\"\n";
+        let after_first = splice(
+            content,
+            "# >>> GENERATED TOOLS",
+            "# <<< GENERATED TOOLS",
+            replacement,
+        ).unwrap();
+        assert!(after_first.contains("fake"), "replacement not applied");
+        // Second splice on the already-spliced result must still find the real markers.
+        let replacement2 = "description = \"new\"\n";
+        let after_second = splice(
+            &after_first,
+            "# >>> GENERATED TOOLS",
+            "# <<< GENERATED TOOLS",
+            replacement2,
+        ).unwrap();
+        assert!(after_second.contains("description = \"new\""), "second splice lost");
+        // The content line with the embedded marker phrase must be gone now.
+        assert!(!after_second.contains("fake"), "embedded marker phrase leaked into output");
     }
 }

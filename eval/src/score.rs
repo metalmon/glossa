@@ -37,9 +37,18 @@ pub fn token_f1(pred: &str, gold: &str) -> f32 {
     2.0 * precision * recall / (precision + recall)
 }
 
-/// Fraction of gold supporting paragraphs whose file appeared in the trace's seen files,
-/// matched by sanitized-title filename substring.
-pub fn retrieval_recall(seen_files: &[String], supporting_titles: &[String]) -> f32 {
+/// Fraction of gold supporting paragraphs whose file appeared in the trace's seen files or
+/// seen locations, matched by sanitized-title substring.
+///
+/// `seen_files` contains the `path` field from trace results (correct for normal mode).
+/// `seen_locations` contains the `location` field from search results (correct for fullwiki
+/// mode, where `path` is a shard file like `wiki/AA_wiki_00.md` but `location` carries the
+/// article title).  A title is counted as recalled if its sanitized stem appears in either.
+pub fn retrieval_recall(
+    seen_files: &[String],
+    seen_locations: &[String],
+    supporting_titles: &[String],
+) -> f32 {
     if supporting_titles.is_empty() {
         return 1.0;
     }
@@ -48,6 +57,7 @@ pub fn retrieval_recall(seen_files: &[String], supporting_titles: &[String]) -> 
         .filter(|t| {
             let stem = sanitize_title(t);
             seen_files.iter().any(|f| f.contains(&stem))
+                || seen_locations.iter().any(|l| sanitize_title(l).contains(&stem))
         })
         .count();
     hit as f32 / supporting_titles.len() as f32
@@ -120,9 +130,22 @@ mod tests {
     #[test]
     fn retrieval_recall_matches_by_sanitized_title() {
         let seen = vec!["eval-corpus/Bob_Page.md".to_string()];
-        assert!((retrieval_recall(&seen, &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6);
-        assert_eq!(retrieval_recall(&seen, &["Bob Page".into()]), 1.0);
-        assert_eq!(retrieval_recall(&[], &["Bob Page".into()]), 0.0);
+        assert!((retrieval_recall(&seen, &[], &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6);
+        assert_eq!(retrieval_recall(&seen, &[], &["Bob Page".into()]), 1.0);
+        assert_eq!(retrieval_recall(&[], &[], &["Bob Page".into()]), 0.0);
+    }
+
+    #[test]
+    fn retrieval_recall_fullwiki_via_location() {
+        // In fullwiki mode the path is a shard file — the article title is in location.
+        let shard_files = vec!["wiki/AA_wiki_00.md".to_string()];
+        let locations = vec!["Bob Page".to_string(), "Other Article".to_string()];
+        // "Bob Page" not found in shard path, but found via location → recall 1.0
+        assert_eq!(retrieval_recall(&shard_files, &locations, &["Bob Page".into()]), 1.0);
+        // "Alice" not found anywhere → recall 0.0
+        assert_eq!(retrieval_recall(&shard_files, &locations, &["Alice".into()]), 0.0);
+        // Both: Bob found via location, Alice not → 0.5
+        assert!((retrieval_recall(&shard_files, &locations, &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6);
     }
 }
 
