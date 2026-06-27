@@ -94,6 +94,11 @@ fn resolve_endpoint_label(
     if let Some(id) = label_to_id.get(&normalize_label(label)) {
         return Some(id.clone());
     }
+    // Exact match against EXISTING nodes via the label_norm index (replaces the old prebuilt
+    // all_nodes map — same unfiltered "first exact" semantics, but O(log N) instead of O(N)).
+    if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
+        return Some(id);
+    }
     const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
     let ids = g.resolve(label).ok()?;
     ids.into_iter()
@@ -150,18 +155,13 @@ pub fn graph_upsert(
         errs.extend(check_label(&id, &nd.label));
     }
 
-    // (2) label_to_id: input nodes win over existing graph nodes
+    // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes. Existing
+    // nodes are no longer loaded wholesale (that was O(N) per upsert); an edge endpoint naming an
+    // existing node is resolved on demand via the label_norm index in `resolve_endpoint_label`.
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    // Insert input nodes first — they win
     for nd in &nodes {
         label_to_id.insert(normalize_label(&nd.label), id_for(&nd.node_type, &nd.label));
-    }
-    // Add existing nodes without overwriting (or_insert)
-    if let Ok(existing) = g.all_nodes() {
-        for n in existing {
-            label_to_id.entry(normalize_label(&n.label)).or_insert(n.id);
-        }
     }
 
     // (3) build NodeSpec list
