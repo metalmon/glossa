@@ -15,9 +15,10 @@ fn index_then_ranked_search_finds_russian_inflection() {
         .success();
 
     // Ranked search with a different inflection than the document.
+    // Index-ranked search is the default now (`--scan` is the literal-search opt-out).
     Command::cargo_bin("kb")
         .unwrap()
-        .args(["search", "--rank", "договор", dir.path().to_str().unwrap()])
+        .args(["search", "договор", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(contains("a.md"));

@@ -241,6 +241,7 @@ fn main() -> anyhow::Result<()> {
             let mut records: Vec<(String, String)> = Vec::new();
 
             if !scan {
+                glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 for h in idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())? {
                     rg_lines.push(format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score));
@@ -362,6 +363,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
+            glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
@@ -370,6 +372,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Glob { pattern, path } => {
+            glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             for (p, n) in glossa::glob::glob_docs(&idx, &pattern)? {
                 println!("{p}  ({n} chunks)");
@@ -384,6 +387,10 @@ fn main() -> anyhow::Result<()> {
             }
             None => {
                 let path = glossa::root::resolve_root(path);
+                // Startup file-first reconcile: bring the index/graph up to date with the corpus once
+                // before serving (cheap when nothing changed). Per-tool freshness is throttled inside
+                // the server. Best-effort — a transient freshen error must not block startup.
+                let _ = glossa::index::store::ensure_fresh(&path);
                 use rmcp::{transport::stdio, ServiceExt};
                 let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
                 let rt = tokio::runtime::Runtime::new()?;
@@ -404,6 +411,7 @@ fn main() -> anyhow::Result<()> {
             }
             GraphAction::Glossary { query, path } => {
                 let path = glossa::root::resolve_root(path);
+                glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let trace = glossa::trace::TraceLog::disabled();

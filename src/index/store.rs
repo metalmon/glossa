@@ -446,6 +446,64 @@ impl DocIndex {
     }
 }
 
+/// Filesystem delta vs a saved `Manifest`, computed with `stat` only (no extraction, no writer
+/// lock, no commit). `changed` = new-or-modified files; `removed` = manifest files no longer on
+/// disk; `next` = the fresh manifest for the current tree. This is the cheap hot-path gate that
+/// lets callers (CLI commands, the MCP server) decide whether any real indexing work is needed.
+#[derive(Debug, Default)]
+pub struct Delta {
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+    pub next: Manifest,
+}
+
+pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
+    let mut d = Delta::default();
+    crate::walk::walk_files(dir, None, true, &mut |path| {
+        let p = path.to_string_lossy().to_string();
+        let sig = match file_sig(path) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        if manifest.changed(&p, sig) {
+            d.changed.push(p.clone());
+        }
+        d.next.files.insert(p, sig);
+        Ok(())
+    })?;
+    d.removed = manifest
+        .files
+        .keys()
+        .filter(|k| !d.next.files.contains_key(*k))
+        .cloned()
+        .collect();
+    Ok(d)
+}
+
+/// Bring the on-disk index/graph up to date with the filesystem — cheap and concurrency-safe.
+/// A lock-free `stat` pre-scan short-circuits the common "nothing changed" case with zero writes.
+/// Only when a delta exists does it call `index_dir` (which takes the tantivy writer lock + commits).
+/// If another process already holds that lock (it is indexing the same delta), this returns a no-op
+/// stat instead of erroring: freshness is COOPERATIVE — coordinated by the writer lock, not owned by
+/// any one process — so both the CLI and a long-lived MCP server can keep the index fresh safely.
+pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
+    let manifest = Manifest::load(dir);
+    let delta = scan_delta(dir, &manifest)?;
+    if delta.changed.is_empty() && delta.removed.is_empty() {
+        return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
+    }
+    match index_dir(dir, false) {
+        Ok(s) => Ok(s),
+        Err(e) if is_lock_busy(&e) => Ok(IndexStats::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// True if `e` is a tantivy writer-lock contention error (another process is indexing right now).
+fn is_lock_busy(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<TantivyError>(), Some(TantivyError::LockFailure(_, _)))
+}
+
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
@@ -463,6 +521,15 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         graph.delete_auto()?;
     }
     let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
+
+    // Cheap hot-path gate: on an incremental run, if nothing changed on disk, do NO work — don't
+    // open the writer, don't commit, don't rewrite the manifest. Keeps `ensure_fresh` ~free.
+    if !force {
+        let delta = scan_delta(dir, &manifest)?;
+        if delta.changed.is_empty() && delta.removed.is_empty() {
+            return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
+        }
+    }
 
     let mut writer = idx.index.writer(50_000_000)?;
     let mut stats = IndexStats::default();
@@ -688,6 +755,48 @@ mod incremental_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let hits = idx.search("договор", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("a.md")));
+    }
+
+    #[test]
+    fn scan_delta_reports_changed_added_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "# A\nalpha\n").unwrap();
+        fs::write(dir.path().join("b.md"), "# B\nbravo\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let manifest = Manifest::load(dir.path());
+
+        // clean tree → empty delta (the cheap hot-path gate)
+        let d0 = scan_delta(dir.path(), &manifest).unwrap();
+        assert!(d0.changed.is_empty() && d0.removed.is_empty(), "clean: {d0:?}");
+
+        // modify a (size differs), add c, remove b
+        fs::write(dir.path().join("a.md"), "# A\nalpha changed longer\n").unwrap();
+        fs::write(dir.path().join("c.md"), "# C\ncharlie\n").unwrap();
+        fs::remove_file(dir.path().join("b.md")).unwrap();
+        let d = scan_delta(dir.path(), &manifest).unwrap();
+        assert!(d.changed.iter().any(|p| p.ends_with("a.md")), "a changed: {:?}", d.changed);
+        assert!(d.changed.iter().any(|p| p.ends_with("c.md")), "c added: {:?}", d.changed);
+        assert!(d.removed.iter().any(|p| p.ends_with("b.md")), "b removed: {:?}", d.removed);
+    }
+
+    #[test]
+    fn ensure_fresh_noop_then_picks_up_change() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "# T\nдоговоры\n").unwrap();
+        let s1 = ensure_fresh(dir.path()).unwrap();
+        assert_eq!(s1.added, 1);
+
+        // nothing changed → cheap no-op, no writes
+        let s2 = ensure_fresh(dir.path()).unwrap();
+        assert_eq!(s2.added, 0);
+        assert_eq!(s2.removed, 0);
+
+        // change on disk → picked up automatically, searchable
+        fs::write(dir.path().join("a.md"), "# T\nдоговоры поставка регламент\n").unwrap();
+        let s3 = ensure_fresh(dir.path()).unwrap();
+        assert_eq!(s3.added, 1);
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.search("регламент", 10).unwrap().iter().any(|h| h.path.ends_with("a.md")));
     }
 
     #[test]
