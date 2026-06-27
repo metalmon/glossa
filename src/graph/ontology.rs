@@ -98,6 +98,20 @@ impl Ontology {
         }
     }
 
+    /// Entity types that are endpoints (`from` or `to`) of any relation named in `spine`.
+    /// Used by the hygiene pass to tell a "doomed" reasoning node (a spine-type node not on a
+    /// complete chain) from an auxiliary one. Empty when there is no spine.
+    pub fn spine_types(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for rel in &self.reasoning.spine {
+            if let Some(r) = self.relations.get(rel) {
+                out.extend(r.from.iter().cloned());
+                out.extend(r.to.iter().cloned());
+            }
+        }
+        out
+    }
+
     pub fn load_or_default(root: &std::path::Path) -> Ontology {
         let p = root.join(".glossa").join("ontology.toml");
         match std::fs::read_to_string(&p) {
@@ -200,6 +214,28 @@ structural = ["Document", "Section"]
             o.closure_rules(),
             vec![("CAUSED_BY".into(), "RESOLVED_BY".into(), "RESOLVED_BY".into())]
         );
+    }
+
+    #[test]
+    fn spine_types_from_relations() {
+        let toml = r#"
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[relations.RESOLVED_BY]
+from = ["Symptom", "Cause"]
+to = ["Resolution"]
+[reasoning]
+spine = ["CAUSED_BY", "RESOLVED_BY"]
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        let types = o.spine_types();
+        assert_eq!(
+            types,
+            ["Symptom", "Cause", "Resolution"].into_iter().map(String::from).collect()
+        );
+        // no spine → no types
+        assert!(Ontology::parse(TOML).unwrap().spine_types().is_empty());
     }
 
     #[test]
