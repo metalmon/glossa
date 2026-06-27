@@ -250,11 +250,27 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         report.similar_edges += 1;
     }
 
-    // (#6 + #7) communities + centrality → node_meta
-    let comm = community::connected_components(&node_ids, &edges);
-    let deg = centrality::degree(&node_ids, &edges);
-    let pr = centrality::pagerank(&node_ids, &edges, 0.85, 30);
-    let meta: Vec<(String, NodeMeta)> = node_ids
+    // (#6 + #7) communities + centrality over the REASONING subgraph, on edges that INCLUDE the
+    // derived closure + SIMILAR just written above (re-fetch — the `edges` snapshot predates them).
+    // Over the FULL graph this made ~one community per Document (each doc + its sections is a
+    // connected component via CONTAINS), and a much-MENTIONed section looked like a centrality hub.
+    // Scoping to non-structural nodes + the edges among them keeps the meta about reasoning; the
+    // shared-evidence relationship survives as the SIMILAR edges, which are reasoning↔reasoning.
+    let structural: HashSet<String> = opts.structural.iter().cloned().collect();
+    let type_of: HashMap<&str, &str> =
+        nodes.iter().map(|n| (n.id.as_str(), n.node_type.as_str())).collect();
+    let is_reasoning = |id: &str| type_of.get(id).is_some_and(|t| !structural.contains(*t));
+    let r_ids: Vec<String> = node_ids.iter().filter(|id| is_reasoning(id)).cloned().collect();
+    let r_edges: Vec<Triple> = g
+        .all_edges()?
+        .into_iter()
+        .map(|e| (e.from, e.edge_type, e.to))
+        .filter(|(f, _t, to)| is_reasoning(f) && is_reasoning(to))
+        .collect();
+    let comm = community::connected_components(&r_ids, &r_edges);
+    let deg = centrality::degree(&r_ids, &r_edges);
+    let pr = centrality::pagerank(&r_ids, &r_edges, 0.85, 30);
+    let meta: Vec<(String, NodeMeta)> = r_ids
         .iter()
         .map(|id| {
             (
