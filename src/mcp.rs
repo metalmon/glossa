@@ -115,8 +115,25 @@ struct NeighborsArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NameArg { name: String }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 struct Empty {}
+
+// No-arg tools take `Parameters<Empty>`. A derived empty-struct schema is a bare
+// `{"type":"object"}` (schemars omits an empty `properties`), but LM Studio's OpenAI-tools
+// validator REJECTS a tool whose `function.parameters` lacks a `properties` object (400 → the
+// gateway 502s the whole inference). Emit an explicit empty `properties` so every consumer of
+// the schema — the live MCP `list_tools`, `tool_specs`, and the TZ export — is valid.
+impl JsonSchema for Empty {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Empty".into()
+    }
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GrepArgs {
@@ -328,6 +345,17 @@ impl ServerHandler for GlossaServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_param_schema_has_properties() {
+        // no-arg tools (graph_generalize/index/reindex/purge) must expose an explicit
+        // `properties: {}` — LM Studio's tools validator 400s when it is absent.
+        let v = serde_json::to_value(schemars::schema_for!(Empty)).unwrap();
+        assert!(
+            v.get("properties").map(|p| p.is_object()).unwrap_or(false),
+            "Empty schema must carry an object `properties`: {v}"
+        );
+    }
 
     #[test]
     fn graph_upsert_args_deserialize_from_json() {

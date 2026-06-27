@@ -131,7 +131,14 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
 
     // 3. Write each tool's JSON schema (from the full set).
     for tool in &full_tools {
-        let json = serde_json::to_string_pretty(&*tool.input_schema)?;
+        let mut schema: serde_json::Value = serde_json::to_value(&*tool.input_schema)?;
+        // No-arg tools (Parameters<Empty>) schema-derive to a bare `{"type":"object"}`. LM Studio's
+        // OpenAI-tools validator (zod) REQUIRES `function.parameters.properties` to be present, and
+        // rejects the whole request (400) when it is undefined. Ensure every schema carries it.
+        if let Some(obj) = schema.as_object_mut() {
+            obj.entry("properties").or_insert_with(|| serde_json::json!({}));
+        }
+        let json = serde_json::to_string_pretty(&schema)?;
         let out = tools_dir.join(format!("{}.json", tool.name));
         std::fs::write(&out, format!("{}\n", json))
             .with_context(|| format!("write {}", out.display()))?;
@@ -244,6 +251,16 @@ type = \"boolean\"\n";
         assert!(
             search_json.get("properties").is_some(),
             "search.json missing 'properties'"
+        );
+
+        // (a2) a NO-ARG tool (index → Parameters<Empty>) must also carry `properties` — LM Studio
+        // rejects a tool schema without it. Guarded at the source (Empty's schema) AND here.
+        let index_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config_dir.join("tools").join("index.json")).unwrap())
+                .unwrap();
+        assert!(
+            index_json.get("properties").map(|p| p.is_object()).unwrap_or(false),
+            "index.json (no-arg tool) missing object 'properties'"
         );
 
         // (b) GENERATED-TOOLS region contains [tools.search] + correct parameters path
