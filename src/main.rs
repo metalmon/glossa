@@ -81,20 +81,21 @@ enum Cmd {
     Grep {
         /// regex or literal pattern
         pattern: String,
-        /// knowledge-base directory
-        path: std::path::PathBuf,
+        /// knowledge-base directory (default: nearest indexed root / current dir)
+        path: Option<PathBuf>,
         #[arg(short = 'i', long, help = "case-insensitive matching (-i)")] ignore_case: bool,
         #[arg(short = 'F', long)] fixed: bool,
         #[arg(short = 'w', long)] word: bool,
         #[arg(short = 'g', long)] glob: Option<String>,
         #[arg(short = 't', long = "type")] file_type: Option<String>,
     },
-    /// List documents whose path matches a shell glob.
+    /// List documents whose PATH matches a shell glob (matches file paths, NOT text inside them —
+    /// for content use `search` or `grep`).
     Glob {
-        /// glob pattern, e.g. *.pdf or *Safety*
+        /// glob over document PATHS, e.g. *.pdf or *Safety* (not a content search)
         pattern: String,
-        /// knowledge-base directory
-        path: std::path::PathBuf,
+        /// knowledge-base directory (default: nearest indexed root / current dir)
+        path: Option<PathBuf>,
     },
     /// Run the MCP server over stdio (for AI agents), or an MCP-related subcommand.
     Mcp {
@@ -357,6 +358,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
+            let path = glossa::root::resolve_root(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
@@ -366,10 +368,16 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Glob { pattern, path } => {
+            let path = glossa::root::resolve_root(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-            for (p, n) in glossa::glob::glob_docs(&idx, &pattern)? {
-                println!("{p}  ({n} chunks)");
+            let docs = glossa::glob::glob_docs(&idx, &pattern)?;
+            if docs.is_empty() {
+                println!("(no documents match — glob matches file PATHS, not text inside documents; use `kb grep` or `kb search` for content)");
+            } else {
+                for (p, n) in docs {
+                    println!("{p}  ({n} chunks)");
+                }
             }
             Ok(())
         }
@@ -417,7 +425,8 @@ fn main() -> anyhow::Result<()> {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let trace = glossa::trace::TraceLog::disabled();
-                println!("{}", glossa::tools::glossary(&idx, &g, &query, &trace));
+                let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(&path));
+                println!("{}", glossa::tools::glossary(&idx, &g, &query, &spec, &trace));
                 Ok(())
             }
             GraphAction::Ls { path, node_type, limit } => {

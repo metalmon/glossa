@@ -37,7 +37,7 @@ pub fn run_grep(idx: &DocIndex, pattern: &str, opts: glossa::grep::GrepOpts, tra
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
-pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::graph::store::GraphStore>, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::graph::store::GraphStore>, spec: &glossa::tools::ChainSpec, trace: &TraceLog) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
     // The raw_arguments fallback (TZ hands back a JSON *string* when the model's args didn't match
     // the tool schema, e.g. a float where an int was required) would make field lookups see empty
     // values. Parse it back to an object so path/n/query/… resolve.
@@ -82,14 +82,14 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
         }
         "glossary" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let body = match graph { Some(g) => glossa::tools::glossary(idx, g, name, trace), None => "(graph unavailable)".to_string() };
+            let body = match graph { Some(g) => glossa::tools::glossary(idx, g, name, spec, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
         "neighbors" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let n = args.get("n").and_then(parse_n).unwrap_or(0);
-            let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-            let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, path, n, depth, trace), None => "(graph unavailable)".to_string() };
+            let node = args.get("node").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let path = args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let n = args.get("n").and_then(parse_n);
+            let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, node, path, n, spec, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
         "resolve" => {
@@ -127,10 +127,10 @@ mod tests {
         let trace = TraceLog::disabled();
 
         // integer n
-        let out = exec("read", &json!({"path": "d.pdf", "n": 7}), &idx, None, &trace).0;
+        let out = exec("read", &json!({"path": "d.pdf", "n": 7}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert!(out.contains("седьмая"), "got: {out}");
         // stray string "p.7" -> digit-strip fallback -> 7
-        let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, None, &trace).0;
+        let out2 = exec("read", &json!({"path": "d.pdf", "n": "p.7"}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert!(out2.contains("седьмая"), "digit-strip fallback: {out2}");
     }
 
@@ -142,7 +142,7 @@ mod tests {
             Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
         ]).unwrap();
         let trace = TraceLog::disabled();
-        let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, None, &trace).0;
+        let out = exec("grep", &json!({"pattern": "maxTsdr"}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert!(out.contains("maxTsdr"), "got: {out}");
         assert!(out.contains(":#7:"), "carries #n read key: {out}");
     }
@@ -156,9 +156,9 @@ mod tests {
             Chunk { doc_path: PathBuf::from("Other.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена".into() },
         ]).unwrap();
         let trace = TraceLog::disabled();
-        let g = exec("glob", &json!({"pattern": "*АБАК*"}), &idx, None, &trace).0;
+        let g = exec("glob", &json!({"pattern": "*АБАК*"}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert!(g.contains("АБАК") && !g.contains("Other"), "glob: {g}");
-        let s = exec("search", &json!({"query": "замена", "glob": "*АБАК*"}), &idx, None, &trace).0;
+        let s = exec("search", &json!({"query": "замена", "glob": "*АБАК*"}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert!(s.contains("АБАК") && !s.contains("Other"), "scoped search: {s}");
     }
 
@@ -173,11 +173,11 @@ mod tests {
         let trace = TraceLog::disabled();
 
         // Unknown name -> "(no matches)" when a real graph is present
-        let result = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, Some(&g), &trace).0;
+        let result = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, Some(&g), &glossa::tools::ChainSpec::default(), &trace).0;
         assert_eq!(result, "(no matches)", "expected no matches, got: {result}");
 
         // graph = None -> "(graph unavailable)" regardless of args
-        let result_no_graph = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, None, &trace).0;
+        let result_no_graph = exec("glossary", &json!({"name": "zzz-nomatch"}), &idx, None, &glossa::tools::ChainSpec::default(), &trace).0;
         assert_eq!(result_no_graph, "(graph unavailable)");
     }
 
@@ -194,12 +194,12 @@ mod tests {
         let path = dir.path().join("p.md").to_string_lossy().to_string();
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out = glossa::tools::neighbors(&idx, &g, &path, 1, 1, &trace);
+        let mcp_out = glossa::tools::neighbors(&idx, &g, None, Some(&path), Some(1), &glossa::tools::ChainSpec::default(), &trace);
         // Eval path: dispatch through exec().
-        let eval_out = exec("neighbors", &json!({"path": path, "n": 1}), &idx, Some(&g), &trace).0;
+        let eval_out = exec("neighbors", &json!({"path": path, "n": 1}), &idx, Some(&g), &glossa::tools::ChainSpec::default(), &trace).0;
 
         assert_eq!(mcp_out, eval_out, "MCP and eval surfaces must render identically");
-        // Sanity: chunk #1 has neighbors (NEXT or CHILD to #2).
-        assert!(mcp_out.contains("#2"), "expected #2 neighbor: {mcp_out}");
+        // This plain corpus has no reasoning graph, so there are no SIMILAR cross-links.
+        assert_eq!(mcp_out, "(no related cases)", "generalization neighbors on a graph-less corpus: {mcp_out}");
     }
 }

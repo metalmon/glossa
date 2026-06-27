@@ -139,6 +139,25 @@ impl Ontology {
         out
     }
 
+    /// The distinct relation types that make up the reasoning spines, in first-seen order
+    /// (e.g. `[CAUSED_BY, RESOLVED_BY]`). `glossary` walks these to render a reasoning node's
+    /// full chain (Symptom→Cause→Resolution, Task→Resolution) in a single call. Empty when
+    /// there are no spines — keeps the chain walk ontology-driven, never hard-coded.
+    pub fn spine_relations(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for sp in &self.reasoning.spines {
+            if sp.anchor.is_empty() || sp.relations.is_empty() {
+                continue;
+            }
+            for rel in &sp.relations {
+                if !out.iter().any(|r| r == rel) {
+                    out.push(rel.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn load_or_default(root: &std::path::Path) -> Ontology {
         let p = root.join(".glossa").join("ontology.toml");
         match std::fs::read_to_string(&p) {
@@ -271,6 +290,15 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         );
         // no spine → no types
         assert!(Ontology::parse(TOML).unwrap().spine_types().is_empty());
+    }
+
+    #[test]
+    fn spine_relations_deduped_in_order() {
+        // union across both spines, first-seen order, RESOLVED_BY not repeated
+        let o = Ontology::parse(REASONING_TOML).unwrap();
+        assert_eq!(o.spine_relations(), vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        // no spine → no relations
+        assert!(Ontology::parse(TOML).unwrap().spine_relations().is_empty());
     }
 
     #[test]

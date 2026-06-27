@@ -89,7 +89,7 @@ pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
             trace.log("glob", json!({"pattern": pattern}), json!({"docs": docs.len()}));
-            if docs.is_empty() { "(no documents match)".to_string() }
+            if docs.is_empty() { "(no documents match — glob matches file PATHS, not text inside documents; use search or grep to find content)".to_string() }
             else { docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n") }
         }
         Err(e) => format!("glob error: {e}"),
@@ -136,56 +136,128 @@ fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
     }
 }
 
-/// Resolve a name/term to graph node ids and render each as a `(path, #ord)` ref.
-/// Section nodes render as `"path  #ord · label"`, Documents as `"path  (document)"`,
-/// unresolved ids fall back to the raw id string. Empty → `"(no matches)"`.
-/// One indented line per edge touching `id`, so `glossary` shows a reasoning node's connectivity
-/// inline — the agent sees what to REUSE/extend without a separate `neighbors` call (and stops
-/// creating orphan duplicates). Outgoing edges are `→`, incoming `←`; the far endpoint renders as
-/// its `(path #ord)` anchor for a section, else `id  [type]  label`.
-fn edge_lines(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> Vec<String> {
-    let endpoint = |nid: &str| match g.get_node(nid) {
+/// The ontology-derived knobs the reasoning tools need: which relations form the spines (so
+/// `glossary` can walk a node's full chain) and the structural-anchor edge (`MENTIONS`). Built
+/// once per call from `Ontology` by each surface (MCP + eval) so both render identically.
+pub struct ChainSpec {
+    pub spine_rels: Vec<String>,
+    pub mentions: String,
+}
+
+impl ChainSpec {
+    pub fn from_ontology(ont: &crate::graph::ontology::Ontology) -> Self {
+        ChainSpec { spine_rels: ont.spine_relations(), mentions: ont.mentions().to_string() }
+    }
+}
+
+impl Default for ChainSpec {
+    /// No spines (so `glossary` prints just the node head) and the default `MENTIONS` anchor —
+    /// used by callers/tests that don't drive the reasoning chain.
+    fn default() -> Self {
+        ChainSpec { spine_rels: Vec::new(), mentions: "MENTIONS".to_string() }
+    }
+}
+
+/// Render the far node of an edge: its `(path #ord)` anchor for a section/document, else
+/// `id  [type]  label`. Used by `neighbors` to show related cases.
+fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) -> String {
+    match g.get_node(nid) {
         Ok(Some(node)) => match node_ref(idx, &node) {
             Some(r) => r,
             None => format!("{}  [{}]  {}", node.id, node.node_type, node.label),
         },
         _ => nid.to_string(),
-    };
-    let mut out = Vec::new();
-    for e in g.outgoing(id).unwrap_or_default() {
-        out.push(format!("    → {}  {}", e.edge_type, endpoint(&e.to)));
     }
-    for e in g.incoming(id).unwrap_or_default() {
-        out.push(format!("    ← {}  {}", e.edge_type, endpoint(&e.from)));
-    }
-    out
 }
 
-pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, trace: &TraceLog) -> String {
+/// The read anchor for a reasoning node: follow its `mentions` edge to a Section and render the
+/// section's `(path #ord · label)`, so the agent can `read(path, ord)` for the detail behind the
+/// node. Empty string when the node mentions no indexed section.
+fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str, mentions: &str) -> String {
+    for e in g.outgoing(id).unwrap_or_default() {
+        if e.edge_type != mentions {
+            continue;
+        }
+        if let Ok(Some(sec)) = g.get_node(&e.to) {
+            if let Some(r) = node_ref(idx, &sec) {
+                return format!("   — read {r}");
+            }
+        }
+    }
+    String::new()
+}
+
+/// Walk a reasoning node's full spine chain (e.g. Symptom → Cause → Resolution, or Task →
+/// Resolution) by following outgoing edges whose type is one of `spine_rels`, transitively. Each
+/// hop is one indented line `→ REL  [Type] label  — read <anchor>`; deeper hops indent further.
+/// `seen` breaks cycles. SIMILAR/structural edges are intentionally skipped — they belong to
+/// `neighbors`, not the answer chain.
+fn chain_lines(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    id: &str,
+    spec: &ChainSpec,
+    depth: usize,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for e in g.outgoing(id).unwrap_or_default() {
+        if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
+            continue;
+        }
+        if !seen.insert(e.to.clone()) {
+            continue;
+        }
+        let Ok(Some(node)) = g.get_node(&e.to) else { continue };
+        let indent = "    ".repeat(depth + 1);
+        out.push(format!(
+            "{indent}→ {}  [{}]  {}{}{}",
+            e.edge_type,
+            node.node_type,
+            node.label,
+            meta_suffix(g, &node.id),
+            read_anchor(idx, g, &node.id, &spec.mentions),
+        ));
+        chain_lines(idx, g, &node.id, spec, depth + 1, seen, out);
+    }
+}
+
+/// Resolve a name/term to graph nodes and render each with its full reasoning chain.
+/// Structural nodes (Section/Document) show their `(path #ord)` anchor. A reasoning node
+/// (Symptom/Cause/Task/…) shows its `id [type] label` then, walked from it along the ontology's
+/// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
+/// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `neighbors`.
+/// Empty → `"(no matches)"`.
+pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, spec: &ChainSpec, trace: &TraceLog) -> String {
     match g.resolve(name) {
         Ok(ids) => {
             trace.log("glossary", json!({ "name": name }), json!({ "ids": ids.len() }));
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
-            // Each match shows the node `id` first (so the agent can reference / reuse it),
-            // then its type and label, plus the `(path, #ord)` anchor for Section/Document nodes.
             let lines: Vec<String> = ids
                 .iter()
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
                         match node_ref(idx, &node) {
-                            // structural node (Section/Document): show its anchor, no edge dump
+                            // structural node (Section/Document): show its anchor, no chain
                             Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id)),
-                            // reasoning/aux node: append its edges so connectivity is visible at once
+                            // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
-                                let head = format!("{base}{}", meta_suffix(g, &node.id));
-                                let edges = edge_lines(idx, g, &node.id);
-                                if edges.is_empty() {
+                                let head = format!(
+                                    "{base}{}{}",
+                                    meta_suffix(g, &node.id),
+                                    read_anchor(idx, g, &node.id, &spec.mentions),
+                                );
+                                let mut seen = std::collections::HashSet::new();
+                                seen.insert(node.id.clone());
+                                let mut chain = Vec::new();
+                                chain_lines(idx, g, &node.id, spec, 0, &mut seen, &mut chain);
+                                if chain.is_empty() {
                                     head
                                 } else {
-                                    format!("{head}\n{}", edges.join("\n"))
+                                    format!("{head}\n{}", chain.join("\n"))
                                 }
                             }
                         }
@@ -199,32 +271,37 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
     }
 }
 
-/// Graph structural neighbors of chunk `n` in `path`, rendered in `(path, #ord)` address space.
-/// Walks the section's own outgoing edges plus the parent document's REFERENCES edges.
-/// Section targets render as `"EDGE_TYPE  path  #ord · label"`, Document targets as
-/// `"EDGE_TYPE  path  (document)"`. Out-of-range `n` → `"no chunk #n in path"`.
-/// No linked sections → `"(no linked sections)"`.
-pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, path: &str, n: u64, depth: usize, trace: &TraceLog) -> String {
-    let _ = depth; // v1: direct neighbors only
-    let location = match idx.location_for_ord(path, n) {
-        Ok(Some(l)) => l,
-        Ok(None) => return format!("no chunk #{n} in {path}"),
-        Err(e) => return format!("neighbors error: {e}"),
+/// The generalization layer around a node: its SIMILAR cross-links — the shared-evidence
+/// "related cases" written by the generalize pass — in both directions, de-duplicated. The target
+/// is either an explicit reasoning-node `id` (copied from a `glossary` line) or a chunk `(path, n)`
+/// that resolves to its Section node. Each related node renders with a `read` anchor. No links →
+/// `"(no related cases)"`. (Spine chains live in `glossary`; this is the cross-case view.)
+pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Option<&str>, path: Option<&str>, n: Option<u64>, spec: &ChainSpec, trace: &TraceLog) -> String {
+    let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
+        nid.to_string()
+    } else if let (Some(p), Some(nn)) = (path, n) {
+        match idx.location_for_ord(p, nn) {
+            Ok(Some(loc)) => crate::graph::build::section_id(p, &loc),
+            Ok(None) => return format!("no chunk #{nn} in {p}"),
+            Err(e) => return format!("neighbors error: {e}"),
+        }
+    } else {
+        return "neighbors needs a node id (from glossary) or a (path, n) chunk".to_string();
     };
-    let sec_id = crate::graph::build::section_id(path, &location);
-    // Section's own edges, plus the parent document's REFERENCES (cross-doc links).
-    let mut edges = g.outgoing(&sec_id).unwrap_or_default();
-    if let Ok(doc_edges) = g.outgoing(path) {
-        edges.extend(doc_edges.into_iter().filter(|e| e.edge_type == "REFERENCES"));
-    }
+    let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
-    for e in &edges {
-        let Ok(Some(node)) = g.get_node(&e.to) else { continue };
-        let Some(ref_str) = node_ref(idx, &node) else { continue };
-        lines.push(format!("{}  {}{}", e.edge_type, ref_str, meta_suffix(g, &e.to)));
+    for e in g.outgoing(&id).unwrap_or_default() {
+        if e.edge_type == "SIMILAR" && seen.insert(e.to.clone()) {
+            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.to), meta_suffix(g, &e.to), read_anchor(idx, g, &e.to, &spec.mentions)));
+        }
     }
-    trace.log("neighbors", json!({"path": path, "n": n}), json!({"links": lines.len()}));
-    if lines.is_empty() { "(no linked sections)".to_string() } else { lines.join("\n") }
+    for e in g.incoming(&id).unwrap_or_default() {
+        if e.edge_type == "SIMILAR" && seen.insert(e.from.clone()) {
+            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.from), meta_suffix(g, &e.from), read_anchor(idx, g, &e.from, &spec.mentions)));
+        }
+    }
+    trace.log("neighbors", json!({"id": id}), json!({"related": lines.len()}));
+    if lines.is_empty() { "(no related cases)".to_string() } else { lines.join("\n") }
 }
 
 #[cfg(test)]
@@ -242,6 +319,80 @@ mod tests {
             Chunk { doc_path: PathBuf::from("АБАК.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
         ]).unwrap();
         (d, i)
+    }
+
+    fn prov() -> Provenance {
+        Provenance { source_path: "d.pdf".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 }
+    }
+    fn node(id: &str, ty: &str, label: &str) -> Node {
+        Node { id: id.into(), node_type: ty.into(), label: label.into(), aliases: Vec::new(), prov: prov() }
+    }
+    fn edge(from: &str, rel: &str, to: &str) -> Edge {
+        Edge { from: from.into(), to: to.into(), edge_type: rel.into(), prov: prov() }
+    }
+    /// A graph with one full causal spine (Symptom→Cause→Resolution) plus two SIMILAR tasks
+    /// hanging off the Symptom (the generalization layer).
+    fn reasoning_graph() -> (tempfile::TempDir, GraphStore) {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for n in [
+            node("sym:loss", "Symptom", "Профибус потеря связи"),
+            node("cau:tsdr", "Cause", "Малый maxTsdr"),
+            node("res:set", "Resolution", "Изменить maxTsdr в 3000"),
+            node("tsk:upd", "Task", "Обновление ПО модулей"),
+            node("tsk:prog", "Task", "Программирование АБАК"),
+        ] {
+            g.put_node(&n).unwrap();
+        }
+        for e in [
+            edge("sym:loss", "CAUSED_BY", "cau:tsdr"),
+            edge("cau:tsdr", "RESOLVED_BY", "res:set"),
+            edge("sym:loss", "SIMILAR", "tsk:upd"),
+            edge("sym:loss", "SIMILAR", "tsk:prog"),
+        ] {
+            g.put_edge(&e).unwrap();
+        }
+        (d, g)
+    }
+    fn spine_spec() -> ChainSpec {
+        ChainSpec { spine_rels: vec!["CAUSED_BY".into(), "RESOLVED_BY".into()], mentions: "MENTIONS".into() }
+    }
+
+    #[test]
+    fn glossary_renders_full_chain_in_one_call() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        let out = glossary(&i, &g, "Профибус потеря связи", &spine_spec(), &t);
+        // entry node + the whole chain to the resolution, surfaced by a SINGLE call
+        assert!(out.contains("[Symptom]") && out.contains("Профибус потеря связи"), "{out}");
+        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"), "{out}");
+        assert!(out.contains("→ RESOLVED_BY") && out.contains("[Resolution]") && out.contains("Изменить maxTsdr"), "{out}");
+        // SIMILAR is no longer part of glossary — it moved to neighbors
+        assert!(!out.contains("SIMILAR"), "glossary must not show SIMILAR: {out}");
+    }
+
+    #[test]
+    fn glossary_chain_is_ontology_driven() {
+        // No spine relations configured → glossary shows only the node head, no chain.
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        let empty = ChainSpec { spine_rels: Vec::new(), mentions: "MENTIONS".into() };
+        let out = glossary(&i, &g, "Профибус потеря связи", &empty, &t);
+        assert!(out.contains("[Symptom]"), "{out}");
+        assert!(!out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"), "no spines → no chain: {out}");
+    }
+
+    #[test]
+    fn neighbors_shows_similar_generalization_for_a_node_id() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &spine_spec(), &t);
+        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей") && out.contains("Программирование АБАК"), "{out}");
+        // it must NOT walk the causal spine — that is glossary's job
+        assert!(!out.contains("CAUSED_BY") && !out.contains("[Resolution]"), "neighbors is generalization only: {out}");
     }
 
     #[test]
@@ -299,7 +450,7 @@ mod tests {
         assert!(grep(&i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
         assert_eq!(grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t), "(no matches)");
         assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
-        assert_eq!(glob(&i, "*nomatch*", &t), "(no documents match)");
+        assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 
     // ── graph tool tests ────────────────────────────────────────────────────
@@ -365,9 +516,9 @@ strict = true
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
-        let result = glossary(&idx, &g, "ACME", &t);
+        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
         assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
-        assert_eq!(glossary(&idx, &g, "nonesuch", &t), "(no matches)");
+        assert_eq!(glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t), "(no matches)");
     }
 
     #[test]
@@ -378,14 +529,14 @@ strict = true
         let t = TraceLog::disabled();
 
         // Before the pass there is no node_meta → output is unannotated (back-compat).
-        let before = glossary(&idx, &g, "ACME", &t);
+        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
         assert!(!before.contains("comm "), "no meta annotation before generalize: {before}");
 
         // Run the generalization pass → community/centrality land in node_meta.
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
-        let after = glossary(&idx, &g, "ACME", &t);
+        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
         assert!(after.contains("org:acme"), "still shows the node id: {after}");
         assert!(after.contains("comm "), "glossary surfaces community after generalize: {after}");
     }
@@ -423,110 +574,19 @@ strict = true
         })
         .unwrap();
 
-        // glossary on the Symptom must surface its CAUSED_BY edge + the connected Cause inline,
-        // so the agent sees connectivity without a separate `neighbors` call.
-        let out = glossary(&idx, &g, "Потеря связи", &t);
-        assert!(out.contains("sym:loss"), "shows the matched node: {out}");
-        assert!(out.contains("→ CAUSED_BY"), "shows the outgoing edge inline: {out}");
-        assert!(out.contains("cau:maxtsdr"), "shows the connected node: {out}");
+        // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
+        // so the agent sees the causal chain without a separate call.
+        let out = glossary(&idx, &g, "Потеря связи", &spine_spec(), &t);
+        assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
+        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]"), "walks the CAUSED_BY hop: {out}");
+        assert!(out.contains("Малый maxTsdr"), "shows the connected Cause label: {out}");
     }
 
-    #[test]
-    fn neighbors_surface_node_meta_after_generalize() {
-        use crate::index::store::index_dir;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        let opts = crate::graph::generalize::apply::Opts::defaults(1);
-        crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
-        let p = dir.path().join("a.md").to_string_lossy().to_string();
-        let t = TraceLog::disabled();
-        let out = neighbors(&idx, &g, &p, 1, 1, &t);
-        assert!(out.contains("comm "), "neighbors surface community after generalize: {out}");
-    }
-
-    // ── structural (path, #n) address-space tests ───────────────────────────
-
-    #[test]
-    fn neighbors_speaks_path_ord_address_space() {
-        use crate::index::store::index_dir;
-
-        // Build a nested-heading document: chunk #1 = "A", #2 = "A > B", #3 = "A > C".
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n## C\nbody c\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        let p = dir.path().join("a.md").to_string_lossy().to_string();
-        let t = TraceLog::disabled();
-
-        // Chunk #1 "A": outgoing edges include NEXT/CHILD to "A > B" which is #2.
-        let n1 = neighbors(&idx, &g, &p, 1, 1, &t);
-        assert!(
-            n1.lines().any(|l| (l.contains("NEXT") || l.contains("CHILD")) && l.contains("#2")),
-            "A's neighbors include a NEXT/CHILD edge to #2: {n1}"
-        );
-
-        // Chunk #2 "A > B": outgoing edges include PARENT/PREV back to "A" which is #1.
-        let n2 = neighbors(&idx, &g, &p, 2, 1, &t);
-        assert!(
-            n2.lines().any(|l| (l.contains("PARENT") || l.contains("PREV")) && l.contains("#1")),
-            "B's neighbors include a PARENT/PREV edge to #1: {n2}"
-        );
-
-        // A returned #ord from n2 should actually be readable.
-        let parent_ord: u64 = n2
-            .lines()
-            .find(|l| l.contains("PARENT") || l.contains("PREV"))
-            .and_then(|l| l.split('#').nth(1))
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse().ok())
-            .expect("could not parse #ord from neighbors output");
-        let read_out = read(&idx, &p, parent_ord, &t);
-        assert!(
-            read_out.text.contains("intro"),
-            "reading #ord from neighbors output returns the parent section's body: {}",
-            read_out.text
-        );
-
-        // Out-of-range n.
-        let oor = neighbors(&idx, &g, &p, 999, 1, &t);
-        assert!(oor.starts_with("no chunk #999"), "out-of-range: {oor}");
-
-        // Isolated single-section document → no structural edges.
-        let dir2 = tempfile::tempdir().unwrap();
-        std::fs::write(dir2.path().join("lone.md"), b"# Solo\njust one section\n").unwrap();
-        index_dir(dir2.path(), true).unwrap();
-        let idx2 = DocIndex::open_or_create(dir2.path()).unwrap();
-        let g2 = crate::graph::store::GraphStore::open(dir2.path()).unwrap();
-        let p2 = dir2.path().join("lone.md").to_string_lossy().to_string();
-        let lone = neighbors(&idx2, &g2, &p2, 1, 1, &t);
-        assert_eq!(lone, "(no linked sections)", "isolated section: {lone}");
-    }
-
-    #[test]
-    fn neighbors_includes_cross_doc_references() {
-        use crate::index::store::index_dir;
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nsee [the manual](b.md)\n").unwrap();
-        std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        let pa = dir.path().join("a.md").to_string_lossy().to_string();
-        let pb = dir.path().join("b.md").to_string_lossy().to_string();
-        let t = TraceLog::disabled();
-
-        // Chunk #1 of a.md has a cross-doc REFERENCES edge to b.md (Document).
-        let n1 = neighbors(&idx, &g, &pa, 1, 1, &t);
-        assert!(
-            n1.lines().any(|l| l.contains("REFERENCES") && l.contains(&pb)),
-            "a.md #1 neighbors include REFERENCES to b.md: {n1}"
-        );
-    }
+    // Structural chunk-navigation tests (NEXT/CHILD/PARENT/PREV/REFERENCES, node_meta on a
+    // section) were removed when `neighbors` became the generalization view (SIMILAR cross-links);
+    // adjacent-chunk navigation now lives in `read`'s prev/next footer. The generalization
+    // behavior is covered by `neighbors_shows_similar_generalization_for_a_node_id` and the
+    // MCP≡eval parity test in eval/src/backend/glossa_tools.rs.
 
     #[test]
     fn glossary_renders_section_nodes_as_path_ord() {
@@ -540,10 +600,10 @@ strict = true
         let t = TraceLog::disabled();
 
         // "Intro" is a Section node; glossary should render it as "path  #1 · Intro".
-        let result = glossary(&idx, &g, "Intro", &t);
+        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t);
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
-        assert_eq!(glossary(&idx, &g, "nonexistentzzz", &t), "(no matches)");
+        assert_eq!(glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t), "(no matches)");
     }
 }

@@ -1,29 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "depth": {
+    "n": {
       "default": null,
-      "format": "uint",
+      "description": "chunk number, exactly as shown in `[#n]` in a search result",
+      "format": "uint64",
       "minimum": 0,
       "type": [
         "integer",
         "null"
       ]
     },
-    "n": {
-      "description": "chunk number, exactly as shown in `[#n]` in a search result",
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
+    "node": {
+      "default": null,
+      "description": "a reasoning-node id copied from a `glossary` line (e.g. `sym:...`) — preferred",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "path": {
-      "description": "document path, exactly as shown in a search result",
-      "type": "string"
+      "default": null,
+      "description": "document path, exactly as shown in a search result (use with `n` instead of `node`)",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
-  "required": [
-    "path",
-    "n"
-  ],
   "type": "object"
 }

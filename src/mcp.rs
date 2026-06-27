@@ -203,12 +203,15 @@ struct ReadArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NeighborsArgs {
-    #[schemars(description = "document path, exactly as shown in a search result")]
-    path: String,
-    #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
-    n: u64,
     #[serde(default)]
-    depth: Option<usize>,
+    #[schemars(description = "a reasoning-node id copied from a `glossary` line (e.g. `sym:...`) — preferred")]
+    node: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "document path, exactly as shown in a search result (use with `n` instead of `node`)")]
+    path: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
+    n: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -325,20 +328,22 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "List existing graph nodes whose label matches a concept, one per line as `id [type] label` — reasoning nodes (Symptom/Cause/Resolution/Task) plus structural Section/Document (those also show a `path #n` anchor). Call it BEFORE creating a node to find and REUSE an existing one instead of duplicating; an empty result means nothing matches yet. Matching is morphology-aware over labels/aliases.")]
+    #[tool(description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &self.trace))]))
+        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace))]))
     }
 
-    #[tool(description = "Graph neighbors of a chunk — pass the document `path` and chunk number `n` (the `[#n]` from a search/grep result). Returns linked sections/documents as `RELATION  path  #n · label`; read any with `read(path, n)`. Direct (1-hop) neighbors.")]
+    #[tool(description = "Related cases for a node — its SIMILAR cross-links (other cases that share evidence), from the generalization layer. Pass a reasoning-node `node` id copied from a `glossary` line, or a chunk `path` + `n`. Each related node renders with a `read path #n` anchor. Empty → no related cases. (For a node's own cause→resolution chain, use `glossary`.)")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, &a.path, a.n, a.depth.unwrap_or(1), &self.trace))]))
+        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, a.node.as_deref(), a.path.as_deref(), a.n, &spec, &self.trace))]))
     }
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
@@ -519,16 +524,28 @@ mod tests {
 
     #[test]
     fn run_generalize_populates_node_meta() {
+        use crate::graph::store::{Node, Provenance};
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
         index_dir(dir.path(), true).unwrap();
+        // generalize scopes community/centrality to the REASONING subgraph (structural Document/
+        // Section nodes are excluded), so seed a reasoning node for the pass to annotate.
+        {
+            let g = GraphStore::open(dir.path()).unwrap();
+            g.put_node(&Node {
+                id: "sym:x".into(),
+                node_type: "Symptom".into(),
+                label: "потеря связи".into(),
+                aliases: vec![],
+                prov: Provenance { source_path: "a.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 },
+            }).unwrap();
+        }
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
         srv.run_generalize();
         let g = GraphStore::open(dir.path()).unwrap();
-        let nodes = g.all_nodes().unwrap();
         assert!(
-            nodes.iter().any(|n| g.node_meta(&n.id).unwrap().is_some()),
-            "generalize pass populated node_meta (community/centrality)"
+            g.node_meta("sym:x").unwrap().is_some(),
+            "generalize pass populated node_meta (community/centrality) for the reasoning node"
         );
     }
 

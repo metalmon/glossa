@@ -68,6 +68,8 @@ pub fn run_enrich(
         let graph = GraphStore::open(&work_iter)
             .context("open graph store")?;
         let trace = TraceLog::to_dir(&work_iter);
+        // Ontology-driven chain spec so glossary/neighbors render identically to the MCP surface.
+        let spec = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&work_iter));
 
         // Shared atomic counters so the exec closure (called concurrently for
         // parallel tool calls) can accumulate upsert counts safely.
@@ -211,7 +213,7 @@ pub fn run_enrich(
                 };
                 (msg, vec![], vec![])
             } else {
-                glossa_tools::exec(name, args, &idx, Some(&graph), &trace)
+                glossa_tools::exec(name, args, &idx, Some(&graph), &spec, &trace)
             }
         };
 
