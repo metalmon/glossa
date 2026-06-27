@@ -53,6 +53,9 @@ pub struct NodeMeta {
 
 pub struct GraphStore {
     conn: Mutex<Connection>,
+    /// BM25 search view over node labels/aliases, for `resolve`'s fuzzy match. Derived from the
+    /// node table and rebuilt lazily when it falls out of sync (see `resolve`).
+    node_index: crate::graph::node_index::NodeIndex,
 }
 
 impl GraphStore {
@@ -80,7 +83,8 @@ impl GraphStore {
                id TEXT PRIMARY KEY, community INTEGER, pagerank REAL, degree INTEGER);",
         )
         .context("init schema")?;
-        Ok(GraphStore { conn: Mutex::new(conn) })
+        let node_index = crate::graph::node_index::NodeIndex::open_or_create(dir).context("open node index")?;
+        Ok(GraphStore { conn: Mutex::new(conn), node_index })
     }
 
     // ── private helpers: take &Connection (no Mutex locking) ─────────────────
@@ -702,7 +706,6 @@ impl GraphStore {
     /// label/alias equality is always honored too. NOTE: this is morphology- + order-tolerant,
     /// NOT transliteration-aware — Cyrillic "модбас" still won't match Latin "Modbus".
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
-        use std::collections::BTreeSet;
         let c = self.conn.lock().unwrap();
         // Fast path: exact (normalized) label match via the label_norm index — the common case
         // during enrichment. Returns ALL nodes sharing that normalized label (near-dups expected).
@@ -710,29 +713,26 @@ impl GraphStore {
         if !exact.is_empty() {
             return Ok(exact);
         }
-        // Fallback: morphology/order-tolerant fuzzy over all nodes. Also covers an exactly-matching
-        // ALIAS (the query's terms are a subset of that alias's terms). Stemmers built ONCE per call
-        // (TermAnalyzer, proven-equivalent to analyze_terms); scratch set reused across labels.
-        let analyzer = crate::index::multilang::TermAnalyzer::new();
-        let mut query: BTreeSet<String> = BTreeSet::new();
-        analyzer.terms(name, &mut query);
-        if query.is_empty() {
-            return Ok(Vec::new());
+        // Fuzzy fallback: BM25 over the node index. The agent asks in long natural phrases while
+        // labels are short, so a strict `query ⊆ label` almost always misses; BM25 ranks nodes by
+        // shared (morphology-stemmed) terms and rarity, best first. The index is DERIVED — if it
+        // has drifted from the node table (e.g. enrichment added nodes, or it was never built),
+        // rebuild it from the labels+aliases here. Done under the connection lock, so concurrent
+        // resolves can't race the rebuild.
+        let count: i64 = c.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0)).context("count nodes")?;
+        if self.node_index.num_docs() as i64 != count {
+            let docs: Vec<(String, Vec<String>)> = Self::all_nodes_c(&c)?
+                .into_iter()
+                .map(|n| {
+                    let mut texts = Vec::with_capacity(1 + n.aliases.len());
+                    texts.push(n.label);
+                    texts.extend(n.aliases);
+                    (n.id, texts)
+                })
+                .collect();
+            self.node_index.rebuild(&docs)?;
         }
-        let mut cand: BTreeSet<String> = BTreeSet::new();
-        let mut ids = Vec::new();
-        for n in Self::all_nodes_c(&c)? {
-            analyzer.terms(&n.label, &mut cand);
-            let hit = query.is_subset(&cand)
-                || n.aliases.iter().any(|a| {
-                    analyzer.terms(a, &mut cand);
-                    query.is_subset(&cand)
-                });
-            if hit {
-                ids.push(n.id);
-            }
-        }
-        Ok(ids)
+        self.node_index.search(name, 10)
     }
 }
 
@@ -852,10 +852,31 @@ strict = true
             prov: agent_prov(),
         };
         g.upsert(&ont, &[n], &[]).unwrap();
-        // A token NOT present in the label must not match (subset, not overlap).
+        // A token NOT present in the label must not match (no shared term → BM25 returns nothing).
         assert!(g.resolve("температура двигателя").unwrap().is_empty());
         // Empty / punctuation-only query must not match everything.
         assert!(g.resolve("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_matches_long_query_via_bm25() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let n = Node {
+            id: "sym:loss".into(),
+            node_type: "Organization".into(),
+            label: "Периодическая потеря связи с ПЛК Siemens по Profibus DP".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[n], &[]).unwrap();
+        // A long agent-style query carrying EXTRA words not in the label (проблема, обмен, данными):
+        // the old strict `query ⊆ label` would miss it; BM25 ranks it by the shared terms and finds it.
+        let hits = g
+            .resolve("проблема периодической потери связи Profibus обмен данными")
+            .unwrap();
+        assert_eq!(hits, vec!["sym:loss".to_string()], "long query finds the node via BM25: {hits:?}");
     }
 
     #[test]
