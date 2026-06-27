@@ -300,13 +300,8 @@ impl GlossaServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Non-destructive: from_ontology leaves prune_incomplete=false and apply_merges=false.
-        let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, now);
-        let r = crate::graph::generalize::apply::generalize(&g, &opts).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "generalized: prune_candidates={} inferred_edges={} similar_edges={} communities={} merge_candidates={}",
-            r.prune_candidates, r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
-        ))]))
+        // Non-destructive (shared with the eval enricher → identical output).
+        Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
     }
 
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
@@ -420,6 +415,11 @@ mod tests {
 
         let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
+
+        // resolve is a universally available tool — present in EVERY profile (not gated).
+        for prof in [&reader, &editor, &full] {
+            assert!(prof.contains(&"resolve".to_string()), "resolve must be in every profile");
+        }
 
         let ng = GlossaServer::new(root, Profile::Editor, false, true).enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));

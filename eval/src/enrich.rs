@@ -178,6 +178,29 @@ pub fn run_enrich(
                     let msg = glossa::graph::ops::graph_update(&graph, ups);
                     (msg, vec![], vec![])
                 }
+            } else if name == "graph_generalize" {
+                // Agent-driven generalization (the same shared op the MCP tool uses → identical
+                // output). Non-destructive. The enricher is a full Editor agent, so this works
+                // in-process instead of returning "unknown tool" and stalling the turn.
+                let ont = Ontology::load_or_default(&work_iter);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                (glossa::graph::ops::graph_generalize(&graph, &ont, now), vec![], vec![])
+            } else if name == "index" || name == "reindex" {
+                let full = name == "reindex";
+                let msg = match glossa::index::store::index_dir(&work_iter, full) {
+                    Ok(s) => format!(
+                        "{}: {} added, {} removed, {} unchanged",
+                        if full { "reindexed" } else { "indexed" },
+                        s.added,
+                        s.removed,
+                        s.unchanged
+                    ),
+                    Err(e) => format!("{name} error: {e}"),
+                };
+                (msg, vec![], vec![])
             } else {
                 glossa_tools::exec(name, args, &idx, Some(&graph), &trace)
             }
