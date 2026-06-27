@@ -133,39 +133,37 @@ pub fn graph_upsert(
     edges: Vec<UpsertEdge>,
     now: u64,
 ) -> UpsertOutcome {
+    // Partial apply: validate each item on its own, WRITE everything well-formed, and DROP only the
+    // bad items with a clear, actionable reason — never discard valid work because a sibling item is
+    // malformed (the old all-or-nothing footballed the model). Label length is NOT gated.
     let mut errs: Vec<String> = Vec::new();
 
-    // (1) source_path must be a real indexed document — reject hallucinated paths
-    // (label length is NOT gated — a long label is a minor quality issue guided by the prompt;
-    // rejecting the whole upsert over it would football the model and lose the entire case.)
-    for nd in &nodes {
-        if !idx.has_document(&nd.source_path).unwrap_or(false) {
-            errs.push(format!(
-                "node \"{}\": source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
-                nd.label, nd.source_path
-            ));
-        }
-    }
-    for ue in &edges {
-        if !idx.has_document(&ue.source_path).unwrap_or(false) {
-            errs.push(format!(
-                "edge {} -{}>  {}: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
-                ue.from, ue.edge_type, ue.to, ue.source_path
-            ));
-        }
-    }
+    // (1) Nodes: keep those whose source_path is a real indexed document; drop the rest.
+    let valid_nodes: Vec<&UpsertNode> = nodes
+        .iter()
+        .filter(|nd| {
+            let ok = idx.has_document(&nd.source_path).unwrap_or(false);
+            if !ok {
+                errs.push(format!(
+                    "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
+                    nd.label, nd.source_path
+                ));
+            }
+            ok
+        })
+        .collect();
 
     // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes. Existing
     // nodes are no longer loaded wholesale (that was O(N) per upsert); an edge endpoint naming an
     // existing node is resolved on demand via the label_norm index in `resolve_endpoint_label`.
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for nd in &nodes {
+    for nd in &valid_nodes {
         label_to_id.insert(normalize_label(&nd.label), id_for(&nd.node_type, &nd.label));
     }
 
-    // (3) build NodeSpec list
-    let nodespecs: Vec<NodeSpec> = nodes
+    // (3) build NodeSpec list (valid nodes only)
+    let nodespecs: Vec<NodeSpec> = valid_nodes
         .iter()
         .map(|nd| NodeSpec {
             id: id_for(&nd.node_type, &nd.label),
@@ -186,6 +184,23 @@ pub fn graph_upsert(
     let mut edgespecs: Vec<EdgeSpec> = Vec::new();
     for ue in &edges {
         let (of, ot, oet) = (ue.from.clone(), ue.to.clone(), ue.edge_type.clone());
+
+        // missing endpoint — the most common malformed edge (e.g. MENTIONS with no `to`).
+        if ue.from.trim().is_empty() || ue.to.trim().is_empty() {
+            let which = if ue.from.trim().is_empty() { "from" } else { "to" };
+            errs.push(format!(
+                "edge -{oet}-> dropped: missing `{which}` — an edge needs BOTH a `from` and a `to` (a node label, or a section `<path>#<n>` for a MENTIONS target)"
+            ));
+            continue;
+        }
+        if !idx.has_document(&ue.source_path).unwrap_or(false) {
+            errs.push(format!(
+                "edge {of} -{oet}-> {ot} dropped: source_path \"{}\" is not a document — use a real path from a search/read result",
+                ue.source_path
+            ));
+            continue;
+        }
+
         let mut from_resolved: Option<String> = None;
         let mut to_resolved: Option<String> = None;
         let mut edge_ok = true;
@@ -193,7 +208,7 @@ pub fn graph_upsert(
         // resolve from endpoint
         match resolve_section_ref(idx, &ue.from) {
             Err(m) => {
-                errs.push(format!("edge {of} -{oet}-> {ot}: {m}"));
+                errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
             Ok(v) if v != ue.from => {
@@ -206,7 +221,7 @@ pub fn graph_upsert(
                     Some(id) => from_resolved = Some(id),
                     None => {
                         errs.push(format!(
-                            "edge {of} -{oet}-> {ot}: from endpoint label \"{of}\" has no node — add a node with that label"
+                            "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" matches no node — add a node with that label"
                         ));
                         edge_ok = false;
                     }
@@ -217,7 +232,7 @@ pub fn graph_upsert(
         // resolve to endpoint
         match resolve_section_ref(idx, &ue.to) {
             Err(m) => {
-                errs.push(format!("edge {of} -{oet}-> {ot}: {m}"));
+                errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
             Ok(v) if v != ue.to => {
@@ -230,7 +245,7 @@ pub fn graph_upsert(
                     Some(id) => to_resolved = Some(id),
                     None => {
                         errs.push(format!(
-                            "edge {of} -{oet}-> {ot}: to endpoint label \"{ot}\" has no node — add a node with that label"
+                            "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" matches no node — add a node with that label"
                         ));
                         edge_ok = false;
                     }
@@ -249,7 +264,7 @@ pub fn graph_upsert(
                     batch_ids.contains(&id) || g.get_node(&id).ok().flatten().is_some();
                 if !exists {
                     errs.push(format!(
-                        "edge {of} -{oet}-> {ot}: {role} endpoint '{id}' is not a known node — create that node (add it to nodes[]) before referencing it"
+                        "edge {of} -{oet}-> {ot} dropped: {role} endpoint '{id}' is not a known node — add it to nodes[] before referencing it"
                     ));
                     exists_ok = false;
                 }
@@ -277,8 +292,10 @@ pub fn graph_upsert(
         dump.push(format!("edge {} -{}-> {}", e.from, e.edge_type, e.to));
     }
 
-    // (6) rejection path — nothing is written
-    if !errs.is_empty() {
+    // (6) Nothing well-formed at all → a full rejection (with the existing-node hint so the model
+    // can reference a real id instead of inventing one). Otherwise apply what's valid below.
+    let dropped = errs.len();
+    if nodespecs.is_empty() && edgespecs.is_empty() {
         // Help the model recover from id confusion (it often references a node it created under a
         // DIFFERENT id, then loops on the rejection): list the reasoning nodes that already exist so
         // it can reference the right id instead of an invented one. Structural nodes are excluded.
@@ -301,7 +318,7 @@ pub fn graph_upsert(
         };
         return UpsertOutcome {
             message: format!(
-                "graph_upsert REJECTED — nothing was written. Fix these and resend:\n- {}{}",
+                "graph_upsert wrote nothing — every item was malformed. Fix and resend:\n- {}{}",
                 errs.join("\n- "),
                 hint
             ),
@@ -312,17 +329,20 @@ pub fn graph_upsert(
         };
     }
 
-    // (7) apply
+    // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
     match apply_upsert(g, ont, nodespecs, edgespecs, now) {
-        Ok((n, e)) => UpsertOutcome {
-            message: format!("upserted {n} nodes, {e} edges"),
-            nodes: n,
-            edges: e,
-            rejected: false,
-            dump,
-        },
+        Ok((n, e)) => {
+            let mut message = format!("upserted {n} nodes, {e} edges");
+            if dropped > 0 {
+                message.push_str(&format!(
+                    "\n{dropped} item(s) dropped (the rest WERE written) — fix and resend only these:\n- {}",
+                    errs.join("\n- ")
+                ));
+            }
+            UpsertOutcome { message, nodes: n, edges: e, rejected: false, dump }
+        }
         Err(e) => UpsertOutcome {
-            message: e.to_string(),
+            message: format!("graph_upsert failed: {e}"),
             nodes: 0,
             edges: 0,
             rejected: true,
@@ -505,14 +525,15 @@ strict = true
             vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
-        assert!(out.rejected, "should be rejected");
+        // Partial apply: the valid Symptom IS written; only the edge to an unknown node is dropped.
+        assert!(!out.rejected, "valid node written: {}", out.message);
+        assert_eq!(out.nodes, 1, "the Symptom node is written");
+        assert_eq!(out.edges, 0, "the edge to an unknown node is dropped");
         assert!(
-            out.message.contains("has no node"),
-            "message should mention 'has no node': {}",
+            out.message.contains("dropped") && out.message.contains("matches no node"),
+            "message should explain the dropped edge: {}",
             out.message
         );
-        assert_eq!(out.nodes, 0);
-        assert_eq!(out.edges, 0);
     }
 
     /// Label-based upsert with no ids: ids are derived from labels, RESOLVED_BY edge is wired.
@@ -558,10 +579,41 @@ strict = true
         let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Неизвестный узел", "case1.docx")];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
-        assert!(out.rejected, "should be rejected");
+        // Partial apply: the Symptom IS written; the edge to an undefined label is dropped (named).
+        assert!(!out.rejected, "valid node written: {}", out.message);
+        assert_eq!(out.nodes, 1);
+        assert_eq!(out.edges, 0);
         assert!(
-            out.message.contains("Неизвестный узел"),
-            "message should name the undefined label: {}",
+            out.message.contains("Неизвестный узел") && out.message.contains("dropped"),
+            "message names the dropped edge's bad label: {}",
+            out.message
+        );
+    }
+
+    /// Partial apply: a malformed edge (MENTIONS with no `to`) is dropped with a clear message,
+    /// but the valid nodes in the SAME call are still written — never football the whole upsert.
+    #[test]
+    fn partial_apply_keeps_valid_nodes_when_edge_missing_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let nodes = vec![
+            unode("Symptom", "Потеря связи", "case1.docx"),
+            unode("Resolution", "Перезапуск", "case1.docx"),
+        ];
+        // a MENTIONS edge with no `to` target — malformed.
+        let edges = vec![uedge("Потеря связи", "MENTIONS", "", "case1.docx")];
+
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        assert!(!out.rejected, "valid nodes are written: {}", out.message);
+        assert_eq!(out.nodes, 2, "both valid nodes written");
+        assert_eq!(out.edges, 0, "the edge with no `to` is dropped");
+        assert!(
+            out.message.contains("missing `to`"),
+            "message clearly names the problem: {}",
             out.message
         );
     }
