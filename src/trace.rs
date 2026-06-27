@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TraceEntry {
@@ -18,27 +19,32 @@ pub fn now_ms() -> u64 {
 }
 
 /// Append-only JSONL tool-call log. `disabled()` is a no-op; `to_dir()` writes one line per call.
+/// Cloning shares the same file lock, so concurrent tool calls on different clones of the same
+/// log don't interleave mid-line.
 #[derive(Clone)]
 pub struct TraceLog {
     path: Option<PathBuf>,
+    /// Process-wide advisory lock shared across all clones of the same TraceLog instance.
+    lock: Arc<Mutex<()>>,
 }
 
 impl TraceLog {
     pub fn disabled() -> TraceLog {
-        TraceLog { path: None }
+        TraceLog { path: None, lock: Arc::new(Mutex::new(())) }
     }
 
     pub fn to_dir(root: &Path) -> TraceLog {
         let dir = root.join(".glossa").join("traces");
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join(format!("{}-{}.jsonl", now_ms(), std::process::id()));
-        TraceLog { path: Some(file) }
+        TraceLog { path: Some(file), lock: Arc::new(Mutex::new(())) }
     }
 
     pub fn log(&self, tool: &str, args: serde_json::Value, result: serde_json::Value) {
         let Some(p) = &self.path else { return };
         let entry = TraceEntry { ts_ms: now_ms(), tool: tool.to_string(), args, result };
         if let Ok(line) = serde_json::to_string(&entry) {
+            let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
                 let _ = writeln!(f, "{line}");
             }

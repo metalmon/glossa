@@ -101,7 +101,10 @@ where
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().expect("tool-call thread panicked"))
+                    .zip(calls.iter())
+                    .map(|(h, (id, name, _args))| h.join().unwrap_or_else(|_| {
+                        (id.clone(), name.clone(), "tool panicked".to_string(), Vec::new(), Vec::new())
+                    }))
                     .collect()
             });
 
@@ -296,7 +299,7 @@ impl TensorZeroBackend {
 fn parse_first_float(s: &str) -> Option<f32> {
     let mut num = String::new();
     for ch in s.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
+        if ch.is_ascii_digit() || (ch == '.' && !num.contains('.')) {
             num.push(ch);
         } else if !num.is_empty() {
             break;
@@ -349,6 +352,14 @@ mod retrieved_tests {
         assert_eq!(parse_first_float("0.8"), Some(0.8));
         assert_eq!(parse_first_float("Score: 1.0 (fully correct)"), Some(1.0));
         assert_eq!(parse_first_float("the answer is wrong"), None);
+    }
+
+    #[test]
+    fn parse_first_float_trailing_period_is_not_decimal() {
+        // A number ending a sentence (e.g. "0.8.") must still parse correctly.
+        assert_eq!(parse_first_float("0.8. correct"), Some(0.8));
+        assert_eq!(parse_first_float("1.0."), Some(1.0));
+        assert_eq!(parse_first_float("score: 3"), Some(3.0));
     }
 
     #[test]

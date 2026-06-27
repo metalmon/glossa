@@ -87,6 +87,16 @@ impl RankedHit {
 impl DocIndex {
     pub fn write_chunks(&self, chunks: &[Chunk]) -> anyhow::Result<()> {
         let mut writer = self.index.writer(50_000_000)?;
+        // Delete existing docs for every distinct path so re-calling is idempotent.
+        let mut distinct_paths: Vec<String> = chunks
+            .iter()
+            .map(|c| c.doc_path.to_string_lossy().to_string())
+            .collect();
+        distinct_paths.sort();
+        distinct_paths.dedup();
+        for path_str in &distinct_paths {
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
+        }
         for (i, c) in chunks.iter().enumerate() {
             let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
             writer.add_document(doc!(
@@ -204,16 +214,40 @@ pub struct ChunkRead {
 }
 
 impl DocIndex {
-    /// Fetch a chunk's stored body by exact (path, ord). Reports whether ord-1 / ord+1 exist in
-    /// the same document, so the caller can offer "next/previous chunk" navigation. None if no
-    /// chunk with that (path, ord) is indexed.
+    /// Fetch a chunk's stored body by exact (path, ord). Reports the nearest preceding and
+    /// following ords that exist for the same document, so the caller can offer "next/previous
+    /// chunk" navigation even when pages are non-contiguous (e.g. blank PDF pages produce no
+    /// chunk). Scans up to 50 steps in each direction. None if no chunk with that (path, ord)
+    /// is indexed.
     pub fn read_chunk_by_ord(&self, path: &str, n: u64) -> anyhow::Result<Option<ChunkRead>> {
         let body = match self.ord_body(path, n)? {
             Some(b) => b,
             None => return Ok(None),
         };
-        let prev = if n > 1 && self.ord_body(path, n - 1)?.is_some() { Some(n - 1) } else { None };
-        let next = if self.ord_body(path, n + 1)?.is_some() { Some(n + 1) } else { None };
+        // Scan backward up to 50 steps to find the nearest existing predecessor.
+        let prev = {
+            let mut found = None;
+            let lo = n.saturating_sub(50);
+            for k in (lo..n).rev() {
+                if k == 0 { break; }
+                if self.ord_body(path, k)?.is_some() {
+                    found = Some(k);
+                    break;
+                }
+            }
+            found
+        };
+        // Scan forward up to 50 steps to find the nearest existing successor.
+        let next = {
+            let mut found = None;
+            for k in (n + 1)..=(n + 50) {
+                if self.ord_body(path, k)?.is_some() {
+                    found = Some(k);
+                    break;
+                }
+            }
+            found
+        };
         Ok(Some(ChunkRead { body, prev, next }))
     }
 
@@ -806,6 +840,22 @@ mod search_tests {
         let md = idx.search_filtered("замена", 10, None, Some("md")).unwrap();
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
+    }
+
+    #[test]
+    fn write_chunks_is_idempotent_no_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        // Write first version of d.md
+        idx.write_chunks(&[chunk("d.md", "original content alpha")]).unwrap();
+        // Overwrite with a different chunk for the same path
+        idx.write_chunks(&[chunk("d.md", "updated content beta")]).unwrap();
+        // Search should find the new content and NOT return duplicates
+        let hits = idx.search("content", 10).unwrap();
+        let d_hits: Vec<_> = hits.iter().filter(|h| h.path == "d.md").collect();
+        assert_eq!(d_hits.len(), 1, "expected exactly one hit for d.md, got {}", d_hits.len());
+        assert!(d_hits[0].snippet.contains("beta") || d_hits[0].snippet.contains("updated"),
+            "expected updated content, got: {}", d_hits[0].snippet);
     }
 }
 

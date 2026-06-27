@@ -46,16 +46,23 @@ fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex>
     Ok(re)
 }
 
+const GREP_MAX_HITS: usize = 1000;
+
 pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Vec<GrepHit>> {
+    if pattern.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let matcher = build_matcher(pattern, opts)?;
     let glob_re = match &opts.glob { Some(g) => Some(glob_to_regex(g)?), None => None };
     let mut hits = Vec::new();
     let mut visit = |path: &str, ord: u64, file_type: &str, body: &str| {
+        if hits.len() >= GREP_MAX_HITS { return; }
         if let Some(ft) = &opts.file_type { if file_type != ft { return; } }
         if let Some(gr) = &glob_re { if !gr.is_match(path) { return; } }
         for line in body.lines() {
             if matcher.is_match(line) {
                 hits.push(GrepHit { path: path.to_string(), ord, line: line.trim().to_string() });
+                if hits.len() >= GREP_MAX_HITS { return; }
             }
         }
     };
@@ -167,5 +174,17 @@ mod tests {
         assert_eq!(grep(&idx, "абак", &GrepOpts::default()).unwrap().len(), 1);
         // pattern WITH an uppercase letter, no -i: smart-case stays case-sensitive -> "Абак" != "АБАК"
         assert_eq!(grep(&idx, "Абак", &GrepOpts::default()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn grep_blank_pattern_returns_empty() {
+        let (_d, idx) = idx_with(&[
+            ("a.md", "S1", "md", "some content here"),
+            ("b.md", "S1", "md", "more content there"),
+        ]);
+        // blank, whitespace-only, and empty patterns must all return empty — not the whole index.
+        assert!(grep(&idx, "", &GrepOpts::default()).unwrap().is_empty());
+        assert!(grep(&idx, "   ", &GrepOpts::default()).unwrap().is_empty());
+        assert!(grep(&idx, "\t", &GrepOpts::default()).unwrap().is_empty());
     }
 }

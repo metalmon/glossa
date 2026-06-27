@@ -27,6 +27,25 @@ pub fn read_window(traces_dir: &Path, t0_ms: u64, t1_ms: u64) -> anyhow::Result<
     Ok(out)
 }
 
+/// Collect every `location` value mentioned in search-result arrays.
+/// In fullwiki mode the `location` field carries the article title while `path` is a shard
+/// file, so callers can use this alongside `seen_files` to match gold titles correctly.
+pub fn seen_locations(entries: &[TraceEntry]) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in entries {
+        if let serde_json::Value::Array(arr) = &e.result {
+            for v in arr {
+                if let Some(l) = v.get("location").and_then(|l| l.as_str()) {
+                    out.push(l.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Collect every `path` mentioned in search-result arrays and read results.
 pub fn seen_files(entries: &[TraceEntry]) -> Vec<String> {
     let mut out = Vec::new();
@@ -70,6 +89,19 @@ mod tests {
         assert_eq!(win.len(), 2);
         let files = seen_files(&win);
         assert_eq!(files, vec!["Alice.md".to_string(), "Bob_Page.md".to_string()]);
+    }
+
+    #[test]
+    fn seen_locations_extracts_location_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        std::fs::write(&p, concat!(
+            r#"{"ts_ms":100,"tool":"search","args":{},"result":[{"path":"wiki/AA_wiki_00.md","location":"Bob Page"},{"path":"wiki/AA_wiki_00.md","location":"Alice"}]}"#, "\n",
+            r#"{"ts_ms":200,"tool":"read","args":{},"result":{"path":"wiki/AA_wiki_00.md"}}"#, "\n",
+        )).unwrap();
+        let entries = read_window(dir.path(), 0, u64::MAX).unwrap();
+        let locs = seen_locations(&entries);
+        assert_eq!(locs, vec!["Alice".to_string(), "Bob Page".to_string()]);
     }
 
     #[test]
