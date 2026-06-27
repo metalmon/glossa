@@ -139,6 +139,28 @@ fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
 /// Resolve a name/term to graph node ids and render each as a `(path, #ord)` ref.
 /// Section nodes render as `"path  #ord · label"`, Documents as `"path  (document)"`,
 /// unresolved ids fall back to the raw id string. Empty → `"(no matches)"`.
+/// One indented line per edge touching `id`, so `glossary` shows a reasoning node's connectivity
+/// inline — the agent sees what to REUSE/extend without a separate `neighbors` call (and stops
+/// creating orphan duplicates). Outgoing edges are `→`, incoming `←`; the far endpoint renders as
+/// its `(path #ord)` anchor for a section, else `id  [type]  label`.
+fn edge_lines(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> Vec<String> {
+    let endpoint = |nid: &str| match g.get_node(nid) {
+        Ok(Some(node)) => match node_ref(idx, &node) {
+            Some(r) => r,
+            None => format!("{}  [{}]  {}", node.id, node.node_type, node.label),
+        },
+        _ => nid.to_string(),
+    };
+    let mut out = Vec::new();
+    for e in g.outgoing(id).unwrap_or_default() {
+        out.push(format!("    → {}  {}", e.edge_type, endpoint(&e.to)));
+    }
+    for e in g.incoming(id).unwrap_or_default() {
+        out.push(format!("    ← {}  {}", e.edge_type, endpoint(&e.from)));
+    }
+    out
+}
+
 pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, trace: &TraceLog) -> String {
     match g.resolve(name) {
         Ok(ids) => {
@@ -153,11 +175,20 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
-                        let line = match node_ref(idx, &node) {
-                            Some(r) => format!("{base}  —  {r}"),
-                            None => base,
-                        };
-                        format!("{line}{}", meta_suffix(g, &node.id))
+                        match node_ref(idx, &node) {
+                            // structural node (Section/Document): show its anchor, no edge dump
+                            Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id)),
+                            // reasoning/aux node: append its edges so connectivity is visible at once
+                            None => {
+                                let head = format!("{base}{}", meta_suffix(g, &node.id));
+                                let edges = edge_lines(idx, g, &node.id);
+                                if edges.is_empty() {
+                                    head
+                                } else {
+                                    format!("{head}\n{}", edges.join("\n"))
+                                }
+                            }
+                        }
                     }
                     _ => id.clone(),
                 })
@@ -357,6 +388,47 @@ strict = true
         let after = glossary(&idx, &g, "ACME", &t);
         assert!(after.contains("org:acme"), "still shows the node id: {after}");
         assert!(after.contains("comm "), "glossary surfaces community after generalize: {after}");
+    }
+
+    #[test]
+    fn glossary_shows_reasoning_node_edges() {
+        use crate::graph::store::{Edge, GraphStore, Node, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(idir.path()).unwrap();
+        let t = TraceLog::disabled();
+        let prov = || Provenance {
+            source_path: "c.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 1.0,
+            created_at: 1,
+        };
+        let node = |id: &str, ty: &str, label: &str| Node {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: vec![],
+            prov: prov(),
+        };
+        g.put_node(&node("sym:loss", "Symptom", "Потеря связи")).unwrap();
+        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr")).unwrap();
+        g.put_edge(&Edge {
+            from: "sym:loss".into(),
+            to: "cau:maxtsdr".into(),
+            edge_type: "CAUSED_BY".into(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        // glossary on the Symptom must surface its CAUSED_BY edge + the connected Cause inline,
+        // so the agent sees connectivity without a separate `neighbors` call.
+        let out = glossary(&idx, &g, "Потеря связи", &t);
+        assert!(out.contains("sym:loss"), "shows the matched node: {out}");
+        assert!(out.contains("→ CAUSED_BY"), "shows the outgoing edge inline: {out}");
+        assert!(out.contains("cau:maxtsdr"), "shows the connected node: {out}");
     }
 
     #[test]
