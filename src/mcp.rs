@@ -30,9 +30,9 @@ pub struct GlossaServer {
     trace: crate::trace::TraceLog,
 }
 
-const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update"];
+const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize"];
 const FULL_TOOLS: &[&str] = &["purge"];
-const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "graph_delete", "graph_update", "resolve", "index", "reindex", "purge"];
+const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "resolve", "index", "reindex", "purge"];
 
 impl GlossaServer {
     pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool) -> Self {
@@ -275,6 +275,23 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
+    #[tool(description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view.")]
+    async fn graph_generalize(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let ont = Ontology::load_or_default(&self.root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Non-destructive: from_ontology leaves prune_incomplete=false and apply_merges=false.
+        let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, now);
+        let r = crate::graph::generalize::apply::generalize(&g, &opts).map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "generalized: prune_candidates={} inferred_edges={} similar_edges={} communities={} merge_candidates={}",
+            r.prune_candidates, r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+        ))]))
+    }
+
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -369,7 +386,9 @@ mod tests {
 
         let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
+        assert!(editor.contains(&"graph_generalize".to_string()), "editor exposes the non-destructive generalize tool");
         assert!(!editor.contains(&"purge".to_string()));
+        assert!(!reader.contains(&"graph_generalize".to_string()), "reader cannot generalize");
 
         let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
