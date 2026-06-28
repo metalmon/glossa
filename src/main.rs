@@ -4,6 +4,10 @@ use glossa::search::search_chunks;
 use glossa::walk::collect_chunks;
 use std::path::PathBuf;
 
+/// Native Windows Service integration (SCM dispatcher + control handler). Windows-only.
+#[cfg(windows)]
+mod winsvc;
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum OutputFormat {
     /// pretty when stdout is a terminal, rg otherwise
@@ -122,6 +126,10 @@ enum Cmd {
         /// Default permits loopback only — set your gateway/public host(s) for a prod deployment.
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
+        /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
+        /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
+        #[arg(long = "windows-service", hide = true)]
+        windows_service: bool,
     },
 }
 
@@ -241,6 +249,91 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
+/// Everything needed to start one MCP serve instance. Built once from the CLI; reused by both the
+/// foreground path and the Windows Service path (which stashes it before the SCM dispatcher starts).
+#[derive(Clone)]
+pub(crate) struct ServeParams {
+    pub path: PathBuf,
+    pub profile: glossa::mcp::Profile,
+    pub trace: bool,
+    pub no_graph: bool,
+    pub transport: McpTransport,
+    pub bind: String,
+    pub allowed_hosts: Vec<String>,
+}
+
+/// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
+/// is set we install the OS-signal → cancel bridge (foreground path). The Windows Service path passes
+/// `handle_signals = false` and cancels via the SCM control handler instead.
+pub(crate) fn run_serve(
+    p: ServeParams,
+    cancel: tokio_util::sync::CancellationToken,
+    handle_signals: bool,
+) -> anyhow::Result<()> {
+    // Startup file-first reconcile (cheap when nothing changed); best-effort.
+    let stats = glossa::index::store::ensure_fresh(&p.path).unwrap_or_default();
+    let server = glossa::mcp::GlossaServer::new(p.path, p.profile, p.trace, p.no_graph);
+    if stats.added + stats.removed > 0 {
+        server.mark_dirty();
+    }
+    // Freshness runs on EVERY instance (readers stay current). The heavy generalize loop runs ONLY on
+    // the indexer (editor/full); among multiple editors it is further serialized by generalize.lock.
+    let run_maintenance = p.profile != glossa::mcp::Profile::Reader;
+    let transport = p.transport;
+    let bind = p.bind;
+    let allowed_hosts = p.allowed_hosts;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        if handle_signals {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                tracing::info!("shutdown signal received — draining");
+                c.cancel();
+            });
+        }
+        if run_maintenance {
+            tokio::spawn(server.clone().maintenance_loop(cancel.clone()));
+        }
+        match transport {
+            McpTransport::Stdio => {
+                use rmcp::{transport::stdio, ServiceExt};
+                let service = server.serve(stdio()).await?;
+                let _ = service.waiting().await; // client-driven: exit on stdin EOF
+                cancel.cancel();
+            }
+            McpTransport::StreamableHttp => {
+                serve_streamable_http(server, &bind, allowed_hosts, cancel).await?;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// Wait for an OS shutdown signal: Ctrl-C on every platform, plus SIGTERM on unix (what
+/// `systemctl stop` / container runtimes send). Returns when either fires.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+}
+
 /// Serve the MCP server over Streamable HTTP at `<bind>/mcp` (one shared `GlossaServer` across all
 /// sessions). DNS-rebind protection allows loopback by default; pass `--allowed-host` for a gateway/
 /// public host. TLS + auth are expected to be terminated by a reverse proxy in front. Ctrl-C
@@ -255,15 +348,7 @@ async fn serve_streamable_http(
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
-    // Translate Ctrl-C into a cancel — drives the listener drain, session teardown, and the loop.
-    {
-        let c = cancel.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received — draining");
-            c.cancel();
-        });
-    }
+    // Shutdown is driven by `cancel` (the caller wires the OS signal or the SCM control handler to it).
     let mut config = StreamableHttpServerConfig::default();
     config.cancellation_token = cancel.clone();
     if !allowed_hosts.is_empty() {
@@ -482,7 +567,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts } => match action {
+        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts, windows_service } => match action {
             Some(McpAction::DumpTzTools { config_dir }) => {
                 let n = glossa::tz_export::dump(&config_dir)?;
                 println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
@@ -490,45 +575,29 @@ fn main() -> anyhow::Result<()> {
             }
             None => {
                 let path = glossa::root::resolve_root(path);
-                // Startup file-first reconcile: bring the index/graph up to date with the corpus once
-                // before serving (cheap when nothing changed). Per-tool freshness is throttled inside
-                // the server. Best-effort — a transient freshen error must not block startup.
-                let stats = glossa::index::store::ensure_fresh(&path).unwrap_or_default();
-                let prof = glossa::mcp::Profile::parse(&profile);
-                let server = glossa::mcp::GlossaServer::new(path, prof, trace, no_graph);
-                // If startup indexing changed anything, the derived layer is owed a refresh — the
-                // debounced maintenance loop will run generalize shortly after the corpus settles.
-                if stats.added + stats.removed > 0 {
-                    server.mark_dirty();
+                let params = ServeParams {
+                    path,
+                    profile: glossa::mcp::Profile::parse(&profile),
+                    trace,
+                    no_graph,
+                    transport,
+                    bind,
+                    allowed_hosts,
+                };
+                if windows_service {
+                    // Launched by the SCM (binPath carries --windows-service): hand off to the
+                    // service dispatcher, which runs run_serve under SCM control (Stop → cancel).
+                    #[cfg(windows)]
+                    {
+                        return winsvc::run(params);
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        anyhow::bail!("--windows-service is only supported on Windows");
+                    }
                 }
-                // Freshness (ensure_fresh) runs on EVERY instance so readers serve up-to-date results.
-                // But the heavy debounced generalize loop runs ONLY on the indexer (editor/full) — a
-                // reader never recomputes the derived layer; it reads what an editor produced. Among
-                // multiple editors, the pass itself is further serialized by `.glossa/generalize.lock`.
-                let run_maintenance = prof != glossa::mcp::Profile::Reader;
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async move {
-                    // One cancellation token drives graceful shutdown across the maintenance loop,
-                    // the HTTP listener, and active sessions.
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    if run_maintenance {
-                        // Background, debounced generalize — off the read hot path (never per-file).
-                        tokio::spawn(server.clone().maintenance_loop(cancel.clone()));
-                    }
-                    match transport {
-                        McpTransport::Stdio => {
-                            use rmcp::{transport::stdio, ServiceExt};
-                            let service = server.serve(stdio()).await?;
-                            // stdio lifecycle is client-driven: exit on stdin EOF (disconnect).
-                            let _ = service.waiting().await;
-                            cancel.cancel(); // stop the maintenance loop on the way out
-                        }
-                        McpTransport::StreamableHttp => {
-                            serve_streamable_http(server, &bind, allowed_hosts, cancel).await?;
-                        }
-                    }
-                    Ok::<(), anyhow::Error>(())
-                })?;
+                // Foreground: OS signals (Ctrl-C / SIGTERM) drive graceful shutdown.
+                run_serve(params, tokio_util::sync::CancellationToken::new(), true)?;
                 Ok(())
             }
         },
