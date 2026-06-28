@@ -25,9 +25,10 @@ fn parse_n(v: &Value) -> Option<u64> {
     s.parse::<u64>().ok()
 }
 
-/// Read a chunk: full text + the chunk's images (for the vision model, delivered by the backend).
-pub fn run_read(idx: &DocIndex, path: &str, n: u64, trace: &TraceLog) -> (String, Vec<glossa::read::DocImage>) {
-    let out = glossa::tools::read(idx, path, n, trace);
+/// Read a chunk OR a reasoning node: full text + the chunk's images (for the vision model). `graph`
+/// makes `read` omnivorous — a node id resolves to the node + its evidence chunks.
+pub fn run_read(idx: &DocIndex, graph: Option<&glossa::graph::store::GraphStore>, path: &str, n: u64, trace: &TraceLog) -> (String, Vec<glossa::read::DocImage>) {
+    let out = glossa::tools::read(idx, graph, path, n, trace);
     (out.text, out.images)
 }
 
@@ -65,7 +66,7 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let n = args.get("n").and_then(parse_n).unwrap_or(0);
-            let (text, imgs) = run_read(idx, path, n, trace);
+            let (text, imgs) = run_read(idx, graph, path, n, trace);
             (text, Vec::new(), imgs)
         }
         "grep" => {
@@ -89,7 +90,7 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
             let node = args.get("node").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
             let path = args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
             let n = args.get("n").and_then(parse_n);
-            let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, node, path, n, spec, trace), None => "(graph unavailable)".to_string() };
+            let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, node, path, n, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
         "resolve" => {
@@ -191,10 +192,10 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
         let trace = TraceLog::disabled();
-        let path = dir.path().join("p.md").to_string_lossy().to_string();
+        let path = "p.md".to_string(); // canonical key: corpus-root-relative
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out = glossa::tools::neighbors(&idx, &g, None, Some(&path), Some(1), &glossa::tools::ChainSpec::default(), &trace);
+        let mcp_out = glossa::tools::neighbors(&idx, &g, None, Some(&path), Some(1), &trace);
         // Eval path: dispatch through exec().
         let eval_out = exec("neighbors", &json!({"path": path, "n": 1}), &idx, Some(&g), &glossa::tools::ChainSpec::default(), &trace).0;
 

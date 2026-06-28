@@ -313,11 +313,12 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
-    #[tool(description = "Read a document chunk by its number `n` — the `[#n]` from a search/grep result (for PDFs, the page number). Returns the chunk's full text plus the previous/next chunk numbers for context expansion. If `n` is out of range, the reply states the document's valid chunk range.")]
+    #[tool(description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). Returns the chunk's full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let out = crate::tools::read(&idx, &a.path, a.n as u64, &self.trace);
+        let g = GraphStore::open(&self.root).ok();
+        let out = crate::tools::read(&idx, g.as_ref(), &a.path, a.n as u64, &self.trace);
         let mut content = vec![Content::text(out.text)];
         if a.include_images.unwrap_or(true) {
             for img in out.images {
@@ -342,8 +343,7 @@ impl GlossaServer {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, a.node.as_deref(), a.path.as_deref(), a.n, &spec, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, a.node.as_deref(), a.path.as_deref(), a.n, &self.trace))]))
     }
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
@@ -479,7 +479,7 @@ mod tests {
         std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
-        let path = dir.path().join("d.md").to_string_lossy().to_string();
+        let path = "d.md".to_string(); // canonical key: corpus-root-relative
 
         let out = srv.read(Parameters(ReadArgs { path, n: 1, include_images: Some(false) })).await.unwrap();
         let text = format!("{:?}", out);

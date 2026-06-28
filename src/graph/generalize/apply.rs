@@ -36,9 +36,6 @@ pub struct Opts {
     /// outweighs the dedup gain. Both ratios are corpus-independent (unlike absolute BM25), so these
     /// defaults port across deployments — tune on real data, but `0.3 / 0.7` is the safe starting point.
     pub merge_bm25_min_ratio: f64,
-    /// Edge type whose target chunk is a reasoning node's evidence anchor (shared-evidence merge).
-    /// Sourced from the ontology's `[reasoning].mentions` (was a hardcoded "MENTIONS").
-    pub mentions_type: String,
     /// Transitive-closure composition rules `(a, b, result)`, from `[reasoning].closure`.
     pub closure_rules: Vec<(String, String, String)>,
     /// Structural (never-reasoning) types excluded from merge/similar, from `[reasoning].structural`.
@@ -62,7 +59,6 @@ impl Opts {
             bm25_min_ratio: 0.3,
             bm25_top_k: 5,
             merge_bm25_min_ratio: 0.7,
-            mentions_type: "MENTIONS".into(),
             closure_rules: vec![],
             structural: ["Document", "Section", "Term", "Topic"]
                 .iter()
@@ -80,7 +76,6 @@ impl Opts {
     /// stays false — callers opt in (CLI `--prune-incomplete`).
     pub fn from_ontology(ont: &Ontology, now: u64) -> Self {
         Opts {
-            mentions_type: ont.mentions().to_string(),
             closure_rules: ont.closure_rules(),
             structural: ont.structural(),
             spines: ont.spines(),
@@ -154,7 +149,7 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         let anchors: Vec<(String, String)> = g
             .all_edges()?
             .into_iter()
-            .filter(|e| e.edge_type == opts.mentions_type && reasoning(&e.from))
+            .filter(|e| e.edge_type == crate::graph::MENTIONS && reasoning(&e.from))
             .map(|e| (e.from, e.to))
             .collect();
         // Merge candidates from two strong near-dup signals, both restricted to SAME type (never

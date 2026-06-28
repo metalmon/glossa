@@ -1,7 +1,7 @@
 use crate::index::multilang::{default_detector, multilang_analyzer};
 use crate::model::Chunk;
 use anyhow::Context;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING};
@@ -21,6 +21,9 @@ pub struct Fields {
 pub struct DocIndex {
     pub index: Index,
     pub fields: Fields,
+    /// Absolute corpus root — the anchor that turns a stored relative doc key back into a real file
+    /// path (`doc_file`). Set once at open; doc keys are always relative to it.
+    pub root: PathBuf,
     /// Long-lived reader, reused across every search/read_chunk. Building a reader reopens the
     /// segments, so doing it once per call (rather than per query) is what made repeated tool
     /// calls on a shared index pay an open cost each time. Refreshed after writes via reload().
@@ -42,8 +45,28 @@ fn build_schema() -> (Schema, Fields) {
     (sb.build(), Fields { body, path, location, file_type, ord })
 }
 
-fn index_dir_path(dir: &Path) -> std::path::PathBuf {
+fn index_dir_path(dir: &Path) -> PathBuf {
     dir.join(".glossa").join("index")
+}
+
+/// The absolute corpus root — the single anchor for relative doc keys. Canonicalized so that `.`,
+/// `kb-test` and `E:\…\kb-test` all resolve to the same root (the `\\?\` verbatim prefix Windows
+/// adds is stripped so `root.join(rel)` stays a clean path).
+pub fn abs_root(dir: &Path) -> PathBuf {
+    match std::fs::canonicalize(dir) {
+        Ok(p) => {
+            let s = p.to_string_lossy();
+            PathBuf::from(s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or_else(|| s.into_owned()))
+        }
+        Err(_) => dir.to_path_buf(),
+    }
+}
+
+/// A document's canonical key: its path RELATIVE to the corpus root. This is the ONE form stored in
+/// the index and the graph; `DocIndex::doc_file` turns it back into a real file path. Built once,
+/// at the walk boundary, so the stored key never depends on how the corpus was addressed.
+pub fn rel_key(root: &Path, abs: &Path) -> String {
+    abs.strip_prefix(root).unwrap_or(abs).to_string_lossy().to_string()
 }
 
 impl DocIndex {
@@ -60,7 +83,13 @@ impl DocIndex {
             .tokenizers()
             .register("multilang", multilang_analyzer(default_detector()));
         let reader = index.reader()?;
-        Ok(DocIndex { index, fields, reader })
+        Ok(DocIndex { index, fields, root: abs_root(dir), reader })
+    }
+
+    /// Turn a stored (corpus-relative) doc key back into the real file path under the corpus root.
+    /// The single place the system maps a key to a file — no path joining is scattered elsewhere.
+    pub fn doc_file(&self, rel: &str) -> PathBuf {
+        self.root.join(rel)
     }
 }
 
@@ -459,8 +488,9 @@ pub struct Delta {
 
 pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
     let mut d = Delta::default();
-    crate::walk::walk_files(dir, None, true, &mut |path| {
-        let p = path.to_string_lossy().to_string();
+    let root = abs_root(dir);
+    crate::walk::walk_files(&root, None, true, &mut |path| {
+        let p = rel_key(&root, path);
         let sig = match file_sig(path) {
             Ok(s) => s,
             Err(_) => return Ok(()),
@@ -536,9 +566,9 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let mut next = Manifest::default();
 
     let mut links: Vec<(String, String)> = Vec::new();
-    eprintln!("indexing files under {}...", dir.display());
-    crate::walk::walk_files(dir, None, true, &mut |path| {
-        let path_str = path.to_string_lossy().to_string();
+    eprintln!("indexing files under {}...", idx.root.display());
+    crate::walk::walk_files(&idx.root, None, true, &mut |path| {
+        let path_str = rel_key(&idx.root, path);
         let sig = match file_sig(path) {
             Ok(s) => s,
             Err(_) => return Ok(()),
@@ -559,7 +589,10 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         // Index/graph write errors are intentionally not propagated here: one bad chunk must not
         // abort the whole run (matches the prior per-file behavior). The file is still recorded
         // in the manifest; a failed write is corrected on the next `reindex`.
-        crate::extract::extract_file(path, &mut |c| {
+        crate::extract::extract_file(path, &mut |mut c: Chunk| {
+            // Canonicalize the chunk to the corpus-relative key here, at the single indexing
+            // boundary, so the index, the structural graph and section ids all speak ONE form.
+            c.doc_path = PathBuf::from(&path_str);
             if !doc_written {
                 let _ = crate::graph::build::build_document(&graph, &path_str, sig);
                 doc_written = true;
@@ -600,15 +633,16 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
     }
     // Cross-document REFERENCES: resolve collected link targets against indexed documents.
-    let mut by_canon: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+    // Doc keys are corpus-relative, so resolve each to a real file through the corpus root anchor.
+    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
     for p in next.files.keys() {
-        if let Ok(c) = std::fs::canonicalize(p) {
+        if let Ok(c) = std::fs::canonicalize(idx.root.join(p)) {
             by_canon.insert(c, p.clone());
         }
     }
     for (src, target) in &links {
-        let src_dir = std::path::Path::new(src).parent().unwrap_or_else(|| std::path::Path::new("."));
-        if let Ok(canon) = std::fs::canonicalize(src_dir.join(target)) {
+        let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
+        if let Ok(canon) = std::fs::canonicalize(idx.root.join(src_dir).join(target)) {
             if let Some(dst) = by_canon.get(&canon) {
                 // Only link to a real Document node — a file with no extractable chunks is in
                 // `next.files` but never got a node (build_document fires on the first chunk).
@@ -660,7 +694,7 @@ mod incremental_tests {
         std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n## C\nbody c\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        let p = dir.path().join("a.md").to_string_lossy().to_string();
+        let p = "a.md".to_string(); // canonical key: corpus-root-relative
         let a = section_id(&p, "A");
         let ab = section_id(&p, "A > B");
         let ac = section_id(&p, "A > C");
@@ -680,8 +714,8 @@ mod incremental_tests {
         std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        let a = dir.path().join("a.md").to_string_lossy().to_string();
-        let b = dir.path().join("b.md").to_string_lossy().to_string();
+        let a = "a.md".to_string(); // canonical keys: corpus-root-relative
+        let b = "b.md".to_string();
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
         assert!(na.contains(&b), "a.md REFERENCES b.md: {na:?}");
         assert!(!na.iter().any(|n| n.contains("x.com")), "external URL is not a REFERENCES edge: {na:?}");
