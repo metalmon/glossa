@@ -353,6 +353,33 @@ struct GraphUpdateNode {
 struct GraphUpdateArgs {
     #[serde(default)]
     nodes: Vec<GraphUpdateNode>,
+    // The model commonly sends a SINGLE update FLAT — {label, new_label, new_type} — instead of
+    // wrapping it in `nodes`. Accept that shape too rather than silently updating nothing.
+    #[serde(default)]
+    #[schemars(description = "single-update shortcut: current label of the node to edit (alternative to `nodes`)")]
+    label: Option<String>,
+    #[serde(default)]
+    new_label: Option<String>,
+    #[serde(default)]
+    new_type: Option<String>,
+}
+
+impl GraphUpdateArgs {
+    /// Node updates from either accepted shape: the canonical `nodes: [...]`, or a single flat
+    /// `{label, new_label?, new_type?}`. Empty only when neither was provided.
+    fn into_updates(self) -> Vec<crate::graph::agent::NodeUpdate> {
+        use crate::graph::agent::NodeUpdate;
+        if !self.nodes.is_empty() {
+            self.nodes
+                .into_iter()
+                .map(|n| NodeUpdate { label: n.label, new_label: n.new_label, new_type: n.new_type })
+                .collect()
+        } else if let Some(label) = self.label {
+            vec![NodeUpdate { label, new_label: self.new_label, new_type: self.new_type }]
+        } else {
+            vec![]
+        }
+    }
 }
 
 #[tool_router]
@@ -446,11 +473,7 @@ impl GlossaServer {
     #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
     async fn graph_update(&self, Parameters(a): Parameters<GraphUpdateArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ups: Vec<crate::graph::agent::NodeUpdate> = a.nodes
-            .into_iter()
-            .map(|n| crate::graph::agent::NodeUpdate { label: n.label, new_label: n.new_label, new_type: n.new_type })
-            .collect();
-        let msg = crate::graph::ops::graph_update(&g, ups);
+        let msg = crate::graph::ops::graph_update(&g, a.into_updates());
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
@@ -525,6 +548,29 @@ mod tests {
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].label, "a");
         assert!(a.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_update_args_accept_nested_and_flat() {
+        // canonical nested shape
+        let nested: GraphUpdateArgs =
+            serde_json::from_str(r#"{"nodes":[{"label":"old","new_label":"new","new_type":"Resolution"}]}"#).unwrap();
+        let u = nested.into_updates();
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].label, "old");
+        assert_eq!(u[0].new_label.as_deref(), Some("new"));
+
+        // FLAT shape the model commonly sends — must be accepted, not silently dropped
+        let flat: GraphUpdateArgs =
+            serde_json::from_str(r#"{"label":"old","new_label":"new","new_type":"Resolution"}"#).unwrap();
+        let u = flat.into_updates();
+        assert_eq!(u.len(), 1, "a flat single update must yield one NodeUpdate");
+        assert_eq!(u[0].label, "old");
+        assert_eq!(u[0].new_type.as_deref(), Some("Resolution"));
+
+        // genuinely empty → no updates (ops layer reports the clear message)
+        let empty: GraphUpdateArgs = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(empty.into_updates().is_empty());
     }
 
     #[tokio::test]

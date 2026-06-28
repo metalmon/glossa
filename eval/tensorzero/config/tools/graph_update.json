@@ -31,6 +31,28 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "label": {
+      "default": null,
+      "description": "single-update shortcut: current label of the node to edit (alternative to `nodes`)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "new_label": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "new_type": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "nodes": {
       "items": {
         "$ref": "#/$defs/GraphUpdateNode"
