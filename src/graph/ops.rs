@@ -383,6 +383,13 @@ pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, ed
 /// Edit existing reasoning nodes in place — rename label and/or change type — by current label.
 /// The node id and all its edges are preserved. Returns a human-readable result string.
 pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
+    if nodes.is_empty() {
+        return "updated 0 nodes — no update received. graph_update takes \
+                {\"nodes\":[{\"label\":\"…\",\"new_label\":\"…\",\"new_type\":\"…\"}]} \
+                (a single flat {\"label\":\"…\",\"new_label\":\"…\"} is also accepted). \
+                Pass the node's current label and what to change."
+            .to_string();
+    }
     match apply_update(g, nodes) {
         Ok((n, notes)) => {
             let mut m = format!("updated {n} nodes");
@@ -632,6 +639,18 @@ strict = true
             "message clearly names the problem: {}",
             out.message
         );
+    }
+
+    #[test]
+    fn graph_update_empty_input_explains_the_shape() {
+        // The model sometimes sends a shape the handler parses to zero updates (the FLAT-vs-nodes
+        // mismatch). Instead of a silent "updated 0 nodes", say what graph_update expects.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let msg = graph_update(&g, vec![]);
+        assert!(msg.contains("updated 0 nodes"), "{msg}");
+        assert!(msg.contains("no update received"), "must explain the empty case: {msg}");
+        assert!(msg.contains("\"nodes\""), "must show the expected shape: {msg}");
     }
 
     /// Clear feedback: delete/update report references that matched nothing instead of a silent

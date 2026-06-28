@@ -176,10 +176,19 @@ pub fn run_enrich(
                 }
                 let mut parse_errs: Vec<String> = Vec::new();
                 let mut ups: Vec<NodeUpdate> = Vec::new();
-                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
-                    match serde_json::from_value::<UpdateNodeArg>(n.clone()) {
+                if let Some(arr) = args.get("nodes").and_then(|v| v.as_array()) {
+                    for (i, n) in arr.iter().enumerate() {
+                        match serde_json::from_value::<UpdateNodeArg>(n.clone()) {
+                            Ok(u) => ups.push(NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type }),
+                            Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                        }
+                    }
+                } else if args.get("label").is_some() {
+                    // The model sent a single update FLAT ({label, new_label, new_type}) instead of
+                    // wrapping it in nodes[] — accept it rather than silently updating nothing.
+                    match serde_json::from_value::<UpdateNodeArg>(args.clone()) {
                         Ok(u) => ups.push(NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type }),
-                        Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                        Err(e) => parse_errs.push(format!("flat update: {e}")),
                     }
                 }
                 if !parse_errs.is_empty() {
