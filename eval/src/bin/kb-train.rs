@@ -66,68 +66,46 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
-    /// Optimize retrieval against the LIVE graph: tail reasoning nodes, score recall@k + select.
+    /// GEPA-optimize the `select` prompt against a dumped `select.jsonl`: reflect on the failures of
+    /// the local model with a cloud mutator LM, keep prompts that beat their parent (Pareto frontier).
     Optimize {
-        /// Corpus root (live graph + index). Read concurrently with `enrich` (SQLite WAL).
-        #[arg(long, default_value = "kb-test")]
-        work: PathBuf,
-        /// TZ gateway base URL (OpenAI-compatible endpoint used for the select call).
+        /// The select dataset produced by `kb-train dump`.
+        #[arg(long, default_value = "select.jsonl")]
+        select: PathBuf,
+        /// File to write the best prompt found into.
+        #[arg(long, default_value = "select.prompt.txt")]
+        out: PathBuf,
+        /// Local gateway (OpenAI-compat) for the per-case select calls.
         #[arg(long, default_value = "http://localhost:3000")]
         gateway: String,
-        /// Model id for the select step (gateway OpenAI-compat).
+        /// Model id for the select step.
         #[arg(long, default_value = "tensorzero::model_name::qwen")]
         model: String,
-        /// search top-k.
-        #[arg(long, default_value_t = 10)]
-        k: usize,
-        /// seconds to wait before re-polling the graph for new nodes.
-        #[arg(long, default_value_t = 20)]
-        poll_secs: u64,
-        /// stop after this many consecutive idle polls (no new nodes).
-        #[arg(long, default_value_t = 10)]
-        idle_stop: u32,
-        /// process the current nodes once and exit (no tailing).
-        #[arg(long)]
-        once: bool,
+        /// OpenAI-compatible endpoint for the reflection/mutator LM. Defaults to the local TZ
+        /// gateway, which reaches OpenRouter with its own key and logs the call as a TZ inference.
+        #[arg(long, default_value = "http://localhost:3000/openai/v1")]
+        mutator_endpoint: String,
+        /// Reflection model id (low volume, high leverage — a strong reasoning model).
+        #[arg(long, default_value = "tensorzero::model_name::deepseek_r1")]
+        mutator_model: String,
+        /// Env var holding the mutator endpoint API key (unset when going through the gateway —
+        /// the gateway holds the OpenRouter key).
+        #[arg(long, default_value = "OPENROUTER_API_KEY")]
+        mutator_key_env: String,
+        /// Fraction of examples held out for validation.
+        #[arg(long, default_value_t = 0.3)]
+        val_frac: f64,
+        /// Number of reflection iterations.
+        #[arg(long, default_value_t = 6)]
+        budget: usize,
+        /// How many failures to show the mutator per reflection.
+        #[arg(long, default_value_t = 5)]
+        minibatch: usize,
     },
 }
 
-/// First run of ASCII digits in a string (e.g. "[#45]" / "45" / "chunk 45" -> 45).
-fn first_int(s: &str) -> Option<u64> {
-    let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
-/// The current select-prompt being evaluated (v1 baseline; v2 will let the mutator evolve it).
+/// The seed select-prompt GEPA starts its reflection from (also the production select baseline).
 const SELECT_PROMPT: &str = "You are given a support question and numbered search results from a knowledge base. Exactly one result contains the answer. Reply with ONLY that result's number (the integer shown after `#`). No words, no punctuation.";
-
-fn hits_block(hits: &[RankedHit]) -> String {
-    hits.iter()
-        .map(|h| {
-            let label = if h.location.starts_with("p.") { h.file_type.as_str() } else { h.location.as_str() };
-            format!("[#{}] {} · {} · {}", h.ord, h.path, label, h.snippet)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Ask the model to pick the chunk number that answers the question, given the hits. Returns the
-/// chosen ord (None on parse/transport failure — counted as a miss).
-fn select_call(gateway: &str, model: &str, question: &str, hits_text: &str) -> Option<u64> {
-    let url = format!("{}/openai/v1/chat/completions", gateway.trim_end_matches('/'));
-    let body = json!({
-        "model": model, "temperature": 0.0,
-        "messages": [
-            {"role": "system", "content": SELECT_PROMPT},
-            {"role": "user", "content": format!("Question: {question}\n\nResults:\n{hits_text}\n\nWhich result number contains the answer?")}
-        ]
-    });
-    let resp = ureq::post(&url).timeout(Duration::from_secs(120)).set("Content-Type", "application/json").send_string(&body.to_string());
-    let text = resp.ok()?.into_string().ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
-    first_int(content)
-}
 
 /// Quality gate for a training example: is the chunk a node MENTIONS actually ABOUT that node?
 /// Term overlap on the shared tantivy analyzer — at least half the label's distinct (stemmed) terms
@@ -157,10 +135,40 @@ fn main() -> Result<()> {
         Cmd::Dump { work, out, k, poll_secs, idle_stop, once } => {
             run_dump(work, out, k, poll_secs, idle_stop, once)
         }
-        Cmd::Optimize { work, gateway, model, k, poll_secs, idle_stop, once } => {
-            run_optimize(work, gateway, model, k, poll_secs, idle_stop, once)
+        Cmd::Optimize { select, out, gateway, model, mutator_endpoint, mutator_model, mutator_key_env, val_frac, budget, minibatch } => {
+            run_optimize(select, out, gateway, model, mutator_endpoint, mutator_model, mutator_key_env, val_frac, budget, minibatch)
         }
     }
+}
+
+/// Load `select.jsonl` (one JSON example per line) and GEPA-optimize the select prompt against it.
+#[allow(clippy::too_many_arguments)]
+fn run_optimize(
+    select: PathBuf, out: PathBuf, gateway: String, model: String,
+    mutator_endpoint: String, mutator_model: String, mutator_key_env: String,
+    val_frac: f64, budget: usize, minibatch: usize,
+) -> Result<()> {
+    let text = std::fs::read_to_string(&select).with_context(|| format!("read {}", select.display()))?;
+    let examples: Vec<kb_eval::gepa::SelectExample> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .context("parse select.jsonl")?;
+    let mutator_key = std::env::var(&mutator_key_env).ok();
+    if mutator_key.is_none() {
+        println!("warning: ${mutator_key_env} not set — mutator calls will be unauthenticated");
+    }
+    let best = kb_eval::gepa::run(
+        kb_eval::gepa::GepaConfig {
+            gateway, model, mutator_endpoint, mutator_model, mutator_key,
+            val_frac, budget, minibatch, seed_prompt: SELECT_PROMPT.to_string(),
+        },
+        examples,
+    )?;
+    std::fs::write(&out, &best).with_context(|| format!("write {}", out.display()))?;
+    println!("wrote best prompt -> {}", out.display());
+    Ok(())
 }
 
 /// Render the hits a select example must choose among as structured JSON — the SAME fields
@@ -279,84 +287,6 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
         "DONE: kept {nodes_kept} nodes (dropped {dropped_no_gold} no-gold, {dropped_gate} gate)  \
          query={query_written}  select={select_written}  baseline recall@{k}={:.3} ({recall_hit}/{nodes_kept})",
         recall_hit as f64 / nodes_kept.max(1) as f64,
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_optimize(work: PathBuf, gateway: String, model: String, k: usize, poll_secs: u64, idle_stop: u32, once: bool) -> Result<()> {
-    let idx = DocIndex::open_or_create(&work).context("open index")?;
-    let graph = GraphStore::open(&work).context("open graph")?;
-    let ont = Ontology::load_or_default(&work);
-    let structural: HashSet<String> = ont.structural().into_iter().collect();
-    println!("kb-train: tailing {} (mentions='{}', k={}, model={})", work.display(), glossa::graph::MENTIONS, k, model);
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let (mut n, mut recall_hit, mut select_total, mut select_ok) = (0u64, 0u64, 0u64, 0u64);
-    let mut idle = 0u32;
-
-    loop {
-        // Re-query the live graph each poll — WAL means we see the enricher's newly-committed nodes.
-        let nodes = graph.all_nodes().context("all_nodes")?;
-        let mut fresh = 0u64;
-        for node in &nodes {
-            if structural.contains(&node.node_type) || !seen.insert(node.id.clone()) {
-                continue;
-            }
-            fresh += 1;
-            // gold = the (path, location) of every section this node MENTIONS.
-            let mut gold: HashSet<(String, String)> = HashSet::new();
-            for e in graph.outgoing(&node.id).unwrap_or_default() {
-                if e.edge_type == glossa::graph::MENTIONS {
-                    if let Some((p, l)) = e.to.split_once('#') {
-                        gold.insert((p.to_string(), l.to_string()));
-                    }
-                }
-            }
-            if gold.is_empty() {
-                continue; // a node with no evidence anchor can't be a retrieval target
-            }
-            n += 1;
-            let hits = idx.search_filtered(&node.label, k, None, None).unwrap_or_default();
-            // gold ords actually present in the top-k hits
-            let gold_ords: HashSet<u64> =
-                hits.iter().filter(|h| gold.contains(&(h.path.clone(), h.location.clone()))).map(|h| h.ord).collect();
-            if !gold_ords.is_empty() {
-                recall_hit += 1;
-                // select is only meaningful when the gold chunk is in the hits to choose from
-                select_total += 1;
-                if let Some(pick) = select_call(&gateway, &model, &node.label, &hits_block(&hits)) {
-                    if gold_ords.contains(&pick) {
-                        select_ok += 1;
-                    }
-                }
-            }
-            if n % 5 == 0 {
-                println!(
-                    "[{n}] recall@{}={:.2}  select_acc={:.2} ({select_ok}/{select_total})",
-                    k,
-                    recall_hit as f64 / n as f64,
-                    if select_total > 0 { select_ok as f64 / select_total as f64 } else { 0.0 },
-                );
-            }
-        }
-        if once {
-            break;
-        }
-        idle = if fresh == 0 { idle + 1 } else { 0 };
-        println!("[poll] {} reasoning nodes seen (+{fresh}); idle={idle}/{}", seen.len(), idle_stop);
-        if idle >= idle_stop {
-            println!("graph stopped growing — done");
-            break;
-        }
-        std::thread::sleep(Duration::from_secs(poll_secs));
-    }
-
-    println!(
-        "DONE: {n} cases  recall@{}={:.3}  select_acc={:.3} ({select_ok}/{select_total})",
-        k,
-        recall_hit as f64 / n.max(1) as f64,
-        select_ok as f64 / select_total.max(1) as f64,
     );
     Ok(())
 }
