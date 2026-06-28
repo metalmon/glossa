@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-const CORE_NODES: &[&str] = &["Document", "Section", "Term", "Topic"];
+const CORE_NODES: &[&str] = crate::graph::STRUCTURAL_NODES;
 const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
 
 #[derive(Debug, Deserialize, Default)]
@@ -47,9 +47,6 @@ struct RawReasoning {
     /// Transitive-closure composition rules, each `[a, b, result]`.
     #[serde(default)]
     closure: Vec<Vec<String>>,
-    /// Anchor edge from a reasoning node to the structural layer. Defaults to "MENTIONS".
-    #[serde(default)]
-    mentions: Option<String>,
     /// Override of the structural (never-reasoning) types. Defaults to the core nodes.
     #[serde(default)]
     structural: Vec<String>,
@@ -107,11 +104,6 @@ impl Ontology {
             .filter(|r| r.len() == 3)
             .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
             .collect()
-    }
-
-    /// The anchor edge type from a reasoning node to the structural layer. "MENTIONS" when unset.
-    pub fn mentions(&self) -> &str {
-        self.reasoning.mentions.as_deref().unwrap_or("MENTIONS")
     }
 
     /// The structural (never-reasoning) types. Declared override, else the core nodes.
@@ -256,7 +248,6 @@ structural = ["Document", "Section"]
         assert_eq!(spines[0].relations, vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
         assert_eq!(spines[1].anchor, "Task");
         assert_eq!(spines[1].relations, vec!["RESOLVED_BY".to_string()]);
-        assert_eq!(o.mentions(), "MENTIONS");
         assert_eq!(o.structural(), vec!["Document".to_string(), "Section".to_string()]);
     }
 
@@ -306,7 +297,6 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         let o = Ontology::parse(TOML).unwrap(); // TOML has no [reasoning]
         assert!(o.spines().is_empty());
         assert!(o.closure_rules().is_empty());
-        assert_eq!(o.mentions(), "MENTIONS");
         assert_eq!(
             o.structural(),
             vec!["Document", "Section", "Term", "Topic"]
