@@ -21,7 +21,7 @@ use std::sync::{
 };
 
 use crate::backend::glossa_tools;
-use crate::backend::tensorzero::{run_episode, TzTurn};
+use crate::backend::tensorzero::{run_episode, EpisodePolicy, TzTurn};
 
 // High cap — identical to tensorzero.rs MAX_ROUNDS (which is private).
 const MAX_ROUNDS: usize = 50;
@@ -279,7 +279,7 @@ pub fn run_enrich(
         );
 
         // Best-effort per case: a single case failing must not abort the whole enrich pass.
-        match run_episode(chat, &user, exec, MAX_ROUNDS) {
+        match run_episode(chat, &user, exec, MAX_ROUNDS, EpisodePolicy::enrich()) {
             Ok(_) => println!(
                 "  → nodes={} edges={}",
                 nodes_total.load(Ordering::Relaxed),

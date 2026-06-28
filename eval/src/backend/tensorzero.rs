@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 /// Per-turn wall-clock profiling, silent unless `KB_PROF` is set. Used to separate inference vs
 /// tool latency (e.g. it surfaced that proxied inference dominated, then large-PDF `read`).
@@ -18,17 +19,46 @@ pub struct TzTurn {
     pub episode_id: String,
 }
 
-/// Drive a TensorZero episode to a final text answer.
+/// How an episode terminates and whether read-only tool calls are de-duplicated.
+#[derive(Clone, Copy, Default)]
+pub struct EpisodePolicy {
+    /// Terminate ONLY on an explicit `done` tool call (enrich): a text-only turn is no longer an
+    /// ending — the model is nudged to act or to call `done`, so "narrate-then-stop" can't end the
+    /// episode prematurely. When false (answer), a text-only turn IS the final answer, as before.
+    pub stop_on_done: bool,
+    /// Short-circuit a read-only tool call whose (name, args) already ran this episode, returning a
+    /// hint instead of re-executing — breaks the re-read-the-same-page thrash loop.
+    pub dedup_readonly: bool,
+}
+
+impl EpisodePolicy {
+    /// Answer mode: a text-only turn ends the episode; no dedup (keeps eval ≡ prod for answering).
+    pub fn answer() -> Self { Self::default() }
+    /// Enrich mode: an explicit `done` ends the episode; read-only calls are de-duplicated.
+    pub fn enrich() -> Self { Self { stop_on_done: true, dedup_readonly: true } }
+}
+
+/// A read-only retrieval tool whose identical re-call is pure waste (safe to dedup). The mutating /
+/// control tools (graph_*, index/reindex/purge, and `done`) are never deduped.
+fn is_dedupable(name: &str) -> bool {
+    !matches!(
+        name,
+        "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize"
+            | "index" | "reindex" | "purge" | "done"
+    )
+}
+
+/// Drive a TensorZero episode to a final outcome.
 ///
 /// `chat(messages, episode_id)` performs one `/inference` call (episode_id is None on the first turn,
-/// then the id returned by the first turn). When the returned content has `tool_call` blocks, each is
-/// executed via `exec(name, args)` and fed back as a `tool_result` content block; otherwise the
-/// concatenated `text` blocks are the answer.
+/// then the id returned by the first turn). `tool_call` blocks are executed via `exec(name, args)`
+/// and fed back as `tool_result` blocks. Termination + dedup follow `policy` (see `EpisodePolicy`).
 pub fn run_episode<C, X>(
     mut chat: C,
     user_question: &str,
     exec: X,
     max_rounds: usize,
+    policy: EpisodePolicy,
 ) -> anyhow::Result<EpisodeOutcome>
 where
     C: FnMut(&[Value], Option<&str>) -> anyhow::Result<TzTurn>,
@@ -37,6 +67,8 @@ where
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user_question })];
     let mut episode_id: Option<String> = None;
     let mut surfaced_titles: Vec<String> = Vec::new();
+    // (name, args) of read-only calls already executed this episode — backs the dedup guard.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for _ in 0..max_rounds {
         let turn = chat(&messages, episode_id.as_deref())?;
@@ -58,7 +90,28 @@ where
                 .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                 .collect::<Vec<_>>()
                 .join("");
-            return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles });
+            if !policy.stop_on_done {
+                return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles });
+            }
+            // Narrate-then-stop: the model described its next action but emitted no tool call. Don't
+            // end the episode — record what it said and nudge it to act or to signal completion.
+            messages.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }));
+            messages.push(json!({ "role": "user", "content": [{ "type": "text", "text":
+                "You ended a turn without calling a tool. If the reasoning graph for this case is complete (or already present), call `done`. Otherwise issue the tool call you described." }] }));
+            continue;
+        }
+
+        // Explicit completion signal (enrich): the model called `done` → the episode is finished.
+        if policy.stop_on_done {
+            if let Some(done) = tool_calls.iter().find(|c| c.get("name").and_then(|n| n.as_str()) == Some("done")) {
+                let note = done
+                    .get("arguments")
+                    .and_then(|a| a.get("note"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(EpisodeOutcome { answer: note, episode_id, surfaced_titles });
+            }
         }
 
         // Build owned (id, name, args) triples with the raw_arguments fallback applied
@@ -93,24 +146,51 @@ where
             .collect();
         messages.push(json!({ "role": "assistant", "content": tool_call_blocks }));
 
-        // Execute all calls concurrently, collecting results in original call order.
+        // Decide per call: run it, or (dedup) short-circuit an identical read-only call already made
+        // this episode. `seen` is updated now, so duplicates within the SAME turn also collapse.
+        let run_flags: Vec<bool> = calls
+            .iter()
+            .map(|(_, name, args)| {
+                if policy.dedup_readonly && is_dedupable(name) {
+                    seen.insert((name.clone(), args.to_string())) // false if already present → skip
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Execute the to-run calls concurrently; substitute a hint for deduped ones. Order kept.
         let results: Vec<(String, String, String, Vec<String>, Vec<glossa::read::DocImage>)> =
             std::thread::scope(|s| {
-                let handles: Vec<_> = calls
+                let handles: Vec<Option<_>> = calls
                     .iter()
-                    .map(|(id, name, args)| {
-                        s.spawn(|| {
-                            let (result, titles, images) = exec(name, args);
-                            (id.clone(), name.clone(), result, titles, images)
-                        })
+                    .zip(&run_flags)
+                    .map(|((id, name, args), &run)| {
+                        if run {
+                            Some(s.spawn(|| {
+                                let (result, titles, images) = exec(name, args);
+                                (id.clone(), name.clone(), result, titles, images)
+                            }))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 handles
                     .into_iter()
                     .zip(calls.iter())
-                    .map(|(h, (id, name, _args))| h.join().unwrap_or_else(|_| {
-                        (id.clone(), name.clone(), "tool panicked".to_string(), Vec::new(), Vec::new())
-                    }))
+                    .map(|(h, (id, name, _args))| match h {
+                        Some(h) => h.join().unwrap_or_else(|_| {
+                            (id.clone(), name.clone(), "tool panicked".to_string(), Vec::new(), Vec::new())
+                        }),
+                        None => (
+                            id.clone(),
+                            name.clone(),
+                            format!("(skipped) You already called `{name}` with these exact arguments this episode; the result is unchanged. Use what you already have, look elsewhere, or call `done`."),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    })
                     .collect()
             });
 
@@ -242,7 +322,7 @@ impl AgentBackend for TensorZeroBackend {
 
         let user = prompt::user_prompt(q);
         let q0 = std::time::Instant::now();
-        let outcome = run_episode(chat, &user, exec, MAX_ROUNDS)?;
+        let outcome = run_episode(chat, &user, exec, MAX_ROUNDS, EpisodePolicy::answer())?;
         prof!("[prof] --- episode loop {}ms ---", q0.elapsed().as_millis());
         let pred = prompt::parse_answer(&outcome.answer);
 
@@ -422,7 +502,7 @@ mod tests {
              vec!["Meet Corliss Archer".to_string()],
              Vec::new())
         };
-        let out = run_episode(chat, "Question: ...", exec, 8).unwrap();
+        let out = run_episode(chat, "Question: ...", exec, 8, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: Chief of Protocol");
         assert_eq!(out.episode_id.as_deref(), Some("ep1"));
         assert_eq!(out.surfaced_titles, vec!["Meet Corliss Archer".to_string()]);
@@ -435,7 +515,7 @@ mod tests {
             episode_id: "e".into(),
         });
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
-        let out = run_episode(chat, "q", exec, 4).unwrap();
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: yes");
     }
 
@@ -446,7 +526,7 @@ mod tests {
             episode_id: "".into(),
         });
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
-        let out = run_episode(chat, "q", exec, 4).unwrap();
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.episode_id, None, "an empty episode_id must not become Some(\"\")");
     }
 
@@ -501,7 +581,7 @@ mod tests {
             ("result".to_string(), vec![format!("title-{name}")], Vec::new())
         };
 
-        let out = run_episode(chat, "q", exec, 4).unwrap();
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: done");
 
         // Both execs must have fired.
@@ -566,7 +646,7 @@ mod tests {
             }
         };
         let exec = |_: &str, _: &Value| ("result".to_string(), Vec::new(), Vec::new());
-        let out = run_episode(chat, "q", exec, 4).unwrap();
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: ok");
         let msgs = seen_round2.borrow();
         // [user question, assistant tool_call, user tool_result]
@@ -577,5 +657,80 @@ mod tests {
             json!("{\"path\":\"a.md\",\"n\":8}"),
             "null `arguments` must be replaced by the raw_arguments string"
         );
+    }
+
+    #[test]
+    fn enrich_stops_on_done_and_never_executes_it() {
+        let chat = |_: &[Value], _: Option<&str>| Ok(TzTurn {
+            content: vec![json!({ "type": "tool_call", "id": "d1", "name": "done", "arguments": { "note": "chain written" } })],
+            episode_id: "e".into(),
+        });
+        let exec = |name: &str, _: &Value| {
+            assert_ne!(name, "done", "`done` is a control signal — it must be intercepted, never executed");
+            (String::new(), Vec::new(), Vec::new())
+        };
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::enrich()).unwrap();
+        assert_eq!(out.answer, "chain written", "done's note becomes the outcome");
+    }
+
+    #[test]
+    fn enrich_dedups_identical_readonly_call() {
+        use std::cell::RefCell;
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        let last: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+        // Rounds 1 & 2 issue the SAME read(a.md, 1); round 3 finishes with `done`.
+        let chat = |msgs: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            match *r {
+                1 | 2 => Ok(TzTurn {
+                    content: vec![json!({ "type": "tool_call", "id": "c", "name": "read", "arguments": { "path": "a.md", "n": 1 } })],
+                    episode_id: "e".into(),
+                }),
+                _ => {
+                    *last.borrow_mut() = msgs.to_vec();
+                    Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} })], episode_id: "e".into() })
+                }
+            }
+        };
+        let reads = Arc::new(Mutex::new(0usize));
+        let rc = Arc::clone(&reads);
+        let exec = move |name: &str, _: &Value| {
+            if name == "read" { *rc.lock().unwrap() += 1; }
+            ("page text".to_string(), Vec::new(), Vec::new())
+        };
+        run_episode(chat, "q", exec, 8, EpisodePolicy::enrich()).unwrap();
+        assert_eq!(*reads.lock().unwrap(), 1, "an identical read must execute only once");
+        // the 2nd identical read fed back the dedup hint, not a fresh execution.
+        let msgs = last.borrow();
+        let hinted = msgs.iter().any(|m| m["content"][0]["result"].as_str().map(|s| s.contains("(skipped)")).unwrap_or(false));
+        assert!(hinted, "the deduped call must return the (skipped) hint");
+    }
+
+    #[test]
+    fn enrich_text_only_turn_does_not_end_episode() {
+        use std::cell::RefCell;
+        let round = RefCell::new(0usize);
+        let last: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+        let chat = |msgs: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                // narrate-then-stop: prose, no tool call.
+                Ok(TzTurn { content: vec![json!({ "type": "text", "text": "Let me read the chunk first." })], episode_id: "e".into() })
+            } else {
+                *last.borrow_mut() = msgs.to_vec();
+                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } })], episode_id: "e".into() })
+            }
+        };
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::enrich()).unwrap();
+        assert_eq!(out.answer, "ok");
+        assert!(*round.borrow() >= 2, "a text-only turn must NOT end an enrich episode");
+        let msgs = last.borrow();
+        let nudged = msgs.iter().any(|m| m["role"] == "user"
+            && m["content"][0]["text"].as_str().map(|s| s.contains("without calling a tool")).unwrap_or(false));
+        assert!(nudged, "a nudge must follow a text-only enrich turn");
     }
 }

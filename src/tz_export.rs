@@ -144,6 +144,16 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
             .with_context(|| format!("write {}", out.display()))?;
     }
 
+    // Runtime control tool `done` — NOT an MCP tool: the enrich loop intercepts it to end the
+    // episode (explicit completion signal), so it never reaches glossa. Write its schema here so
+    // the gateway can advertise it to the model alongside the real tools.
+    let done_json = tools_dir.join("done.json");
+    std::fs::write(
+        &done_json,
+        "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"note\": {\n      \"type\": \"string\",\n      \"description\": \"One short line: the chain you wrote, or why the case needed nothing.\"\n    }\n  }\n}\n",
+    )
+    .with_context(|| format!("write {}", done_json.display()))?;
+
     // 4. Build the [tools.*] TOML blocks (full set).
     let mut blocks = String::new();
     for (i, tool) in full_tools.iter().enumerate() {
@@ -163,13 +173,22 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     if !blocks.ends_with('\n') {
         blocks.push('\n');
     }
+    // Declare the runtime `done` tool so the gateway advertises it (referenced by the enrich list).
+    let done_desc = "Signal that the reasoning graph for this case is complete — the chain is written with a MENTIONS anchor, or `glossary` showed it already exists. Calling `done` ends the episode. Give a one-line `note`.";
+    blocks.push_str(&format!(
+        "\n[tools.done]\ndescription = {}\nparameters = \"tools/done.json\"\n",
+        toml_quote(done_desc),
+    ));
 
     // 5. Build the tool-list line (reader set — the answer_hotpot function).
     let names: Vec<String> = reader_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
     let tool_list = format!("tools = [{}]\n", names.join(", "));
 
-    // 5b. Build the tool-list line (editor set — the enrich function).
-    let enrich_names: Vec<String> = editor_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    // 5b. Build the tool-list line (editor set — the enrich function). Append the runtime `done`
+    // tool: enrich-only (the answer/reader list above does NOT get it — its completion is a text
+    // answer, while the enricher signals completion explicitly).
+    let mut enrich_names: Vec<String> = editor_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    enrich_names.push("\"done\"".to_string());
     let enrich_list = format!("tools = [{}]\n", enrich_names.join(", "));
 
     // 7. Splice both regions into tensorzero.toml.
@@ -316,6 +335,18 @@ type = \"boolean\"\n";
                 && toml_out.contains("# <<< GENERATED ENRICH TOOL LIST"),
             "enrich list markers missing"
         );
+
+        // (g) the runtime `done` tool is declared and is ENRICH-ONLY: present in the enrich list,
+        // absent from the answer (reader) list.
+        assert!(toml_out.contains("[tools.done]"), "missing runtime [tools.done] block");
+        let enrich_region = toml_out
+            .split("# >>> GENERATED ENRICH TOOL LIST").nth(1).unwrap()
+            .split("# <<< GENERATED ENRICH TOOL LIST").next().unwrap();
+        assert!(enrich_region.contains("\"done\""), "enrich list missing runtime 'done'");
+        let answer_region = toml_out
+            .split("# >>> GENERATED TOOL LIST").nth(1).unwrap()
+            .split("# <<< GENERATED TOOL LIST").next().unwrap();
+        assert!(!answer_region.contains("\"done\""), "answer list must NOT carry 'done'");
     }
 
     #[test]
