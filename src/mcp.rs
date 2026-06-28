@@ -151,6 +151,40 @@ impl GlossaServer {
         let _ = FileExt::unlock(&_lock);
     }
 
+    /// Readiness probe: the index and graph at `root` can be opened (the server can serve). Backs the
+    /// streamable-http `/ready` endpoint.
+    pub fn readiness(&self) -> bool {
+        crate::index::store::DocIndex::open_or_create(&self.root).is_ok()
+            && GraphStore::open(&self.root).is_ok()
+    }
+
+    /// Prometheus text-exposition metrics for `/metrics`. Cheap, computed at scrape time: index size,
+    /// graph size, and whether the derived layer is stale. (Request-rate/latency are left to the HTTP
+    /// access log / gateway.)
+    pub fn metrics_text(&self) -> String {
+        let chunks = crate::index::store::DocIndex::open_or_create(&self.root)
+            .ok()
+            .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()))
+            .unwrap_or(0);
+        let (nodes, edges) = match GraphStore::open(&self.root) {
+            Ok(g) => (g.node_count().unwrap_or(0), g.edge_count().unwrap_or(0)),
+            Err(_) => (0, 0),
+        };
+        let dirty = self.dirty.load(Ordering::Relaxed) as u8;
+        format!(
+            "# HELP glossa_up 1 if the server is running\n\
+             # TYPE glossa_up gauge\nglossa_up 1\n\
+             # HELP glossa_index_chunks Indexed chunks in the tantivy index\n\
+             # TYPE glossa_index_chunks gauge\nglossa_index_chunks {chunks}\n\
+             # HELP glossa_graph_nodes Knowledge-graph nodes\n\
+             # TYPE glossa_graph_nodes gauge\nglossa_graph_nodes {nodes}\n\
+             # HELP glossa_graph_edges Knowledge-graph edges\n\
+             # TYPE glossa_graph_edges gauge\nglossa_graph_edges {edges}\n\
+             # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
+             # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n"
+        )
+    }
+
     /// Background maintenance: after indexing changes settle (debounce), run ONE `generalize` pass to
     /// refresh the derived layer — off the read hot path, never per-file. Spawned once by `kb mcp`.
     pub async fn maintenance_loop(self) {
@@ -563,6 +597,20 @@ mod tests {
             g.node_meta("sym:x").unwrap().is_some(),
             "generalize pass populated node_meta (community/centrality) for the reasoning node"
         );
+    }
+
+    #[test]
+    fn readiness_true_and_metrics_render() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nhello world\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        assert!(srv.readiness(), "index + graph open → ready");
+        let m = srv.metrics_text();
+        assert!(m.contains("glossa_up 1"), "metrics: {m}");
+        assert!(m.contains("glossa_index_chunks"), "metrics: {m}");
+        assert!(m.contains("glossa_graph_nodes"), "metrics: {m}");
+        assert!(m.contains("glossa_graph_dirty"), "metrics: {m}");
     }
 
     #[test]
