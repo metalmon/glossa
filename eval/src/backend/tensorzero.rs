@@ -1,5 +1,11 @@
 use serde_json::{json, Value};
 
+/// Per-turn wall-clock profiling, silent unless `KB_PROF` is set. Used to separate inference vs
+/// tool latency (e.g. it surfaced that proxied inference dominated, then large-PDF `read`).
+macro_rules! prof {
+    ($($a:tt)*) => { if std::env::var_os("KB_PROF").is_some() { eprintln!($($a)*); } };
+}
+
 pub struct EpisodeOutcome {
     pub answer: String,
     pub episode_id: Option<String>,
@@ -178,6 +184,7 @@ impl AgentBackend for TensorZeroBackend {
         // is sent on every turn, so all inferences group into one episode (telemetry + feedback).
         let eid = backdated_episode_id(30);
         let chat = |messages: &[Value], _episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
+            let t0 = std::time::Instant::now();
             let mut body = json!({ "function_name": function, "input": { "messages": messages }, "episode_id": eid });
             if tags.as_object().is_some_and(|o| !o.is_empty()) {
                 body["tags"] = tags.clone();
@@ -214,6 +221,7 @@ impl AgentBackend for TensorZeroBackend {
             }
             let episode_id = v.get("episode_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let content = v.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            prof!("[prof] infer {}ms  ctx_msgs={}", t0.elapsed().as_millis(), messages.len());
             Ok(TzTurn { content, episode_id })
         };
 
@@ -225,10 +233,17 @@ impl AgentBackend for TensorZeroBackend {
         // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/neighbors render
         // the reasoning chain identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(work));
-        let exec = |name: &str, args: &Value| crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
+        let exec = |name: &str, args: &Value| {
+            let t = std::time::Instant::now();
+            let r = crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
+            prof!("[prof] tool {name} {}ms", t.elapsed().as_millis());
+            r
+        };
 
         let user = prompt::user_prompt(q);
+        let q0 = std::time::Instant::now();
         let outcome = run_episode(chat, &user, exec, MAX_ROUNDS)?;
+        prof!("[prof] --- episode loop {}ms ---", q0.elapsed().as_millis());
         let pred = prompt::parse_answer(&outcome.answer);
 
         // Post Track-B feedback for this episode (best-effort; never fail the run on feedback error).
@@ -251,7 +266,10 @@ impl AgentBackend for TensorZeroBackend {
             self.feedback(&eid, "recall_at_10", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 10)));
             self.feedback(&eid, "recall_at_20", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 20)));
             self.feedback(&eid, "mrr", json!(crate::score::mrr(&ranked, &q.supporting_titles)));
-            if let Some(j) = self.judge_score(&q.question, &q.answer, &pred) {
+            let tj = std::time::Instant::now();
+            let j = self.judge_score(&q.question, &q.answer, &pred);
+            prof!("[prof] judge {}ms", tj.elapsed().as_millis());
+            if let Some(j) = j {
                 self.feedback(&eid, "judge", json!(j));
             }
         }
