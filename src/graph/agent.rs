@@ -148,6 +148,30 @@ fn resolve_node_ref(g: &GraphStore, reference: &str) -> anyhow::Result<Vec<Strin
         .collect())
 }
 
+/// On a no-match, suggest the closest existing node labels — fuzzy and inflection-tolerant via the
+/// BM25 node index (`GraphStore::resolve`), so the caller can fix a typo or rephrase instead of
+/// looping on a label that doesn't exist (e.g. delete "питаниЕ…" → "did you mean: «питаниЯ…»").
+/// Returns "" when nothing is close. The exact-normalized label is excluded (it would have matched).
+fn did_you_mean(g: &GraphStore, reference: &str) -> String {
+    let norm = crate::graph::store::normalize_label(reference);
+    let mut labels: Vec<String> = Vec::new();
+    for id in g.resolve(reference).unwrap_or_default() {
+        if let Ok(Some(node)) = g.get_node(&id) {
+            if crate::graph::store::normalize_label(&node.label) != norm && !labels.contains(&node.label) {
+                labels.push(node.label);
+            }
+        }
+        if labels.len() == 3 {
+            break;
+        }
+    }
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" — did you mean: {}?", labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", "))
+    }
+}
+
 pub fn apply_delete(
     g: &GraphStore,
     node_refs: Vec<String>,
@@ -160,7 +184,7 @@ pub fn apply_delete(
     for reference in &node_refs {
         let ids = resolve_node_ref(g, reference)?;
         if ids.is_empty() {
-            notes.push(format!("node \"{reference}\" matched nothing"));
+            notes.push(format!("node \"{reference}\" matched nothing{}", did_you_mean(g, reference)));
         }
         for id in ids {
             total += g.delete_node(&id)?;
@@ -210,7 +234,7 @@ pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<(u
         // share a label (e.g. same label, different node_type) would give them all the new label and
         // corrupt label identity — skip those (and SAY SO) rather than mangle the graph.
         match ids.len() {
-            0 => notes.push(format!("node \"{}\" matched nothing — nothing renamed", u.label)),
+            0 => notes.push(format!("node \"{}\" matched nothing — nothing renamed{}", u.label, did_you_mean(g, &u.label))),
             1 => total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?,
             n => notes.push(format!(
                 "node \"{}\" is ambiguous ({n} nodes share that label) — rename skipped to avoid corrupting identity",
@@ -370,5 +394,23 @@ strict = true
         let (removed, _) = apply_delete(&g, vec!["sym:test".into()], vec![]).unwrap();
         assert!(removed > 0, "delete-by-id must remove the node (the bug returned 0)");
         assert!(g.get_node("sym:test").unwrap().is_none(), "node deleted by id");
+    }
+
+    #[test]
+    fn apply_delete_no_match_suggests_closest_label() {
+        // The model deletes an inflected/typo'd label that doesn't exact-match the stored one
+        // (the «питаниЯ» vs «питаниЕ» churn). The note must point it at the real label so it can fix
+        // the call instead of looping. Suggestion comes from the inflection-tolerant BM25 resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        apply_upsert(&g, &ont, vec![node("sym:t", "Symptom", "Тестовый симптом насоса", "t.docx")], vec![], 1).unwrap();
+
+        let (removed, notes) = apply_delete(&g, vec!["Тестовые симптомы насоса".into()], vec![]).unwrap();
+        assert_eq!(removed, 0, "an inflected variant must not match exactly");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("matched nothing"), "note: {}", notes[0]);
+        assert!(notes[0].contains("did you mean"), "a no-match must suggest a fix: {}", notes[0]);
+        assert!(notes[0].contains("Тестовый симптом насоса"), "must name the close existing label: {}", notes[0]);
     }
 }
