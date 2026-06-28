@@ -97,7 +97,8 @@ enum Cmd {
         /// knowledge-base directory (default: nearest indexed root / current dir)
         path: Option<PathBuf>,
     },
-    /// Run the MCP server over stdio (for AI agents), or an MCP-related subcommand.
+    /// Run the MCP server (stdio for a local subprocess, or streamable-http for the network), or an
+    /// MCP-related subcommand.
     Mcp {
         #[command(subcommand)]
         action: Option<McpAction>,
@@ -111,7 +112,26 @@ enum Cmd {
         /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
         #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
+        /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
+        #[arg(long, value_enum, default_value = "stdio", env = "GLOSSA_MCP_TRANSPORT")]
+        transport: McpTransport,
+        /// Bind address for --transport streamable-http.
+        #[arg(long, default_value = "127.0.0.1:8080", env = "GLOSSA_MCP_BIND")]
+        bind: String,
+        /// Extra allowed `Host` header value(s) for streamable-http (DNS-rebind guard). Repeatable.
+        /// Default permits loopback only — set your gateway/public host(s) for a prod deployment.
+        #[arg(long = "allowed-host")]
+        allowed_hosts: Vec<String>,
     },
+}
+
+/// MCP transport for `kb mcp`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum McpTransport {
+    /// Newline-delimited JSON-RPC over stdin/stdout (local subprocess clients).
+    Stdio,
+    /// MCP Streamable HTTP at `<bind>/mcp` (network clients; put a TLS/auth gateway in front).
+    StreamableHttp,
 }
 
 #[derive(Subcommand)]
@@ -218,6 +238,38 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
     if !text.ends_with('\n') {
         println!();
     }
+    Ok(())
+}
+
+/// Serve the MCP server over Streamable HTTP at `<bind>/mcp` (one shared `GlossaServer` across all
+/// sessions). DNS-rebind protection allows loopback by default; pass `--allowed-host` for a gateway/
+/// public host. TLS + auth are expected to be terminated by a reverse proxy in front. Ctrl-C / SIGTERM
+/// triggers a graceful shutdown of the HTTP listener.
+async fn serve_streamable_http(
+    server: glossa::mcp::GlossaServer,
+    bind: &str,
+    allowed_hosts: Vec<String>,
+) -> anyhow::Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    let mut config = StreamableHttpServerConfig::default();
+    if !allowed_hosts.is_empty() {
+        config = config.with_allowed_hosts(allowed_hosts);
+    }
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    let app = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    eprintln!("glossa MCP (streamable-http) listening on http://{bind}/mcp");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
@@ -381,7 +433,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Mcp { action, path, profile, trace, no_graph } => match action {
+        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts } => match action {
             Some(McpAction::DumpTzTools { config_dir }) => {
                 let n = glossa::tz_export::dump(&config_dir)?;
                 println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
@@ -393,7 +445,6 @@ fn main() -> anyhow::Result<()> {
                 // before serving (cheap when nothing changed). Per-tool freshness is throttled inside
                 // the server. Best-effort — a transient freshen error must not block startup.
                 let stats = glossa::index::store::ensure_fresh(&path).unwrap_or_default();
-                use rmcp::{transport::stdio, ServiceExt};
                 let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
                 // If startup indexing changed anything, the derived layer is owed a refresh — the
                 // debounced maintenance loop will run generalize shortly after the corpus settles.
@@ -405,8 +456,16 @@ fn main() -> anyhow::Result<()> {
                     // Background, debounced generalize — refreshes the derived graph layer off the
                     // read hot path (never per-file, never on a query).
                     tokio::spawn(server.clone().maintenance_loop());
-                    let service = server.serve(stdio()).await?;
-                    let _ = service.waiting().await;
+                    match transport {
+                        McpTransport::Stdio => {
+                            use rmcp::{transport::stdio, ServiceExt};
+                            let service = server.serve(stdio()).await?;
+                            let _ = service.waiting().await;
+                        }
+                        McpTransport::StreamableHttp => {
+                            serve_streamable_http(server, &bind, allowed_hosts).await?;
+                        }
+                    }
                     Ok::<(), anyhow::Error>(())
                 })?;
                 Ok(())

@@ -444,6 +444,8 @@ impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.protocol_version = ProtocolVersion::V_2025_06_18;
+        info.server_info.name = "glossa".into();
+        info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns numbered hits `[#n]`; `read` opens chunk number `n`.".into());
         info
     }
