@@ -38,14 +38,26 @@ impl EpisodePolicy {
     pub fn enrich() -> Self { Self { stop_on_done: true, dedup_readonly: true } }
 }
 
-/// A read-only retrieval tool whose identical re-call is pure waste (safe to dedup). The mutating /
-/// control tools (graph_*, index/reindex/purge, and `done`) are never deduped.
-fn is_dedupable(name: &str) -> bool {
-    !matches!(
-        name,
-        "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize"
-            | "index" | "reindex" | "purge" | "done"
-    )
+/// What a tool call reads or changes — drives dedup invalidation. An identical call is "stale" (must
+/// re-run) once the state it depends on changed: a graph read after any graph mutation, a corpus read
+/// after an index rebuild. Corpus reads over the static KB never go stale, so they dedup once forever.
+#[derive(PartialEq, Clone, Copy)]
+enum ToolKind {
+    Corpus,       // search/read/grep/glob — static KB; dedup once, never invalidate
+    GraphRead,    // glossary/neighbors/resolve — invalidated by any graph mutation
+    GraphMutate,  // graph_upsert/delete/update/generalize — invalidates graph reads + graph mutates
+    CorpusMutate, // index/reindex/purge — invalidates everything
+    Control,      // done — never deduped
+}
+
+fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "done" => ToolKind::Control,
+        "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => ToolKind::GraphMutate,
+        "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
+        "glossary" | "neighbors" | "resolve" => ToolKind::GraphRead,
+        _ => ToolKind::Corpus,
+    }
 }
 
 /// Drive a TensorZero episode to a final outcome.
@@ -146,18 +158,30 @@ where
             .collect();
         messages.push(json!({ "role": "assistant", "content": tool_call_blocks }));
 
-        // Decide per call: run it, or (dedup) short-circuit an identical read-only call already made
-        // this episode. `seen` is updated now, so duplicates within the SAME turn also collapse.
+        // Dedup: skip a call whose (name,args) is still "current" in `seen`; `done`/control is never
+        // deduped. Then invalidate `seen` for the next turn — a graph mutation makes prior graph
+        // reads + graph mutates stale (corpus reads survive); an index rebuild makes everything stale.
         let run_flags: Vec<bool> = calls
             .iter()
             .map(|(_, name, args)| {
-                if policy.dedup_readonly && is_dedupable(name) {
-                    seen.insert((name.clone(), args.to_string())) // false if already present → skip
-                } else {
-                    true
-                }
+                !(policy.dedup_readonly
+                    && tool_kind(name) != ToolKind::Control
+                    && seen.contains(&(name.clone(), args.to_string())))
             })
             .collect();
+        if policy.dedup_readonly {
+            for ((_, name, args), &ran) in calls.iter().zip(&run_flags) {
+                if !ran {
+                    continue; // deduped → didn't execute → state unchanged
+                }
+                match tool_kind(name) {
+                    ToolKind::CorpusMutate => seen.clear(),
+                    ToolKind::GraphMutate => seen.retain(|(n, _)| tool_kind(n) == ToolKind::Corpus),
+                    _ => {}
+                }
+                seen.insert((name.clone(), args.to_string()));
+            }
+        }
 
         // Execute the to-run calls concurrently; substitute a hint for deduped ones. Order kept.
         let results: Vec<(String, String, String, Vec<String>, Vec<glossa::read::DocImage>)> =
@@ -186,7 +210,7 @@ where
                         None => (
                             id.clone(),
                             name.clone(),
-                            format!("(skipped) You already called `{name}` with these exact arguments this episode; the result is unchanged. Use what you already have, look elsewhere, or call `done`."),
+                            format!("(skipped) You already called `{name}` with these exact arguments and nothing has changed since. Use what you have, do something different, or call `done`."),
                             Vec::new(),
                             Vec::new(),
                         ),
@@ -706,6 +730,66 @@ mod tests {
         let msgs = last.borrow();
         let hinted = msgs.iter().any(|m| m["content"][0]["result"].as_str().map(|s| s.contains("(skipped)")).unwrap_or(false));
         assert!(hinted, "the deduped call must return the (skipped) hint");
+    }
+
+    #[test]
+    fn enrich_dedups_repeated_mutator_until_state_changes() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        // generalize, generalize(dup), upsert(changes graph), generalize(now fresh again), done.
+        let script = ["graph_generalize", "graph_generalize", "graph_upsert", "graph_generalize"];
+        let chat = |_: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            let i = *r;
+            *r += 1;
+            if i < script.len() {
+                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": format!("c{i}"), "name": script[i], "arguments": {} })], episode_id: "e".into() })
+            } else {
+                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} })], episode_id: "e".into() })
+            }
+        };
+        let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cc = Arc::clone(&counts);
+        let exec = move |name: &str, _: &Value| {
+            *cc.lock().unwrap().entry(name.to_string()).or_default() += 1;
+            (String::new(), Vec::new(), Vec::new())
+        };
+        run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
+        let c = counts.lock().unwrap();
+        assert_eq!(c.get("graph_generalize").copied().unwrap_or(0), 2, "2nd generalize deduped; 3rd re-runs because the upsert changed the graph");
+        assert_eq!(c.get("graph_upsert").copied().unwrap_or(0), 1);
+    }
+
+    #[test]
+    fn enrich_graph_mutation_invalidates_repeated_graph_read() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        // glossary, glossary(dup), upsert, glossary(now stale → re-runs), done.
+        let chat = |_: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            let i = *r;
+            *r += 1;
+            let block = match i {
+                0 | 1 | 3 => json!({ "type": "tool_call", "id": format!("c{i}"), "name": "glossary", "arguments": { "concept": "насос" } }),
+                2 => json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} }),
+                _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
+            };
+            Ok(TzTurn { content: vec![block], episode_id: "e".into() })
+        };
+        let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cc = Arc::clone(&counts);
+        let exec = move |name: &str, _: &Value| {
+            *cc.lock().unwrap().entry(name.to_string()).or_default() += 1;
+            (String::new(), Vec::new(), Vec::new())
+        };
+        run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
+        let c = counts.lock().unwrap();
+        assert_eq!(c.get("glossary").copied().unwrap_or(0), 2, "repeat glossary deduped, but re-runs after the upsert (graph changed)");
+        assert_eq!(c.get("graph_upsert").copied().unwrap_or(0), 1);
     }
 
     #[test]
