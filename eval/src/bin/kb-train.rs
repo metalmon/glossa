@@ -7,38 +7,66 @@
 //! (improve the select prompt from failures via a cloud mutator) is layered on next.
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::{DocIndex, RankedHit};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "kb-train", about = "Stream the reasoning graph; optimize retrieval against its MENTIONS gold chunks")]
+#[command(name = "kb-train", about = "Build & learn: enrich the reasoning graph from solved cases, and optimize retrieval prompts against it")]
 struct Cli {
-    /// Corpus root (live graph + index). Read concurrently with the enricher (SQLite WAL).
-    #[arg(long, default_value = "kb-test")]
-    work: std::path::PathBuf,
-    /// TZ gateway base URL (OpenAI-compatible endpoint used for the select call).
-    #[arg(long, default_value = "http://localhost:3000")]
-    gateway: String,
-    /// Model id for the select step (gateway OpenAI-compat).
-    #[arg(long, default_value = "tensorzero::model_name::qwen")]
-    model: String,
-    /// search top-k.
-    #[arg(long, default_value_t = 10)]
-    k: usize,
-    /// seconds to wait before re-polling the graph for new nodes.
-    #[arg(long, default_value_t = 20)]
-    poll_secs: u64,
-    /// stop after this many consecutive idle polls (no new nodes).
-    #[arg(long, default_value_t = 10)]
-    idle_stop: u32,
-    /// process the current nodes once and exit (no tailing).
-    #[arg(long)]
-    once: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Enrich the reasoning graph from solved training cases (reverse-trace Q→A into nodes/edges).
+    Enrich {
+        /// Path to the training JSON (array of {_id, question, answer}).
+        #[arg(long)]
+        train: PathBuf,
+        /// Corpus root (index + graph live here).
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        /// Enrich the first N cases (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// TensorZero gateway base URL.
+        #[arg(long, default_value = "http://localhost:3000")]
+        tensorzero_endpoint: String,
+        /// TensorZero function name.
+        #[arg(long, default_value = "enrich")]
+        tensorzero_function: String,
+    },
+    /// Optimize retrieval against the LIVE graph: tail reasoning nodes, score recall@k + select.
+    Optimize {
+        /// Corpus root (live graph + index). Read concurrently with `enrich` (SQLite WAL).
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        /// TZ gateway base URL (OpenAI-compatible endpoint used for the select call).
+        #[arg(long, default_value = "http://localhost:3000")]
+        gateway: String,
+        /// Model id for the select step (gateway OpenAI-compat).
+        #[arg(long, default_value = "tensorzero::model_name::qwen")]
+        model: String,
+        /// search top-k.
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// seconds to wait before re-polling the graph for new nodes.
+        #[arg(long, default_value_t = 20)]
+        poll_secs: u64,
+        /// stop after this many consecutive idle polls (no new nodes).
+        #[arg(long, default_value_t = 10)]
+        idle_stop: u32,
+        /// process the current nodes once and exit (no tailing).
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 /// First run of ASCII digits in a string (e.g. "[#45]" / "45" / "chunk 45" -> 45).
@@ -79,12 +107,23 @@ fn select_call(gateway: &str, model: &str, question: &str, hits_text: &str) -> O
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let idx = DocIndex::open_or_create(&cli.work).context("open index")?;
-    let graph = GraphStore::open(&cli.work).context("open graph")?;
-    let ont = Ontology::load_or_default(&cli.work);
+    match Cli::parse().cmd {
+        Cmd::Enrich { train, work, limit, tensorzero_endpoint, tensorzero_function } => {
+            kb_eval::enrich::run_enrich(&train, &work, limit, &tensorzero_endpoint, &tensorzero_function)
+        }
+        Cmd::Optimize { work, gateway, model, k, poll_secs, idle_stop, once } => {
+            run_optimize(work, gateway, model, k, poll_secs, idle_stop, once)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize(work: PathBuf, gateway: String, model: String, k: usize, poll_secs: u64, idle_stop: u32, once: bool) -> Result<()> {
+    let idx = DocIndex::open_or_create(&work).context("open index")?;
+    let graph = GraphStore::open(&work).context("open graph")?;
+    let ont = Ontology::load_or_default(&work);
     let structural: HashSet<String> = ont.structural().into_iter().collect();
-    println!("kb-train: tailing {} (mentions='{}', k={}, model={})", cli.work.display(), glossa::graph::MENTIONS, cli.k, cli.model);
+    println!("kb-train: tailing {} (mentions='{}', k={}, model={})", work.display(), glossa::graph::MENTIONS, k, model);
 
     let mut seen: HashSet<String> = HashSet::new();
     let (mut n, mut recall_hit, mut select_total, mut select_ok) = (0u64, 0u64, 0u64, 0u64);
@@ -112,7 +151,7 @@ fn main() -> Result<()> {
                 continue; // a node with no evidence anchor can't be a retrieval target
             }
             n += 1;
-            let hits = idx.search_filtered(&node.label, cli.k, None, None).unwrap_or_default();
+            let hits = idx.search_filtered(&node.label, k, None, None).unwrap_or_default();
             // gold ords actually present in the top-k hits
             let gold_ords: HashSet<u64> =
                 hits.iter().filter(|h| gold.contains(&(h.path.clone(), h.location.clone()))).map(|h| h.ord).collect();
@@ -120,7 +159,7 @@ fn main() -> Result<()> {
                 recall_hit += 1;
                 // select is only meaningful when the gold chunk is in the hits to choose from
                 select_total += 1;
-                if let Some(pick) = select_call(&cli.gateway, &cli.model, &node.label, &hits_block(&hits)) {
+                if let Some(pick) = select_call(&gateway, &model, &node.label, &hits_block(&hits)) {
                     if gold_ords.contains(&pick) {
                         select_ok += 1;
                     }
@@ -129,27 +168,27 @@ fn main() -> Result<()> {
             if n % 5 == 0 {
                 println!(
                     "[{n}] recall@{}={:.2}  select_acc={:.2} ({select_ok}/{select_total})",
-                    cli.k,
+                    k,
                     recall_hit as f64 / n as f64,
                     if select_total > 0 { select_ok as f64 / select_total as f64 } else { 0.0 },
                 );
             }
         }
-        if cli.once {
+        if once {
             break;
         }
         idle = if fresh == 0 { idle + 1 } else { 0 };
-        println!("[poll] {} reasoning nodes seen (+{fresh}); idle={idle}/{}", seen.len(), cli.idle_stop);
-        if idle >= cli.idle_stop {
+        println!("[poll] {} reasoning nodes seen (+{fresh}); idle={idle}/{}", seen.len(), idle_stop);
+        if idle >= idle_stop {
             println!("graph stopped growing — done");
             break;
         }
-        std::thread::sleep(Duration::from_secs(cli.poll_secs));
+        std::thread::sleep(Duration::from_secs(poll_secs));
     }
 
     println!(
         "DONE: {n} cases  recall@{}={:.3}  select_acc={:.3} ({select_ok}/{select_total})",
-        cli.k,
+        k,
         recall_hit as f64 / n.max(1) as f64,
         select_ok as f64 / select_total.max(1) as f64,
     );

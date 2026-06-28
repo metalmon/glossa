@@ -3,9 +3,17 @@ name = "kb-eval"
 version = "0.0.1"
 edition = "2021"
 
+[lib]
+name = "kb_eval"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kb-eval"
 path = "src/main.rs"
+
+[[bin]]
+name = "kb-train"
+path = "src/bin/kb-train.rs"
 
 [dependencies]
 glossa = { path = ".." }
