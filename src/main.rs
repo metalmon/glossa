@@ -445,17 +445,24 @@ fn main() -> anyhow::Result<()> {
                 // before serving (cheap when nothing changed). Per-tool freshness is throttled inside
                 // the server. Best-effort — a transient freshen error must not block startup.
                 let stats = glossa::index::store::ensure_fresh(&path).unwrap_or_default();
-                let server = glossa::mcp::GlossaServer::new(path, glossa::mcp::Profile::parse(&profile), trace, no_graph);
+                let prof = glossa::mcp::Profile::parse(&profile);
+                let server = glossa::mcp::GlossaServer::new(path, prof, trace, no_graph);
                 // If startup indexing changed anything, the derived layer is owed a refresh — the
                 // debounced maintenance loop will run generalize shortly after the corpus settles.
                 if stats.added + stats.removed > 0 {
                     server.mark_dirty();
                 }
+                // Freshness (ensure_fresh) runs on EVERY instance so readers serve up-to-date results.
+                // But the heavy debounced generalize loop runs ONLY on the indexer (editor/full) — a
+                // reader never recomputes the derived layer; it reads what an editor produced. Among
+                // multiple editors, the pass itself is further serialized by `.glossa/generalize.lock`.
+                let run_maintenance = prof != glossa::mcp::Profile::Reader;
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async move {
-                    // Background, debounced generalize — refreshes the derived graph layer off the
-                    // read hot path (never per-file, never on a query).
-                    tokio::spawn(server.clone().maintenance_loop());
+                    if run_maintenance {
+                        // Background, debounced generalize — off the read hot path (never per-file).
+                        tokio::spawn(server.clone().maintenance_loop());
+                    }
                     match transport {
                         McpTransport::Stdio => {
                             use rmcp::{transport::stdio, ServiceExt};

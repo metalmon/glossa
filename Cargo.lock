@@ -1009,6 +1009,7 @@ dependencies = [
  "chardetng",
  "clap",
  "encoding_rs",
+ "fs4",
  "globset",
  "ignore",
  "lingua",
