@@ -243,17 +243,29 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
 
 /// Serve the MCP server over Streamable HTTP at `<bind>/mcp` (one shared `GlossaServer` across all
 /// sessions). DNS-rebind protection allows loopback by default; pass `--allowed-host` for a gateway/
-/// public host. TLS + auth are expected to be terminated by a reverse proxy in front. Ctrl-C / SIGTERM
-/// triggers a graceful shutdown of the HTTP listener.
+/// public host. TLS + auth are expected to be terminated by a reverse proxy in front. Ctrl-C
+/// triggers a graceful shutdown: active sessions are terminated, the listener drains, and `cancel`
+/// (shared with the maintenance loop) fires so the whole server stops together.
 async fn serve_streamable_http(
     server: glossa::mcp::GlossaServer,
     bind: &str,
     allowed_hosts: Vec<String>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
+    // Translate Ctrl-C into a cancel — drives the listener drain, session teardown, and the loop.
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown signal received — draining");
+            c.cancel();
+        });
+    }
     let mut config = StreamableHttpServerConfig::default();
+    config.cancellation_token = cancel.clone();
     if !allowed_hosts.is_empty() {
         config = config.with_allowed_hosts(allowed_hosts);
     }
@@ -294,10 +306,9 @@ async fn serve_streamable_http(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;
+    tracing::info!("glossa MCP (streamable-http) stopped");
     Ok(())
 }
 
@@ -497,18 +508,23 @@ fn main() -> anyhow::Result<()> {
                 let run_maintenance = prof != glossa::mcp::Profile::Reader;
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async move {
+                    // One cancellation token drives graceful shutdown across the maintenance loop,
+                    // the HTTP listener, and active sessions.
+                    let cancel = tokio_util::sync::CancellationToken::new();
                     if run_maintenance {
                         // Background, debounced generalize — off the read hot path (never per-file).
-                        tokio::spawn(server.clone().maintenance_loop());
+                        tokio::spawn(server.clone().maintenance_loop(cancel.clone()));
                     }
                     match transport {
                         McpTransport::Stdio => {
                             use rmcp::{transport::stdio, ServiceExt};
                             let service = server.serve(stdio()).await?;
+                            // stdio lifecycle is client-driven: exit on stdin EOF (disconnect).
                             let _ = service.waiting().await;
+                            cancel.cancel(); // stop the maintenance loop on the way out
                         }
                         McpTransport::StreamableHttp => {
-                            serve_streamable_http(server, &bind, allowed_hosts).await?;
+                            serve_streamable_http(server, &bind, allowed_hosts, cancel).await?;
                         }
                     }
                     Ok::<(), anyhow::Error>(())
