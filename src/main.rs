@@ -257,14 +257,42 @@ async fn serve_streamable_http(
     if !allowed_hosts.is_empty() {
         config = config.with_allowed_hosts(allowed_hosts);
     }
+    let ready_srv = server.clone();
+    let metrics_srv = server.clone();
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
         config,
     );
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = axum::Router::new()
+        // Liveness: the process is up.
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        // Readiness: the index + graph are openable (the server can actually serve).
+        .route(
+            "/ready",
+            axum::routing::get(move || {
+                let s = ready_srv.clone();
+                async move {
+                    if s.readiness() {
+                        (axum::http::StatusCode::OK, "ready")
+                    } else {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready")
+                    }
+                }
+            }),
+        )
+        // Prometheus metrics (index/graph size, derived-layer staleness).
+        .route(
+            "/metrics",
+            axum::routing::get(move || {
+                let s = metrics_srv.clone();
+                async move { s.metrics_text() }
+            }),
+        )
+        .nest_service("/mcp", service)
+        .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("glossa MCP (streamable-http) listening on http://{bind}/mcp");
+    tracing::info!("glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -274,6 +302,16 @@ async fn serve_streamable_http(
 }
 
 fn main() -> anyhow::Result<()> {
+    // Structured logs go to STDERR — stdout is the stdio JSON-RPC channel and must never carry logs.
+    // Level via RUST_LOG (default `info`). Best-effort init (a second init in tests is a no-op).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                // Our logs at info; silence tantivy's per-reload INFO chatter. RUST_LOG overrides.
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Search { pattern, path, ignore_case, word, fixed, glob, file_type, limit, scan, no_ignore, format } => {
