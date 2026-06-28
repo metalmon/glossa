@@ -15,6 +15,9 @@ eval-data/
 /eval-corpus/
 /eval-*.json
 
+# GEPA dump/optimize artifacts (query.jsonl/select.jsonl derived from the corpus — never commit)
+/gepa-out/
+
 # TensorZero local secrets + the fullwiki corpus/archive (large/secret, not committed)
 eval/tensorzero/.env
 /wiki-corpus/
