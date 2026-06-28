@@ -187,11 +187,15 @@ impl GlossaServer {
 
     /// Background maintenance: after indexing changes settle (debounce), run ONE `generalize` pass to
     /// refresh the derived layer — off the read hot path, never per-file. Spawned once by `kb mcp`.
-    pub async fn maintenance_loop(self) {
+    /// Exits promptly when `cancel` fires (graceful shutdown), so the loop never outlives the server.
+    pub async fn maintenance_loop(self, cancel: tokio_util::sync::CancellationToken) {
         const DEBOUNCE_MS: u64 = 5_000;
         const POLL_MS: u64 = 1_000;
         loop {
-            tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_millis(POLL_MS)) => {}
+            }
             if !Self::maintenance_due(
                 self.dirty.load(Ordering::Relaxed),
                 self.last_change.load(Ordering::Relaxed),
@@ -570,6 +574,19 @@ mod tests {
         assert!(!GlossaServer::maintenance_due(true, 8_000, 10_000, 5_000));
         // dirty and quiet for >= the debounce window → run
         assert!(GlossaServer::maintenance_due(true, 2_000, 10_000, 5_000));
+    }
+
+    #[tokio::test]
+    async fn maintenance_loop_stops_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel(); // pre-cancelled → the loop must return promptly, not hang
+        tokio::time::timeout(std::time::Duration::from_secs(2), srv.maintenance_loop(cancel))
+            .await
+            .expect("maintenance_loop honored cancel");
     }
 
     #[test]
