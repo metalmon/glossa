@@ -36,6 +36,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net
 axum = "0.8"
 chardetng = "0.1"
 encoding_rs = "0.8"
+fs4 = "0.13"
 
 [features]
 default = []

@@ -127,7 +127,20 @@ impl GlossaServer {
 
     /// Recompute the DERIVED graph layer (closure/SIMILAR edges + community/centrality) from what is
     /// currently stored — the same non-destructive pass as the `graph_generalize` tool. Best-effort.
+    /// Cross-process singleton: multiple editor instances are expected, so the pass is guarded by an
+    /// advisory try-lock on `.glossa/generalize.lock`. If another editor holds it, this round is
+    /// skipped (the holder refreshes the shared graph for everyone). The lock releases when `_lock`
+    /// drops (function exit / process death).
     fn run_generalize(&self) {
+        use fs4::fs_std::FileExt;
+        let lock_path = self.root.join(".glossa").join("generalize.lock");
+        let Ok(_lock) = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path) else {
+            return;
+        };
+        match _lock.try_lock_exclusive() {
+            Ok(true) => {}    // acquired — we are the one editor running the pass this round
+            _ => return,      // held by another editor (false) or lock error → skip
+        }
         let Ok(g) = GraphStore::open(&self.root) else { return };
         let ont = Ontology::load_or_default(&self.root);
         let now = std::time::SystemTime::now()
@@ -135,6 +148,7 @@ impl GlossaServer {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let _ = crate::graph::ops::graph_generalize(&g, &ont, now);
+        let _ = FileExt::unlock(&_lock);
     }
 
     /// Background maintenance: after indexing changes settle (debounce), run ONE `generalize` pass to
@@ -548,6 +562,46 @@ mod tests {
         assert!(
             g.node_meta("sym:x").unwrap().is_some(),
             "generalize pass populated node_meta (community/centrality) for the reasoning node"
+        );
+    }
+
+    #[test]
+    fn run_generalize_skips_when_lock_held() {
+        use crate::graph::store::{Node, Provenance};
+        use fs4::fs_std::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        {
+            let g = GraphStore::open(dir.path()).unwrap();
+            g.put_node(&Node {
+                id: "sym:x".into(),
+                node_type: "Symptom".into(),
+                label: "потеря связи".into(),
+                aliases: vec![],
+                prov: Provenance { source_path: "a.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 },
+            }).unwrap();
+        }
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+
+        // Another editor holds the cross-process generalize lock.
+        let lock_path = dir.path().join(".glossa").join("generalize.lock");
+        let holder = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).unwrap();
+        assert!(FileExt::try_lock_exclusive(&holder).unwrap(), "test acquires the lock");
+
+        // Lock held → this instance must SKIP the pass (no derived layer written).
+        srv.run_generalize();
+        assert!(
+            GraphStore::open(dir.path()).unwrap().node_meta("sym:x").unwrap().is_none(),
+            "lock held → generalize skipped, no node_meta"
+        );
+
+        // Release → next run proceeds.
+        FileExt::unlock(&holder).unwrap();
+        srv.run_generalize();
+        assert!(
+            GraphStore::open(dir.path()).unwrap().node_meta("sym:x").unwrap().is_some(),
+            "lock free → generalize ran, node_meta written"
         );
     }
 
