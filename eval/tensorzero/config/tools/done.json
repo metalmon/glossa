@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "note": {
+      "type": "string",
+      "description": "One short line: the chain you wrote, or why the case needed nothing."
+    }
+  }
+}

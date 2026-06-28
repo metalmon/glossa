@@ -52,7 +52,9 @@ For a `MENTIONS` edge, set the endpoint to `<path>#<n>`, where `<n>` is the chun
 }
 ```
 
-## You are done when
-All labels are in Russian and the graph holds one complete chain:
+## Finishing — call `done`
+When the graph holds one complete chain (all labels in Russian) — or `glossary` already showed the case is present — call the `done` tool with a one-line `note`. "Already complete, nothing to add" is itself a good reason to call `done`. A complete chain is:
 - a **problem**: a `Symptom`, a `Cause`, a `Resolution`, a `CAUSED_BY` edge (Symptom → Cause), a `RESOLVED_BY` edge (Cause → Resolution), and a `MENTIONS` anchor. A `Symptom → Resolution` with no `Cause` is INCOMPLETE and will be discarded.
 - a **how-to/reference**: a `Task`, a `Resolution`, a `RESOLVED_BY` edge (Task → Resolution), and a `MENTIONS` anchor.
+
+The episode ends when you call `done` — so when you catch yourself describing your next step in prose, make that tool call instead. And if a section you already read this case comes back unchanged, you have it: use it or look elsewhere rather than reading it again.

@@ -218,7 +218,7 @@ description = "Delete the index + graph for the knowledge base."
 parameters = "tools/purge.json"
 
 [tools.read]
-description = "Read a document chunk by its number `n` — the `[#n]` from a search/grep result (for PDFs, the page number). Returns the chunk's full text plus the previous/next chunk numbers for context expansion. If `n` is out of range, the reply states the document's valid chunk range."
+description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). Returns the chunk's full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
 parameters = "tools/read.json"
 
 [tools.reindex]
@@ -232,6 +232,10 @@ parameters = "tools/resolve.json"
 [tools.search]
 description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
 parameters = "tools/search.json"
+
+[tools.done]
+description = "Signal that the reasoning graph for this case is complete — the chain is written with a MENTIONS anchor, or `glossary` showed it already exists. Calling `done` ends the episode. Give a one-line `note`."
+parameters = "tools/done.json"
 # <<< GENERATED TOOLS
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
@@ -239,7 +243,7 @@ parameters = "tools/search.json"
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search"]
+tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 
