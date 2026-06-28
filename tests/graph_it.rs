@@ -16,8 +16,9 @@ fn graph_stats_and_neighbors_after_index() {
         .assert().success()
         .stdout(contains("nodes:"));
 
-    // The Document node id is the file path; its CONTAINS neighbors are sections.
-    let doc_id = dir.path().join("a.md").to_string_lossy().to_string();
+    // The Document node id is the corpus-relative doc key ("a.md"), not an absolute path — its
+    // CONTAINS neighbors are sections. (Doc keys are corpus-root-relative since the path-canon work.)
+    let doc_id = "a.md".to_string();
     Command::cargo_bin("kb").unwrap()
         .args(["graph", "neighbors", &doc_id, dir.path().to_str().unwrap(), "--depth", "1"])
         .assert().success()
