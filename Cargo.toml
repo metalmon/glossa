@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 walkdir = "2"
 ignore = "0.4"
 regex = "1"
@@ -29,10 +29,11 @@ toml = "0.8"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 postcard = { version = "1", features = ["alloc"] }
 lingua = { version = "1.8", default-features = false, features = ["russian", "english"], optional = true }
-rmcp = { version = "1.8", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "1.8", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 schemars = "1.0"
 base64 = "0.22"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "signal"] }
+axum = "0.8"
 chardetng = "0.1"
 encoding_rs = "0.8"
 
