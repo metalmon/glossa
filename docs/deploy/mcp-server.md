@@ -54,6 +54,7 @@ All knobs are CLI flags, with env fallback (flag overrides env):
 | `--bind <addr>` | `GLOSSA_MCP_BIND` | `127.0.0.1:8080` |
 | `--profile reader\|editor\|full` | — | `editor` |
 | `--allowed-host <h>` (repeatable) | — | loopback only |
+| `--service-name <name>` (Windows SCM) | `GLOSSA_SERVICE_NAME` | `glossa` |
 | `RUST_LOG` (log level) | `RUST_LOG` | `info,tantivy=warn` |
 
 ## Ops endpoints (streamable-http)
@@ -61,7 +62,7 @@ All knobs are CLI flags, with env fallback (flag overrides env):
 - `GET /health` — liveness (200 `ok`).
 - `GET /ready` — readiness: index + graph openable (200 `ready`, else 503).
 - `GET /metrics` — Prometheus: `glossa_up`, `glossa_index_chunks`, `glossa_graph_nodes`,
-  `glossa_graph_edges`, `glossa_graph_dirty`.
+  `glossa_graph_edges`, `glossa_graph_dirty`, `glossa_indexing`.
 
 Logs go to **stderr** (stdout is the stdio JSON-RPC channel). Each HTTP request is traced
 (method/path/status/latency).
@@ -106,7 +107,7 @@ The binary integrates with the Service Control Manager (`--windows-service`, set
 for manual use). Create one service per (base, profile, port) with `sc.exe` (elevated):
 
 ```
-sc.exe create glossa-base1-editor binPath= "C:\kb\kb.exe mcp C:\kb\base1 --profile editor --transport streamable-http --bind 127.0.0.1:8801 --allowed-host gw.internal --windows-service" start= auto
+sc.exe create glossa-base1-editor binPath= "C:\kb\kb.exe mcp C:\kb\base1 --profile editor --transport streamable-http --bind 127.0.0.1:8801 --allowed-host gw.internal --windows-service --service-name glossa-base1-editor" start= auto
 sc.exe description glossa-base1-editor "glossa MCP (base1, editor)"
 sc.exe start glossa-base1-editor
 :: ...
@@ -116,6 +117,7 @@ sc.exe delete glossa-base1-editor
 
 Notes:
 - The space after `binPath=` / `start=` is required by `sc.exe`.
+- Pass `--service-name` matching the SCM service name (install scripts set this automatically).
 - Set the service log-on account and grant it read access to the corpus + read/write to `.glossa`.
 - Run readers as separate services on their own ports (`glossa-base1-reader-8802`, …).
 
