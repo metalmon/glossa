@@ -13,7 +13,7 @@
     },
     "node": {
       "default": null,
-      "description": "a reasoning-node id copied from a `glossary` line (e.g. `sym:...`) — preferred",
+      "description": "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases",
       "type": [
         "string",
         "null"

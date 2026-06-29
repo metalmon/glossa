@@ -208,8 +208,8 @@ pub fn import_replace_layer(
     for t in &e.exported_types {
         pruned += g.delete_by_type(t)?;
     }
-    let (n, ed) = apply_upsert(g, ont, e.nodes, e.edges, now)?;
-    Ok((pruned, n, ed))
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now)?;
+    Ok((pruned, r.nodes_written, r.edges_written))
 }
 
 #[cfg(test)]

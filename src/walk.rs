@@ -4,7 +4,6 @@ use crate::extract::office::OfficeExtractor;
 use crate::extract::pdf::PdfExtractor;
 use crate::extract::Extractor;
 use crate::model::Chunk;
-use globset::Glob;
 use ignore::WalkBuilder;
 use std::path::Path;
 
@@ -26,7 +25,7 @@ pub fn walk_files(
     visit: &mut dyn FnMut(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let matcher = match glob {
-        Some(g) => Some(Glob::new(g)?.compile_matcher()),
+        Some(g) => Some(crate::glob::compile_glob(g)?),
         None => None,
     };
     let mut wb = WalkBuilder::new(root);
@@ -46,7 +45,7 @@ pub fn walk_files(
         }
         let path = entry.path();
         if let Some(m) = &matcher {
-            if !m.is_match(path) {
+            if !crate::glob::path_matches_fs(m, path) {
                 continue;
             }
         }

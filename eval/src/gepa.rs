@@ -7,13 +7,13 @@
 //! over per-validation-example scores preserves prompt diversity so we don't collapse to one local
 //! optimum.
 //!
-//! Two endpoints: the per-case `select` calls hit the LOCAL gateway (qwen via LM Studio — free, high
-//! volume); the reflection calls hit a cloud OpenAI-compatible endpoint (OpenRouter — tiny volume).
+//! Select calls go through the TensorZero `select` function (`POST /inference`) so they appear in the
+//! UI/ClickHouse; run-level metrics are posted as episode feedback at the end.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::time::SystemTime;
 
 /// One select example from `select.jsonl`: the question, the hits to choose among (each carrying its
 /// `#ord`), and the gold ord(s) that count as a correct pick.
@@ -26,16 +26,18 @@ pub struct SelectExample {
 
 /// Knobs for one optimization run.
 pub struct GepaConfig {
-    /// Local gateway (OpenAI-compat) for the per-case select calls.
+    /// TensorZero gateway base URL.
     pub gateway: String,
-    /// Model id for the select step.
-    pub model: String,
-    /// Cloud OpenAI-compatible endpoint for the reflection/mutator LM.
-    pub mutator_endpoint: String,
-    /// Reflection model id (e.g. `deepseek/deepseek-r1`).
-    pub mutator_model: String,
-    /// Bearer key for the mutator endpoint (None for keyless).
-    pub mutator_key: Option<String>,
+    /// TZ function for per-case select calls (logged under this name in the UI).
+    pub function: String,
+    /// TZ variant — filter runs in the UI by variant; add new variants to `tensorzero.toml`.
+    pub variant: String,
+    /// TZ function for reflection/mutator calls.
+    pub reflect_function: String,
+    /// One episode id for the whole GEPA run (all select + reflect inferences + feedback).
+    pub episode_id: String,
+    /// Flat `{key: value}` tags on inferences and feedback (e.g. `run`, `budget`).
+    pub tags: Value,
     /// Fraction of examples held out for validation (the rest are the reflection train pool).
     pub val_frac: f64,
     /// Number of reflection iterations (each = 1 mutator call + a minibatch re-score).
@@ -44,6 +46,15 @@ pub struct GepaConfig {
     pub minibatch: usize,
     /// The starting select prompt to improve.
     pub seed_prompt: String,
+}
+
+/// Outcome of one GEPA run (also posted to TZ `/feedback`).
+pub struct GepaRunResult {
+    pub prompt: String,
+    pub baseline_acc: f64,
+    pub best_acc: f64,
+    pub candidates: usize,
+    pub episode_id: String,
 }
 
 /// First run of ASCII digits in a string (e.g. "[#45]" / "45" / "chunk 45" -> 45).
@@ -69,23 +80,29 @@ fn render_hits(hits: &[Value]) -> String {
         .join("\n")
 }
 
-/// Run one select call: ask the local model to pick the chunk number. Returns the chosen ord
-/// (None on parse/transport failure — counted as a miss).
+fn select_user_content(ex: &SelectExample) -> String {
+    format!(
+        "Question: {}\n\nResults:\n{}\n\nWhich result number contains the answer?",
+        ex.question,
+        render_hits(&ex.hits),
+    )
+}
+
+/// Run one select call via TZ `select`: dynamic system prompt + user turn. Returns chosen ord.
 fn select_pick(cfg: &GepaConfig, prompt: &str, ex: &SelectExample) -> Option<u64> {
-    let url = format!("{}/openai/v1/chat/completions", cfg.gateway.trim_end_matches('/'));
-    let body = json!({
-        "model": cfg.model, "temperature": 0.0,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": format!(
-                "Question: {}\n\nResults:\n{}\n\nWhich result number contains the answer?",
-                ex.question, render_hits(&ex.hits))}
-        ]
-    });
-    let resp = ureq::post(&url).timeout(Duration::from_secs(120)).set("Content-Type", "application/json").send_string(&body.to_string());
-    let text = resp.ok()?.into_string().ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    first_int(v["choices"][0]["message"]["content"].as_str().unwrap_or(""))
+    let messages = [
+        json!({"role": "system", "content": prompt}),
+        json!({"role": "user", "content": select_user_content(ex)}),
+    ];
+    let text = crate::tz::infer_chat(
+        &cfg.gateway,
+        &cfg.function,
+        &cfg.variant,
+        &cfg.episode_id,
+        &messages,
+        &cfg.tags,
+    )?;
+    first_int(&text)
 }
 
 /// Score a prompt over a set of examples: per-example correctness (the pick is one of the gold ords).
@@ -97,18 +114,21 @@ fn score(cfg: &GepaConfig, prompt: &str, examples: &[SelectExample]) -> Vec<bool
 }
 
 fn acc(scores: &[bool]) -> f64 {
-    if scores.is_empty() { return 0.0; }
+    if scores.is_empty() {
+        return 0.0;
+    }
     scores.iter().filter(|b| **b).count() as f64 / scores.len() as f64
 }
 
-/// Reflection: hand the mutator the current prompt and a batch of failures (question, the numbered
-/// hits, the gold ord, and what the model wrongly picked) and ask for an improved system prompt.
+/// Reflection: hand the mutator the current prompt and a batch of failures and ask for an improved prompt.
 fn reflect(cfg: &GepaConfig, prompt: &str, failures: &[(&SelectExample, Option<u64>)]) -> Result<String> {
     let mut cases = String::new();
     for (i, (ex, pick)) in failures.iter().enumerate() {
         cases.push_str(&format!(
             "--- Failure {} ---\nQuestion: {}\nResults:\n{}\nGold answer: #{}\nModel picked: {}\n\n",
-            i + 1, ex.question, render_hits(&ex.hits),
+            i + 1,
+            ex.question,
+            render_hits(&ex.hits),
             ex.gold_ords.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(" or #"),
             pick.map(|p| format!("#{p}")).unwrap_or_else(|| "(no valid number)".into()),
         ));
@@ -122,20 +142,19 @@ fn reflect(cfg: &GepaConfig, prompt: &str, failures: &[(&SelectExample, Option<u
          Reply with ONLY the new system prompt text — no preamble, no quotes, no explanation.\n\n\
          === CURRENT SYSTEM PROMPT ===\n{prompt}\n\n=== FAILURES ===\n{cases}=== NEW SYSTEM PROMPT ==="
     );
-    let url = format!("{}/chat/completions", cfg.mutator_endpoint.trim_end_matches('/'));
-    let body = json!({
-        "model": cfg.mutator_model, "temperature": 1.0,
-        "messages": [{"role": "user", "content": instruction}]
-    });
-    let mut req = ureq::post(&url).timeout(Duration::from_secs(300)).set("Content-Type", "application/json");
-    if let Some(k) = &cfg.mutator_key {
-        req = req.set("Authorization", &format!("Bearer {k}"));
-    }
-    let text = req.send_string(&body.to_string()).context("mutator request")?.into_string()?;
-    let v: Value = serde_json::from_str(&text).context("mutator response not JSON")?;
-    let out = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    let messages = [json!({"role": "user", "content": instruction})];
+    let out = crate::tz::infer_chat(
+        &cfg.gateway,
+        &cfg.reflect_function,
+        &cfg.variant,
+        &cfg.episode_id,
+        &messages,
+        &cfg.tags,
+    )
+    .context("gepa_reflect inference failed")?;
+    let out = out.trim().to_string();
     if out.is_empty() {
-        anyhow::bail!("mutator returned an empty prompt (response: {text})");
+        anyhow::bail!("gepa_reflect returned an empty prompt");
     }
     Ok(out)
 }
@@ -151,7 +170,7 @@ fn dominates(a: &[bool], b: &[bool]) -> bool {
     let mut strictly = false;
     for (x, y) in a.iter().zip(b) {
         if !x && *y {
-            return false; // a worse somewhere → cannot dominate
+            return false;
         }
         if *x && !*y {
             strictly = true;
@@ -167,27 +186,56 @@ fn frontier(pool: &[Candidate]) -> Vec<usize> {
         .collect()
 }
 
-/// Run the GEPA optimization loop and return the best prompt found (highest validation accuracy).
-pub fn run(cfg: GepaConfig, examples: Vec<SelectExample>) -> Result<String> {
+fn post_run_feedback(cfg: &GepaConfig, result: &GepaRunResult, n_train: usize, n_val: usize) {
+    let ep = &result.episode_id;
+    let tags = &cfg.tags;
+    crate::tz::post_feedback(&cfg.gateway, ep, "select_baseline_acc", json!(result.baseline_acc), tags);
+    crate::tz::post_feedback(&cfg.gateway, ep, "select_acc", json!(result.best_acc), tags);
+    crate::tz::post_feedback(&cfg.gateway, ep, "gepa_candidates", json!(result.candidates as f64), tags);
+    crate::tz::post_feedback(&cfg.gateway, ep, "gepa_examples_train", json!(n_train as f64), tags);
+    crate::tz::post_feedback(&cfg.gateway, ep, "gepa_examples_val", json!(n_val as f64), tags);
+    println!(
+        "TZ feedback: episode={} function={} variant={} select_acc={:.3} baseline={:.3}",
+        ep, cfg.function, cfg.variant, result.best_acc, result.baseline_acc,
+    );
+}
+
+/// Run the GEPA optimization loop; post run metrics to TZ and return the best prompt found.
+pub fn run(cfg: GepaConfig, examples: Vec<SelectExample>) -> Result<GepaRunResult> {
     anyhow::ensure!(!examples.is_empty(), "no select examples to optimize against");
-    // Deterministic split: trailing `val_frac` is validation, the rest is the reflection train pool.
     let n_val = ((examples.len() as f64 * cfg.val_frac).round() as usize).clamp(1, examples.len() - 1);
     let split = examples.len() - n_val;
     let (train, val) = examples.split_at(split);
-    println!("gepa: {} examples ({} train, {} val), budget={}, minibatch={}, mutator={}",
-        examples.len(), train.len(), val.len(), cfg.budget, cfg.minibatch, cfg.mutator_model);
+    println!(
+        "gepa: {} examples ({} train, {} val), budget={}, minibatch={}, function={}, variant={}, episode={}",
+        examples.len(),
+        train.len(),
+        val.len(),
+        cfg.budget,
+        cfg.minibatch,
+        cfg.function,
+        cfg.variant,
+        cfg.episode_id,
+    );
 
     let base_val = score(&cfg, &cfg.seed_prompt, val);
-    println!("baseline select_acc(val)={:.3} ({}/{})", acc(&base_val), base_val.iter().filter(|b| **b).count(), val.len());
-    let mut pool = vec![Candidate { prompt: cfg.seed_prompt.clone(), val: base_val }];
+    let baseline_acc = acc(&base_val);
+    println!(
+        "baseline select_acc(val)={:.3} ({}/{})",
+        baseline_acc,
+        base_val.iter().filter(|b| **b).count(),
+        val.len()
+    );
+    let mut pool = vec![Candidate {
+        prompt: cfg.seed_prompt.clone(),
+        val: base_val,
+    }];
 
     for it in 0..cfg.budget {
-        // Parent = rotate through the current frontier (keeps prompt diversity, no RNG needed).
         let front = frontier(&pool);
         let parent_idx = front[it % front.len()];
         let parent_prompt = pool[parent_idx].prompt.clone();
 
-        // Find this parent's failures on the train pool to reflect on.
         let train_scores = score(&cfg, &parent_prompt, train);
         let failures: Vec<(&SelectExample, Option<u64>)> = train
             .iter()
@@ -203,9 +251,11 @@ pub fn run(cfg: GepaConfig, examples: Vec<SelectExample>) -> Result<String> {
 
         let child_prompt = match reflect(&cfg, &parent_prompt, &failures) {
             Ok(p) => p,
-            Err(e) => { println!("[iter {it}] reflection failed: {e:#} — skipping"); continue; }
+            Err(e) => {
+                println!("[iter {it}] reflection failed: {e:#} — skipping");
+                continue;
+            }
         };
-        // Cheap gate: the child must beat its parent on the reflected minibatch before we pay for val.
         let mb: Vec<SelectExample> = failures.iter().map(|(ex, _)| (*ex).clone()).collect();
         let child_mb = score(&cfg, &child_prompt, &mb);
         if acc(&child_mb) <= 0.0 {
@@ -213,14 +263,46 @@ pub fn run(cfg: GepaConfig, examples: Vec<SelectExample>) -> Result<String> {
             continue;
         }
         let child_val = score(&cfg, &child_prompt, val);
-        println!("[iter {it}] parent#{parent_idx} acc(val)={:.3} -> child acc(val)={:.3} (fixed {}/{} minibatch)",
-            acc(&pool[parent_idx].val), acc(&child_val), child_mb.iter().filter(|b| **b).count(), mb.len());
-        pool.push(Candidate { prompt: child_prompt, val: child_val });
+        println!(
+            "[iter {it}] parent#{parent_idx} acc(val)={:.3} -> child acc(val)={:.3} (fixed {}/{} minibatch)",
+            acc(&pool[parent_idx].val),
+            acc(&child_val),
+            child_mb.iter().filter(|b| **b).count(),
+            mb.len()
+        );
+        pool.push(Candidate {
+            prompt: child_prompt,
+            val: child_val,
+        });
     }
 
-    let best = pool.iter().max_by(|a, b| acc(&a.val).partial_cmp(&acc(&b.val)).unwrap()).unwrap();
-    println!("DONE: best select_acc(val)={:.3} ({} candidates explored)", acc(&best.val), pool.len());
-    Ok(best.prompt.clone())
+    let best = pool
+        .iter()
+        .max_by(|a, b| acc(&a.val).partial_cmp(&acc(&b.val)).unwrap())
+        .unwrap();
+    let result = GepaRunResult {
+        prompt: best.prompt.clone(),
+        baseline_acc,
+        best_acc: acc(&best.val),
+        candidates: pool.len(),
+        episode_id: cfg.episode_id.clone(),
+    };
+    println!(
+        "DONE: best select_acc(val)={:.3} ({} candidates explored)",
+        result.best_acc,
+        result.candidates
+    );
+    post_run_feedback(&cfg, &result, train.len(), val.len());
+    Ok(result)
+}
+
+/// Default run label for TZ tags when the caller does not supply one.
+pub fn default_run_tag() -> String {
+    let secs = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("gepa-{secs}")
 }
 
 #[cfg(test)]
@@ -234,15 +316,14 @@ mod tests {
             json!({"ord": 3, "path": "n.md", "location": "Intro", "file_type": "md", "snippet": "hello"}),
         ];
         let out = render_hits(&hits);
-        // paged location (p.N) renders the file type as the label; a heading renders the heading.
         assert_eq!(out, "[#7] doc.pdf · pdf · the answer\n[#3] n.md · Intro · hello");
     }
 
     #[test]
     fn dominance_is_strict_pareto() {
-        assert!(dominates(&[true, true], &[true, false])); // ≥ everywhere, better once
-        assert!(!dominates(&[true, false], &[false, true])); // trade-off → neither dominates
-        assert!(!dominates(&[true, true], &[true, true])); // equal → not strict
+        assert!(dominates(&[true, true], &[true, false]));
+        assert!(!dominates(&[true, false], &[false, true]));
+        assert!(!dominates(&[true, true], &[true, true]));
         assert!(!dominates(&[false, false], &[true, true]));
     }
 
@@ -251,7 +332,7 @@ mod tests {
         let pool = vec![
             Candidate { prompt: "a".into(), val: vec![true, false] },
             Candidate { prompt: "b".into(), val: vec![false, true] },
-            Candidate { prompt: "c".into(), val: vec![false, false] }, // dominated by both a and b
+            Candidate { prompt: "c".into(), val: vec![false, false] },
         ];
         let f = frontier(&pool);
         assert_eq!(f, vec![0, 1]);

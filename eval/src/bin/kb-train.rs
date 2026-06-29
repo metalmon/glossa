@@ -68,6 +68,7 @@ enum Cmd {
     },
     /// GEPA-optimize the `select` prompt against a dumped `select.jsonl`: reflect on the failures of
     /// the local model with a cloud mutator LM, keep prompts that beat their parent (Pareto frontier).
+    /// All inferences and run metrics are logged under the TZ `select` / `gepa_reflect` functions.
     Optimize {
         /// The select dataset produced by `kb-train dump`.
         #[arg(long, default_value = "select.jsonl")]
@@ -75,23 +76,24 @@ enum Cmd {
         /// File to write the best prompt found into.
         #[arg(long, default_value = "select.prompt.txt")]
         out: PathBuf,
-        /// Local gateway (OpenAI-compat) for the per-case select calls.
+        /// TensorZero gateway base URL.
         #[arg(long, default_value = "http://localhost:3000")]
         gateway: String,
-        /// Model id for the select step.
-        #[arg(long, default_value = "tensorzero::model_name::qwen")]
-        model: String,
-        /// OpenAI-compatible endpoint for the reflection/mutator LM. Defaults to the local TZ
-        /// gateway, which reaches OpenRouter with its own key and logs the call as a TZ inference.
-        #[arg(long, default_value = "http://localhost:3000/openai/v1")]
-        mutator_endpoint: String,
-        /// Reflection model id (low volume, high leverage — a strong reasoning model).
-        #[arg(long, default_value = "tensorzero::model_name::deepseek_r1")]
-        mutator_model: String,
-        /// Env var holding the mutator endpoint API key (unset when going through the gateway —
-        /// the gateway holds the OpenRouter key).
-        #[arg(long, default_value = "OPENROUTER_API_KEY")]
-        mutator_key_env: String,
+        /// TZ function for per-case select calls (visible in the UI metrics dashboard).
+        #[arg(long, default_value = "select")]
+        function: String,
+        /// TZ variant for this run — filter by variant in the UI; add new variants to `tensorzero.toml`.
+        #[arg(long, default_value = "baseline")]
+        variant: String,
+        /// TZ function for reflection/mutator calls.
+        #[arg(long, default_value = "gepa_reflect")]
+        reflect_function: String,
+        /// Run label → TZ tag `run=<value>` (for ClickHouse); auto-generated if omitted.
+        #[arg(long)]
+        run: Option<String>,
+        /// Extra TZ tags on inferences + feedback (repeatable KEY=VALUE).
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tag: Vec<String>,
         /// Fraction of examples held out for validation.
         #[arg(long, default_value_t = 0.3)]
         val_frac: f64,
@@ -99,7 +101,7 @@ enum Cmd {
         #[arg(long, default_value_t = 6)]
         budget: usize,
         /// How many failures to show the mutator per reflection.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 4)]
         minibatch: usize,
     },
 }
@@ -135,18 +137,48 @@ fn main() -> Result<()> {
         Cmd::Dump { work, out, k, poll_secs, idle_stop, once } => {
             run_dump(work, out, k, poll_secs, idle_stop, once)
         }
-        Cmd::Optimize { select, out, gateway, model, mutator_endpoint, mutator_model, mutator_key_env, val_frac, budget, minibatch } => {
-            run_optimize(select, out, gateway, model, mutator_endpoint, mutator_model, mutator_key_env, val_frac, budget, minibatch)
-        }
+        Cmd::Optimize {
+            select,
+            out,
+            gateway,
+            function,
+            variant,
+            reflect_function,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+        } => run_optimize(
+            select,
+            out,
+            gateway,
+            function,
+            variant,
+            reflect_function,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+        ),
     }
 }
 
 /// Load `select.jsonl` (one JSON example per line) and GEPA-optimize the select prompt against it.
 #[allow(clippy::too_many_arguments)]
 fn run_optimize(
-    select: PathBuf, out: PathBuf, gateway: String, model: String,
-    mutator_endpoint: String, mutator_model: String, mutator_key_env: String,
-    val_frac: f64, budget: usize, minibatch: usize,
+    select: PathBuf,
+    out: PathBuf,
+    gateway: String,
+    function: String,
+    variant: String,
+    reflect_function: String,
+    run: Option<String>,
+    tag: Vec<String>,
+    val_frac: f64,
+    budget: usize,
+    minibatch: usize,
 ) -> Result<()> {
     let text = std::fs::read_to_string(&select).with_context(|| format!("read {}", select.display()))?;
     let examples: Vec<kb_eval::gepa::SelectExample> = text
@@ -155,19 +187,35 @@ fn run_optimize(
         .map(serde_json::from_str)
         .collect::<std::result::Result<_, _>>()
         .context("parse select.jsonl")?;
-    let mutator_key = std::env::var(&mutator_key_env).ok();
-    if mutator_key.is_none() {
-        println!("warning: ${mutator_key_env} not set — mutator calls will be unauthenticated");
+
+    let run_label = run.unwrap_or_else(kb_eval::gepa::default_run_tag);
+    let mut tags = serde_json::Map::new();
+    tags.insert("run".into(), run_label.clone().into());
+    tags.insert("budget".into(), budget.to_string().into());
+    tags.insert("minibatch".into(), minibatch.to_string().into());
+    for t in &tag {
+        if let Some((k, v)) = t.split_once('=') {
+            tags.insert(k.to_string(), v.into());
+        }
     }
-    let best = kb_eval::gepa::run(
+
+    let result = kb_eval::gepa::run(
         kb_eval::gepa::GepaConfig {
-            gateway, model, mutator_endpoint, mutator_model, mutator_key,
-            val_frac, budget, minibatch, seed_prompt: SELECT_PROMPT.to_string(),
+            gateway,
+            function,
+            variant,
+            reflect_function,
+            episode_id: kb_eval::tz::backdated_episode_id(30),
+            tags: Value::Object(tags),
+            val_frac,
+            budget,
+            minibatch,
+            seed_prompt: SELECT_PROMPT.to_string(),
         },
         examples,
     )?;
-    std::fs::write(&out, &best).with_context(|| format!("write {}", out.display()))?;
-    println!("wrote best prompt -> {}", out.display());
+    std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
+    println!("wrote best prompt -> {} (run={run_label}, episode={})", out.display(), result.episode_id);
     Ok(())
 }
 

@@ -11,12 +11,16 @@
 
 # ── Entities (the support domain's nouns) ──
 [entities.Symptom]    # an observed problem / question class (kept BROAD for transfer)
+id_prefix = "sym"
 props = []
 [entities.Cause]      # a root cause
+id_prefix = "cau"
 props = []
 [entities.Resolution] # an action / fix / answer-pattern
+id_prefix = "res"
 props = []
 [entities.Task]       # a how-to intent (a procedure the user wants to perform)
+id_prefix = "tsk"
 props = []
 [entities.Parameter]  # a configurable setting (maxTsdr, watchdog, метод вычисления, …)
 props = []
