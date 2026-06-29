@@ -109,16 +109,7 @@ impl DocIndex {
         std::fs::create_dir_all(&idx_path).with_context(|| format!("create {idx_path:?}"))?;
         let index = match Index::create_in_dir(&idx_path, schema.clone()) {
             Ok(i) => i,
-            Err(TantivyError::IndexAlreadyExists) => {
-                let existing = Index::open_in_dir(&idx_path)?;
-                if existing.schema().get_field("body_trigrams").is_err() {
-                    drop(existing);
-                    std::fs::remove_dir_all(&idx_path)?;
-                    Index::create_in_dir(&idx_path, schema)?
-                } else {
-                    existing
-                }
-            }
+            Err(TantivyError::IndexAlreadyExists) => Index::open_in_dir(&idx_path)?,
             Err(e) => return Err(e.into()),
         };
         register_tokenizers(&index);
@@ -232,8 +223,8 @@ impl DocIndex {
         let hits = self.search(query, pool)?;
         let filtered: Vec<RankedHit> = hits
             .into_iter()
-            .filter(|h| file_type.map_or(true, |ft| h.file_type == ft))
-            .filter(|h| glob_m.as_ref().map_or(true, |m| crate::glob::path_matches(m, &h.path)))
+            .filter(|h| file_type.is_none_or(|ft| h.file_type == ft))
+            .filter(|h| glob_m.as_ref().is_none_or(|m| crate::glob::path_matches(m, &h.path)))
             .take(limit)
             .collect();
         Ok(filtered)
@@ -618,9 +609,6 @@ pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
 /// any one process — so both the CLI and a long-lived MCP server can keep the index fresh safely.
 pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
     let manifest = Manifest::load(dir);
-    if manifest.index_schema_version < INDEX_SCHEMA_VERSION {
-        return index_dir(dir, false);
-    }
     let delta = scan_delta(dir, &manifest)?;
     if delta.changed.is_empty() && delta.removed.is_empty() {
         return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
@@ -920,6 +908,22 @@ mod incremental_tests {
         assert!(d.changed.iter().any(|p| p.ends_with("a.md")), "a changed: {:?}", d.changed);
         assert!(d.changed.iter().any(|p| p.ends_with("c.md")), "c added: {:?}", d.changed);
         assert!(d.removed.iter().any(|p| p.ends_with("b.md")), "b removed: {:?}", d.removed);
+    }
+
+    #[test]
+    fn ensure_fresh_skips_schema_migration_when_nothing_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# Hi\nhello world\n").unwrap();
+        let sig = file_sig(dir.path().join("a.md").as_path()).unwrap();
+        let mut old = Manifest::default();
+        old.files.insert("a.md".into(), sig);
+        old.index_schema_version = 1;
+        old.save(dir.path()).unwrap();
+
+        let s = ensure_fresh(dir.path()).unwrap();
+        assert_eq!(s.added, 0);
+        assert_eq!(s.removed, 0);
+        assert_eq!(Manifest::load(dir.path()).index_schema_version, 1);
     }
 
     #[test]
