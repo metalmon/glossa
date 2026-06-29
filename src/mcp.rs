@@ -32,14 +32,15 @@ pub struct GlossaServer {
     tool_router: ToolRouter<Self>,
     trace: crate::trace::TraceLog,
     /// Epoch-ms of the last file-first freshness scan, shared across cloned handlers. Throttles
-    /// `ensure_fresh` so bursty tool calls don't each re-scan the corpus (see `freshen`).
+    /// `ensure_fresh` so bursty tool calls don't each re-scan the corpus (see `kick_freshen`).
     last_fresh: Arc<AtomicU64>,
-    /// Set when a freshen actually (re)indexed something → the derived graph layer (closure/SIMILAR
-    /// + community/centrality) is stale and a `generalize` pass is owed. Consumed by the debounced
-    /// background maintenance loop, never on the read hot path.
+    /// Set when background freshen reindexed something — derived layer (closure/SIMILAR +
+    /// community/centrality) is stale until debounced `generalize` runs (off the read hot path).
     dirty: Arc<AtomicBool>,
     /// Epoch-ms of the last indexing change — the debounce clock for the maintenance loop.
     last_change: Arc<AtomicU64>,
+    /// True while a background `ensure_fresh` is running — concurrent `kick_freshen` calls bail out.
+    indexing: Arc<AtomicBool>,
 }
 
 const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "graph_stats"];
@@ -64,9 +65,8 @@ impl GlossaServer {
             }
         }
         let trace = if trace { crate::trace::TraceLog::to_dir(&root) } else { crate::trace::TraceLog::disabled() };
-        // Seed `last_fresh` to "now" so the first tool call does NOT scan — startup freshness is done
-        // once by the `kb mcp` entry point (main.rs). This also keeps `new()` free of any filesystem
-        // access, so unit tests that construct a server with root="." never index the repo.
+        // Seed `last_fresh` to "now" so bursty first calls don't each scan — `run_serve` kicks one
+        // background freshen after the transport is up. Keeps `new()` free of filesystem access.
         Self {
             root,
             tool_router: router,
@@ -74,6 +74,7 @@ impl GlossaServer {
             last_fresh: Arc::new(AtomicU64::new(crate::trace::now_ms())),
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
+            indexing: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -82,13 +83,14 @@ impl GlossaServer {
         self.tool_router.list_all()
     }
 
-    /// File-first freshness: bring the index/graph up to date with the corpus before serving a
-    /// read. Cheap (a `stat`-scan short-circuits when nothing changed) and THROTTLED — at most one
-    /// scan per window across concurrent calls, claimed via CAS so only one task runs it. Heavy
-    /// extraction (when files did change) runs on a blocking thread so it never stalls the async
-    /// executor. Best-effort: a freshness error never fails the tool — we serve on the prior index.
-    async fn freshen(&self) {
+    /// File-first freshness off the read hot path: schedule `ensure_fresh` in the background when
+    /// the throttle window allows. Read tools call this (no await) and serve the current on-disk
+    /// index immediately. Best-effort: indexing errors never fail the tool.
+    pub fn kick_freshen(&self) {
         const FRESH_WINDOW_MS: u64 = 1500;
+        if self.indexing.load(Ordering::Acquire) {
+            return;
+        }
         let now = crate::trace::now_ms();
         let last = self.last_fresh.load(Ordering::Relaxed);
         if now.saturating_sub(last) < FRESH_WINDOW_MS {
@@ -99,16 +101,29 @@ impl GlossaServer {
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
         {
-            return; // another task claimed this window
+            return;
+        }
+        if self
+            .indexing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
         }
         let root = self.root.clone();
-        if let Ok(Ok(stats)) =
-            tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await
-        {
-            if stats.added + stats.removed > 0 {
-                self.mark_dirty();
+        let dirty = self.dirty.clone();
+        let last_change = self.last_change.clone();
+        let indexing = self.indexing.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
+            indexing.store(false, Ordering::Release);
+            if let Ok(Ok(stats)) = result {
+                if stats.added + stats.removed > 0 {
+                    last_change.store(crate::trace::now_ms(), Ordering::Relaxed);
+                    dirty.store(true, Ordering::Relaxed);
+                }
             }
-        }
+        });
     }
 
     /// Mark the derived graph layer stale (a freshen reindexed something) and stamp the change time —
@@ -134,7 +149,7 @@ impl GlossaServer {
     fn run_generalize(&self) {
         use fs4::fs_std::FileExt;
         let lock_path = self.root.join(".glossa").join("generalize.lock");
-        let Ok(_lock) = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path) else {
+        let Ok(_lock) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path) else {
             return;
         };
         match _lock.try_lock_exclusive() {
@@ -171,6 +186,7 @@ impl GlossaServer {
             Err(_) => (0, 0),
         };
         let dirty = self.dirty.load(Ordering::Relaxed) as u8;
+        let indexing = self.indexing.load(Ordering::Relaxed) as u8;
         format!(
             "# HELP glossa_up 1 if the server is running\n\
              # TYPE glossa_up gauge\nglossa_up 1\n\
@@ -181,7 +197,9 @@ impl GlossaServer {
              # HELP glossa_graph_edges Knowledge-graph edges\n\
              # TYPE glossa_graph_edges gauge\nglossa_graph_edges {edges}\n\
              # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
-             # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n"
+             # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n\
+             # HELP glossa_indexing Background ensure_fresh in progress (1) or idle (0)\n\
+             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n"
         )
     }
 
@@ -386,7 +404,7 @@ impl GraphUpdateArgs {
 impl GlossaServer {
     #[tool(description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let (body, _hits) = crate::tools::search(&idx, &a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref(), &self.trace);
         Ok(CallToolResult::success(vec![Content::text(body)]))
@@ -394,7 +412,7 @@ impl GlossaServer {
 
     #[tool(description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). Returns the chunk's full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from.")]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
         let out = crate::tools::read(&idx, g.as_ref(), &a.path, a.n as u64, &self.trace);
@@ -410,7 +428,7 @@ impl GlossaServer {
 
     #[tool(description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
@@ -419,7 +437,7 @@ impl GlossaServer {
 
     #[tool(description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, a.node.as_deref(), a.path.as_deref(), a.n, &self.trace))]))
@@ -445,7 +463,7 @@ impl GlossaServer {
 
     #[tool(description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call.")]
     async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
@@ -459,7 +477,7 @@ impl GlossaServer {
 
     #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
     async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
@@ -497,7 +515,7 @@ impl GlossaServer {
 
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let opts = crate::grep::GrepOpts { ignore_case: a.ignore_case.unwrap_or(false), fixed: a.fixed.unwrap_or(false), word: a.word.unwrap_or(false), glob: a.glob, file_type: a.file_type };
         Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
@@ -505,7 +523,7 @@ impl GlossaServer {
 
     #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
-        self.freshen().await;
+        self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(crate::tools::glob(&idx, &a.pattern, &self.trace))]))
     }
@@ -716,7 +734,7 @@ mod tests {
 
         // Another editor holds the cross-process generalize lock.
         let lock_path = dir.path().join(".glossa").join("generalize.lock");
-        let holder = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).unwrap();
+        let holder = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path).unwrap();
         assert!(FileExt::try_lock_exclusive(&holder).unwrap(), "test acquires the lock");
 
         // Lock held → this instance must SKIP the pass (no derived layer written).

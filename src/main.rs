@@ -130,6 +130,9 @@ enum Cmd {
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
         #[arg(long = "windows-service", hide = true)]
         windows_service: bool,
+        /// SCM service name (Windows only; set by install scripts). Env: `GLOSSA_SERVICE_NAME`.
+        #[arg(long = "service-name", hide = true, env = "GLOSSA_SERVICE_NAME")]
+        service_name: Option<String>,
     },
 }
 
@@ -260,6 +263,7 @@ pub(crate) struct ServeParams {
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
+    pub service_name: Option<String>,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -269,13 +273,9 @@ pub(crate) fn run_serve(
     p: ServeParams,
     cancel: tokio_util::sync::CancellationToken,
     handle_signals: bool,
+    on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
-    // Startup file-first reconcile (cheap when nothing changed); best-effort.
-    let stats = glossa::index::store::ensure_fresh(&p.path).unwrap_or_default();
     let server = glossa::mcp::GlossaServer::new(p.path, p.profile, p.trace, p.no_graph);
-    if stats.added + stats.removed > 0 {
-        server.mark_dirty();
-    }
     // Freshness runs on EVERY instance (readers stay current). The heavy generalize loop runs ONLY on
     // the indexer (editor/full); among multiple editors it is further serialized by generalize.lock.
     let run_maintenance = p.profile != glossa::mcp::Profile::Reader;
@@ -298,12 +298,17 @@ pub(crate) fn run_serve(
         match transport {
             McpTransport::Stdio => {
                 use rmcp::{transport::stdio, ServiceExt};
+                let freshen_srv = server.clone();
                 let service = server.serve(stdio()).await?;
+                if let Some(f) = on_transport_ready {
+                    f();
+                }
+                freshen_srv.kick_freshen();
                 let _ = service.waiting().await; // client-driven: exit on stdin EOF
                 cancel.cancel();
             }
             McpTransport::StreamableHttp => {
-                serve_streamable_http(server, &bind, allowed_hosts, cancel).await?;
+                serve_streamable_http(server, &bind, allowed_hosts, cancel, on_transport_ready).await?;
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -344,6 +349,7 @@ async fn serve_streamable_http(
     bind: &str,
     allowed_hosts: Vec<String>,
     cancel: tokio_util::sync::CancellationToken,
+    on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -356,6 +362,7 @@ async fn serve_streamable_http(
     }
     let ready_srv = server.clone();
     let metrics_srv = server.clone();
+    let freshen_srv = server.clone();
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
@@ -390,6 +397,10 @@ async fn serve_streamable_http(
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)");
+    if let Some(f) = on_transport_ready {
+        f();
+    }
+    freshen_srv.kick_freshen();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;
@@ -567,7 +578,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts, windows_service } => match action {
+        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts, windows_service, service_name } => match action {
             Some(McpAction::DumpTzTools { config_dir }) => {
                 let n = glossa::tz_export::dump(&config_dir)?;
                 println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
@@ -583,6 +594,7 @@ fn main() -> anyhow::Result<()> {
                     transport,
                     bind,
                     allowed_hosts,
+                    service_name,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
@@ -597,7 +609,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 // Foreground: OS signals (Ctrl-C / SIGTERM) drive graceful shutdown.
-                run_serve(params, tokio_util::sync::CancellationToken::new(), true)?;
+                run_serve(params, tokio_util::sync::CancellationToken::new(), true, None)?;
                 Ok(())
             }
         },
