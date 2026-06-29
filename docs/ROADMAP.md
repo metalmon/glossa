@@ -1,139 +1,76 @@
-# glossa — roadmap & backlog
+# glossa — roadmap and backlog
 
-Status as of 2026-06-24: Milestones 1–5 + real `graph_upsert` are merged to `master`.
-Pure-Rust single offline binary (`kb`); ~54 tests green; no C compiled on shipping targets.
+Status as of **2026-06-28**. Version **0.1.0** on `master`.
 
-## What works today
-- Extraction: md, docx/doc/xlsx/xls/pptx/ppt (office_oxide), pdf (oxidize-pdf **lenient/xref-recovery**, per-page chunks `p.N`, scans indexed by filename), txt/json/yaml/xml/toml/log/source (catch-all text, charset-detected via chardetng+encoding_rs), csv/tsv, html (tag-stripped). Pipeline is streaming (no size limit); binary files silently skipped.
-- Search: ripgrep-syntax scan (default) **and** BM25 ranked (`--rank`) with RU/EN stemming.
-- Knowledge graph (redb): provenance-stamped nodes/edges, `ontology.toml` validation, bounded
-  traversal (`neighbors`/`path`), deterministic auto layer-1 (Document/Section/CONTAINS) during index.
-- MCP server (`kb mcp --profile reader|editor|full`): `search`, `read` (text + embedded images as
-  vision content), `glossary`, `neighbors`, `index`, `reindex`, `resolve`, `graph_upsert` (validated,
-  provenance-stamped), `purge`. gitignore-aware indexing.
-- Human CLI: `search` (rg-format by default; numbered log-lines via `--format pretty`/auto in a TTY),
-  `read <path|result#> [location]` (open a hit by number or a doc/page), `graph stats|near|node|path`
-  (inspect nodes, provenance, edges, paths). `near` aliases `neighbors`.
+For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
-## Performance (search/index speed)
-- **Search is slow on large bases.** The default scan re-walks the whole tree and regex-scans every
-  file on *each* query (no persistent state); `index`/PDF extraction is also heavy. Optimize the
-  walker + per-file IO: parallel traversal (rayon), fewer syscalls, mmap/streaming reads, skip-by-size,
-  and consider a persistent file list. **Reference for ideas:** `fff` — https://github.com/dmtrKovalenko/fff
-  (blazingly-fast parallel file finder in Rust) — mine its traversal/IO approach.
-  - **Blocker for parallel extraction:** `PdfExtractor` uses the process-global panic hook
-    (`take_hook`/`set_hook`) to silence pdf backtraces; that races if `extract` runs on multiple
-    threads. Before parallelizing indexing, drop the hook swap (rely on `catch_unwind` alone) or guard
-    it. Correctness is unaffected today (single-threaded).
+## Shipped in v0.1
 
-## Technical backlog (carry-forward, non-blocking)
-- **Graph crash-atomicity**: fold one file's node/edge writes into a single redb write txn so a
-  mid-file crash can't leave a partial graph the manifest then skips as "unchanged". (`reindex` recovers today.)
-- **`--expand`**: glossary query expansion — needs the layer-2 `Term`/co-occurrence layer (not built).
-- **Induction/deduction graph + ontology revision** — design: `docs/superpowers/specs/2026-06-25-induction-deduction-graph.md`.
-  Graph edges = induction (specific→abstract) / deduction (abstract→specific) relations; revise `ontology.toml`
-  with reasoning-typed node/edge classes (Environment/Symptom/Term/Heuristic; INDICATES/DISAMBIGUATES/APPLIES_TO/
-  RESOLVED_BY/…); two prod agents `build_graph` (induction, multi-step research → typed `graph_upsert`) + `answer`
-  (deduction, env-first); optimize Qwen's `build_graph` prompt toward a strong-model **reference graph**
-  (distillation). Near-term seed: typed reference graph from the real-base edge candidates.
-- **HTTP/streamable transport** for the MCP server — stdio only today.
-- **Image-only PDF pages (scans).** PDFs are chunked per page (`p.N`); pages with no text layer are
-  skipped, and a PDF with *no* extractable text is now indexed **by filename** (location `(no-text)`)
-  so it is never dropped and is findable by name. Remaining work: extract/render the page *image* so
-  the connected agent can *vision-read* it (like `read` already returns embedded office images as
-  vision content). Pure-Rust offline OCR is hard (tesseract is C), so bet on vision-read, not OCR.
-- ~~**File-type coverage (File-First gap).**~~ **DONE.** txt/json/yaml/xml/toml/log/source code
-  (catch-all charset-detected text), csv/tsv, and html (tag-stripped) are now indexed via a
-  streaming pipeline; binary files are silently skipped; unknown extensions no longer dropped.
-  Remaining extractor backlog (lower priority): structured JSON (key: value per chunk), heading-aware
-  HTML chunking, csv-crate row-level indexing, rtf, epub (zip+html), eml/msg.
-- **Table extraction fidelity (correctness on table-heavy bases, not cosmetics).** An xlsx cell containing
-  newlines breaks the markdown-table render (a multi-line cell splits the `|...|` rows). **docx tables almost
-  certainly share the root cause** (same office_oxide table rendering) — verify + apply the same per-cell
-  newline normalization. **PDF tables are not reconstructed at all** (oxidize-pdf yields a flat per-page text
-  stream — no column/row structure); real-base tables (CAN K-factor table, Profibus maxTsdr value table) are
-  retrieval-relevant yet BM25-opaque. Tiers: (1) xlsx multi-line cells — cheap; (2) docx tables — verify+fix;
-  (3) PDF table reconstruction (column detection from text x-positions) — hard, high value, separate effort.
-  Surfaced by the kb-val real-base retrieval-path analysis (vocabulary/table opacity was a recurring miss).
-- **Indexing progress UX**: show per-file progress on slow/large bases (in flight).
-- **PDF robustness**: `pdf-extract` can *panic* on malformed PDFs — must be caught so indexing never aborts (in flight).
-- `type_of` in `upsert` swallows `get_node` errors via `.ok()` (fail-closed) — propagate.
-- `read_region` returns empty string for unknown extensions silently; `join("\n")` may double newlines.
-- Bounded-traversal depth doc-comments; secondary indexes for `resolve`/`delete_by_source` (O(n) today).
-- Cosmetic: `Mcp` enum-variant vs match-arm ordering.
-- **eval harness — backend per-question timeout (spec'd, not yet built).** `kb-eval` claude/qwen backends
-  block indefinitely; a hung live run never times out. Add `ureq .timeout(...)` + a wait-with-timeout on
-  the `claude -p` subprocess (+ a `--timeout` flag), surfacing `failed: timeout`. Do before the first
-  live operator run. (Mock backend / CI unaffected.) Minor: no `GLOSSA_TRACE` env alias (only
-  `--trace`). DONE: per-question `--timeout-secs` + generic `cli`/`openai` backends; `OpenAiBackend`
-  now surfaces `v["error"]` instead of silently scoring "".
-- **eval `openai` backend is now the agent itself (harness-side tool loop).** LM Studio's
-  OpenAI-compatible *API* does NOT auto-run MCP tools (that is GUI-only), so the backend advertises
-  glossa `search`/`read` as OpenAI function tools, runs the tool-call loop (max 8 rounds), and
-  executes the tools **in-process** (`DocIndex::search` / `read_region`) against the corpus in
-  `--work`, logging each call to `work/.glossa/traces` so retrieval-recall is measured unchanged.
-  Server-agnostic (LM Studio/vLLM/OpenRouter); the model server is just an LLM, no MCP needed for
-  eval. `read` results truncated to 4000 chars to fit small-model context. Possible follow-ups:
-  per-round (not just per-request) wall-clock budget; expose `MAX_ROUNDS`/`READ_CHARS_CAP` as flags.
+- **Extraction:** md, Office (office_oxide), PDF (oxidize-pdf, per-page `p.N`), text/json/yaml/xml/html/csv/source; streaming pipeline; gitignore-aware walk.
+- **Search:** BM25 ranked search (RU/EN stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
+- **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
+- **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; MCP maintenance loop on editor profiles.
+- **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`.
+- **Graph UX:** `graph_stats`, COMMUNITY neighbors, formatted `graph_upsert` responses (Written / Merged / REJECTED).
+- **Eval:** `kb-eval`, `kb-train enrich`, TensorZero integration, GEPA select optimization; release `justfile` recipes.
 
-## Product roadmap
+## Performance
 
-The work splits into **two distinct tracks**. They share one model-agnostic agent-eval harness, but
-the "traces → patterns → domain skills" loop belongs ONLY to Track B.
+- **Large corpora:** indexing and unindexed regex `--scan` are heavy. Opportunities: parallel traversal, fewer syscalls, mmap reads, persistent file list (see [fff](https://github.com/dmtrKovalenko/fff) for traversal ideas).
+- **PDF extraction:** parallel indexing blocked by process-global panic-hook usage in PDF path — remove or guard before multi-threaded extract.
 
-### Stage 1 — local bring-up (IN PROGRESS)
-- Build the release binary; connect glossa as an MCP server to the controlling agent (Claude Code).
-- Smoke-test on a real knowledge base (`kb-test/`, git-ignored): `index` → `search`/`--rank` → `graph`.
-- Operator runs CLI commands in the terminal.
+## Technical backlog
 
-### Track A — public benchmarks (engine positioning)
-Goal: measure where the **engine** sits vs the field. NOT a domain — no skill loop here.
-- Build a **model-agnostic agent-eval harness**: an MCP *client* that drives a model, lets it call
-  glossa tools, and scores. Swap the model backend: the smart controller (Claude) vs a weak local
-  model (Qwen3.5-4B via LM Studio's OpenAI-compatible API).
-- Datasets + scoring come WITH the public benchmark — use their gold + **their official metric**
-  (Exact Match / F1 against the gold answer string). Do NOT use our LLM-judge here.
-- Gold **supporting-fact spans are provided** by multihop benches → retrieval/groundedness measurable
-  out of the box.
-- Benches: multihop reasoning + exact-fact (HotpotQA, 2WikiMultihopQA, MuSiQue).
-- **Multihop A/B (the key claim):** same questions / same model, graph OFF vs graph ON
-  (no-saturation, code layers 1–2 only → after the agent saturates layers 3–4 via `graph_upsert`).
-  Needs a "graph-off" mode for a clean control.
-- Honest caveat: these benches are English-Wikipedia, clean text — they do NOT exercise our
-  differentiators (office/pdf, Russian, offline, agentic graph) and on paraphrase recall will favor
-  dense-embedding RAG (we are lexical+graph). They validate the **multihop/retrieval engine**, not
-  the product edge. Expect to trail on pure-semantic benches; our bet is multihop+graph+offline.
-- Traces here are for **debugging failures only** — not pattern-mining.
+### Retrieval and extraction
 
-### Track B — domain refinement (the product moat)
-Goal: tune glossa to a real domain via your own knowledge base. THIS is where the loop lives.
-- **Curate a domain Q/A set** (laborious, first-class deliverable): question → gold answer → **gold
-  source spans** (which file + location). *Bootstrap:* the smart agent answers each question against
-  the base and records the sources it used → draft gold-spans; human verifies. Include **negative /
-  no-answer cases** to measure false-positive / hallucination rate.
-- **Scoring split:** retrieval metrics (was the right source surfaced?) via **regex/span-match**
-  (works well here) — Recall@k, MRR; answer correctness (free-form) via **LLM-as-judge**; plus
-  **groundedness/citation accuracy** (every answer traces to a real span — our differentiator).
-- **Tracing is external, not in the server:** the eval harness is the MCP *client* mediating
-  model↔glossa, so it already sees every tool call + result (search results carry
-  path:location:line:snippet+score). Log the trace in the harness; keep the server clean. **Reverse-trace:**
-  given a question's gold spans, which queries/hops reach them (optimal-path oracle for diagnosing failures).
-- **Heatmap = static PNG** (pure-Rust plotter, e.g. `plotters`, C-free; open/share anywhere): per
-  question × per step hit/miss, so the operator sees, visually, how retrieval is doing.
-- **Patterns → domain skills:** start trace-assisted **manual** skill authoring (operator + agent read
-  traces); auto pattern-mining is a later nicety, not promised now.
-- **Skill packaging:** a **base ontology + base skill**, refined per domain (legal/medical/eng/…).
-- **CI regression:** once the harness exists, run it on a fixed mini-set so quality can't silently regress.
-- Possible small product adds for this track: a `list` tool (enumerate indexed docs, for systematic
-  saturation), a "graph-off" query mode (for the A/B), richer tool-result metadata.
+- **Table fidelity:** multi-line cells break markdown tables in xlsx/docx; PDF tables are flat text only — column reconstruction is high value, hard.
+- **Image-only PDF pages:** filename-indexed when no text; vision-read of rendered page images (like embedded office images in `read`).
+- **Extractors:** structured JSON chunks, heading-aware HTML, row-level CSV, rtf, epub, eml/msg.
+- **Indexing UX:** per-file progress on slow bases.
 
-### Ordering
-1. Finish Stage 1 (bring-up) — in flight.
-2. Build the shared agent-eval harness; run **Track A** (engine numbers, Claude then Qwen-4B).
-3. In parallel/after: **Track B** — curate domain Q/A (+ bootstrap gold-spans), external traces,
-   PNG heatmap, patterns → domain skills.
+### Graph
 
-## Notes
-- Everything stays pure Rust / offline / single binary. The graph is a disposable overlay over files
-  (File-First) — deleting `.glossa/` loses nothing; it rebuilds from the index.
-- Profiles are tool-visibility gating, not RBAC: `reader` (query), `editor` (+ build/index), `full` (+ admin).
+- **Crash atomicity:** single SQLite transaction per file's graph writes.
+- **Glossary expansion (`--expand`):** needs Term/co-occurrence layer (not built).
+- **Induction/deduction ontology:** richer reasoning types (Environment, Term, Heuristic; INDICATES, APPLIES_TO, …) and dual agents (build_graph vs answer).
+- **Resolve/delete_by_source:** secondary indexes (O(n) scans today).
+- **Ontology-aware edge errors:** clearer messages when endpoint types violate relation rules (e.g. Task → CAUSED_BY → Cause).
+
+### MCP and product
+
+- **Parallel indexing** behind feature flag once PDF hook is fixed.
+- **Trigram grep accelerator** (research done; not integrated).
+- **Layer-2 term glossary** for query expansion.
+
+### Eval harness
+
+- Per-round wall-clock budget in OpenAI backend tool loop.
+- Expose `MAX_ROUNDS` / read truncation as CLI flags.
+- **Fullwiki** HotpotQA (hard retrieval regime) — not yet run.
+
+## Product tracks
+
+### Track A — public benchmarks
+
+Measure the **engine** (agent + tools) on standard QA sets (HotpotQA, 2WikiMultihopQA, MuSiQue). Official EM/F1 against gold answers. Multihop A/B: graph off vs on.
+
+Caveat: English Wikipedia text does not stress office/PDF, Russian, or offline deployment — expect dense-embedding RAG to win on pure semantic paraphrase; glossa's bet is multihop + graph + offline.
+
+### Track B — domain refinement
+
+Curate domain Q/A with gold source spans; retrieval via span match; answer via LLM judge; groundedness/citation checks. Traces in the eval harness (MCP client), not the server. Patterns → domain skills and ontology overlays.
+
+## Ordering
+
+1. OSS docs and stable v0.1 operator path (this release).
+2. Track A fullwiki + graph A/B tooling.
+3. Track B domain corpus + regression CI on a fixed mini-set.
+
+## Principles
+
+- Pure Rust, offline, single binary on shipping targets.
+- File-first: delete `.glossa/`, re-index — corpus files are authoritative.
+- Domain rules in `ontology.toml`, not hardcoded in Rust.
+- Profiles gate tool visibility, not data access or freshness.
+
+See [benchmarks.md](benchmarks.md) for eval numbers and [eval-and-training.md](eval-and-training.md) for the dev pipeline.

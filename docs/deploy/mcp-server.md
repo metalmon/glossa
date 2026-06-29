@@ -1,5 +1,7 @@
 # Deploying the glossa MCP server
 
+Back to [MCP guide](../mcp.md).
+
 The `kb mcp` server speaks MCP (JSON-RPC 2.0, protocol `2025-06-18`) over two transports:
 
 - **stdio** — local subprocess (IDE / desktop clients co-located with the binary).
