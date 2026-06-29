@@ -67,7 +67,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: glossa-${{ matrix.target }}
-          path: dist/*.{tar.gz,zip}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
 
   release:
     name: publish GitHub Release
