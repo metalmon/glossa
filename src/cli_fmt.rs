@@ -20,6 +20,18 @@ pub fn bold(s: &str) -> String { paint("1", s) }
 pub fn magenta(s: &str) -> String { paint("35", s) }
 pub fn green(s: &str) -> String { paint("32", s) }
 
+/// Suffix for a no-match hint: ` — did you mean: "a", "b"?` or "" when empty.
+pub fn format_did_you_mean(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " — did you mean: {}?",
+            candidates.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", ")
+        )
+    }
+}
+
 /// Query tokens to highlight in snippets: alphanumeric runs of length ≥ 2.
 fn query_terms(q: &str) -> Vec<String> {
     q.split(|c: char| !c.is_alphanumeric())

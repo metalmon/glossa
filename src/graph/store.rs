@@ -539,6 +539,100 @@ impl GraphStore {
         }
     }
 
+    /// Other reasoning nodes in the same community, sorted by PageRank (desc) then id (asc).
+    pub fn community_siblings(
+        &self,
+        comm: i64,
+        exclude_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, NodeMeta)>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT id, community, pagerank, degree FROM node_meta \
+                 WHERE community = ?1 AND id != ?2 \
+                 ORDER BY pagerank DESC, id ASC LIMIT ?3",
+            )
+            .context("prepare community_siblings")?;
+        let rows = stmt
+            .query_map(rusqlite::params![comm, exclude_id, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    NodeMeta {
+                        community: r.get(1)?,
+                        pagerank: r.get(2)?,
+                        degree: r.get(3)?,
+                    },
+                ))
+            })
+            .context("query community_siblings")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Number of rows in `node_meta` (0 until generalize has run).
+    pub fn node_meta_count(&self) -> anyhow::Result<usize> {
+        let c = self.conn.lock().unwrap();
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM node_meta", [], |r| r.get(0))
+            .context("node_meta_count")?;
+        Ok(n as usize)
+    }
+
+    /// `(community_id, member_count)` sorted by community id ascending.
+    pub fn community_sizes(&self) -> anyhow::Result<Vec<(i64, usize)>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT community, COUNT(*) FROM node_meta \
+                 WHERE community IS NOT NULL GROUP BY community ORDER BY community ASC",
+            )
+            .context("prepare community_sizes")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as usize)))
+            .context("query community_sizes")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Top nodes in a community by PageRank (desc), then id (asc).
+    pub fn community_top_nodes(
+        &self,
+        comm: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, NodeMeta)>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT id, community, pagerank, degree FROM node_meta \
+                 WHERE community = ?1 ORDER BY pagerank DESC, id ASC LIMIT ?2",
+            )
+            .context("prepare community_top_nodes")?;
+        let rows = stmt
+            .query_map(rusqlite::params![comm, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    NodeMeta {
+                        community: r.get(1)?,
+                        pagerank: r.get(2)?,
+                        degree: r.get(3)?,
+                    },
+                ))
+            })
+            .context("query community_top_nodes")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {
         let c = self.conn.lock().unwrap();
         Self::outgoing_c(&c, from)
@@ -987,6 +1081,45 @@ mod tests {
         // empty / missing ids are no-ops
         assert_eq!(g.delete_nodes(&[]).unwrap(), 0);
         assert_eq!(g.delete_nodes(&["zzz".into()]).unwrap(), 0);
+    }
+
+    #[test]
+    fn community_siblings_excludes_self_sorts_by_pagerank_and_respects_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.replace_node_meta(&[
+            ("self".into(), NodeMeta { community: Some(3), pagerank: Some(0.9), degree: Some(5) }),
+            ("low".into(), NodeMeta { community: Some(3), pagerank: Some(0.1), degree: Some(1) }),
+            ("mid".into(), NodeMeta { community: Some(3), pagerank: Some(0.5), degree: Some(2) }),
+            ("high".into(), NodeMeta { community: Some(3), pagerank: Some(0.8), degree: Some(4) }),
+            ("other".into(), NodeMeta { community: Some(4), pagerank: Some(1.0), degree: Some(10) }),
+        ])
+        .unwrap();
+
+        let sibs = g.community_siblings(3, "self", 2).unwrap();
+        assert_eq!(sibs.len(), 2);
+        assert_eq!(sibs[0].0, "high");
+        assert_eq!(sibs[1].0, "mid");
+        assert!(sibs.iter().all(|(id, _)| id != "self" && id != "other"));
+    }
+
+    #[test]
+    fn community_sizes_and_top_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        assert_eq!(g.node_meta_count().unwrap(), 0);
+        g.replace_node_meta(&[
+            ("a".into(), NodeMeta { community: Some(1), pagerank: Some(0.9), degree: Some(2) }),
+            ("b".into(), NodeMeta { community: Some(1), pagerank: Some(0.1), degree: Some(1) }),
+            ("c".into(), NodeMeta { community: Some(2), pagerank: Some(0.5), degree: Some(3) }),
+        ])
+        .unwrap();
+        assert_eq!(g.node_meta_count().unwrap(), 3);
+        let sizes = g.community_sizes().unwrap();
+        assert_eq!(sizes, vec![(1, 2), (2, 1)]);
+        let top = g.community_top_nodes(1, 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, "a");
     }
 
     #[test]

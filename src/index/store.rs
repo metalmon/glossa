@@ -182,8 +182,8 @@ impl DocIndex {
         if glob.is_none() && file_type.is_none() {
             return self.search(query, limit);
         }
-        let glob_re = match glob {
-            Some(g) => Some(crate::glob::glob_to_regex(g)?),
+        let glob_m = match glob {
+            Some(g) => Some(crate::glob::compile_glob(g)?),
             None => None,
         };
         let pool = limit.saturating_mul(20).min(2000).max(limit);
@@ -191,7 +191,7 @@ impl DocIndex {
         let filtered: Vec<RankedHit> = hits
             .into_iter()
             .filter(|h| file_type.map_or(true, |ft| h.file_type == ft))
-            .filter(|h| glob_re.as_ref().map_or(true, |re| re.is_match(&h.path)))
+            .filter(|h| glob_m.as_ref().map_or(true, |m| crate::glob::path_matches(m, &h.path)))
             .take(limit)
             .collect();
         Ok(filtered)
@@ -376,10 +376,19 @@ impl DocIndex {
         Ok(max)
     }
 
+    /// Agent-supplied path → canonical index key. Fast exact hit, else [`Self::resolve_path`].
+    pub fn canonical_document_path(&self, input: &str) -> Option<String> {
+        if self.has_document(input).unwrap_or(false) {
+            return Some(input.to_string());
+        }
+        self.resolve_path(input).ok().flatten()
+    }
+
     /// Resolve a possibly-mangled `input` path to the real indexed path by collapsing runs of
     /// whitespace (the model routinely turns a document's double space into a single one when
-    /// copying a path). Returns the exact path only when exactly one indexed document matches the
-    /// normalized form — never guesses between ambiguous candidates.
+    /// copying a path) and stripping spurious leading path segments (e.g. a corpus-folder prefix
+    /// the model prepends even though search results omit it). Returns the exact path only when
+    /// exactly one indexed document matches — never guesses between ambiguous candidates.
     pub fn resolve_path(&self, input: &str) -> anyhow::Result<Option<String>> {
         fn norm(s: &str) -> String {
             // Collapse runs of whitespace AND of path separators, and unify `/` and `\` to `\`, so
@@ -408,15 +417,31 @@ impl DocIndex {
             }
             out.trim().to_string()
         }
-        let target = norm(input);
-        let mut seen = std::collections::HashSet::new();
-        let mut matches: Vec<String> = Vec::new();
-        self.iter_chunks(|path, _ord, _ft, _body| {
-            if seen.insert(path.to_string()) && norm(path) == target {
-                matches.push(path.to_string());
+        fn match_normalized(
+            idx: &DocIndex,
+            target: &str,
+            norm: &impl Fn(&str) -> String,
+        ) -> anyhow::Result<Option<String>> {
+            let mut seen = std::collections::HashSet::new();
+            let mut matches: Vec<String> = Vec::new();
+            idx.iter_chunks(|path, _ord, _ft, _body| {
+                if seen.insert(path.to_string()) && norm(path) == target {
+                    matches.push(path.to_string());
+                }
+            })?;
+            Ok(if matches.len() == 1 { matches.pop() } else { None })
+        }
+        if let Some(p) = match_normalized(self, &norm(input), &norm)? {
+            return Ok(Some(p));
+        }
+        let segments: Vec<&str> = input.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+        for i in 1..segments.len() {
+            let stripped = segments[i..].join("\\");
+            if let Some(p) = match_normalized(self, &norm(&stripped), &norm)? {
+                return Ok(Some(p));
             }
-        })?;
-        Ok(if matches.len() == 1 { matches.pop() } else { None })
+        }
+        Ok(None)
     }
 }
 
@@ -951,6 +976,37 @@ mod search_tests {
     }
 
     #[test]
+    fn resolve_path_strips_spurious_leading_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("БД ДПТК\\doc.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }]).unwrap();
+        assert_eq!(
+            idx.resolve_path("kb-manual\\БД ДПТК\\doc.pdf").unwrap().as_deref(),
+            Some("БД ДПТК\\doc.pdf")
+        );
+    }
+
+    #[test]
+    fn canonical_document_path_exact_and_tolerant() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("real.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }]).unwrap();
+        assert_eq!(idx.canonical_document_path("real.pdf").as_deref(), Some("real.pdf"));
+        assert_eq!(idx.canonical_document_path("kb-manual\\real.pdf").as_deref(), Some("real.pdf"));
+        assert!(idx.canonical_document_path("missing.pdf").is_none());
+    }
+
+    #[test]
     fn iter_chunks_visits_every_stored_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
@@ -996,6 +1052,13 @@ mod search_tests {
         let md = idx.search_filtered("замена", 10, None, Some("md")).unwrap();
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
+        // recursive glob on nested paths
+        idx.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("nested\\inner.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
+        ]).unwrap();
+        let rec = idx.search_filtered("замена", 10, Some("**/*.pdf"), None).unwrap();
+        assert!(rec.len() >= 2);
+        assert!(rec.iter().any(|h| h.path.contains("inner.pdf")));
     }
 
     #[test]

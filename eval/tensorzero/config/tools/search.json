@@ -11,7 +11,7 @@
     },
     "glob": {
       "default": null,
-      "description": "only documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)",
+      "description": "only documents whose path matches this ripgrep -g glob, e.g. *.pdf, **/*, *.{pdf,md}",
       "type": [
         "string",
         "null"

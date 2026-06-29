@@ -6,6 +6,28 @@ use crate::index::store::{DocIndex, RankedHit};
 use crate::trace::TraceLog;
 use serde_json::json;
 
+/// Indexed document path suggestions for a failed path lookup (basename glob, up to 3).
+pub fn document_path_hints(idx: &DocIndex, path: &str) -> String {
+    let base = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    if base.len() < 4 {
+        return String::new();
+    }
+    crate::glob::glob_docs(idx, &format!("*{base}*"))
+        .ok()
+        .map(|hits| {
+            let hints: Vec<String> = hits.into_iter().take(3).map(|(p, _)| p).collect();
+            crate::cli_fmt::format_did_you_mean(&hints)
+        })
+        .unwrap_or_default()
+}
+
+fn path_not_found(idx: &DocIndex, path: &str) -> String {
+    format!(
+        "no document indexed at {path} — check the path from a search/glob result{}",
+        document_path_hints(idx, path)
+    )
+}
+
 /// BM25 search (optionally scoped). Returns (model text, hits for the caller's scoring).
 pub fn search(idx: &DocIndex, query: &str, limit: usize, glob: Option<&str>, file_type: Option<&str>, trace: &TraceLog) -> (String, Vec<RankedHit>) {
     match idx.search_filtered(query, limit.max(1), glob, file_type) {
@@ -112,20 +134,20 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
                 text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
                 images: Vec::new(),
             },
-            // No exact path match — try a whitespace-tolerant resolve, then retry once.
-            Ok(None) => match idx.resolve_path(path).ok().flatten() {
+            // No exact path match — try a tolerant resolve, then retry once.
+            Ok(None) => match idx.canonical_document_path(path) {
                 Some(real) => match idx.read_chunk_by_ord(&real, n) {
                     Ok(Some(c)) => (real, c),
                     _ => {
                         let text = match idx.last_chunk_ord(&real) {
                             Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
-                            _ => format!("no document indexed at {path} — check the path from a search/glob result"),
+                            _ => path_not_found(idx, path),
                         };
                         return ReadOut { text, images: Vec::new() };
                     }
                 },
                 None => return ReadOut {
-                    text: format!("no document indexed at {path} — check the path from a search/glob result"),
+                    text: path_not_found(idx, path),
                     images: Vec::new(),
                 },
             },
@@ -150,7 +172,9 @@ pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
             trace.log("glob", json!({"pattern": pattern}), json!({"docs": docs.len()}));
-            if docs.is_empty() { "(no documents match — glob matches file PATHS, not text inside documents; use search or grep to find content)".to_string() }
+            if docs.is_empty() {
+                "(no documents match — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text)".to_string()
+            }
             else { docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n") }
         }
         Err(e) => format!("glob error: {e}"),
@@ -333,10 +357,14 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
 }
 
 /// The generalization layer around a node: its SIMILAR cross-links — the shared-evidence
-/// "related cases" written by the generalize pass — in both directions, de-duplicated. The target
-/// is either an explicit reasoning-node `id` (copied from a `glossary` line) or a chunk `(path, n)`
-/// that resolves to its Section node. Each related node renders with a `read` anchor. No links →
+/// "related cases" written by the generalize pass — plus same-community siblings (other reasoning
+/// nodes in the same connected component, top by PageRank). The target is either an explicit
+/// reasoning-node `id` (copied from a `glossary` line) or a chunk `(path, n)` that resolves to
+/// its Section node. Each related node renders with a `read` anchor. No links →
 /// `"(no related cases)"`. (Spine chains live in `glossary`; this is the cross-case view.)
+/// Top community siblings / stats examples per cluster (PageRank-ranked).
+const COMMUNITY_TOP_LIMIT: usize = 8;
+
 pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Option<&str>, path: Option<&str>, n: Option<u64>, trace: &TraceLog) -> String {
     let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
         nid.to_string()
@@ -361,8 +389,66 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Opti
             lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.from), meta_suffix(g, &e.from), read_anchor(idx, g, &e.from)));
         }
     }
-    trace.log("neighbors", json!({"id": id}), json!({"related": lines.len()}));
+    let similar_count = lines.len();
+    if let Ok(Some(meta)) = g.node_meta(&id) {
+        if let Some(comm) = meta.community {
+            if let Ok(siblings) = g.community_siblings(comm, &id, COMMUNITY_TOP_LIMIT) {
+                for (sib_id, _) in siblings {
+                    if seen.insert(sib_id.clone()) {
+                        lines.push(format!(
+                            "COMMUNITY  {}{}{}",
+                            endpoint_ref(idx, g, &sib_id),
+                            meta_suffix(g, &sib_id),
+                            read_anchor(idx, g, &sib_id),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    trace.log(
+        "neighbors",
+        json!({"id": id}),
+        json!({"similar": similar_count, "community": lines.len() - similar_count}),
+    );
     if lines.is_empty() { "(no related cases)".to_string() } else { lines.join("\n") }
+}
+
+fn stats_example_line(g: &crate::graph::store::GraphStore, id: &str, meta: &crate::graph::store::NodeMeta) -> String {
+    match g.get_node(id) {
+        Ok(Some(n)) => {
+            let pr = meta
+                .pagerank
+                .map(|p| format!("  · pr {p:.3}"))
+                .unwrap_or_default();
+            format!("  {}  [{}]  {}{}", n.id, n.node_type, n.label, pr)
+        }
+        _ => format!("  {id}"),
+    }
+}
+
+/// Graph node/edge counts and, when `node_meta` exists, a per-community overview with up to
+/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank.
+pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
+    let nodes = g.node_count().unwrap_or(0);
+    let edges = g.edge_count().unwrap_or(0);
+    let mut out = format!("nodes: {nodes}, edges: {edges}");
+    if g.node_meta_count().unwrap_or(0) == 0 {
+        return format!("{out}\ncommunities: (none)");
+    }
+    let sizes = g.community_sizes().unwrap_or_default();
+    if sizes.is_empty() {
+        return format!("{out}\ncommunities: (none)");
+    }
+    out.push_str(&format!("\ncommunities: {}", sizes.len()));
+    for (comm, size) in sizes {
+        out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
+        for (id, meta) in g.community_top_nodes(comm, COMMUNITY_TOP_LIMIT).unwrap_or_default() {
+            out.push('\n');
+            out.push_str(&stats_example_line(g, &id, &meta));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -456,6 +542,136 @@ mod tests {
         assert!(!out.contains("CAUSED_BY") && !out.contains("[Resolution]"), "neighbors is generalization only: {out}");
     }
 
+    const REASONING_ONT: &str = r#"
+[entities.Symptom]
+props = ["name"]
+[entities.Cause]
+props = ["name"]
+[entities.Resolution]
+props = ["name"]
+[entities.Section]
+props = ["name"]
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[relations.RESOLVED_BY]
+from = ["Cause", "Symptom"]
+to = ["Resolution"]
+[relations.MENTIONS]
+from = ["Symptom"]
+to = ["Section"]
+[validation]
+strict = false
+[reasoning]
+spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
+closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
+"#;
+
+    fn two_component_reasoning_graph() -> (tempfile::TempDir, GraphStore) {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let ont = Ontology::parse(REASONING_ONT).unwrap();
+        let nodes = [
+            node("sym:a", "Symptom", "Профибус потеря связи"),
+            node("cau:a", "Cause", "Малый maxTsdr"),
+            node("res:a", "Resolution", "Поднять maxTsdr"),
+            node("sym:b", "Symptom", "Modbus таймаут опроса"),
+            node("cau:b", "Cause", "Неверный baud"),
+            node("res:b", "Resolution", "Изменить скорость порта"),
+        ];
+        let edges = [
+            edge("sym:a", "CAUSED_BY", "cau:a"),
+            edge("cau:a", "RESOLVED_BY", "res:a"),
+            edge("sym:b", "CAUSED_BY", "cau:b"),
+            edge("cau:b", "RESOLVED_BY", "res:b"),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+        let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
+        crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
+        (d, g)
+    }
+
+    #[test]
+    fn neighbors_shows_community_siblings_after_generalize() {
+        let (_d, i) = idx();
+        let (_gd, g) = two_component_reasoning_graph();
+        let t = TraceLog::disabled();
+        let out = neighbors(&i, &g, Some("sym:a"), None, None, &t);
+        assert!(out.contains("COMMUNITY"), "expected community siblings: {out}");
+        assert!(out.contains("cau:a") || out.contains("res:a"), "same-component siblings: {out}");
+        assert!(!out.contains("sym:b") && !out.contains("cau:b") && !out.contains("res:b"), "other component excluded: {out}");
+        assert!(!out.contains("sym:a  [Symptom]"), "self excluded: {out}");
+    }
+
+    #[test]
+    fn neighbors_dedups_similar_from_community_section() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let ont = Ontology::parse(REASONING_ONT).unwrap();
+        let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
+        crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
+        let t = TraceLog::disabled();
+        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
+        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей"), "{out}");
+        let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
+        assert!(
+            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование АБАК")),
+            "SIMILAR nodes must not repeat in COMMUNITY: {out}",
+        );
+    }
+
+    #[test]
+    fn neighbors_community_sorted_by_pagerank() {
+        use crate::graph::store::NodeMeta;
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        g.replace_node_meta(&[
+            ("sym:loss".into(), NodeMeta { community: Some(1), pagerank: Some(0.9), degree: Some(3) }),
+            ("cau:tsdr".into(), NodeMeta { community: Some(1), pagerank: Some(0.2), degree: Some(1) }),
+            ("res:set".into(), NodeMeta { community: Some(1), pagerank: Some(0.7), degree: Some(2) }),
+            ("tsk:upd".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
+            ("tsk:prog".into(), NodeMeta { community: Some(1), pagerank: Some(0.1), degree: Some(1) }),
+        ])
+        .unwrap();
+        let t = TraceLog::disabled();
+        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
+        let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
+        assert_eq!(community_lines.len(), 2, "limit excludes SIMILAR dupes, top-2 by pr after SIMILAR taken: {out}");
+        assert!(community_lines[0].contains("res:set"), "highest pr sibling first: {out}");
+        assert!(community_lines[1].contains("cau:tsdr"), "second by pr: {out}");
+    }
+
+    #[test]
+    fn graph_stats_lists_communities_with_top_examples() {
+        use crate::graph::store::NodeMeta;
+        let gd = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(gd.path()).unwrap();
+        for n in [
+            node("sym:a", "Symptom", "Profibus loss"),
+            node("sym:b", "Symptom", "Modbus timeout"),
+        ] {
+            g.put_node(&n).unwrap();
+        }
+        g.replace_node_meta(&[
+            ("sym:a".into(), NodeMeta { community: Some(0), pagerank: Some(0.9), degree: Some(2) }),
+            ("sym:b".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
+        ])
+        .unwrap();
+        let out = graph_stats(&g);
+        assert!(out.contains("nodes: 2") && out.contains("communities: 2"), "{out}");
+        assert!(out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"), "{out}");
+        assert!(out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"), "{out}");
+    }
+
+    #[test]
+    fn graph_stats_without_meta_shows_none() {
+        let gd = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(gd.path()).unwrap();
+        g.put_node(&node("sym:x", "Symptom", "X")).unwrap();
+        let out = graph_stats(&g);
+        assert!(out.contains("nodes: 1") && out.contains("communities: (none)"), "{out}");
+    }
+
     #[test]
     fn read_is_omnivorous_over_reasoning_node_ids() {
         let (_d, i) = idx(); // АБАК.pdf #p.7 = "параметр maxTsdr равен 3000"
@@ -520,6 +736,57 @@ mod tests {
         // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
         let out2 = read(&i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
         assert!(out2.text.contains("safety body"), "resolved despite doubled backslash: {}", out2.text);
+    }
+
+    #[test]
+    fn read_tolerates_spurious_leading_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("БД ДПТК\\doc.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "body text".into() },
+        ]).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
+        assert!(out.text.contains("body text"), "strip spurious prefix: {}", out.text);
+    }
+
+    #[test]
+    fn read_suggests_path_on_total_miss() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("БД ДПТК\\Методика повerки АбакПЛК 2025.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "x".into() },
+        ]).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
+        assert!(out.contains("did you mean"), "hint on miss: {out}");
+        assert!(out.contains("Методика"), "suggest real path: {out}");
+    }
+
+    #[test]
+    fn read_reasoning_node_id_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&Node {
+            id: "sym:test".into(),
+            node_type: "Symptom".into(),
+            label: "Test".into(),
+            aliases: vec![],
+            prov: prov(),
+        }).unwrap();
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("evidence.md"), location: "S1".into(), file_type: "md".into(), text: "evidence body".into() },
+        ]).unwrap();
+        g.put_edge(&Edge {
+            from: "sym:test".into(),
+            to: "evidence.md#S1".into(),
+            edge_type: "MENTIONS".into(),
+            prov: prov(),
+        }).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, Some(&g), "sym:test", 1, &t).text;
+        assert!(out.contains("evidence body"), "reasoning node read: {out}");
     }
 
     #[test]

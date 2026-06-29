@@ -127,6 +127,37 @@ api_base = "https://openrouter.ai/api/v1"
 model_name = "deepseek/deepseek-r1"
 api_key_location = "env::OPENROUTER_API_KEY"
 
+# ── GEPA select micro-task: pick the gold chunk ord from numbered search hits ──
+# `kb-train optimize` passes the evolving system prompt in input messages; the template here is the seed.
+[functions.select]
+type = "chat"
+
+[functions.select.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "select/system.minijinja"
+temperature = 0.0
+max_tokens = 16
+
+# Add experiment variants (weight = 0) and pass `--variant <name>` to filter runs in the TZ UI:
+# [functions.select.variants.gepa_v1]
+# type = "chat_completion"
+# model = "qwen"
+# system_template = "select/system.minijinja"
+# temperature = 0.0
+# max_tokens = 16
+# weight = 0
+
+# ── GEPA reflection: mutator proposes an improved select system prompt from failures ──
+[functions.gepa_reflect]
+type = "chat"
+
+[functions.gepa_reflect.variants.baseline]
+type = "chat_completion"
+model = "deepseek_r1"
+temperature = 1.0
+max_tokens = 4096
+
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
 type = "chat"
@@ -178,11 +209,11 @@ extra_body = [
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
 [tools.glob]
-description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count)."
+description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count)."
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
+description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
 parameters = "tools/glossary.json"
 
 [tools.graph_delete]
@@ -193,12 +224,16 @@ parameters = "tools/graph_delete.json"
 description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
 parameters = "tools/graph_generalize.json"
 
+[tools.graph_stats]
+description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank)."
+parameters = "tools/graph_stats.json"
+
 [tools.graph_update]
 description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
 parameters = "tools/graph_update.json"
 
 [tools.graph_upsert]
-description = "Create/update reasoning nodes and directed edges. A node carries a `label` (NO id — the system derives the id and de-duplicates by label) plus `node_type` and `source_path`. Reference nodes in `edges` by their `label` (or a section as `<path>#<n>`). A Resolution label names the fix ACTION, never the literal value; write labels as a broad reusable class in the knowledge base's language. Send a node and the edges referencing it in the same call so both endpoints exist."
+description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
@@ -210,7 +245,7 @@ description = "Build/update the index + structural graph for the knowledge base.
 parameters = "tools/index.json"
 
 [tools.neighbors]
-description = "Related cases for a node — its SIMILAR cross-links (other cases that share evidence), from the generalization layer. Pass a reasoning-node `node` id copied from a `glossary` line, or a chunk `path` + `n`. Each related node renders with a `read path #n` anchor. Empty → no related cases. (For a node's own cause→resolution chain, use `glossary`.)"
+description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors."
 parameters = "tools/neighbors.json"
 
 [tools.purge]
@@ -243,7 +278,7 @@ parameters = "tools/done.json"
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
+tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 
@@ -324,4 +359,28 @@ level = "episode"
 [metrics.enrich_rounds]
 type = "float"
 optimize = "min"
+level = "episode"
+
+# ── GEPA select optimization (posted by `kb-train optimize` per run) ──
+[metrics.select_acc]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.select_baseline_acc]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_candidates]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_examples_train]
+type = "float"
+level = "episode"
+
+[metrics.gepa_examples_val]
+type = "float"
 level = "episode"

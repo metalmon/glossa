@@ -55,7 +55,7 @@ fn tool_kind(name: &str) -> ToolKind {
         "done" => ToolKind::Control,
         "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => ToolKind::GraphMutate,
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
-        "glossary" | "neighbors" | "resolve" => ToolKind::GraphRead,
+        "glossary" | "neighbors" | "resolve" | "graph_stats" => ToolKind::GraphRead,
         _ => ToolKind::Corpus,
     }
 }
@@ -286,7 +286,7 @@ impl AgentBackend for TensorZeroBackend {
         // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
         // relative to the gateway's clock — immune to Docker/WSL host↔container clock skew. The same id
         // is sent on every turn, so all inferences group into one episode (telemetry + feedback).
-        let eid = backdated_episode_id(30);
+        let eid = crate::tz::backdated_episode_id(30);
         let chat = |messages: &[Value], _episode_id: Option<&str>| -> anyhow::Result<TzTurn> {
             let t0 = std::time::Instant::now();
             let mut body = json!({ "function_name": function, "input": { "messages": messages }, "episode_id": eid });
@@ -433,18 +433,6 @@ fn parse_first_float(s: &str) -> Option<f32> {
     num.parse::<f32>().ok()
 }
 
-/// A UUIDv7 episode id whose embedded timestamp is `secs_back` seconds in the PAST, so the gateway
-/// never rejects it as "in the future" under Docker/WSL host↔container clock skew. Reused across an
-/// episode's turns to keep all inferences grouped.
-fn backdated_episode_id(secs_back: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs().saturating_sub(secs_back);
-    let ts = uuid::Timestamp::from_unix(uuid::NoContext, secs, now.subsec_nanos());
-    uuid::Uuid::new_v7(ts).to_string()
-}
-
 /// True if any gold supporting title appears among the titles the agent's searches surfaced.
 /// Empty gold is trivially satisfied; an empty `surfaced` with real gold is NOT (it retrieved nothing).
 fn retrieved_any(surfaced: &[String], gold: &[String]) -> bool {
@@ -461,7 +449,7 @@ mod retrieved_tests {
 
     #[test]
     fn backdated_episode_id_is_valid_past_v7() {
-        let id = backdated_episode_id(30);
+        let id = crate::tz::backdated_episode_id(30);
         let u = uuid::Uuid::parse_str(&id).unwrap();
         assert_eq!(u.get_version_num(), 7, "must be UUIDv7");
         let (secs, _) = u.get_timestamp().unwrap().to_unix();

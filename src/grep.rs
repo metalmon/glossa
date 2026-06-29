@@ -3,7 +3,7 @@
 //! all stored chunk bodies and confirms with the real `regex` engine. The trigram accelerator
 //! is added in v2.
 
-use crate::glob::glob_to_regex;
+use crate::glob::{compile_glob, path_matches};
 use crate::index::store::DocIndex;
 use regex::RegexBuilder;
 
@@ -53,12 +53,12 @@ pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Ve
         return Ok(Vec::new());
     }
     let matcher = build_matcher(pattern, opts)?;
-    let glob_re = match &opts.glob { Some(g) => Some(glob_to_regex(g)?), None => None };
+    let glob_m = match &opts.glob { Some(g) => Some(compile_glob(g)?), None => None };
     let mut hits = Vec::new();
     let mut visit = |path: &str, ord: u64, file_type: &str, body: &str| {
         if hits.len() >= GREP_MAX_HITS { return; }
         if let Some(ft) = &opts.file_type { if file_type != ft { return; } }
-        if let Some(gr) = &glob_re { if !gr.is_match(path) { return; } }
+        if let Some(m) = &glob_m { if !path_matches(m, path) { return; } }
         for line in body.lines() {
             if matcher.is_match(line) {
                 hits.push(GrepHit { path: path.to_string(), ord, line: line.trim().to_string() });
@@ -124,6 +124,24 @@ mod tests {
         // -w word boundary: "договор" as a whole word does NOT match inside "договоры"
         let w = grep(&idx, "договор", &GrepOpts { ignore_case: true, word: true, ..Default::default() }).unwrap();
         assert_eq!(w.iter().filter(|h| h.path == "b.md").count(), 0);
+    }
+
+    #[test]
+    fn grep_glob_recursive_on_windows_paths() {
+        let (_d, idx) = idx_with(&[
+            ("dir\\nested.md", "S1", "md", "договор подписан"),
+            ("top.md", "S1", "md", "договор другой"),
+            ("dir\\nested.pdf", "p.1", "pdf", "договор pdf"),
+        ]);
+        let g = grep(
+            &idx,
+            "договор",
+            &GrepOpts { ignore_case: true, glob: Some("**/*.md".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(g.len(), 2);
+        let paths: std::collections::BTreeSet<_> = g.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["dir\\nested.md", "top.md"].into_iter().collect());
     }
 
     #[test]

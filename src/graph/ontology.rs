@@ -67,20 +67,40 @@ struct RawOntology {
 #[derive(Debug, Default)]
 pub struct Ontology {
     entity_types: std::collections::BTreeSet<String>,
+    /// Optional per-entity id prefix (e.g. Symptom → "sym"). Unset types fall back to lowercase type name.
+    id_prefixes: BTreeMap<String, String>,
     relations: BTreeMap<String, RawRelation>,
     strict: bool,
     reasoning: RawReasoning,
 }
 
+fn entity_id_prefix(v: &toml::Value) -> Option<String> {
+    v.get("id_prefix").and_then(|p| p.as_str()).map(str::to_string)
+}
+
 impl Ontology {
     pub fn parse(toml_str: &str) -> anyhow::Result<Ontology> {
         let raw: RawOntology = toml::from_str(toml_str)?;
+        let id_prefixes = raw
+            .entities
+            .iter()
+            .filter_map(|(name, v)| entity_id_prefix(v).map(|p| (name.clone(), p)))
+            .collect();
         Ok(Ontology {
             entity_types: raw.entities.keys().cloned().collect(),
+            id_prefixes,
             relations: raw.relations,
             strict: raw.validation.strict,
             reasoning: raw.reasoning,
         })
+    }
+
+    /// Prefix used when deriving a node id for `node_type` (`id_for` / label sanitize).
+    pub fn id_abbrev(&self, node_type: &str) -> String {
+        self.id_prefixes
+            .get(node_type)
+            .cloned()
+            .unwrap_or_else(|| node_type.to_lowercase())
     }
 
     /// The reasoning spines — the valid shapes a node must lie on a complete instance of to
@@ -304,6 +324,21 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
                 .map(String::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn id_prefix_parsed_and_fallback() {
+        let toml = r#"
+[entities.Symptom]
+id_prefix = "sym"
+props = []
+[entities.Parameter]
+props = []
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        assert_eq!(o.id_abbrev("Symptom"), "sym");
+        assert_eq!(o.id_abbrev("Parameter"), "parameter");
+        assert_eq!(o.id_abbrev("Unknown"), "unknown");
     }
 
     #[test]

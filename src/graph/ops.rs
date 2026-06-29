@@ -30,19 +30,22 @@ pub struct UpsertEdge {
     pub source_path: String,
 }
 
-/// Derive the canonical node id from its type and label.
-/// Abbrevs: Symptom→"sym", Cause→"cau", Resolution→"res", Task→"tsk", else lowercased type.
+/// Derive the canonical node id from ontology prefix, type, and label.
 /// The label is normalised (lowercase, collapsed whitespace) and spaces replaced with "-".
-pub fn id_for(node_type: &str, label: &str) -> String {
+pub fn id_for(ont: &Ontology, node_type: &str, label: &str) -> String {
     let slug = normalize_label(label).replace(' ', "-");
-    let abbrev = match node_type {
-        "Symptom" => "sym".to_string(),
-        "Cause" => "cau".to_string(),
-        "Resolution" => "res".to_string(),
-        "Task" => "tsk".to_string(),
-        other => other.to_lowercase(),
-    };
-    format!("{abbrev}:{slug}")
+    format!("{}:{}", ont.id_abbrev(node_type), slug)
+}
+
+/// Strip a mistaken type-prefix when the agent copied a graph id into the `label` field.
+pub fn sanitize_label_for_upsert(ont: &Ontology, node_type: &str, label: &str) -> String {
+    let prefix = format!("{}:", ont.id_abbrev(node_type));
+    let trimmed = label.trim();
+    if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+        trimmed[prefix.len()..].trim_start().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ── label helpers ─────────────────────────────────────────────────────────────
@@ -56,9 +59,12 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
     if let Some(pos) = s.rfind('#') {
         let suffix = &s[pos + 1..];
         if let Ok(n) = suffix.parse::<u64>() {
-            let path = &s[..pos];
-            return match idx.location_for_ord(path, n) {
-                Ok(Some(loc)) => Ok(crate::graph::build::section_id(path, &loc)),
+            let raw = &s[..pos];
+            let path = idx
+                .canonical_document_path(raw)
+                .unwrap_or_else(|| raw.to_string());
+            return match idx.location_for_ord(&path, n) {
+                Ok(Some(loc)) => Ok(crate::graph::build::section_id(&path, &loc)),
                 Ok(None) => Err(format!(
                     "chunk #{n} does not exist in {path}; take the chunk number from a search/grep/read on THIS document — never reuse a number from another file"
                 )),
@@ -77,6 +83,9 @@ fn resolve_endpoint_label(
     label_to_id: &std::collections::HashMap<String, String>,
     label: &str,
 ) -> Option<String> {
+    if g.get_node(label).ok().flatten().is_some() {
+        return Some(label.to_string());
+    }
     if let Some(id) = label_to_id.get(&normalize_label(label)) {
         return Some(id.clone());
     }
@@ -100,7 +109,7 @@ fn resolve_endpoint_label(
 
 /// Outcome of a `graph_upsert` operation.
 pub struct UpsertOutcome {
-    /// Success summary or rejection text the model should act on.
+    /// Formatted response for the model (via `format_upsert_response`).
     pub message: String,
     pub nodes: usize,
     pub edges: usize,
@@ -109,6 +118,55 @@ pub struct UpsertOutcome {
     /// Human-readable dump lines for logging:
     /// `"node <id> [<type>] <label>"` and `"edge <from> -<type>-> <to>"` (resolved).
     pub dump: Vec<String>,
+    /// requested_id → canonical_id when dedup merged into an existing node
+    pub merged: Vec<(String, String)>,
+    /// Malformed items that were dropped (partial apply) or caused full rejection
+    pub dropped: Vec<String>,
+}
+
+/// Build the human-readable tool response from an upsert outcome.
+pub fn format_upsert_response(out: &UpsertOutcome) -> String {
+    if out.rejected && out.nodes == 0 && out.edges == 0 {
+        let mut s = String::from("REJECTED — nothing written");
+        if !out.dropped.is_empty() {
+            s.push_str("\n- ");
+            s.push_str(&out.dropped.join("\n- "));
+        }
+        if !out.dump.is_empty() {
+            // dump on full rejection holds the hint block appended by graph_upsert
+            for line in &out.dump {
+                if !line.is_empty() {
+                    s.push('\n');
+                    s.push_str(line);
+                }
+            }
+        }
+        return s;
+    }
+
+    let mut parts = vec![format!("upserted {} nodes, {} edges", out.nodes, out.edges)];
+    if !out.dump.is_empty() {
+        parts.push("Written:".into());
+        for line in &out.dump {
+            parts.push(format!("- {line}"));
+        }
+    }
+    if !out.merged.is_empty() {
+        parts.push("Merged (already existed, edges attached):".into());
+        for (from, to) in &out.merged {
+            parts.push(format!("- {from} → {to}"));
+        }
+    }
+    if !out.dropped.is_empty() {
+        parts.push(format!(
+            "{} item(s) dropped (the rest WERE written) — fix and resend only these:",
+            out.dropped.len()
+        ));
+        for e in &out.dropped {
+            parts.push(format!("- {e}"));
+        }
+    }
+    parts.join("\n")
 }
 
 /// Validate, resolve, and apply a graph upsert.
@@ -139,38 +197,51 @@ pub fn graph_upsert(
     let mut errs: Vec<String> = Vec::new();
 
     // (1) Nodes: keep those whose source_path is a real indexed document; drop the rest.
-    let valid_nodes: Vec<&UpsertNode> = nodes
-        .iter()
-        .filter(|nd| {
-            let ok = idx.has_document(&nd.source_path).unwrap_or(false);
-            if !ok {
-                errs.push(format!(
-                    "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result",
-                    nd.label, nd.source_path
+    struct SanitizedNode {
+        node_type: String,
+        label: String,
+        aliases: Vec<String>,
+    }
+    let mut valid_nodes: Vec<(SanitizedNode, String)> = Vec::new();
+    for nd in &nodes {
+        match idx.canonical_document_path(&nd.source_path) {
+            Some(canonical) => {
+                let label = sanitize_label_for_upsert(ont, &nd.node_type, &nd.label);
+                valid_nodes.push((
+                    SanitizedNode {
+                        node_type: nd.node_type.clone(),
+                        label,
+                        aliases: nd.aliases.clone(),
+                    },
+                    canonical,
                 ));
             }
-            ok
-        })
-        .collect();
+            None => errs.push(format!(
+                "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result{}",
+                nd.label, nd.source_path, crate::tools::document_path_hints(idx, &nd.source_path)
+            )),
+        }
+    }
 
-    // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes. Existing
-    // nodes are no longer loaded wholesale (that was O(N) per upsert); an edge endpoint naming an
-    // existing node is resolved on demand via the label_norm index in `resolve_endpoint_label`.
+    // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes.
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for nd in &valid_nodes {
-        label_to_id.insert(normalize_label(&nd.label), id_for(&nd.node_type, &nd.label));
+    for (nd, _) in &valid_nodes {
+        label_to_id.insert(
+            normalize_label(&nd.label),
+            id_for(ont, &nd.node_type, &nd.label),
+        );
     }
 
     // (3) build NodeSpec list (valid nodes only)
     let nodespecs: Vec<NodeSpec> = valid_nodes
         .iter()
-        .map(|nd| NodeSpec {
-            id: id_for(&nd.node_type, &nd.label),
+        .map(|(nd, canonical)| NodeSpec {
+            id: id_for(ont, &nd.node_type, &nd.label),
             node_type: nd.node_type.clone(),
             label: nd.label.clone(),
             aliases: nd.aliases.clone(),
-            source_path: nd.source_path.clone(),
+            source_path: canonical.clone(),
             range: None,
             confidence: None,
         })
@@ -193,13 +264,17 @@ pub fn graph_upsert(
             ));
             continue;
         }
-        if !idx.has_document(&ue.source_path).unwrap_or(false) {
-            errs.push(format!(
-                "edge {of} -{oet}-> {ot} dropped: source_path \"{}\" is not a document — use a real path from a search/read result",
-                ue.source_path
-            ));
-            continue;
-        }
+        let edge_source_path = match idx.canonical_document_path(&ue.source_path) {
+            Some(canonical) => canonical,
+            None => {
+                errs.push(format!(
+                    "edge {of} -{oet}-> {ot} dropped: source_path \"{}\" is not a document — use a real path from a search/read result{}",
+                    ue.source_path,
+                    crate::tools::document_path_hints(idx, &ue.source_path)
+                ));
+                continue;
+            }
+        };
 
         let mut from_resolved: Option<String> = None;
         let mut to_resolved: Option<String> = None;
@@ -275,7 +350,7 @@ pub fn graph_upsert(
                     from: from_id,
                     to: to_id,
                     edge_type: ue.edge_type.clone(),
-                    source_path: ue.source_path.clone(),
+                    source_path: edge_source_path,
                     range: None,
                     confidence: None,
                 });
@@ -292,13 +367,8 @@ pub fn graph_upsert(
         dump.push(format!("edge {} -{}-> {}", e.from, e.edge_type, e.to));
     }
 
-    // (6) Nothing well-formed at all → a full rejection (with the existing-node hint so the model
-    // can reference a real id instead of inventing one). Otherwise apply what's valid below.
-    let dropped = errs.len();
+    // (6) Nothing well-formed at all → full rejection with a label-matching hint.
     if nodespecs.is_empty() && edgespecs.is_empty() {
-        // Help the model recover from id confusion (it often references a node it created under a
-        // DIFFERENT id, then loops on the rejection): list the reasoning nodes that already exist so
-        // it can reference the right id instead of an invented one. Structural nodes are excluded.
         const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
         let existing: Vec<String> = g
             .all_nodes()
@@ -308,46 +378,62 @@ pub fn graph_upsert(
             .map(|n| format!("{} [{}] {}", n.id, n.node_type, n.label))
             .take(25)
             .collect();
-        let hint = if existing.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nExisting reasoning nodes — reference one of THESE ids, do not invent a new id for the same concept:\n- {}",
-                existing.join("\n- ")
-            )
-        };
-        return UpsertOutcome {
-            message: format!(
-                "graph_upsert wrote nothing — every item was malformed. Fix and resend:\n- {}{}",
-                errs.join("\n- "),
-                hint
-            ),
+        let mut hint_dump = Vec::new();
+        if !existing.is_empty() {
+            hint_dump.push(
+                "Similar existing nodes (match by label in edges, do not put ids in label):".into(),
+            );
+            for line in existing {
+                hint_dump.push(format!("- {line}"));
+            }
+        }
+        let out = UpsertOutcome {
+            message: String::new(),
             nodes: 0,
             edges: 0,
             rejected: true,
-            dump,
+            dump: hint_dump,
+            merged: vec![],
+            dropped: errs,
+        };
+        return UpsertOutcome {
+            message: format_upsert_response(&out),
+            ..out
         };
     }
 
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
     match apply_upsert(g, ont, nodespecs, edgespecs, now) {
-        Ok((n, e)) => {
-            let mut message = format!("upserted {n} nodes, {e} edges");
-            if dropped > 0 {
-                message.push_str(&format!(
-                    "\n{dropped} item(s) dropped (the rest WERE written) — fix and resend only these:\n- {}",
-                    errs.join("\n- ")
-                ));
+        Ok(result) => {
+            let out = UpsertOutcome {
+                message: String::new(),
+                nodes: result.nodes_written,
+                edges: result.edges_written,
+                rejected: false,
+                dump,
+                merged: result.merged,
+                dropped: errs,
+            };
+            UpsertOutcome {
+                message: format_upsert_response(&out),
+                ..out
             }
-            UpsertOutcome { message, nodes: n, edges: e, rejected: false, dump }
         }
-        Err(e) => UpsertOutcome {
-            message: format!("graph_upsert failed: {e}"),
-            nodes: 0,
-            edges: 0,
-            rejected: true,
-            dump,
-        },
+        Err(e) => {
+            let out = UpsertOutcome {
+                message: String::new(),
+                nodes: 0,
+                edges: 0,
+                rejected: true,
+                dump,
+                merged: vec![],
+                dropped: vec![format!("graph_upsert failed: {e}")],
+            };
+            UpsertOutcome {
+                message: format!("graph_upsert failed: {e}"),
+                ..out
+            }
+        }
     }
 }
 
@@ -427,8 +513,10 @@ mod tests {
 
     const DEDUP_ONT: &str = r#"
 [entities.Symptom]
+id_prefix = "sym"
 props = []
 [entities.Resolution]
+id_prefix = "res"
 props = []
 [relations.RESOLVED_BY]
 from = ["Symptom"]
@@ -485,7 +573,8 @@ strict = true
         assert!(!out.rejected, "should not be rejected: {}", out.message);
         assert_eq!(out.nodes, 2);
         assert_eq!(out.edges, 1);
-        assert!(out.message.contains("upserted 2 nodes, 1 edges"), "{}", out.message);
+        assert!(format_upsert_response(&out).contains("upserted 2 nodes, 1 edges"), "{}", out.message);
+        assert!(out.message.contains("Written:"), "{}", out.message);
     }
 
     /// graph_update renames a node in place while preserving its id and all outgoing edges.
@@ -521,11 +610,11 @@ strict = true
         let id = id.unwrap();
 
         // (b) the id is the label-derived id for the original label
-        let expected_id = id_for("Symptom", "Потеря связи");
+        let expected_id = id_for(&ont, "Symptom", "Потеря связи");
         assert_eq!(id, expected_id, "id should be the label-derived id");
 
         // (c) the RESOLVED_BY edge still exists
-        let res_id = id_for("Resolution", "Перезагрузка модуля");
+        let res_id = id_for(&ont, "Resolution", "Перезагрузка модуля");
         let out = g.outgoing(&id).unwrap();
         assert!(
             out.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
@@ -580,8 +669,8 @@ strict = true
         assert_eq!(out.edges, 1);
 
         // Assert the RESOLVED_BY edge connects the label-derived ids.
-        let sym_id = id_for("Symptom", "Потеря связи");
-        let res_id = id_for("Resolution", "Перезапуск");
+        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let res_id = id_for(&ont, "Resolution", "Перезапуск");
         let outgoing = g.outgoing(&sym_id).unwrap();
         assert!(
             outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
@@ -743,6 +832,59 @@ strict = true
         assert!(!out_real.rejected, "real source_path must be accepted: {}", out_real.message);
     }
 
+    #[test]
+    fn upsert_accepts_prefixed_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+
+        let out = graph_upsert(
+            &idx, &g, &ont,
+            vec![unode("Symptom", "Потеря связи", "kb-manual\\kb-test\\Доп.данные\\real.pdf")],
+            vec![],
+            1,
+        );
+        assert!(!out.rejected, "prefixed source_path must resolve: {}", out.message);
+        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let node = g.get_node(&sym_id).unwrap().unwrap();
+        assert_eq!(node.prov.source_path, "kb-test\\Доп.данные\\real.pdf");
+    }
+
+    #[test]
+    fn upsert_rejects_bad_path_with_did_you_mean() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+
+        let out = graph_upsert(
+            &idx, &g, &ont,
+            vec![unode("Symptom", "Потеря связи", "wrong\\real.pdf")],
+            vec![],
+            1,
+        );
+        assert!(out.rejected, "bad path must reject: {}", out.message);
+        assert!(out.message.contains("did you mean"), "upsert hint: {}", out.message);
+        assert!(out.message.contains("real.pdf"), "upsert suggests real path: {}", out.message);
+    }
+
+    #[test]
+    fn resolve_section_ref_prefixed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "docs\\real.md".into(),
+            location: "Introduction".into(),
+            file_type: "md".into(),
+            text: "section content".into(),
+        }]).unwrap();
+        let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
+        assert_eq!(resolved, "docs\\real.md#Introduction");
+    }
+
     /// Fix 2 — graph_delete resolves `<path>#<n>` section refs (symmetry with upsert).
     #[test]
     fn graph_delete_resolves_section_refs() {
@@ -784,7 +926,7 @@ strict = true
         );
         assert!(msg.contains("deleted"), "basic label delete: {msg}");
 
-        let sym_id = id_for("Symptom", "Test Symptom");
+        let sym_id = id_for(&ont, "Symptom", "Test Symptom");
         let outgoing = g.outgoing(&sym_id).unwrap();
         assert!(
             !outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY"),
@@ -815,5 +957,154 @@ strict = true
             }],
         );
         assert!(!msg3.contains("error"), "non-existent chunk ref must not produce error: {msg3}");
+    }
+
+    /// Agent copied sym: into label — sanitize prevents sym:sym: double prefix.
+    #[test]
+    fn sanitize_strips_type_prefix_from_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "sym:Горячая замена CPU", "case1.docx")],
+            vec![],
+            1,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        let expected = id_for(&ont, "Symptom", "Горячая замена CPU");
+        assert_eq!(expected, "sym:горячая-замена-cpu");
+        assert!(g.get_node(&expected).unwrap().is_some());
+        assert!(out.message.contains("Written:"), "{}", out.message);
+        assert!(out.message.contains(&expected), "{}", out.message);
+    }
+
+    /// Edge endpoint may reference an existing node by id.
+    #[test]
+    fn edge_resolves_existing_node_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![],
+            1,
+        );
+        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Перезапуск", "case1.docx")],
+            vec![uedge(&sym_id, "RESOLVED_BY", "Перезапуск", "case1.docx")],
+            2,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.edges, 1);
+    }
+
+    /// Dedup reports merged ids when an existing node shares the label but has a different id.
+    #[test]
+    fn dedup_reports_merged_in_response() {
+        use crate::graph::agent::{apply_upsert, NodeSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        apply_upsert(
+            &g,
+            &ont,
+            vec![NodeSpec {
+                id: "sym:legacy-id".into(),
+                node_type: "Symptom".into(),
+                label: "Потеря связи".into(),
+                aliases: vec![],
+                source_path: "case1.docx".into(),
+                range: None,
+                confidence: None,
+            }],
+            vec![],
+            1,
+        )
+        .unwrap();
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![],
+            2,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0, "deduped node not created");
+        assert!(out.message.contains("Merged"), "{}", out.message);
+        assert!(out.message.contains("sym:legacy-id"), "{}", out.message);
+    }
+
+    #[test]
+    fn full_rejection_uses_rejected_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "X", "nonexistent.docx")],
+            vec![],
+            1,
+        );
+        assert!(out.rejected, "{}", out.message);
+        assert!(out.message.contains("REJECTED — nothing written"), "{}", out.message);
+        assert!(out.message.contains("is not a document"), "{}", out.message);
+    }
+
+    #[test]
+    fn full_rejection_hint_suggests_label_not_id_in_label_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Existing symptom", "case1.docx")],
+            vec![],
+            1,
+        );
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Y", "bad.docx")],
+            vec![],
+            2,
+        );
+        assert!(out.rejected, "{}", out.message);
+        assert!(
+            out.message.contains("match by label in edges"),
+            "hint wording: {}",
+            out.message
+        );
     }
 }

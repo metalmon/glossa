@@ -93,6 +93,13 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
             let body = match graph { Some(g) => glossa::tools::neighbors(idx, g, node, path, n, trace), None => "(graph unavailable)".to_string() };
             (body, Vec::new(), Vec::new())
         }
+        "graph_stats" => {
+            let body = match graph {
+                Some(g) => glossa::tools::graph_stats(g),
+                None => "(graph unavailable)".to_string(),
+            };
+            (body, Vec::new(), Vec::new())
+        }
         "resolve" => {
             // entity resolution — a Reader tool, so present in EVERY profile; both answer_hotpot
             // and enrich can call it. Without this branch it fell through to "unknown tool".

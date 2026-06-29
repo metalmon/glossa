@@ -19,7 +19,7 @@
     },
     "glob": {
       "default": null,
-      "description": "only files whose path matches this glob, e.g. *.pdf (-g)",
+      "description": "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*",
       "type": [
         "string",
         "null"

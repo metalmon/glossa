@@ -559,7 +559,7 @@ fn main() -> anyhow::Result<()> {
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let docs = glossa::glob::glob_docs(&idx, &pattern)?;
             if docs.is_empty() {
-                println!("(no documents match — glob matches file PATHS, not text inside documents; use `kb grep` or `kb search` for content)");
+                println!("(no documents match — ripgrep -g glob syntax: use * or **/* or *.{{pdf,md}}; matches PATHS not content; use `kb grep` or `kb search` for text)");
             } else {
                 for (p, n) in docs {
                     println!("{p}  ({n} chunks)");
@@ -605,7 +605,7 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Stats { path } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
-                println!("nodes: {}, edges: {}", g.node_count()?, g.edge_count()?);
+                println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
             GraphAction::Glossary { query, path } => {

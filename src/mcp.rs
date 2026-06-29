@@ -42,7 +42,7 @@ pub struct GlossaServer {
     last_change: Arc<AtomicU64>,
 }
 
-const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize"];
+const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "graph_stats"];
 const FULL_TOOLS: &[&str] = &["purge"];
 const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "resolve", "index", "reindex", "purge"];
 
@@ -229,7 +229,7 @@ struct SearchArgs {
     #[schemars(description = "max hits (default 50)")]
     limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "only documents whose path matches this glob, e.g. *.pdf or *АБАК* (-g)")]
+    #[schemars(description = "only documents whose path matches this ripgrep -g glob, e.g. *.pdf, **/*, *.{pdf,md}")]
     glob: Option<String>,
     #[serde(default)]
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
@@ -238,7 +238,7 @@ struct SearchArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GlobArgs {
-    #[schemars(description = "shell glob over document paths, e.g. *.pdf or *Safety*")]
+    #[schemars(description = "ripgrep -g glob over document paths, e.g. *, **/*, *.pdf, *.{pdf,htm}, *АБАК*")]
     pattern: String,
 }
 
@@ -256,7 +256,7 @@ struct ReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NeighborsArgs {
     #[serde(default)]
-    #[schemars(description = "a reasoning-node id copied from a `glossary` line (e.g. `sym:...`) — preferred")]
+    #[schemars(description = "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases")]
     node: Option<String>,
     #[serde(default)]
     #[schemars(description = "document path, exactly as shown in a search result (use with `n` instead of `node`)")]
@@ -303,7 +303,7 @@ struct GrepArgs {
     #[schemars(description = "match whole words only (-w)")]
     word: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "only files whose path matches this glob, e.g. *.pdf (-g)")]
+    #[schemars(description = "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*")]
     glob: Option<String>,
     #[serde(default)]
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
@@ -408,7 +408,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one.")]
+    #[tool(description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one.")]
     async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -417,7 +417,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace))]))
     }
 
-    #[tool(description = "Related cases for a node — its SIMILAR cross-links (other cases that share evidence), from the generalization layer. Pass a reasoning-node `node` id copied from a `glossary` line, or a chunk `path` + `n`. Each related node renders with a `read path #n` anchor. Empty → no related cases. (For a node's own cause→resolution chain, use `glossary`.)")]
+    #[tool(description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors.")]
     async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -443,7 +443,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
     }
 
-    #[tool(description = "Create/update reasoning nodes and directed edges. A node carries a `label` (NO id — the system derives the id and de-duplicates by label) plus `node_type` and `source_path`. Reference nodes in `edges` by their `label` (or a section as `<path>#<n>`). A Resolution label names the fix ACTION, never the literal value; write labels as a broad reusable class in the knowledge base's language. Send a node and the edges referencing it in the same call so both endpoints exist.")]
+    #[tool(description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call.")]
     async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -489,6 +489,12 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
     }
 
+    #[tool(description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank).")]
+    async fn graph_stats(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::graph_stats(&g))]))
+    }
+
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
@@ -497,7 +503,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
     }
 
-    #[tool(description = "List knowledge-base documents whose path matches a shell glob (e.g. `*.pdf`, `*Safety*`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
+    #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -610,6 +616,19 @@ mod tests {
         let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "*АБАК*".into() })).await.unwrap());
         assert!(out.contains("АБАК"), "lists the matching doc: {out}");
         assert!(!out.contains("Other"), "excludes non-matching: {out}");
+    }
+
+    #[tokio::test]
+    async fn glob_tool_recursive_lists_nested_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("top.md"), "# A\none\n".as_bytes()).unwrap();
+        std::fs::write(dir.path().join("sub").join("nested.md"), "# A\ntwo\n".as_bytes()).unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "**/*".into() })).await.unwrap());
+        assert!(out.contains("top.md"), "lists top-level: {out}");
+        assert!(out.contains("nested"), "lists nested: {out}");
     }
 
     #[test]
@@ -726,8 +745,10 @@ mod tests {
         let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(editor.contains(&"graph_generalize".to_string()), "editor exposes the non-destructive generalize tool");
+        assert!(editor.contains(&"graph_stats".to_string()), "editor exposes graph stats");
         assert!(!editor.contains(&"purge".to_string()));
         assert!(!reader.contains(&"graph_generalize".to_string()), "reader cannot generalize");
+        assert!(!reader.contains(&"graph_stats".to_string()), "reader cannot graph_stats");
 
         let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));

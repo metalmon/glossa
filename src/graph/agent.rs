@@ -41,17 +41,25 @@ fn stat_sig(path: &str) -> Option<FileSig> {
     Some(FileSig { mtime_secs, size: md.len() })
 }
 
+/// Result of applying an agent upsert batch (after dedup by label+type).
+pub struct ApplyUpsertResult {
+    pub nodes_written: usize,
+    pub edges_written: usize,
+    /// requested_id → canonical_id when the node merged into an existing one
+    pub merged: Vec<(String, String)>,
+}
+
 /// Convert agent-supplied specs into provenance-stamped graph elements
 /// (origin="agent", file_sig from the current source file, created_at=`now`),
 /// validate against the ontology, and upsert. Deduplicates nodes by normalized
-/// label+type so the graph converges across cases. Returns (#nodes written, #edges).
+/// label+type so the graph converges across cases.
 pub fn apply_upsert(
     g: &GraphStore,
     ont: &Ontology,
     nodes: Vec<NodeSpec>,
     edges: Vec<EdgeSpec>,
     now: u64,
-) -> anyhow::Result<(usize, usize)> {
+) -> anyhow::Result<ApplyUpsertResult> {
     use std::collections::HashMap;
 
     let prov = |source_path: &str, range: Option<String>, confidence: Option<f32>| Provenance {
@@ -90,6 +98,16 @@ pub fn apply_upsert(
         canonical.insert(n.id.clone(), canon);
     }
 
+    let merged: Vec<(String, String)> = nodes
+        .iter()
+        .filter_map(|n| {
+            canonical
+                .get(&n.id)
+                .filter(|c| *c != &n.id)
+                .map(|c| (n.id.clone(), c.clone()))
+        })
+        .collect();
+
     // Only create nodes whose canonical id is their own id (genuinely new ones).
     let model_nodes: Vec<Node> = nodes
         .iter()
@@ -118,7 +136,11 @@ pub fn apply_upsert(
         .collect();
 
     g.upsert(ont, &model_nodes, &model_edges)?;
-    Ok((model_nodes.len(), model_edges.len()))
+    Ok(ApplyUpsertResult {
+        nodes_written: model_nodes.len(),
+        edges_written: model_edges.len(),
+        merged,
+    })
 }
 
 /// Label-based reference to an edge (from/to are human-readable labels, not internal ids).
@@ -168,7 +190,7 @@ fn did_you_mean(g: &GraphStore, reference: &str) -> String {
     if labels.is_empty() {
         String::new()
     } else {
-        format!(" — did you mean: {}?", labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", "))
+        crate::cli_fmt::format_did_you_mean(&labels)
     }
 }
 
@@ -292,8 +314,8 @@ strict = true
             from: "org:acme".into(), to: "contract.docx".into(), edge_type: "PARTY_TO".into(),
             source_path: "contract.docx".into(), range: None, confidence: Some(0.9),
         }];
-        let (n, e) = apply_upsert(&g, &ont, nodes, edges, 123).unwrap();
-        assert_eq!((n, e), (2, 1));
+        let r = apply_upsert(&g, &ont, nodes, edges, 123).unwrap();
+        assert_eq!((r.nodes_written, r.edges_written), (2, 1));
         assert_eq!(g.node_count().unwrap(), 2);
         let org = g.get_node("org:acme").unwrap().unwrap();
         assert_eq!(org.prov.origin, "agent");
