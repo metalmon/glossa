@@ -1,6 +1,6 @@
 [package]
 name = "glossa"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive", "env"] }
 walkdir = "2"
 ignore = "0.4"
 regex = "1"
+regex-syntax = "0.8"
 globset = "0.4"
 office_oxide = "0.1"
 oxidize-pdf = "2"

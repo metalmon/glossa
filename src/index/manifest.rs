@@ -9,9 +9,24 @@ pub struct FileSig {
     pub size: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+fn default_index_schema_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub files: BTreeMap<String, FileSig>,
+    #[serde(default = "default_index_schema_version")]
+    pub index_schema_version: u32,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            index_schema_version: default_index_schema_version(),
+        }
+    }
 }
 
 fn manifest_path(dir: &Path) -> std::path::PathBuf {

@@ -1,3 +1,4 @@
+use crate::index::manifest::{FileSig, Manifest};
 use crate::index::multilang::{default_detector, multilang_analyzer};
 use crate::model::Chunk;
 use anyhow::Context;
@@ -7,11 +8,16 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING};
 use tantivy::schema::Value;
 use tantivy::snippet::SnippetGenerator;
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
+
+/// Bump when the tantivy schema changes (triggers index-only rebuild via manifest migration).
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 pub struct Fields {
     pub body: Field,
+    pub body_trigrams: Field,
     pub path: Field,
     pub location: Field,
     pub file_type: Field,
@@ -30,19 +36,46 @@ pub struct DocIndex {
     reader: IndexReader,
 }
 
-fn build_schema() -> (Schema, Fields) {
+fn build_schema() -> Schema {
     let mut sb = Schema::builder();
     let body_opts = TextOptions::default().set_stored().set_indexing_options(
         TextFieldIndexing::default()
             .set_tokenizer("multilang")
             .set_index_option(IndexRecordOption::WithFreqsAndPositions),
     );
-    let body = sb.add_text_field("body", body_opts);
-    let path = sb.add_text_field("path", STRING | STORED);
-    let location = sb.add_text_field("location", STRING | STORED);
-    let file_type = sb.add_text_field("file_type", STRING | STORED);
-    let ord = sb.add_u64_field("ord", INDEXED | STORED);
-    (sb.build(), Fields { body, path, location, file_type, ord })
+    sb.add_text_field("body", body_opts);
+    let trigram_opts = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("trigram3")
+            .set_index_option(IndexRecordOption::Basic),
+    );
+    sb.add_text_field("body_trigrams", trigram_opts);
+    sb.add_text_field("path", STRING | STORED);
+    sb.add_text_field("location", STRING | STORED);
+    sb.add_text_field("file_type", STRING | STORED);
+    sb.add_u64_field("ord", INDEXED | STORED);
+    sb.build()
+}
+
+fn fields_from_schema(schema: &Schema) -> anyhow::Result<Fields> {
+    Ok(Fields {
+        body: schema.get_field("body")?,
+        body_trigrams: schema.get_field("body_trigrams")?,
+        path: schema.get_field("path")?,
+        location: schema.get_field("location")?,
+        file_type: schema.get_field("file_type")?,
+        ord: schema.get_field("ord")?,
+    })
+}
+
+fn register_tokenizers(index: &Index) {
+    index
+        .tokenizers()
+        .register("multilang", multilang_analyzer(default_detector()));
+    let trigram = TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).expect("trigram tokenizer"))
+        .filter(LowerCaser)
+        .build();
+    index.tokenizers().register("trigram3", trigram);
 }
 
 fn index_dir_path(dir: &Path) -> PathBuf {
@@ -71,17 +104,25 @@ pub fn rel_key(root: &Path, abs: &Path) -> String {
 
 impl DocIndex {
     pub fn open_or_create(dir: &Path) -> anyhow::Result<DocIndex> {
-        let (schema, fields) = build_schema();
+        let schema = build_schema();
         let idx_path = index_dir_path(dir);
         std::fs::create_dir_all(&idx_path).with_context(|| format!("create {idx_path:?}"))?;
         let index = match Index::create_in_dir(&idx_path, schema.clone()) {
             Ok(i) => i,
-            Err(TantivyError::IndexAlreadyExists) => Index::open_in_dir(&idx_path)?,
+            Err(TantivyError::IndexAlreadyExists) => {
+                let existing = Index::open_in_dir(&idx_path)?;
+                if existing.schema().get_field("body_trigrams").is_err() {
+                    drop(existing);
+                    std::fs::remove_dir_all(&idx_path)?;
+                    Index::create_in_dir(&idx_path, schema)?
+                } else {
+                    existing
+                }
+            }
             Err(e) => return Err(e.into()),
         };
-        index
-            .tokenizers()
-            .register("multilang", multilang_analyzer(default_detector()));
+        register_tokenizers(&index);
+        let fields = fields_from_schema(&index.schema())?;
         let reader = index.reader()?;
         Ok(DocIndex { index, fields, root: abs_root(dir), reader })
     }
@@ -130,6 +171,7 @@ impl DocIndex {
             let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
             writer.add_document(doc!(
                 self.fields.body => c.text.clone(),
+                self.fields.body_trigrams => c.text.clone(),
                 self.fields.path => c.doc_path.to_string_lossy().to_string(),
                 self.fields.location => c.location.clone(),
                 self.fields.file_type => c.file_type.clone(),
@@ -456,8 +498,6 @@ pub fn chunk_ord(file_type: &str, location: &str, seq: u64) -> u64 {
     seq
 }
 
-use crate::index::manifest::{FileSig, Manifest};
-
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct IndexStats {
     pub added: usize,
@@ -482,6 +522,41 @@ impl DocIndex {
         use tantivy::query::AllQuery;
         let searcher = self.reader.searcher();
         let docs = searcher.search(&AllQuery, &DocSetCollector)?;
+        for addr in docs {
+            let d: TantivyDocument = searcher.doc(addr)?;
+            let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
+            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
+            f(s(self.fields.path), ord, s(self.fields.file_type), s(self.fields.body));
+        }
+        Ok(())
+    }
+
+    /// Visit chunks whose indexed char-trigrams satisfy an AND of `grams` (grep prefilter).
+    pub fn iter_chunks_trigram_candidates(
+        &self,
+        grams: &[String],
+        mut f: impl FnMut(&str, u64, &str, &str),
+    ) -> anyhow::Result<()> {
+        if grams.is_empty() {
+            return self.iter_chunks(f);
+        }
+        use tantivy::collector::DocSetCollector;
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let clauses: Vec<(Occur, Box<dyn Query>)> = grams
+            .iter()
+            .map(|g| {
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        tantivy::Term::from_field_text(self.fields.body_trigrams, g),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                )
+            })
+            .collect();
+        let query = BooleanQuery::new(clauses);
+        let searcher = self.reader.searcher();
+        let docs = searcher.search(&query, &DocSetCollector)?;
         for addr in docs {
             let d: TantivyDocument = searcher.doc(addr)?;
             let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
@@ -543,6 +618,9 @@ pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
 /// any one process — so both the CLI and a long-lived MCP server can keep the index fresh safely.
 pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
     let manifest = Manifest::load(dir);
+    if manifest.index_schema_version < INDEX_SCHEMA_VERSION {
+        return index_dir(dir, false);
+    }
     let delta = scan_delta(dir, &manifest)?;
     if delta.changed.is_empty() && delta.removed.is_empty() {
         return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
@@ -567,15 +645,19 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
     // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
     // graph.sqlite is PRESERVED — a reindex must not destroy hand/agent-built knowledge.
+    let mut manifest = if force { Manifest::default() } else { Manifest::load(dir) };
+    let schema_migrate = manifest.index_schema_version < INDEX_SCHEMA_VERSION;
     if force {
         let _ = std::fs::remove_dir_all(dir.join(".glossa").join("index"));
+    } else if schema_migrate {
+        let _ = std::fs::remove_dir_all(dir.join(".glossa").join("index"));
+        manifest.files.clear();
     }
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
     if force {
         graph.delete_auto()?;
     }
-    let manifest = if force { Manifest::default() } else { Manifest::load(dir) };
 
     // Cheap hot-path gate: on an incremental run, if nothing changed on disk, do NO work — don't
     // open the writer, don't commit, don't rewrite the manifest. Keeps `ensure_fresh` ~free.
@@ -626,6 +708,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
             let _ = writer.add_document(doc!(
                 idx.fields.body => c.text.clone(),
+                idx.fields.body_trigrams => c.text.clone(),
                 idx.fields.path => path_str.clone(),
                 idx.fields.location => c.location.clone(),
                 idx.fields.file_type => c.file_type.clone(),
@@ -679,6 +762,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
     }
     writer.commit()?;
+    next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(dir)?;
     Ok(stats)
 }
@@ -1087,9 +1171,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(a.index.schema().get_field("body").is_ok());
+        assert!(a.index.schema().get_field("body_trigrams").is_ok());
         drop(a);
-        // Second call must open the existing index, not error.
         let b = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(b.index.schema().get_field("path").is_ok());
+    }
+
+    #[test]
+    fn iter_chunks_trigram_candidates_and_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let mk = |p: &str, ord: u64, t: &str| crate::model::Chunk {
+            doc_path: p.into(),
+            location: format!("S{ord}"),
+            file_type: "md".into(),
+            text: t.into(),
+        };
+        idx.write_chunks(&[
+            mk("a.md", 1, "регистрация устройства завершена"),
+            mk("b.md", 1, "несвязанный текст"),
+        ])
+        .unwrap();
+        let mut paths = Vec::new();
+        idx.iter_chunks_trigram_candidates(&["рег".to_string()], |path, _ord, _ft, _body| {
+            paths.push(path.to_string());
+        })
+        .unwrap();
+        assert_eq!(paths, vec!["a.md".to_string()]);
+    }
+
+    #[test]
+    fn index_schema_migration_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# Hi\nhello world\n").unwrap();
+        let mut old = Manifest::default();
+        old.files.insert("a.md".into(), FileSig { mtime_secs: 1, size: 10 });
+        old.index_schema_version = 1;
+        old.save(dir.path()).unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let loaded = Manifest::load(dir.path());
+        assert_eq!(loaded.index_schema_version, INDEX_SCHEMA_VERSION);
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.index.schema().get_field("body_trigrams").is_ok());
+        let hits = idx.search("hello", 5).unwrap();
+        assert!(!hits.is_empty());
     }
 }
