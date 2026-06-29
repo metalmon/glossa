@@ -16,8 +16,6 @@ impl Extractor for PdfExtractor {
         use std::collections::BTreeMap;
 
         // Any PDF parser can panic on a malformed file; catch it so indexing never aborts.
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let owned = bytes.to_vec();
         let path_buf = path.to_path_buf();
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Vec<Chunk> {
@@ -89,7 +87,6 @@ impl Extractor for PdfExtractor {
             }
             Vec::new()
         }));
-        std::panic::set_hook(prev);
 
         let out = caught.unwrap_or_default();
         if !out.is_empty() {
@@ -165,6 +162,23 @@ mod tests {
         let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
         for cell in ["Parametr", "Znachenie", "Tsvet", "Siniy"] {
             assert!(joined.contains(cell), "table cell '{cell}' missing from:\n{joined}");
+        }
+    }
+
+    #[test]
+    fn concurrent_pdf_extract_does_not_panic() {
+        use std::thread;
+        let bytes = include_bytes!("../../tests/fixtures/sample.pdf");
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let b = bytes.to_vec();
+                thread::spawn(move || {
+                    PdfExtractor.extract(Path::new("sample.pdf"), &b).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
         }
     }
 }
