@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="glossa" width="200"/>
+  <img src="docs/assets/logo.svg" alt="glossa" width="320"/>
 </p>
 
 <p align="center">
@@ -56,15 +56,15 @@ On Windows, the binary is `target\release\kb.exe`. Optional: install [just](http
 flowchart LR
   files[Corpus files]
   index[Tantivy BM25 index]
-  graph[SQLite reasoning graph]
+  kg[SQLite reasoning graph]
   mcp[MCP server kb mcp]
   agent[LLM agent]
 
   files --> index
-  files --> graph
+  files --> kg
   agent --> mcp
   mcp --> index
-  mcp --> graph
+  mcp --> kg
 ```
 
 - **Structural layer** (auto during index): Document → Section → CONTAINS, MENTIONS, chunk navigation.
