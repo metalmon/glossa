@@ -104,6 +104,8 @@ just build
 cargo test -p glossa --release
 ```
 
+CI runs on every push/PR (Linux + Windows tests, `cargo check`). Tagged releases (`v*`) build `kb` binaries for Linux, Windows, and macOS — see [GitHub Releases](https://github.com/metalmon/glossa/releases).
+
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Acknowledgments

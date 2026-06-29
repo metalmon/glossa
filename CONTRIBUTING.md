@@ -15,11 +15,24 @@ just build
 # or
 cargo build --workspace --release
 
-# Run tests
-cargo test -p glossa --release
+# Run tests (matches CI)
+cargo test -p glossa --release --locked
+cargo test -p kb-eval --release --locked
 ```
 
 The workspace also includes `kb-eval` and `kb-train`. Full workspace tests can take longer; avoid running `cargo test --workspace` while a long `kb-train enrich` process holds a binary lock on Windows.
+
+### CI and releases
+
+- **CI** (`.github/workflows/ci.yml`): push/PR → tests on Ubuntu + Windows, `cargo check` on Ubuntu.
+- **Releases** (`.github/workflows/release.yml`): push a tag `v0.1.0` → GitHub Release with `kb` for Linux, Windows, macOS (arm64 + x64).
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Release artifacts ship **`kb` only** (the operator binary). `kb-eval` / `kb-train` are built from source for benchmark/enrich workflows.
 
 ## MCP tool schema sync
 
