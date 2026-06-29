@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build kb
+        run: cargo build --release --locked --target ${{ matrix.target }} -p glossa --bin kb
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          stem="glossa-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/${stem}"
+          cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
+          cp README.md LICENSE "dist/${stem}/"
+          tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".Substring(1)
+          $stem = "glossa-${tag}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$stem"
+          Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
+          Copy-Item README.md, LICENSE "dist/$stem/"
+          Compress-Archive -Path "dist/$stem" -DestinationPath "dist/$stem.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glossa-${{ matrix.target }}
+          path: dist/*.{tar.gz,zip}
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
