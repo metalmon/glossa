@@ -128,7 +128,7 @@ model_name = "deepseek/deepseek-r1"
 api_key_location = "env::OPENROUTER_API_KEY"
 
 # ── GEPA select micro-task: pick the gold chunk ord from numbered search hits ──
-# `kb-train optimize` passes the evolving system prompt in input messages; the template here is the seed.
+# `kb-train optimize` passes the evolving system prompt via `input.system` on each /inference call.
 [functions.select]
 type = "chat"
 
@@ -379,8 +379,10 @@ level = "episode"
 
 [metrics.gepa_examples_train]
 type = "float"
+optimize = "max"
 level = "episode"
 
 [metrics.gepa_examples_val]
 type = "float"
+optimize = "max"
 level = "episode"

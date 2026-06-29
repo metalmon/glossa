@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// One select example from `select.jsonl`: the question, the hits to choose among (each carrying its
 /// `#ord`), and the gold ord(s) that count as a correct pick.
@@ -90,19 +90,20 @@ fn select_user_content(ex: &SelectExample) -> String {
 
 /// Run one select call via TZ `select`: dynamic system prompt + user turn. Returns chosen ord.
 fn select_pick(cfg: &GepaConfig, prompt: &str, ex: &SelectExample) -> Option<u64> {
-    let messages = [
-        json!({"role": "system", "content": prompt}),
-        json!({"role": "user", "content": select_user_content(ex)}),
-    ];
-    let text = crate::tz::infer_chat(
+    let messages = [json!({"role": "user", "content": select_user_content(ex)})];
+    let turn = crate::tz::infer(
         &cfg.gateway,
         &cfg.function,
-        &cfg.variant,
         &cfg.episode_id,
         &messages,
         &cfg.tags,
-    )?;
-    first_int(&text)
+        Duration::from_secs(120),
+        Some(&cfg.variant),
+        Some(prompt),
+    )
+    .inspect_err(|e| eprintln!("select inference failed: {e:#}"))
+    .ok()?;
+    first_int(&turn.text())
 }
 
 /// Score a prompt over a set of examples: per-example correctness (the pick is one of the gold ords).
@@ -143,16 +144,18 @@ fn reflect(cfg: &GepaConfig, prompt: &str, failures: &[(&SelectExample, Option<u
          === CURRENT SYSTEM PROMPT ===\n{prompt}\n\n=== FAILURES ===\n{cases}=== NEW SYSTEM PROMPT ==="
     );
     let messages = [json!({"role": "user", "content": instruction})];
-    let out = crate::tz::infer_chat(
+    let turn = crate::tz::infer(
         &cfg.gateway,
         &cfg.reflect_function,
-        &cfg.variant,
         &cfg.episode_id,
         &messages,
         &cfg.tags,
+        Duration::from_secs(180),
+        Some(&cfg.variant),
+        None,
     )
     .context("gepa_reflect inference failed")?;
-    let out = out.trim().to_string();
+    let out = turn.text().trim().to_string();
     if out.is_empty() {
         anyhow::bail!("gepa_reflect returned an empty prompt");
     }
