@@ -1,4 +1,5 @@
 .superpowers/
+docs/superpowers/
 /target
 
 # Local debug knowledge base (real data — never commit)

@@ -1,17 +1,12 @@
 //! Deterministic, embeddings-free graph generalization.
 //!
-//! Implements the techniques from
-//! `docs/superpowers/plans/2026-06-27-graph-generalization-no-embeddings.md`, each as a PURE
-//! function over the graph's ids/edges (no DB, no model, no embeddings) in its own file, so it can
-//! be unit-tested in isolation and later wired into a single `kb graph generalize` post-enrichment
-//! pass. NONE of this is hooked into the live pipeline yet — that is the integration step (map
-//! `store::Edge` ↔ these triples, stamp derived edges `origin = "auto-generalized"`).
+//! Pure functions over graph ids/edges (no DB, no model, no embeddings), each in its own module
+//! under this directory. Wired into `kb graph generalize`, MCP `graph_generalize`, and the editor
+//! maintenance loop. Derived edges are stamped `origin = "auto-generalized"`.
 //!
-//! Coverage vs the plan: #2 BM25-over-labels (approximated embeddings-free by stemmed-token Jaccard
-//! in `similarity::label_jaccard`), #3 shared-evidence (`similarity::shared_evidence`), #4 structural
-//! link-prediction (`linkpred`), #6 communities (`community`), #7 centrality (`centrality`),
-//! #8 transitive closure (`closure`), plus near-dup MERGE grouping (`merge`). #5 synonym dictionary
-//! (needs curation) and a true tantivy-BM25 label index are left for the integration step.
+//! Techniques: stemmed label Jaccard + shared evidence (SIMILAR), link prediction, community
+//! detection, PageRank centrality, ontology-defined transitive closure, optional near-dup merge.
+//! See [docs/architecture.md](../../docs/architecture.md) § Derived layer.
 
 pub mod apply;
 pub mod centrality;
