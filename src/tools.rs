@@ -713,7 +713,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let out = read(&i, None, "d.md", 1, &t);
         assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
-        assert!(out.text.contains("next #2") && out.text.contains("end of document") == false);
+        assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
         assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
         // Out-of-range read reports the valid chunk range so the model can self-correct.
         let oor = read(&i, None, "d.md", 99, &t).text;
