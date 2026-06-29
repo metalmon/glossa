@@ -76,7 +76,7 @@ if (-not (Test-Path $Manifest)) {
 }
 
 # sc.exe requires a space after binPath= and start=
-$BinPath = "`"$KbExe`" mcp `"$CorpusPath`" --profile $Profile --transport streamable-http --bind $Bind --allowed-host $AllowedHost --windows-service"
+$BinPath = "`"$KbExe`" mcp `"$CorpusPath`" --profile $Profile --transport streamable-http --bind $Bind --allowed-host $AllowedHost --windows-service --service-name $ServiceName"
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
