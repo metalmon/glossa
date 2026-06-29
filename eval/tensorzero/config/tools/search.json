@@ -28,7 +28,7 @@
       ]
     },
     "query": {
-      "description": "natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex",
+      "description": "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex",
       "type": "string"
     }
   },

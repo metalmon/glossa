@@ -54,7 +54,9 @@ Binary files are skipped silently. Extraction is streaming (no fixed size cap).
 
 ## Index layer
 
-Full-text search uses [Tantivy](https://github.com/quickwit-oss/tantivy) with BM25 ranking and Russian/English stemming. The index stores chunk text and metadata for ranked `search` and for `grep` (regex over extracted content).
+Full-text search uses [Tantivy](https://github.com/quickwit-oss/tantivy) with BM25 ranking and morphology-aware multilingual stemming. The index stores chunk text and metadata for ranked `search` and for `grep` (regex over extracted content).
+
+**`grep` two-phase search:** each chunk is indexed twice for grep — `body` (stored, BM25/multilang) and `body_trigrams` (indexed-only char 3-grams with lowercase folding). For a pattern, glossa extracts a trigram boolean query from the regex (Cox-style HIR walk via `regex-syntax`), queries Tantivy for candidate chunks, then confirms line-by-line with the real `regex` engine. When no selective trigrams exist, grep scans all chunks (same results, slower). Schema bumps set `index_schema_version` in the manifest and trigger an index-only rebuild.
 
 `ensure_fresh` stat-scans the corpus before MCP reads so agents see up-to-date results without manual re-index.
 

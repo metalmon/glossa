@@ -1,0 +1,67 @@
+[
+  {
+    "_id": "sample_q1",
+    "question": "Which city hosts the Acme factory?",
+    "answer": "Riverdale",
+    "context": [
+      [
+        "Riverdale",
+        [
+          "Riverdale is a city in the north.",
+          "The Acme factory opened there in 1998."
+        ]
+      ],
+      [
+        "Springfield",
+        [
+          "Springfield is a town in the south.",
+          "It has no connection to Acme Widget Co."
+        ]
+      ]
+    ],
+    "supporting_facts": [["Riverdale", 1]]
+  },
+  {
+    "_id": "sample_q2",
+    "question": "What year did the Acme factory open?",
+    "answer": "1998",
+    "context": [
+      [
+        "Riverdale",
+        [
+          "Riverdale is a city in the north.",
+          "The Acme factory opened there in 1998."
+        ]
+      ],
+      [
+        "Acme Widget Co.",
+        [
+          "Acme Widget Co. was founded in 1985.",
+          "Its main plant is in Riverdale."
+        ]
+      ]
+    ],
+    "supporting_facts": [["Riverdale", 1]]
+  },
+  {
+    "_id": "sample_q3",
+    "question": "When was Acme Widget Co. founded?",
+    "answer": "1985",
+    "context": [
+      [
+        "Acme Widget Co.",
+        [
+          "Acme Widget Co. was founded in 1985.",
+          "Its main plant is in Riverdale."
+        ]
+      ],
+      [
+        "Springfield",
+        [
+          "Springfield is unrelated to Acme."
+        ]
+      ]
+    ],
+    "supporting_facts": [["Acme Widget Co.", 0]]
+  }
+]

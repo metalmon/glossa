@@ -8,7 +8,8 @@
 </p>
 
 <p align="center">
-  <a href="docs/getting-started.md">Getting started</a> ·
+  <a href="docs/install.md">Install</a> ·
+  <a href="docs/connect-to-agents.md">Connect to agents</a> ·
   <a href="docs/mcp.md">MCP tools</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="LICENSE">MIT</a>
@@ -39,12 +40,24 @@ Details: [architecture.md](docs/architecture.md), [mcp.md](docs/mcp.md).
 
 ## Quickstart
 
+**Operators** — install from [GitHub Releases](https://github.com/metalmon/glossa/releases) (no Rust required):
+
+```bash
+# See docs/install.md for your OS — then index any folder of documents:
+kb index ~/Documents/my-kb
+kb mcp ~/Documents/my-kb --profile reader --transport stdio
+```
+
+Connect Claude, Cursor, or [ZeroClaw](docs/integrations/zeroclaw.md): [connect-to-agents.md](docs/connect-to-agents.md).  
+Run as a system service: [deploy/service.md](docs/deploy/service.md).
+
+**Developers** — build from source:
+
 ```bash
 cargo build --release
 ./target/release/kb index ./my-corpus
 cd ./my-corpus
 ./target/release/kb search "connection timeout"
-./target/release/kb read manual.md
 ./target/release/kb mcp --profile reader
 ```
 
@@ -81,17 +94,20 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `editor` | Index + graph editing | All except `purge` |
 | `full` | Admin | All tools including `purge` |
 
-Tool reference: [docs/mcp.md](docs/mcp.md). Production deployment: [docs/deploy/mcp-server.md](docs/deploy/mcp-server.md).
+Tool reference: [docs/mcp.md](docs/mcp.md). Service install: [docs/deploy/service.md](docs/deploy/service.md). Advanced HTTP: [docs/deploy/mcp-server.md](docs/deploy/mcp-server.md).
 
 ## Documentation
 
 | Doc | Description |
 |-----|-------------|
-| [docs/getting-started.md](docs/getting-started.md) | Install, index, search, read |
+| [docs/install.md](docs/install.md) | Install from release; first index |
+| [docs/connect-to-agents.md](docs/connect-to-agents.md) | Claude, Cursor, ZeroClaw |
+| [docs/getting-started.md](docs/getting-started.md) | Build from source, CLI |
 | [docs/architecture.md](docs/architecture.md) | Index, extraction, graph layers |
 | [docs/mcp.md](docs/mcp.md) | MCP tools and IDE setup |
+| [docs/deploy/service.md](docs/deploy/service.md) | System service install |
 | [docs/graph-and-ontology.md](docs/graph-and-ontology.md) | Ontology, enrich, generalize |
-| [docs/eval-and-training.md](docs/eval-and-training.md) | kb-eval, kb-train, just pipeline |
+| [docs/eval-and-training.md](docs/eval-and-training.md) | kb-eval, kb-train, dataset format |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Backlog and direction |
 | [docs/benchmarks.md](docs/benchmarks.md) | Eval run history |
 

@@ -1,6 +1,8 @@
 # Getting started
 
-This guide walks through building glossa, indexing a corpus, and searching it from the CLI. For MCP agent integration, see [mcp.md](mcp.md).
+This guide is for **developers** building glossa from source. **Operators** should start with [install.md](install.md) (GitHub Release, no Rust) and [connect-to-agents.md](connect-to-agents.md).
+
+For MCP agent integration, see [mcp.md](mcp.md).
 
 ## Build
 
@@ -62,14 +64,13 @@ Indexing respects `.gitignore` by default. Use `kb search --no-ignore` when you 
 
 Run commands from the corpus directory (or any subdirectory — glossa finds the nearest `.glossa/` root).
 
-**Ranked keyword search** (BM25, morphology-aware for Russian and English):
+**Ranked keyword search** (BM25, morphology-aware stemming):
 
 ```bash
 cd ./my-corpus
 kb search "connection timeout"
 kb search "maxTsdr" -l 20
-kb search "ошибка связи" -g '*.pdf'
-```
+kb search "print queue" -g '*.pdf'
 ```
 
 Output is ripgrep-compatible by default (`path:location: snippet`). In a terminal, format auto-switches to numbered lines; force with `-f pretty` or `-f rg`.
@@ -136,6 +137,8 @@ For Cursor or other HTTP clients, see [mcp.md](mcp.md) and [deploy/mcp-server.md
 
 ## Next steps
 
+- [connect-to-agents.md](connect-to-agents.md) — Claude, Cursor, ZeroClaw
+- [install.md](install.md) — release install (no build)
 - [architecture.md](architecture.md) — how indexing and the graph fit together
 - [mcp.md](mcp.md) — full tool list for agents
 - [graph-and-ontology.md](graph-and-ontology.md) — reasoning graph workflow

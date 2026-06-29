@@ -1,13 +1,13 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-06-28**. Version **0.1.0** on `master`.
+Status as of **2026-06-29**. Version **1.0.0**.
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
-## Shipped in v0.1
+## Shipped in v1.0
 
 - **Extraction:** md, Office (office_oxide), PDF (oxidize-pdf, per-page `p.N`), text/json/yaml/xml/html/csv/source; streaming pipeline; gitignore-aware walk.
-- **Search:** BM25 ranked search (RU/EN stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
+- **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep` with char-trigram prefilter, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; MCP maintenance loop on editor profiles.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`.
@@ -17,6 +17,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 ## Performance
 
 - **Large corpora:** indexing and unindexed regex `--scan` are heavy. Opportunities: parallel traversal, fewer syscalls, mmap reads, persistent file list (see [fff](https://github.com/dmtrKovalenko/fff) for traversal ideas).
+- **`grep`:** char-trigram index field (`body_trigrams`) narrows candidate chunks before regex confirmation; falls back to full scan when the pattern has no selective trigrams (short literals, look-around, etc.). An earlier BM25 whole-token prefilter was removed as unsound for substrings (e.g. `Tsdr` inside `maxTsdr`).
 - **PDF extraction:** parallel indexing blocked by process-global panic-hook usage in PDF path — remove or guard before multi-threaded extract.
 
 ## Technical backlog
@@ -39,8 +40,8 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 ### MCP and product
 
 - **Parallel indexing** behind feature flag once PDF hook is fixed.
-- **Trigram grep accelerator** (research done; not integrated).
 - **Layer-2 term glossary** for query expansion.
+- **Package managers:** publish `kb` to apt (Debian/Ubuntu), Homebrew, and winget so operators can `apt install` / `brew install` / `winget install` instead of manual release downloads. Today: [GitHub Releases](https://github.com/metalmon/glossa/releases) + [install.md](install.md) + [deploy/](../deploy/) service scripts.
 
 ### Eval harness
 
@@ -54,7 +55,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 
 Measure the **engine** (agent + tools) on standard QA sets (HotpotQA, 2WikiMultihopQA, MuSiQue). Official EM/F1 against gold answers. Multihop A/B: graph off vs on.
 
-Caveat: English Wikipedia text does not stress office/PDF, Russian, or offline deployment — expect dense-embedding RAG to win on pure semantic paraphrase; glossa's bet is multihop + graph + offline.
+Caveat: English Wikipedia text does not stress office/PDF, legacy encodings, or offline deployment — expect dense-embedding RAG to win on pure semantic paraphrase; glossa's bet is multihop + graph + offline.
 
 ### Track B — domain refinement
 

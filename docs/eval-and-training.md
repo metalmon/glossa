@@ -58,6 +58,7 @@ flowchart LR
 | `just dump` | Export `query.jsonl` + `select.jsonl` to `gepa-out/` |
 | `just gepa` | GEPA-optimize select prompt via TensorZero |
 | `just eval dataset=...` | End-to-end benchmark through TZ agent |
+| `just eval-fixture` | Smoke-test eval on committed sample dataset (mock backend) |
 | `just graph-stats` | `kb graph stats` on work corpus |
 
 Default work corpus: `kb-test/` (git-ignored). Train cases: `kb-val/derived/synthetic-train.json`.
@@ -80,6 +81,47 @@ just eval kb-val/derived/test.json
 ```
 
 Runs `kb-eval` with TensorZero backend against `eval-corpus/` by default. See [`eval/tensorzero/README.md`](../eval/tensorzero/README.md) for gateway setup, models, and `.env` secrets.
+
+Smoke-test without local corpora or TensorZero:
+
+```bash
+just eval-fixture
+# or
+kb-eval run --dataset eval/fixtures/sample-hotpot-distractor.json --backend mock
+```
+
+## Dataset format
+
+`kb-eval run` accepts a JSON array in **HotpotQA distractor** shape (parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs)). Each item becomes a mini-corpus: one markdown file per `context` title, then the agent is scored on answer EM/F1 and retrieval recall.
+
+Committed sample: [`eval/fixtures/sample-hotpot-distractor.json`](../eval/fixtures/sample-hotpot-distractor.json) (fictional English content — safe to ship in the repo).
+
+| Field | Type | Role |
+|-------|------|------|
+| `_id` | string | Question id |
+| `question` | string | Agent question |
+| `answer` | string | Gold answer (EM/F1) |
+| `context` | `[title, sentences[]][]` | Paragraphs → one `.md` file per title |
+| `supporting_facts` | `[title, sentence_index][]` | Gold retrieval titles (deduped for recall) |
+
+Example (abbreviated):
+
+```json
+[
+  {
+    "_id": "sample_q1",
+    "question": "Which city hosts the Acme factory?",
+    "answer": "Riverdale",
+    "context": [
+      ["Riverdale", ["Riverdale is a city in the north.", "The Acme factory opened there in 1998."]],
+      ["Springfield", ["Springfield is unrelated to Acme."]]
+    ],
+    "supporting_facts": [["Riverdale", 1]]
+  }
+]
+```
+
+For **`kb-train enrich`**, use a simpler JSON array of solved cases: `[{_id, question, answer}]`. Sample: [`eval/fixtures/sample-train.json`](../eval/fixtures/sample-train.json).
 
 ### GEPA
 

@@ -1,0 +1,7 @@
+---
+# Example inventory — replace with your hosts
+all:
+  hosts:
+    glossa-host:
+      ansible_host: 127.0.0.1
+      ansible_connection: local

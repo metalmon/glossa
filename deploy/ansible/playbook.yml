@@ -1,0 +1,6 @@
+---
+- name: Install glossa MCP service from GitHub Release
+  hosts: all
+  become: true
+  roles:
+    - glossa

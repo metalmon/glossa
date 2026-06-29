@@ -1,0 +1,9 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart glossa-mcp
+  ansible.builtin.systemd:
+    name: glossa-mcp
+    state: restarted
