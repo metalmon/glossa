@@ -25,21 +25,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Whole-workspace compile check (ubuntu only). Retries transient crates.io SSL failures.
+      - name: cargo check (workspace)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if cargo check --workspace --release --locked; then
+              exit 0
+            fi
+            echo "cargo check failed (attempt ${attempt}/3), retrying in 15s..."
+            sleep 15
+          done
+          exit 1
+
       - name: cargo test (glossa)
         run: cargo test -p glossa --release --locked
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
-
-  check:
-    name: check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cargo check
-        run: cargo check --workspace --release --locked
