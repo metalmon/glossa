@@ -17,7 +17,7 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
     let mut all = g.all_nodes()?;
     all.retain(|n| {
         !STRUCTURAL.contains(&n.node_type.as_str())
-            && type_filter.map_or(true, |t| t == n.node_type)
+            && type_filter.is_none_or(|t| t == n.node_type)
     });
 
     let mut type_set: BTreeSet<String> = BTreeSet::new();

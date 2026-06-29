@@ -152,7 +152,7 @@ impl GraphStore {
             .prov
             .file_sig
             .as_ref()
-            .map(|fs| serde_json::to_string(fs))
+            .map(serde_json::to_string)
             .transpose()
             .context("ser file_sig")?;
         c.execute(
@@ -196,7 +196,7 @@ impl GraphStore {
             .prov
             .file_sig
             .as_ref()
-            .map(|fs| serde_json::to_string(fs))
+            .map(serde_json::to_string)
             .transpose()
             .context("ser edge file_sig")?;
         c.execute(

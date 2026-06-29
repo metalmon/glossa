@@ -21,7 +21,7 @@ fn extractor_coverage_text_formats() {
     // Binary blob: must be silently skipped — indexing must not crash.
     fs::write(
         dir.path().join("blob.png"),
-        &[0x89u8, b'P', b'N', b'G', 0x00, 0x01, 0x02],
+        [0x89u8, b'P', b'N', b'G', 0x00, 0x01, 0x02],
     )
     .unwrap();
 
