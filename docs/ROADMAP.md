@@ -46,6 +46,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 
 ### Eval harness
 
+- **GEPA recall (`query` sub-task):** today `just gepa` / `kb-train optimize` only improves the **select** prompt (pick gold `#ord` from hits). `dump` already emits `query.jsonl` with per-node recall@k labels — add a parallel GEPA loop to optimize **query formulation** (what to pass to `search`) against recall@k, with its own TZ function + mutator, then graft the won instructions into the agent prompt. See [graph-supervised retrieval plan](superpowers/plans/2026-06-28-graph-supervised-retrieval-optimization.md).
 - Per-round wall-clock budget in OpenAI backend tool loop.
 - Expose `MAX_ROUNDS` / read truncation as CLI flags.
 - **Fullwiki** HotpotQA (hard retrieval regime) — not yet run.
