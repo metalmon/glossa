@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-06-29**. Version **1.0.0**.
+Status as of **2026-06-29**. Version **1.1.0**.
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -39,6 +39,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 
 ### MCP and product
 
+- **Human-friendly CLI:** richer interactive commands for operators — browse/search the index, inspect graph neighborhoods, trigger maintenance, and run ad-hoc queries without MCP. Think progress bars, shell completion, readable defaults, and a small TUI or REPL for day-to-day use (today `kb` is optimized for scripting and agent integration).
 - **Parallel indexing** behind feature flag once PDF hook is fixed.
 - **Layer-2 term glossary** for query expansion.
 - **Package managers:** publish `kb` to apt (Debian/Ubuntu), Homebrew, and winget so operators can `apt install` / `brew install` / `winget install` instead of manual release downloads. Today: [GitHub Releases](https://github.com/metalmon/glossa/releases) + [install.md](install.md) + [deploy/](../deploy/) service scripts.
