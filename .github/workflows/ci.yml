@@ -25,7 +25,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Whole-workspace compile check (ubuntu only). Retries transient crates.io SSL failures.
+      # Whole-workspace compile check (ubuntu only). Retries transient registry failures.
       - name: cargo check (workspace)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
