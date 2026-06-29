@@ -223,7 +223,7 @@ fn internal(e: anyhow::Error) -> McpError {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchArgs {
-    #[schemars(description = "natural-language keywords (Russian or English; morphology-aware, BM25-ranked) — NOT a regex")]
+    #[schemars(description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex")]
     query: String,
     #[serde(default)]
     #[schemars(description = "max hits (default 50)")]
@@ -384,7 +384,7 @@ impl GraphUpdateArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base — natural-language keywords (Russian or English; morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
+    #[tool(description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
     async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         self.freshen().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;

@@ -6,7 +6,7 @@ glossa exposes its knowledge-base tools via the [Model Context Protocol](https:/
 kb mcp ./my-corpus --profile reader
 ```
 
-Default transport is **stdio** (JSON-RPC on stdin/stdout). For network deployment see [deploy/mcp-server.md](deploy/mcp-server.md).
+Default transport is **stdio** (JSON-RPC on stdin/stdout). For network deployment see [deploy/mcp-server.md](deploy/mcp-server.md). Install without building: [install.md](install.md).
 
 ## Profiles
 
@@ -89,9 +89,26 @@ Ops endpoints: `/health`, `/ready`, `/metrics` (Prometheus). Details in [deploy/
 
 ## IDE configuration
 
+Install `kb` first: [install.md](install.md). Use your corpus folder path in the examples below.
+
+### Cursor (stdio)
+
+```json
+{
+  "mcpServers": {
+    "glossa": {
+      "command": "/usr/local/bin/kb",
+      "args": ["mcp", "/path/to/my-documents", "--profile", "reader", "--transport", "stdio"]
+    }
+  }
+}
+```
+
+On Windows use the full path to `kb.exe`. Place in `.cursor/mcp.json` (project) or user MCP settings.
+
 ### Cursor (HTTP)
 
-If glossa runs as a local HTTP server:
+If glossa runs as a local HTTP service ([deploy/service.md](deploy/service.md)):
 
 ```json
 {
@@ -103,17 +120,13 @@ If glossa runs as a local HTTP server:
 }
 ```
 
-Place in `.cursor/mcp.json` (project) or user MCP settings. Match `--bind` and `--allowed-host` to your setup.
+Match `--bind` and `--allowed-host` on the server.
 
-### stdio subprocess
+See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other clients.
 
-Configure your client to spawn:
+## ZeroClaw
 
-```
-/path/to/kb mcp /path/to/corpus --profile reader --transport stdio
-```
-
-Working directory should allow resolving the corpus path.
+→ [integrations/zeroclaw.md](integrations/zeroclaw.md)
 
 ## Freshness and maintenance
 

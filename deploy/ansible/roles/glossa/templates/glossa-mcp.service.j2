@@ -1,0 +1,15 @@
+[Unit]
+Description=glossa MCP server ({{ glossa_profile }})
+After=network.target
+
+[Service]
+Type=simple
+User={{ glossa_user }}
+Group={{ glossa_group }}
+ExecStart={{ glossa_bin_dir }}/kb mcp {{ glossa_corpus_path }} --profile {{ glossa_profile }} --transport streamable-http --bind {{ glossa_bind }} --allowed-host {{ glossa_allowed_host }}
+Environment=RUST_LOG=info,tantivy=warn
+Restart=on-failure
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

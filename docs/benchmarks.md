@@ -53,4 +53,4 @@ Same 50 questions, identical glossa retrieval; only the reader changes:
      where the recall metric becomes discriminating (distractor recall is near-saturated/agent-behaviour-bound).
   4. **Graph A/B** (graph OFF vs ON) once a graph-off query mode exists — the multihop claim.
 - Caveat: these benches are English-Wikipedia clean text; they validate the multihop/retrieval engine,
-  not glossa's product edge (office/pdf/Russian/offline/agentic graph).
+  not glossa's product edge (office/pdf/legacy encodings/offline/agentic graph).

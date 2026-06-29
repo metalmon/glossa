@@ -7,6 +7,8 @@ Thank you for your interest in contributing. glossa is a pure-Rust, offline know
 - Rust stable (2021 edition)
 - [just](https://github.com/casey/just) (optional but recommended for the dev pipeline)
 
+Operators installing from release: see [docs/install.md](docs/install.md) instead of building locally.
+
 ## Build and test
 
 ```bash
@@ -25,11 +27,11 @@ The workspace also includes `kb-eval` and `kb-train`. Full workspace tests can t
 ### CI and releases
 
 - **CI** (`.github/workflows/ci.yml`): push/PR → tests on Ubuntu + Windows, `cargo check` on Ubuntu.
-- **Releases** (`.github/workflows/release.yml`): push a tag `v0.1.0` → GitHub Release with `kb` for Linux, Windows, macOS (arm64 + x64).
+- **Releases** (`.github/workflows/release.yml`): push a tag `v1.0.0` → GitHub Release with `kb` for Linux, Windows, macOS (arm64 + x64).
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 Release artifacts ship **`kb` only** (the operator binary). `kb-eval` / `kb-train` are built from source for benchmark/enrich workflows.

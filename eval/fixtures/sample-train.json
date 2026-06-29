@@ -1,0 +1,12 @@
+[
+  {
+    "_id": "sample_train_1",
+    "question": "Which city hosts the Acme factory?",
+    "answer": "Riverdale"
+  },
+  {
+    "_id": "sample_train_2",
+    "question": "What year did the Acme factory open?",
+    "answer": "1998"
+  }
+]

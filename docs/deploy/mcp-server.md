@@ -1,6 +1,6 @@
 # Deploying the glossa MCP server
 
-Back to [MCP guide](../mcp.md).
+Back to [MCP guide](../mcp.md). Service install from release: [service.md](service.md).
 
 The `kb mcp` server speaks MCP (JSON-RPC 2.0, protocol `2025-06-18`) over two transports:
 
@@ -119,8 +119,12 @@ Notes:
 - Set the service log-on account and grant it read access to the corpus + read/write to `.glossa`.
 - Run readers as separate services on their own ports (`glossa-base1-reader-8802`, …).
 
-## Build
+## Production
 
-```
-cargo build --release            # target\release\kb.exe  (or target/release/kb on Linux)
-```
+For service install (release binary, all platforms): [service.md](service.md).
+
+For multi-process topology, TLS termination, systemd details, and Windows SCM: [mcp-server.md](mcp-server.md).
+
+## Install binary
+
+Download from [GitHub Releases](https://github.com/metalmon/glossa/releases) — see [install.md](../install.md). Contributors build with `cargo build --release`.

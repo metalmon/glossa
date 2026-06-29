@@ -90,6 +90,10 @@ gepa-metrics:
 eval dataset func="answer_hotpot" corpus="eval-corpus": build-eval
     ./{{bin}}/kb-eval run --dataset {{dataset}} --backend tensorzero --work {{corpus}} --tensorzero-function {{func}}
 
+# smoke-test eval on the committed sample dataset (no TensorZero / local corpus required)
+eval-fixture: build-eval
+    ./{{bin}}/kb-eval run --dataset eval/fixtures/sample-hotpot-distractor.json --backend mock
+
 # ── inspect ─────────────────────────────────────────────────────────────────
 # reasoning-graph node/edge counts
 graph-stats: build-kb

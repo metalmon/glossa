@@ -1,0 +1,71 @@
+---
+- name: Create glossa system user
+  ansible.builtin.user:
+    name: "{{ glossa_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ glossa_install_dir }}"
+    create_home: false
+
+- name: Create install directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ glossa_install_dir }}"
+    - "{{ glossa_bin_dir }}"
+
+- name: Create corpus directory
+  ansible.builtin.file:
+    path: "{{ glossa_corpus_path }}"
+    state: directory
+    owner: "{{ glossa_user }}"
+    group: "{{ glossa_group }}"
+    mode: "0755"
+
+- name: Download glossa release archive
+  ansible.builtin.get_url:
+    url: "https://github.com/{{ glossa_repo }}/releases/download/v{{ glossa_version }}/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
+    dest: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
+    mode: "0644"
+
+- name: Extract kb binary
+  ansible.builtin.unarchive:
+    src: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
+    dest: "/tmp"
+    remote_src: true
+    creates: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}/kb"
+
+- name: Install kb binary
+  ansible.builtin.copy:
+    src: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}/kb"
+    dest: "{{ glossa_bin_dir }}/kb"
+    mode: "0755"
+    remote_src: true
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: glossa-mcp.service.j2
+    dest: /etc/systemd/system/glossa-mcp.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart glossa-mcp
+
+- name: Enable and start glossa-mcp
+  ansible.builtin.systemd:
+    name: glossa-mcp
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Run initial index if .glossa missing
+  ansible.builtin.command:
+    cmd: "{{ glossa_bin_dir }}/kb index {{ glossa_corpus_path }}"
+  become: true
+  become_user: "{{ glossa_user }}"
+  args:
+    creates: "{{ glossa_corpus_path }}/.glossa/manifest.json"
