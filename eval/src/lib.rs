@@ -5,6 +5,7 @@ pub mod backend;
 pub mod corpus;
 pub mod dataset;
 pub mod enrich;
+pub mod export_tz;
 pub mod gepa;
 pub mod prep;
 pub mod run;

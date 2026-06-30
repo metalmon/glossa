@@ -12,7 +12,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; MCP maintenance loop on editor profiles.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`.
 - **Graph UX:** `graph_stats`, COMMUNITY neighbors, formatted `graph_upsert` responses (Written / Merged / REJECTED).
-- **Eval:** `kb-eval`, `kb-train enrich`, TensorZero integration, GEPA select optimization; release `justfile` recipes.
+- **Eval:** `kb-eval`, `kb-train enrich`, TensorZero integration, **TZ episode export + dual GEPA** (query + read on prod prompt); release `justfile` recipes.
 
 ## Performance
 
@@ -46,7 +46,7 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 
 ### Eval harness
 
-- **GEPA recall (`query` sub-task):** today `just gepa` / `kb-train optimize` only improves the **select** prompt (pick gold `#ord` from hits). `dump` already emits `query.jsonl` with per-node recall@k labels — add a parallel GEPA loop to optimize **query formulation** (what to pass to `search`) against recall@k, with its own TZ function + mutator, then graft the won instructions into the agent prompt. See [graph-supervised retrieval plan](superpowers/plans/2026-06-28-graph-supervised-retrieval-optimization.md).
+- **GEPA (shipped):** `export-tz` builds `query.jsonl` / `read.jsonl` from ClickHouse episodes; `just gepa` optimizes prod `answer_hotpot` prompt with dual query+read scoring via TZ **`functions.search`** + **`functions.read`**. Optional: tighten gold join for train cases (`source` field), `case_id` tags on eval episodes.
 - Per-round wall-clock budget in OpenAI backend tool loop.
 - Expose `MAX_ROUNDS` / read truncation as CLI flags.
 - **Fullwiki** HotpotQA (hard retrieval regime) — not yet run.

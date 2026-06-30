@@ -282,7 +282,13 @@ impl AgentBackend for TensorZeroBackend {
         let url = format!("{}/inference", self.endpoint.trim_end_matches('/'));
         let function = self.function.clone();
         let timeout = self.timeout;
-        let tags = self.tags.clone();
+        let mut tag_map = self
+            .tags
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        tag_map.insert("case_id".to_string(), json!(q.id));
+        let tags = Value::Object(tag_map);
         // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
         // relative to the gateway's clock — immune to Docker/WSL host↔container clock skew. The same id
         // is sent on every turn, so all inferences group into one episode (telemetry + feedback).

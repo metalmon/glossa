@@ -23,3 +23,11 @@ eval-data/
 eval/tensorzero/.env
 /wiki-corpus/
 /eval-data/*.tar.bz2
+
+# Local debug logs and scratch (never commit)
+*.log
+episode_*.txt
+g.json
+run-chain.sh
+_test_strip.sh
+.cursor/

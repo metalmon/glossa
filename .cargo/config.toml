@@ -1,0 +1,28 @@
+# Cargo registry mirror — used when index.crates.io is unreachable.
+# Change `replace-with` below to switch mirror (rebuild after edit).
+#
+#   rsproxy-sparse — https://rsproxy.cn (default)
+#   ustc           — USTC sparse
+#   tuna           — Tsinghua sparse
+#
+# Alt: copy a block to ~/.cargo/config.toml for all projects on this machine.
+
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[source.tuna]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+[registries.crates-io]
+protocol = "sparse"
+
+# Windows / flaky TLS: fewer mysterious connection failures (see USTC mirror FAQ).
+[http]
+multiplexing = false
+check-revoke = false

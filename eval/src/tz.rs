@@ -109,6 +109,41 @@ pub fn infer(
     Ok(InferenceTurn { content, episode_id })
 }
 
+/// Fail fast when the gateway was not restarted after `tensorzero.toml` changes.
+pub fn ensure_function(gateway: &str, function: &str, variant: Option<&str>) -> Result<()> {
+    let url = format!("{}/inference", gateway.trim_end_matches('/'));
+    let mut body = json!({
+        "function_name": function,
+        "episode_id": backdated_episode_id(30),
+        "input": { "messages": [{"role": "user", "content": "ping"}] },
+    });
+    if let Some(variant) = variant {
+        body["variant_name"] = json!(variant);
+    }
+    match ureq::post(&url)
+        .timeout(Duration::from_secs(15))
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::to_string(&body)?)
+    {
+        Ok(resp) => {
+            if resp.status() == 404 {
+                bail!(
+                    "gateway unknown function '{function}' — restart gateway after config change: \
+                     `just gw-restart` (or `cd eval/tensorzero && docker compose restart gateway`)"
+                );
+            }
+            Ok(())
+        }
+        Err(ureq::Error::Status(404, _)) => {
+            bail!(
+                "gateway unknown function '{function}' — restart gateway after config change: \
+                 `just gw-restart`"
+            );
+        }
+        Err(e) => Err(anyhow!("gateway probe for '{function}' failed: {e}")),
+    }
+}
+
 /// POST episode-level feedback to the gateway (best-effort; never fails the caller).
 pub fn post_feedback(gateway: &str, episode_id: &str, metric: &str, value: Value, tags: &Value) {
     let url = format!("{}/feedback", gateway.trim_end_matches('/'));
