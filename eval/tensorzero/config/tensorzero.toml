@@ -112,19 +112,14 @@ extra_body = [
   { pointer = "/transforms", value = ["middle-out"] },
 ]
 
-# ── GEPA reflection model: DeepSeek-R1 via OpenRouter ──
-# The mutator for `kb-train optimize` — it reads search/read prompt failures and proposes an
-# improved prompt. Low volume (a handful of calls per run), high leverage, so a strong
-# reasoning model is worth it; R1 is cheap (~cents/run). Routed THROUGH the gateway so it
-# reuses the gateway's OPENROUTER_API_KEY and shows up as a TZ inference (observability).
-# Reference as model "tensorzero::model_name::deepseek_r1".
-[models.deepseek_r1]
+# ── GEPA mutator: Qwen3.6-35B via OpenRouter (separate TZ model name from `qwen3_coder`/Zed) ──
+[models.gepa_mutator]
 routing = ["openrouter"]
 
-[models.deepseek_r1.providers.openrouter]
+[models.gepa_mutator.providers.openrouter]
 type = "openai"
 api_base = "https://openrouter.ai/api/v1"
-model_name = "deepseek/deepseek-r1"
+model_name = "qwen/qwen3.6-35b-a3b"
 api_key_location = "env::OPENROUTER_API_KEY"
 
 # ── GEPA search micro-task: emit search(query) for a question ──
@@ -158,17 +153,30 @@ type = "chat_completion"
 model = "qwen"
 system_template = "read/system.minijinja"
 max_tokens = 512
-temperature = 0.0
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
 
-# ── GEPA reflection: mutator proposes an improved system prompt from failures ──
+# ── GEPA reflection: mutator proposes an improved answer_hotpot system prompt ──
 [functions.gepa_reflect]
 type = "chat"
 
 [functions.gepa_reflect.variants.baseline]
 type = "chat_completion"
-model = "deepseek_r1"
+model = "gepa_mutator"
 temperature = 1.0
+top_p = 0.95
 max_tokens = 4096
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+  { pointer = "/reasoning", value = { enabled = false } },
+  ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
@@ -285,7 +293,7 @@ description = "Signal that the reasoning graph for this case is complete — the
 parameters = "tools/done.json"
 # <<< GENERATED TOOLS
 
-# ── Constraint validation tools ──
+# ── Constraint tools ──
 [tools.get_ontology]
 description = "Return the full constraint ontology: entity types, relation types, constraint types, prefixes, and the strict validation flag."
 parameters = "tools/get_ontology.json"
@@ -294,23 +302,48 @@ parameters = "tools/get_ontology.json"
 description = "Run the CSP constraint solver. Modes: validate (check field assignments), infer (show valid domains for each field), check (consistency of the constraint graph). Returns structured violation/domain/issue data."
 parameters = "tools/constraint_solve.json"
 
-# ── Constraint validation function (CSP + LLM epistemic eval) ──
+# ── Constraint validation function: agent builds graph from GOST then validates ──
+# Tools = all glossa tools so the agent can search/read the GOST document,
+# build the constraint graph via graph_upsert, self-check with constraint_solve,
+# and signal completion with done.
 [functions.constraint_validate]
 type = "chat"
-tools = ["get_ontology", "constraint_solve"]
+tools = [
+  "search", "read", "grep", "glob",
+  "get_ontology",
+  "graph_upsert", "graph_delete", "graph_update",
+  "graph_stats", "graph_generalize",
+  "constraint_solve",
+  "done",
+]
 parallel_tool_calls = true
 
-[functions.constraint_validate.variants.baseline]
+# Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)
+[functions.constraint_validate.variants.qwen35]
+type = "chat_completion"
+model = "qwen3_coder"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+extra_body = [
+  { pointer = "/top_k", value = 20 },
+  { pointer = "/min_p", value = 0 },
+  { pointer = "/reasoning", value = { enabled = false } },
+  { pointer = "/transforms", value = ["middle-out"] },
+]
+
+# Lightweight variant: Qwen3.5-4B via LM Studio (for quick tests)
+[functions.constraint_validate.variants.qwen4b]
 type = "chat_completion"
 model = "qwen"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 1024
-temperature = 0.2
-top_p = 0.9
+max_tokens = 2048
+temperature = 1.0
+top_p = 0.95
 extra_body = [
   { pointer = "/top_k", value = 40 },
   { pointer = "/min_p", value = 0.1 },
-  { pointer = "/repetition_penalty", value = 1.05 },
+  { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
@@ -401,7 +434,7 @@ type = "float"
 optimize = "min"
 level = "episode"
 
-# ── GEPA optimize (posted by `kb-train optimize`; one semantic per metric name) ──
+# ── GEPA prod optimization (posted by `kb-train optimize` per run) ──
 [metrics.gepa_baseline_query]
 type = "float"
 optimize = "max"
@@ -504,6 +537,32 @@ optimize = "min"
 level = "episode"
 
 [metrics.tools_used]
+type = "float"
+optimize = "max"
+level = "episode"
+
+# ── Agent graph quality eval (full agent mode, not csp-only) ──
+[metrics.field_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.constraint_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.literal_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.agent_graph_node_count]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.agent_graph_edge_count]
 type = "float"
 optimize = "max"
 level = "episode"
