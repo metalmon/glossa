@@ -41,7 +41,7 @@ impl InferenceTurn {
 }
 
 /// One `/inference` call (kb-eval pattern). Pass `system` to override the variant's system template
-/// at runtime (GEPA select); omit it for functions whose prompt lives entirely in `tensorzero.toml`.
+/// at runtime (GEPA search/read); omit it for functions whose prompt lives entirely in `tensorzero.toml`.
 pub fn infer(
     gateway: &str,
     function: &str,

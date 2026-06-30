@@ -101,7 +101,7 @@ gepa-apply prompt="{{out}}/answer_hotpot.prompt.txt" target="{{tzcfg}}/answer_ho
 gepa-metrics:
     @just ch "SELECT t.value AS run, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_baseline_combined'), 3) AS baseline, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_combined_acc'), 3) AS final, round(avgIf(f.value, f.metric_name='gepa_iter_combined'), 3) AS iter_avg, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_final_query'), 3) AS query, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_final_read'), 3) AS read, maxIf(f.value, f.metric_name='gepa_candidates') AS candidates FROM tensorzero.FloatMetricFeedback f JOIN tensorzero.FloatMetricFeedbackTagView t ON f.id = t.feedback_id AND t.key = 'run' WHERE f.metric_name IN ('gepa_baseline_combined','gepa_combined_acc','gepa_iter_combined','gepa_final_query','gepa_final_read','gepa_candidates') GROUP BY run ORDER BY run DESC LIMIT 20 FORMAT PrettyCompact"
 
-# Wipe GEPA run history in ClickHouse (select/gepa_reflect inferences + episode metrics). Does not touch enrich/eval/coding.
+# Wipe GEPA run history in ClickHouse (search/read/gepa_reflect + episode metrics). Does not touch enrich/eval/coding.
 gepa-reset:
     @just ch "ALTER TABLE tensorzero.ModelInference DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name IN ('search', 'read', 'gepa_reflect'))"
     @just ch "ALTER TABLE tensorzero.InferenceTag DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name IN ('search', 'read', 'gepa_reflect'))"

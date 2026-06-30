@@ -570,7 +570,7 @@ fn reflect(cfg: &GepaConfig, prompt: &str, failures: &[FailureCase]) -> Result<S
         &messages,
         &cfg.tags,
         Duration::from_secs(180),
-        Some(&cfg.variant),
+        Some("baseline"),
         None,
     )
     .context("gepa_reflect inference failed")?;
