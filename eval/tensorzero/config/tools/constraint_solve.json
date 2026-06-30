@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "mode": {
+      "description": "Solve mode: validate (check assignments), infer (show valid domains), check (graph consistency)",
+      "enum": ["validate", "infer", "check"],
+      "type": "string"
+    },
+    "field_assignments": {
+      "default": null,
+      "description": "Field name → value map for validate mode (e.g. {\"Диаметр\": 150, \"Тип\": \"A\"})",
+      "type": ["object", "null"]
+    },
+    "field": {
+      "default": null,
+      "description": "Field name to infer domain for (infer mode, optional — omit to infer all fields)",
+      "type": ["string", "null"]
+    }
+  },
+  "required": ["mode"],
+  "type": "object"
+}

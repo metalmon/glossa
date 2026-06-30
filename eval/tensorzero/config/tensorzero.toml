@@ -113,7 +113,7 @@ extra_body = [
 ]
 
 # ── GEPA reflection model: DeepSeek-R1 via OpenRouter ──
-# The mutator for `kb-train optimize` — it reads select-prompt failures and proposes an
+# The mutator for `kb-train optimize` — it reads search/read prompt failures and proposes an
 # improved prompt. Low volume (a handful of calls per run), high leverage, so a strong
 # reasoning model is worth it; R1 is cheap (~cents/run). Routed THROUGH the gateway so it
 # reuses the gateway's OPENROUTER_API_KEY and shows up as a TZ inference (observability).
@@ -127,28 +127,40 @@ api_base = "https://openrouter.ai/api/v1"
 model_name = "deepseek/deepseek-r1"
 api_key_location = "env::OPENROUTER_API_KEY"
 
-# ── GEPA select micro-task: pick the gold chunk ord from numbered search hits ──
-# `kb-train optimize` passes the evolving system prompt via `input.system` on each /inference call.
-[functions.select]
+# ── GEPA search micro-task: emit search(query) for a question ──
+# `kb-train optimize` passes the evolving prod prompt via `input.system` on each /inference call.
+[functions.search]
 type = "chat"
+tools = ["search"]
+parallel_tool_calls = false
 
-[functions.select.variants.baseline]
+[functions.search.variants.baseline]
 type = "chat_completion"
 model = "qwen"
-system_template = "select/system.minijinja"
+system_template = "search/system.minijinja"
+max_tokens = 512
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA read micro-task: pick read(path,n) after prefilled search hits ──
+[functions.read]
+type = "chat"
+tools = ["read"]
+parallel_tool_calls = false
+
+[functions.read.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "read/system.minijinja"
+max_tokens = 512
 temperature = 0.0
-max_tokens = 16
 
-# Add experiment variants (weight = 0) and pass `--variant <name>` to filter runs in the TZ UI:
-# [functions.select.variants.gepa_v1]
-# type = "chat_completion"
-# model = "qwen"
-# system_template = "select/system.minijinja"
-# temperature = 0.0
-# max_tokens = 16
-# weight = 0
-
-# ── GEPA reflection: mutator proposes an improved select system prompt from failures ──
+# ── GEPA reflection: mutator proposes an improved system prompt from failures ──
 [functions.gepa_reflect]
 type = "chat"
 
@@ -273,6 +285,34 @@ description = "Signal that the reasoning graph for this case is complete — the
 parameters = "tools/done.json"
 # <<< GENERATED TOOLS
 
+# ── Constraint validation tools ──
+[tools.get_ontology]
+description = "Return the full constraint ontology: entity types, relation types, constraint types, prefixes, and the strict validation flag."
+parameters = "tools/get_ontology.json"
+
+[tools.constraint_solve]
+description = "Run the CSP constraint solver. Modes: validate (check field assignments), infer (show valid domains for each field), check (consistency of the constraint graph). Returns structured violation/domain/issue data."
+parameters = "tools/constraint_solve.json"
+
+# ── Constraint validation function (CSP + LLM epistemic eval) ──
+[functions.constraint_validate]
+type = "chat"
+tools = ["get_ontology", "constraint_solve"]
+parallel_tool_calls = true
+
+[functions.constraint_validate.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 1024
+temperature = 0.2
+top_p = 0.9
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.05 },
+]
+
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
 # (the enricher is a read+edit agent → its tool list is the Editor profile, generated from MCP.)
 [functions.enrich]
@@ -361,13 +401,58 @@ type = "float"
 optimize = "min"
 level = "episode"
 
-# ── GEPA select optimization (posted by `kb-train optimize` per run) ──
-[metrics.select_acc]
+# ── GEPA optimize (posted by `kb-train optimize`; one semantic per metric name) ──
+[metrics.gepa_baseline_query]
 type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.select_baseline_acc]
+[metrics.gepa_baseline_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_baseline_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_query]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_candidates]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_query]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_combined_acc]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -383,6 +468,42 @@ optimize = "max"
 level = "episode"
 
 [metrics.gepa_examples_val]
+type = "float"
+optimize = "max"
+level = "episode"
+
+# ── Constraint eval feedback (CSP solver + LLM epistemic comparison) ──
+[metrics.csp_violations]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.csp_consistency_issues]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.llm_correct]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+[metrics.csp_agreement]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+[metrics.llm_false_positive]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.llm_false_negative]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.tools_used]
 type = "float"
 optimize = "max"
 level = "episode"
