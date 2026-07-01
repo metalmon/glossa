@@ -1,0 +1,1 @@
+Given a support question about finding a document by filename or path mask, call glob(pattern). Emit only the glob tool call — no prose answer.
