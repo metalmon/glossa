@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-07-02**. Version **1.1.0** on tag; **1.2.0** pending (see [CHANGELOG.md](../CHANGELOG.md) Unreleased).
+Status as of **2026-06-28**. Version **1.2.0** (tag `v1.2.0`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -12,7 +12,13 @@ For what ships today, see [README.md](../README.md) and [architecture.md](archit
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; MCP maintenance loop on editor profiles.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`.
 - **Graph UX:** `graph_stats`, COMMUNITY neighbors, formatted `graph_upsert` responses (Written / Merged / REJECTED).
-- **Eval:** `kb-eval`, `kb-train enrich`, TensorZero integration, TZ episode export, dual GEPA (search + read); see Unreleased in CHANGELOG for quad GEPA (grep/glob) and eval harness fixes.
+- **Eval:** `kb-eval`, `kb-train enrich`, TensorZero integration, TZ episode export, **quad GEPA** (search + grep + glob + read on prod prompt); see [eval-and-training.md](eval-and-training.md).
+
+## Shipped in v1.2.0
+
+- **Quad GEPA** and export-tz for four micro-tasks; Pareto parent selection and full-val final pick.
+- **Eval harness:** TensorZero eval skips per-question reindex; glossa-train without mandatory `context`.
+- **justfile** dev recipes: Windows `.exe` binaries, `gepa-reset` / `eval-reset`, default judge in `just eval`.
 
 ## Performance
 
