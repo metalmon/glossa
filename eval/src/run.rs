@@ -77,8 +77,9 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
         transcript: Vec::new(),
         recall_at_5: 0.0, recall_at_10: 0.0, recall_at_20: 0.0, mrr: 0.0,
     };
-    // In fullwiki mode the shared corpus is pre-built; do NOT write/index/clear per question.
-    if backend.needs_corpus() && !fullwiki {
+    // HotpotQA rows with inline `context` may rebuild a mini-corpus (CLI/OpenAI backends only).
+    // TensorZero eval uses a pre-built index in `work`; `--fullwiki` skips even for Hotpot.
+    if backend.rebuild_corpus_each_question() && !fullwiki && !q.paragraphs.is_empty() {
         if let Err(e) = corpus::write_corpus(work, q).and_then(|_| corpus::index(work, kb_bin)) {
             return Row { failed: Some(format!("corpus: {e}")), ..base };
         }
@@ -123,6 +124,7 @@ fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, wor
 mod fullwiki_tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::dataset::Question;
     use std::collections::HashMap;
 
     #[test]
@@ -143,5 +145,63 @@ mod fullwiki_tests {
         assert_eq!(report.rows.len(), 1);
         assert!(corpus.join("Sentinel.md").exists(), "fullwiki must NOT clear the shared corpus");
         assert_eq!(report.recall_at_5_mean, 0.0); // empty mock transcript
+    }
+
+    #[test]
+    fn empty_context_uses_prebuilt_corpus_without_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Sentinel.md"), b"# Sentinel\nkeep me\n").unwrap();
+
+        let dataset = dir.path().join("d.json");
+        std::fs::write(
+            &dataset,
+            br#"[{"_id":"syn-1","question":"Q?","answer":"A","source":"doc.htm:#1"}]"#,
+        )
+        .unwrap();
+
+        let be = MockBackend { canned: HashMap::new() };
+        let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), None).unwrap();
+
+        assert_eq!(report.rows.len(), 1);
+        assert!(
+            dir.path().join("Sentinel.md").exists(),
+            "empty context must NOT clear the work corpus"
+        );
+    }
+
+    struct NoRebuildBackend;
+
+    impl AgentBackend for NoRebuildBackend {
+        fn needs_corpus(&self) -> bool {
+            true
+        }
+        fn rebuild_corpus_each_question(&self) -> bool {
+            false
+        }
+        fn answer(&self, _work: &Path, _q: &Question) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn tensorzero_style_backend_skips_hotpot_corpus_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Sentinel.md"), b"# Sentinel\nkeep me\n").unwrap();
+
+        let dataset = dir.path().join("d.json");
+        std::fs::write(
+            &dataset,
+            br#"[{"_id":"q1","question":"Who?","answer":"Bob",
+            "context":[["Bob Page",["b."]]],"supporting_facts":[["Bob Page",0]]}]"#,
+        )
+        .unwrap();
+
+        let be = NoRebuildBackend;
+        let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), None).unwrap();
+        assert_eq!(report.rows.len(), 1);
+        assert!(
+            dir.path().join("Sentinel.md").exists(),
+            "rebuild_corpus_each_question=false must NOT wipe work"
+        );
     }
 }

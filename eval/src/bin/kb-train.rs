@@ -27,12 +27,12 @@ enum Cmd {
         work: PathBuf,
         #[arg(long, default_value_t = 0)]
         limit: usize,
-        #[arg(long, default_value = "http://localhost:3000")]
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
         tensorzero_endpoint: String,
         #[arg(long, default_value = "enrich")]
         tensorzero_function: String,
     },
-    /// Export query/read datasets from TZ ClickHouse episodes (primary GEPA source).
+    /// Export search/read datasets from TZ ClickHouse episodes (primary GEPA source).
     ExportTz {
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
@@ -64,10 +64,14 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
-    /// GEPA-optimize the prod answer_hotpot system prompt (dual query + read scoring).
+    /// GEPA-optimize the prod answer_hotpot system prompt (quad search + grep + glob + read scoring).
     Optimize {
-        #[arg(long, default_value = "gepa-out/query.jsonl")]
-        query: PathBuf,
+        #[arg(long, default_value = "gepa-out/search.jsonl")]
+        search: PathBuf,
+        #[arg(long, default_value = "gepa-out/grep.jsonl")]
+        grep: PathBuf,
+        #[arg(long, default_value = "gepa-out/glob.jsonl")]
+        glob: PathBuf,
         #[arg(long, default_value = "gepa-out/read.jsonl")]
         read: PathBuf,
         #[arg(long, default_value = "gepa-out/answer_hotpot.prompt.txt")]
@@ -76,12 +80,16 @@ enum Cmd {
         seed: PathBuf,
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
-        #[arg(long, default_value = "http://localhost:3000")]
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
         gateway: String,
         #[arg(long, default_value = "search")]
         search_function: String,
         #[arg(long, default_value = "read")]
         read_function: String,
+        #[arg(long, default_value = "grep")]
+        grep_function: String,
+        #[arg(long, default_value = "glob")]
+        glob_function: String,
         #[arg(long, default_value = "baseline")]
         variant: String,
         #[arg(long, default_value = "gepa_reflect")]
@@ -94,14 +102,27 @@ enum Cmd {
         val_frac: f64,
         #[arg(long, default_value_t = 6)]
         budget: usize,
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = 12)]
         minibatch: usize,
         #[arg(long, default_value_t = 10)]
         k: usize,
-        #[arg(long, default_value_t = 0.5)]
-        w_query: f64,
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = 0.25)]
+        w_search: f64,
+        #[arg(long, default_value_t = 0.25)]
+        w_grep: f64,
+        #[arg(long, default_value_t = 0.10)]
+        w_glob: f64,
+        #[arg(long, default_value_t = 0.25)]
         w_read: f64,
+        /// RNG seed for minibatch sampling (default: hash of run tag).
+        #[arg(long)]
+        rng_seed: Option<u64>,
+        /// Cap on D_pareto instances sampled from val (parent selection + pool scores).
+        #[arg(long, default_value_t = 20)]
+        pareto_size: usize,
+        /// Parent selection: pareto (default) or current_best.
+        #[arg(long, default_value = "pareto")]
+        candidate_selection: String,
     },
 }
 
@@ -131,7 +152,9 @@ fn main() -> Result<()> {
             run_dump(work, out, k, poll_secs, idle_stop, once)
         }
         Cmd::Optimize {
-            query,
+            search,
+            grep,
+            glob,
             read,
             out,
             seed,
@@ -139,6 +162,8 @@ fn main() -> Result<()> {
             gateway,
             search_function,
             read_function,
+            grep_function,
+            glob_function,
             variant,
             reflect_function,
             run,
@@ -147,10 +172,17 @@ fn main() -> Result<()> {
             budget,
             minibatch,
             k,
-            w_query,
+            w_search,
+            w_grep,
+            w_glob,
             w_read,
+            rng_seed,
+            pareto_size,
+            candidate_selection,
         } => run_optimize(
-            query,
+            search,
+            grep,
+            glob,
             read,
             out,
             seed,
@@ -158,6 +190,8 @@ fn main() -> Result<()> {
             gateway,
             search_function,
             read_function,
+            grep_function,
+            glob_function,
             variant,
             reflect_function,
             run,
@@ -166,23 +200,45 @@ fn main() -> Result<()> {
             budget,
             minibatch,
             k,
-            w_query,
+            w_search,
+            w_grep,
+            w_glob,
             w_read,
+            rng_seed,
+            pareto_size,
+            candidate_selection,
         ),
     }
 }
 
 fn load_jsonl<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<Vec<T>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).with_context(|| format!("parse {}", path.display())))
-        .collect()
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let reader = BufReader::new(f);
+    let mut out = Vec::new();
+    for (n, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "read {} line {} (invalid UTF-8 — re-run `just export-tz`; file may be corrupted by concurrent export)",
+                path.display(),
+                n + 1,
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push(serde_json::from_str(&line).with_context(|| {
+            format!("parse {} line {}", path.display(), n + 1)
+        })?);
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_optimize(
-    query: PathBuf,
+    search: PathBuf,
+    grep: PathBuf,
+    glob: PathBuf,
     read: PathBuf,
     out: PathBuf,
     seed: PathBuf,
@@ -190,6 +246,8 @@ fn run_optimize(
     gateway: String,
     search_function: String,
     read_function: String,
+    grep_function: String,
+    glob_function: String,
     variant: String,
     reflect_function: String,
     run: Option<String>,
@@ -198,11 +256,32 @@ fn run_optimize(
     budget: usize,
     minibatch: usize,
     top_k: usize,
-    w_query: f64,
+    w_search: f64,
+    w_grep: f64,
+    w_glob: f64,
     w_read: f64,
+    rng_seed: Option<u64>,
+    pareto_size: usize,
+    candidate_selection: String,
 ) -> Result<()> {
-    let queries: Vec<kb_eval::gepa::QueryExample> = if query.exists() {
-        load_jsonl(&query)?
+    let searches: Vec<kb_eval::gepa::SearchExample> = if search.exists() {
+        load_jsonl(&search)?
+    } else {
+        Vec::new()
+    };
+    let greps: Vec<kb_eval::export_tz::GrepExample> = if grep.exists() {
+        load_jsonl::<kb_eval::export_tz::GrepExample>(&grep)?
+            .into_iter()
+            .filter(|g| !g.synthetic)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let globs: Vec<kb_eval::export_tz::GlobExample> = if glob.exists() {
+        load_jsonl::<kb_eval::export_tz::GlobExample>(&glob)?
+            .into_iter()
+            .filter(|g| !g.synthetic)
+            .collect()
     } else {
         Vec::new()
     };
@@ -214,6 +293,10 @@ fn run_optimize(
 
     let seed_prompt = kb_eval::gepa::load_seed_prompt(&seed)?;
     let run_label = run.unwrap_or_else(kb_eval::gepa::default_run_tag);
+    let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
+    let candidate_selection = candidate_selection
+        .parse::<kb_eval::gepa::CandidateSelection>()
+        .with_context(|| format!("parse candidate_selection {candidate_selection:?}"))?;
     let mut tags = serde_json::Map::new();
     tags.insert("run".into(), run_label.clone().into());
     tags.insert("budget".into(), budget.to_string().into());
@@ -229,6 +312,8 @@ fn run_optimize(
             gateway,
             search_function,
             read_function,
+            grep_function,
+            glob_function,
             variant,
             reflect_function,
             episode_id: kb_eval::tz::backdated_episode_id(30),
@@ -239,10 +324,17 @@ fn run_optimize(
             seed_prompt,
             work,
             top_k,
-            w_query,
+            w_search,
+            w_grep,
+            w_glob,
             w_read,
+            seed: rng_seed,
+            pareto_size,
+            candidate_selection,
         },
-        queries,
+        searches,
+        greps,
+        globs,
         reads,
     )?;
     if let Some(parent) = out.parent() {
@@ -250,10 +342,12 @@ fn run_optimize(
     }
     std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
     println!(
-        "wrote best prompt -> {} (run={run_label}, episode={}, query_acc={:.3}, read_acc={:.3})",
+        "wrote best prompt -> {} (run={run_label}, episode={}, search_acc={:.3}, grep_acc={:.3}, glob_acc={:.3}, read_acc={:.3})",
         out.display(),
         result.episode_id,
-        result.query_acc,
+        result.search_acc,
+        result.grep_acc,
+        result.glob_acc,
         result.read_acc,
     );
     Ok(())
@@ -299,19 +393,19 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
     let analyzer = glossa::index::multilang::TermAnalyzer::new();
 
     std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
-    let query_path = out.join("query.jsonl");
+    let search_path = out.join("search.jsonl");
     let select_path = out.join("select.jsonl");
-    let mut query_f = std::fs::File::create(&query_path)?;
+    let mut search_f = std::fs::File::create(&search_path)?;
     let mut select_f = std::fs::File::create(&select_path)?;
     println!(
         "kb-train dump (legacy): {} -> {} / {}",
         work.display(),
-        query_path.display(),
+        search_path.display(),
         select_path.display(),
     );
 
     let mut seen: HashSet<String> = HashSet::new();
-    let (mut nodes_kept, mut query_written, mut select_written, mut recall_hit) = (0u64, 0u64, 0u64, 0u64);
+    let (mut nodes_kept, mut search_written, mut select_written, mut recall_hit) = (0u64, 0u64, 0u64, 0u64);
     let mut idle = 0u32;
 
     loop {
@@ -348,8 +442,8 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
             }
             nodes_kept += 1;
             let gold_locs: Vec<String> = relevant.iter().map(|(p, l)| format!("{p}#{l}")).collect();
-            writeln!(query_f, "{}", json!({"question": node.label, "gold": gold_locs}))?;
-            query_written += 1;
+            writeln!(search_f, "{}", json!({"question": node.label, "gold": gold_locs}))?;
+            search_written += 1;
             let hits = idx.search_filtered(&node.label, k, None, None).unwrap_or_default();
             let gold_set: HashSet<(String, String)> = relevant.into_iter().collect();
             let gold_ords: Vec<u64> =
@@ -373,10 +467,10 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
         }
         std::thread::sleep(Duration::from_secs(poll_secs));
     }
-    query_f.flush().ok();
+    search_f.flush().ok();
     select_f.flush().ok();
     println!(
-        "DONE (legacy dump): kept {nodes_kept} nodes, query={query_written}, select={select_written}, recall@{k}={:.3}",
+        "DONE (legacy dump): kept {nodes_kept} nodes, search={search_written}, select={select_written}, recall@{k}={:.3}",
         recall_hit as f64 / nodes_kept.max(1) as f64,
     );
     Ok(())
