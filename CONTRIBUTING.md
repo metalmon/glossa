@@ -22,7 +22,9 @@ cargo test -p glossa --release --locked
 cargo test -p kb-eval --release --locked
 ```
 
-The workspace also includes `kb-eval` and `kb-train`. Full workspace tests can take longer; avoid running `cargo test --workspace` while a long `kb-train enrich` process holds a binary lock on Windows.
+The workspace also includes `kb-eval` and `kb-train`. Full workspace tests can take longer; avoid running `cargo test --workspace` while a long `kb-train enrich` or GEPA run holds a lock on `kb-train.exe` on Windows.
+
+On Windows, `just` invokes **`kb-eval.exe`** and **`kb-train.exe`**. After pulling eval changes: `just build-eval force` and `just build-train force`. Remove stale extensionless GNU binaries in `target/release/` if an old build keeps running.
 
 ### CI and releases
 
