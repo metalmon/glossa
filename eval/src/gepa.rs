@@ -1337,11 +1337,11 @@ fn select_parent_idx(pool: &[Candidate], cfg: &GepaConfig, rng: &mut StdRng) -> 
     }
 }
 
-fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize {
+fn pareto_frontier_win_counts(pool: &[Candidate]) -> (Vec<usize>, Vec<usize>) {
     let bits: Vec<Vec<bool>> = pool.iter().map(candidate_pareto_bits).collect();
     let n_inst = bits.first().map(|b| b.len()).unwrap_or(0);
     if n_inst == 0 {
-        return rng.gen_range(0..pool.len());
+        return ((0..pool.len()).collect(), vec![0; pool.len()]);
     }
 
     let mut union = HashSet::new();
@@ -1360,7 +1360,8 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
         per_instance_winners.push(winners);
     }
 
-    let c_vec: Vec<usize> = union.into_iter().collect();
+    let mut c_vec: Vec<usize> = union.into_iter().collect();
+    c_vec.sort_unstable();
     let mut dominated = HashSet::new();
     for &i in &c_vec {
         for &j in &c_vec {
@@ -1387,9 +1388,7 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
     if frontier_idxs.is_empty() {
         frontier_idxs = frontier(pool);
     }
-    if frontier_idxs.is_empty() {
-        return 0;
-    }
+    frontier_idxs.sort_unstable();
 
     let mut counts = vec![0usize; pool.len()];
     for winners in &per_instance_winners {
@@ -1402,6 +1401,21 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
         for k in active {
             counts[k] += 1;
         }
+    }
+
+    (frontier_idxs, counts)
+}
+
+fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize {
+    let bits: Vec<Vec<bool>> = pool.iter().map(candidate_pareto_bits).collect();
+    let n_inst = bits.first().map(|b| b.len()).unwrap_or(0);
+    if n_inst == 0 {
+        return rng.gen_range(0..pool.len());
+    }
+
+    let (frontier_idxs, counts) = pareto_frontier_win_counts(pool);
+    if frontier_idxs.is_empty() {
+        return 0;
     }
 
     let total: usize = frontier_idxs.iter().map(|&k| counts[k]).sum();
@@ -2368,6 +2382,21 @@ mod tests {
     }
 
     #[test]
+    fn pareto_parent_win_counts_prefer_frequent_winner() {
+        let pool = vec![
+            test_candidate("a", &[true, false, false]),
+            test_candidate("b", &[false, true, true]),
+            test_candidate("c", &[false, false, false]),
+        ];
+        let (frontier, counts) = pareto_frontier_win_counts(&pool);
+        assert!(frontier.contains(&0));
+        assert!(frontier.contains(&1));
+        assert_eq!(counts[0], 1);
+        assert_eq!(counts[1], 2);
+        assert_eq!(counts[2], 0);
+    }
+
+    #[test]
     fn select_parent_weighted_prefers_frequent_winner() {
         let pool = vec![
             test_candidate("a", &[true, false, false]),
@@ -2377,7 +2406,7 @@ mod tests {
         let cfg = test_cfg();
         let mut rng = StdRng::seed_from_u64(99);
         let mut picks = [0usize; 3];
-        for _ in 0..60 {
+        for _ in 0..600 {
             let k = select_parent_idx(&pool, &cfg, &mut rng);
             picks[k] += 1;
         }
