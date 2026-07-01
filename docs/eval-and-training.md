@@ -1,12 +1,12 @@
 # Eval and training — playbook
 
-Developer guide: run the agent, accumulate TensorZero telemetry, turn it into a GEPA dataset, and improve the prod prompt. Corpus operators can skip most of this — see [getting-started.md](getting-started.md).
+Developer guide: run the agent, accumulate TensorZero telemetry, export a GEPA dataset, and improve the prod prompt. Corpus operators can skip most of this — see [getting-started.md](getting-started.md).
 
 ## Why this exists
 
-glossa measures not a bare LLM but an **agent with tools** (`search`, `read`, graph, …). TensorZero (TZ) logs every run to ClickHouse: question, tool-call chain, metrics. From that history we:
+glossa measures not a bare LLM but an **agent with tools** (`search`, `grep`, `glob`, `read`, graph, …). TensorZero (TZ) logs every run to ClickHouse: question, tool-call chain, metrics. From that history we:
 
-1. **Export** — build a labeled dump of how the model searched/read vs gold chunks.
+1. **Export** — build labeled dumps of how the model searched, grepped, globbed, and read vs gold chunks.
 2. **GEPA** — iteratively improve the system prompt (`answer_hotpot`) without changing agent code.
 3. **Eval** — check end-to-end (answer, recall, judge) before and after.
 
@@ -19,7 +19,7 @@ flowchart TB
   end
 
   subgraph corpus [kb-test corpus]
-    index[kb index]
+    index[kb index / reindex once]
     enrich[just enrich]
   end
 
@@ -67,13 +67,13 @@ just build          # kb + kb-eval + kb-train
 just test           # optional
 ```
 
-Binaries land in `target/release/`. On Windows, use **release** for long runs (debug locks the `.exe`).
+Binaries land in `target/release/`. On Windows use **`kb-eval.exe`** and **`kb-train.exe`** (release builds). After code changes: `just build-eval force` / `just build-train force`.
 
 | Binary | Purpose |
 |--------|---------|
-| `kb` | index, search, MCP |
+| `kb` | index, search, MCP (shipped in GitHub Releases) |
 | `kb-eval` | benchmark, scoring |
-| `kb-train` | enrich, export-tz, GEPA |
+| `kb-train` | enrich, export-tz, GEPA optimize |
 
 ### 2. TensorZero + ClickHouse
 
@@ -90,8 +90,8 @@ Details: [eval/tensorzero/README.md](../eval/tensorzero/README.md).
 
 | Role | Where | Used for |
 |------|-------|----------|
-| **Qwen3.5-4B** | LM Studio `:1234` | agent (`answer_hotpot`, GEPA scoring) |
-| **DeepSeek-R1** | OpenRouter via TZ | GEPA reflect/mutate |
+| **Qwen3.5-4B** | LM Studio `:1234` | agent (`answer_hotpot`), GEPA micro-task scoring, optional judge |
+| **DeepSeek-R1** | OpenRouter via TZ | GEPA reflect/mutate (`gepa_mutator`) |
 
 After changing TZ tool schemas:
 
@@ -102,25 +102,29 @@ just gw-restart
 
 ---
 
-## Playbook 2 — Corpus and reasoning graph (optional but useful)
+## Playbook 2 — Corpus and reasoning graph
 
-Default work corpus: **`kb-test/`** (git-ignored). Case registry for export/GEPA: **`kb-val/derived/train.json`** + **`synthetic-train.json`**.
+Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/derived/train.json`** + **`synthetic-train.json`**.
+
+### Index once
+
+Build or rebuild the search index **before** eval or GEPA (not per question):
+
+```bash
+./target/release/kb reindex kb-test    # Windows: kb.exe
+```
+
+TensorZero eval uses a **pre-built index** in `--work`; it does not wipe `.glossa` between questions.
 
 ### Enrich — silver graph from solved cases
 
 ```bash
 just enrich          # all cases from synthetic-train.json
 just enrich 10       # first 10 only
-just graph-stats     # node counts
+just graph-stats
 ```
 
-The enricher reverse-traces Q→A into reasoning nodes (`Symptom` → `MENTIONS` → section). Needed for gold via the graph when JSON has no `source` field.
-
-Long run (Unix):
-
-```bash
-nohup just enrich > enrich.log 2>&1 &
-```
+The enricher reverse-traces Q→A into reasoning nodes. Gold for export can come from graph `MENTIONS` when train JSON has no `source` field.
 
 ---
 
@@ -128,27 +132,24 @@ nohup just enrich > enrich.log 2>&1 &
 
 Eval = one question = one TZ **episode**. `export-tz` reads these later.
 
-### Standard run (HotpotQA and similar)
+### Standard run
 
 ```bash
-just eval path/to/dataset.json
+just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test after-gepa
 ```
 
-Defaults: backend `tensorzero`, corpus `eval-corpus/`. Metrics: `just eval-metrics`.
+Positional args: `DATASET`, `FUNCTION`, `WORK`, **`RUN_TAG`** (4th). Sets `tags.run=after-gepa`. **`tags.case_id = _id`** is added from the dataset.
 
-### Tagged run (recommended for GEPA)
+`just eval` also passes `--judge-endpoint http://localhost:1234 --judge-model qwen3.5-4b` (LM Studio must be up for judge metrics).
 
-Pass a **`run`** label so export and metrics can filter by eval batch:
+### Dataset formats
 
-```bash
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test run=gepa-v1
-```
+| Format | Used for | `context` field |
+|--------|----------|-----------------|
+| HotpotQA | mini-corpus per question (CLI/OpenAI backends) | required paragraphs |
+| glossa-train (`synthetic-train.json`, `train.json`) | enrich + eval on fixed corpus | optional (empty OK) |
 
-That sets `tags.run=gepa-v1` on every inference. **`tags.case_id = _id`** is added automatically from the dataset — export joins gold by id without matching question text.
-
-Extra tags (e.g. A/B arm): pass `--tag` directly to `kb-eval` after `just build-eval`.
-
-> **Note:** `kb-eval run` expects Hotpot-shaped JSON (`context`, `supporting_facts`). The enrich format `[{_id, question, answer}]` is for `kb-train enrich` only. Export can use episodes from **any** past eval runs if the question or `case_id` is in the registry.
+Parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs). Sample Hotpot: [sample-hotpot-distractor.json](../eval/fixtures/sample-hotpot-distractor.json). Sample train: [sample-train.json](../eval/fixtures/sample-train.json).
 
 ### After eval
 
@@ -162,169 +163,136 @@ Columns: `run`, `f1`, `recall_at_10`, `judge`.
 
 ## Playbook 4 — Export: episodes → GEPA dataset
 
-Export **does not run the model**. It reads ClickHouse, parses `search` / `read` from the transcript, and labels against gold.
+Export **does not run the model**. It reads ClickHouse, parses tool calls from transcripts, labels against gold.
 
 ```bash
 just export-tz                  # all answer_hotpot episodes
 just export-tz gepa-v1          # only tags.run=gepa-v1
 ```
 
-Output:
+Output in `gepa-out/` (git-ignored):
 
 | File | Contents |
 |------|----------|
-| `gepa-out/query.jsonl` | question, search_query, gold, hit@k |
-| `gepa-out/read.jsonl` | prefilled hits, model read, hit/miss |
+| `search.jsonl` | question, search_query, gold, hit@k |
+| `grep.jsonl` | question, grep pattern, gold, hit@k |
+| `glob.jsonl` | question, glob pattern, gold paths |
+| `read.jsonl` | prefilled search hits, model read pick, hit/miss |
 
-### How gold is joined
+If episodes lack grep/glob tool calls, export **synthesizes** rows from registry cases.
 
-1. **`tags.case_id`** → lookup in train/synthetic-train (best path; needs eval after rebuild).
-2. **Question text** (whitespace-normalized) → fallback for old episodes.
+### Gold join
+
+1. **`tags.case_id`** → lookup in train/synthetic-train (best).
+2. **Question text** (normalized) → fallback for old episodes.
 3. Gold chunk: **`source`** field (`path#loc`) or graph **`MENTIONS`**.
 
-### Reading the report line
+Prefer explicit **`source`** on train cases over graph-only gold.
 
-**Reference baseline** (kb-test, export after path/gold fix, no `case_id` re-eval yet — 2026-06-30):
-
-```
-export-tz: episodes=160 skipped_no_q=1 skipped_no_gold=89 joined_by_id=0
-  query=217 (hit=43) read=450 (hit=22)
-```
-
-Older broken export (path mismatch, all hits false):
+### Report line (example)
 
 ```
-export-tz: episodes=159 skipped_no_q=1 skipped_no_gold=88
-  query=217 (hit=0) read=450 (hit=0) joined_by_id=0
+export-tz: episodes=160 skipped_no_q=1 skipped_no_gold=89 joined_by_id=42
+  search=217 (hit=43) grep=49 (hit=8) glob=109 (hit=74) read=97 (hit=22)
 ```
 
 | Field | Meaning |
 |-------|---------|
-| `episodes` | Unique episode_id rows in CH |
-| `skipped_no_gold` | No registry match / no gold chunk |
-| `query` / `read` | Rows in the dump — **what matters for GEPA** |
-| `hit` | Retrospective: gold in top-k (query) or correct read(path,n) in **that** episode; GEPA re-scores live during optimize |
-| `joined_by_id` | Episodes matched via `case_id` (0 = old runs without the tag) |
-
-**You can run GEPA** when `query` and `read` are > 0.
+| `joined_by_id` | Episodes matched via `case_id` (re-run eval with current `kb-eval` if 0) |
+| `search` / `grep` / `glob` / `read` | Row counts — **what GEPA needs** |
+| `hit` | Retrospective on that episode; GEPA re-scores live during optimize |
 
 ---
 
 ## Playbook 5 — GEPA: improve the prod prompt
 
-Target: **`eval/tensorzero/config/answer_hotpot/system.minijinja`**. Scoring goes through TZ **`functions.search`** (query stage) and **`functions.read`** (read stage) — isolated metrics channel, prod tools.
+Target: [`eval/tensorzero/config/answer_hotpot/system.minijinja`](../eval/tensorzero/config/answer_hotpot/system.minijinja).
+
+GEPA scores four micro-tasks via TZ functions **`search`**, **`grep`**, **`glob`**, **`read`** — each with the evolving prod prompt passed as `input.system`.
 
 ### Quick run (dump already exists)
 
 ```bash
-just gepa 6 4 baseline gepa-smoke
+just gepa
 just gepa-metrics
 ```
 
 Artifact: **`gepa-out/answer_hotpot.prompt.txt`**.
 
-### Full cycle from scratch
+### Full cycle
 
 ```bash
-just gepa-all 6 4 baseline gepa-v1 gepa-v1
-# export-tz (all runs) + optimize with run tag gepa-v1
+just gepa-all run=gepa-v1
+# export-tz + optimize; auto run tag if omitted
 ```
 
-### `just gepa B M V RUN` parameters
+### `just gepa` parameters (named)
 
-| # | Name | Example | Meaning |
-|---|------|---------|---------|
-| 1 | `budget` | `6` | Reflect→mutate iterations (DeepSeek-R1) |
-| 2 | `minibatch` | `4` | Failures shown to the mutator per iteration (query + read) |
-| 3 | `variant` | `baseline` | TZ variant in `tensorzero.toml` |
-| 4 | `run` | `gepa-smoke` | Tag `run=…` in ClickHouse for `gepa-metrics` |
+| Param | Default | Meaning |
+|-------|---------|---------|
+| `budget` | `40` | Reflect→mutate iterations |
+| `minibatch` | `12` | Failure traces per iteration (weighted across tools) |
+| `w_search` | `0.35` | Combined metric weight |
+| `w_read` | `0.40` | |
+| `w_grep` | `0.15` | |
+| `w_glob` | `0.10` | |
+| `pareto-size` | `20` (in recipe) | D_pareto sample cap |
+| `run` | `gepa-long-YYYYMMDD-HHMM` | TZ tag for metrics |
 
-Windows: use **`just gepa 6 4`**, not `just gepa budget=6`.
+Examples:
 
-### Two sub-tasks (one loop)
+```bash
+just gepa budget=80 w_search=0.45 w_read=0.30 run=my-run
+just gepa budget=12 minibatch=8
+```
+
+Seed: `gepa-out/answer_hotpot.prompt.txt` if present, else prod `system.minijinja`.
+
+### Quad sub-tasks
 
 | Sub-task | Model must | Score |
 |----------|------------|-------|
-| **query** | Emit `search(query)` | gold chunk in top-k |
-| **read** | After prefilled search hits — `read(path,n)` | args match gold |
+| **search** | `search(query)` | gold chunk in top-k |
+| **grep** | `grep(pattern)` | gold in grep hits |
+| **glob** | `glob(pattern)` | gold path in listing |
+| **read** | `read(path,n)` after prefilled hits | pick matches gold |
 
-Combined metric: `gepa_combined_acc` = weighted average of query + read (default 0.5/0.5).
-
-### How scoring and reflection work
-
-GEPA here follows the **text-feedback** pattern from the GEPA paper (not score-only):
-
-1. **Scorer** (`kb-train`) runs `functions.search` / `functions.read` on each example, parses tool calls from the response, checks gold deterministically against the local index (no gateway tool execution, no LLM judge).
-2. **Mutator** (`gepa_reflect`, DeepSeek-R1) receives the **current system prompt** plus up to `minibatch` **failure cases**. Each case includes what the model actually emitted:
-   - **Query:** `search("…")` or no call, plus top-k hits for that query vs gold chunks.
-   - **Read:** prefilled search context, gold chunks, and `read(path, n) → location` or no call.
-3. **Minibatch balance:** failures are split ~50/50 between query and read when both exist (interleaved), so read failures are not starved when query fails are abundant.
-4. **Early stop:** each iteration scores train examples only until enough balanced failures are collected (not the full train set), then reflect runs once.
-
-Progress feedback is posted to TZ (one metric name = one meaning):
-
-| When | TZ metrics | Notes |
-|------|------------|-------|
-| baseline | `gepa_baseline_{query,read,combined}` | once per run |
-| each iter | `gepa_iter_{query,read,combined}`, `gepa_iter_candidates` | tag `iter=N`; safe to average for learning curve |
-| final | `gepa_final_{query,read,combined}`, **`gepa_combined_acc`** | `gepa_combined_acc` = optimize target (best val combined) |
-
-Console also prints `baseline val: …` after scoring the val split (live inference, not read from CH).
-
-**Before first GEPA run** after pulling config changes: `just gw-restart` (gateway must load `functions.search` / `functions.read`).
+Combined: weighted average (`gepa_combined_acc`). Acceptance: minibatch improve → pool; **final pick** re-scores all candidates on **full val**.
 
 ### Production checklist
 
 ```bash
-# 0. Rebuild + restart gateway after pull
 just build-train force
 just gw-restart
 
-# 1. Eval with case_id tags (required for reliable gold)
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test run=gepa-v1
-
-# 2. Export — check joined_by_id > 0 and query/read > 0
+just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test gepa-v1
 just export-tz gepa-v1
+just gepa budget=40 run=gepa-v1
 
-# 3. Optimize (budget × minibatch positional args on Windows)
-just gepa-all 10 10 baseline gepa-v1
-
-# 4. Review metrics and diff prompt
 just gepa-metrics
-git diff gepa-out/answer_hotpot.prompt.txt
-
-# 5. Apply to prod template + restart gateway
+# Review gepa-out/answer_hotpot.prompt.txt — apply manually when satisfied:
 just gepa-apply
+just gw-restart
 
-# 6. Re-eval same corpus with new run tag
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test run=gepa-v1-applied
+just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test gepa-v1-applied
 just eval-metrics
 ```
 
-Prefer **`source`** on train cases (`path#loc`) over graph-only gold — graph `MENTIONS` fallback can be noisy and inflate false negatives during optimize.
-
-### After GEPA
-
-1. Diff the prompt against the seed in git.
-2. `just gepa-apply` (or manually graft into `answer_hotpot/system.minijinja`).
-3. `just gw-restart`
-4. Re-run eval with the same corpus and a new `run=…` tag; compare `just eval-metrics`.
+**`gepa-apply` is manual** — copies optimized prompt to prod template (creates `.bak`; `.bak` is git-ignored).
 
 ---
 
 ## Playbook 6 — Reset ClickHouse history
 
 ```bash
-just gepa-reset    # search / read / gepa_reflect + GEPA metrics
+just gepa-reset    # search/grep/glob/read/gepa_reflect + GEPA metrics
 just eval-reset    # answer_hotpot* only
 # wait ~5s
 just gepa-metrics
 just eval-metrics
 ```
 
-`just gepa-metrics` columns: `baseline`, `final`, `iter_avg`, `query`, `read`, `candidates` (grouped by tag `run`).
-
-Eval and GEPA history are independent — reset either side.
+Eval and GEPA history are independent.
 
 ---
 
@@ -333,54 +301,19 @@ Eval and GEPA history are independent — reset either side.
 | Recipe | When |
 |--------|------|
 | `just build` | After pull / code changes |
-| `just build-train force` | Force rebuild kb-train (PowerShell: positional `force`) |
+| `just build-eval force` / `just build-train force` | Force rebuild on Windows |
 | `just up` / `just down` | TZ stack |
 | `just enrich` | Build reasoning graph |
-| `just eval DATASET [FUNC] [WORK] [run=…]` | End-to-end benchmark → episodes |
-| `just export-tz [run]` | Episodes → query/read jsonl |
-| `just gepa B M V RUN` | Optimize prompt |
-| `just gepa-all …` | export-tz + gepa |
-| `just gepa-apply` | Copy optimized prompt → `system.minijinja` (`.bak` backup) |
+| `just eval DATASET [FUNC] [WORK] [RUN]` | Benchmark → episodes (+ judge) |
+| `just export-tz [run]` | Episodes → four jsonl files |
+| `just gepa [budget=…] [run=…]` | Optimize prompt |
+| `just gepa-all` | export-tz + gepa |
+| `just gepa-apply` | Copy optimized prompt → prod (manual step) |
 | `just gepa-metrics` / `just eval-metrics` | Terminal tables |
-| `just dump` | **Legacy** — graph dump, not primary source |
+| `just dump` | **Legacy** graph dump |
 | `just graph-stats` | Graph size |
 
 Full list: `just --list`.
-
----
-
-## Dataset formats
-
-### HotpotQA (kb-eval run)
-
-Parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs). Sample: [sample-hotpot-distractor.json](../eval/fixtures/sample-hotpot-distractor.json).
-
-| Field | Role |
-|-------|------|
-| `_id` | → `tags.case_id` in TZ |
-| `question` | User turn |
-| `answer` | Gold for EM/F1/judge |
-| `context` | Mini-corpus (paragraphs → `.md`) |
-| `supporting_facts` | Gold titles for recall |
-
-### Train / enrich / export registry
-
-`[{_id, question, answer, source?}]` — [sample-train.json](../eval/fixtures/sample-train.json).
-
-- **`source`**: `"path/to/doc.htm:#chunk"` — explicit gold for export (best).
-- Without `source` — gold from graph `MENTIONS` (silver).
-
----
-
-## Artifacts (git-ignored)
-
-| Path | Contents |
-|------|----------|
-| `kb-test/` | Index + graph (prod-like corpus) |
-| `kb-val/` | Train / eval JSON |
-| `gepa-out/` | `query.jsonl`, `read.jsonl`, `answer_hotpot.prompt.txt` |
-| `eval-corpus/` | Hotpot mini-corpora |
-| `.glossa/` | Index state per work dir |
 
 ---
 
@@ -388,36 +321,32 @@ Parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs). Sample: [sample-hotpo
 
 | Symptom | Check |
 |---------|-------|
-| `export-tz` query=0 | No episodes in CH or no registry join; run eval on train/synthetic questions or fresh eval with `case_id` |
-| `joined_by_id=0` | Old eval without `case_id` tag — re-run `just eval … run=…` with current `kb-eval` |
-| `hit=0` in export | Broken gold/paths (pre-fix) or weak retrieval; after export fix expect ~20% query / ~5% read on kb-test baseline |
-| GEPA baseline 0.000 | `just gw-restart` after config pull; LM Studio up (`just health`); stderr `query inference failed` / 404 unknown function |
-| `Unknown function: search` (404) | Gateway on old config — `just gw-restart` |
-| GEPA won't start | `gepa-out/query.jsonl` and `read.jsonl` must be non-empty |
-| TZ 5xx | `just gw-logs`; restart gateway |
-| After tool changes | `just tools && just gw-restart` |
+| `export-tz` search=0 | No episodes or no registry join; run eval on train questions |
+| `joined_by_id=0` | Re-run eval with current `kb-eval` (needs `case_id` tag) |
+| GEPA baseline 0.000 | Empty index → `kb reindex kb-test`; LM Studio up; `just gw-restart` |
+| `Unknown function: search` | Gateway on old config — `just gw-restart` |
+| `missing field context` | Stale `kb-eval` without `.exe` — `just build-eval force` |
+| `indexed: N added` every question | Stale eval binary or Hotpot dataset with `context` paragraphs |
+| Per-question reindex on kb-test | Use TensorZero backend (default in `just eval`); rebuild `kb-eval` |
+| No `judge` in TZ metrics | LM Studio down or judge model missing |
+| After tool schema changes | `just tools && just gw-restart` |
 
 ---
 
-## kb-eval backends (short)
+## kb-eval backends
 
 | Backend | When |
 |---------|------|
 | `tensorzero` | Prod-like: TZ gateway + glossa tools in-process |
 | `openai` | LM Studio / OpenAI without TZ |
-| `cli` | External MCP client (Claude CLI) |
+| `cli` | External MCP client |
 | `mock` | Unit smoke |
-
----
-
-## Benchmark history
-
-[benchmarks.md](benchmarks.md) — HotpotQA distractor (50 q): Qwen EM 0.68, Claude 0.80; recall already high on the small model.
 
 ---
 
 ## Related
 
 - [graph-and-ontology.md](graph-and-ontology.md) — ontology for enrich
+- [benchmarks.md](benchmarks.md) — published eval numbers
 - [mcp.md](mcp.md) — agent tools
-- [ROADMAP.md](ROADMAP.md) — eval track backlog
+- [ROADMAP.md](ROADMAP.md) — backlog
