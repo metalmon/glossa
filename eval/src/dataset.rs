@@ -22,7 +22,9 @@ struct RawItem {
     id: String,
     question: String,
     answer: String,
+    #[serde(default)]
     context: Vec<(String, Vec<String>)>,
+    #[serde(default)]
     supporting_facts: Vec<(String, i64)>,
 }
 
@@ -66,6 +68,18 @@ mod tests {
        "context":[["Alice",["s1.","s2."]],["Bob Page",["b1."]]],
        "supporting_facts":[["Bob Page",0],["Bob Page",0],["Alice",1]]}
     ]"#;
+
+    #[test]
+    fn parses_glossa_train_without_hotpot_context() {
+        let json = r#"[
+          {"_id":"syn-1","question":"Q?","answer":"A","source":"doc.htm:#1"}
+        ]"#;
+        let qs = parse_hotpot(json).unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].id, "syn-1");
+        assert!(qs[0].paragraphs.is_empty());
+        assert!(qs[0].supporting_titles.is_empty());
+    }
 
     #[test]
     fn parses_questions_and_dedups_supporting_titles() {

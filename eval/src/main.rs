@@ -56,7 +56,7 @@ enum Cmd {
         fullwiki: Option<PathBuf>,
         // --- tensorzero backend ---
         /// TensorZero gateway base URL (for `--backend tensorzero`).
-        #[arg(long, default_value = "http://localhost:3000")]
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
         tensorzero_endpoint: String,
         /// TensorZero function name to call.
         #[arg(long, default_value = "answer_hotpot")]

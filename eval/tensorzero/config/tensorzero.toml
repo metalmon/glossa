@@ -133,7 +133,6 @@ parallel_tool_calls = false
 type = "chat_completion"
 model = "qwen"
 system_template = "search/system.minijinja"
-max_tokens = 512
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -152,7 +151,42 @@ parallel_tool_calls = false
 type = "chat_completion"
 model = "qwen"
 system_template = "read/system.minijinja"
-max_tokens = 512
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA grep micro-task: emit grep(pattern) for exact-token questions ──
+[functions.grep]
+type = "chat"
+tools = ["grep"]
+parallel_tool_calls = false
+
+[functions.grep.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "grep/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA glob micro-task: emit glob(pattern) to find a document by path mask ──
+[functions.glob]
+type = "chat"
+tools = ["glob"]
+parallel_tool_calls = false
+
+[functions.glob.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "glob/system.minijinja"
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -170,12 +204,12 @@ type = "chat_completion"
 model = "gepa_mutator"
 temperature = 1.0
 top_p = 0.95
-max_tokens = 4096
 extra_body = [
   { pointer = "/top_k", value = 40 },
   { pointer = "/min_p", value = 0.1 },
   { pointer = "/repetition_penalty", value = 1.1 },
   { pointer = "/reasoning", value = { enabled = false } },
+  { pointer = "/transforms", value = ["middle-out"] },
   ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
@@ -193,7 +227,6 @@ system_template = "answer_hotpot/system.minijinja"
 # Sampling preset tuned to curb the small model's repetition/looping without crushing
 # exploration. top_k/min_p/repetition_penalty are llama.cpp params → passed via extra_body.
 # max_tokens caps any runaway turn.
-max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -217,7 +250,6 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen"
 system_template = "answer_hotpot_nograph/system.minijinja"
-max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -323,7 +355,6 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen3_coder"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
 temperature = 0.7
 extra_body = [
   { pointer = "/top_k", value = 20 },
@@ -337,7 +368,6 @@ extra_body = [
 type = "chat_completion"
 model = "qwen"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -359,7 +389,6 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen"
 system_template = "enrich/system.minijinja"
-max_tokens = 2048
 # Reasoning OFF — fixes the Qwen3.x agentic empty-turn early-stop (finish_reason=stop, tool_calls=0).
 # Sampling KEEPS the proven anti-loop combo (temp 0.8 + min_p 0.1 + repetition_penalty 1.1): lower
 # temp made the agentic loop repeat rejected calls, and presence_penalty 1.5 alone did not hold it.
@@ -435,7 +464,7 @@ optimize = "min"
 level = "episode"
 
 # ── GEPA prod optimization (posted by `kb-train optimize` per run) ──
-[metrics.gepa_baseline_query]
+[metrics.gepa_baseline_search]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -445,17 +474,37 @@ type = "float"
 optimize = "max"
 level = "episode"
 
+[metrics.gepa_baseline_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_baseline_glob]
+type = "float"
+optimize = "max"
+level = "episode"
+
 [metrics.gepa_baseline_combined]
 type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.gepa_iter_query]
+[metrics.gepa_iter_search]
 type = "float"
 optimize = "max"
 level = "episode"
 
 [metrics.gepa_iter_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_glob]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -470,12 +519,22 @@ type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.gepa_final_query]
+[metrics.gepa_final_search]
 type = "float"
 optimize = "max"
 level = "episode"
 
 [metrics.gepa_final_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_glob]
 type = "float"
 optimize = "max"
 level = "episode"

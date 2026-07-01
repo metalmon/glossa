@@ -278,8 +278,12 @@ impl AgentBackend for TensorZeroBackend {
         true
     }
 
+    fn rebuild_corpus_each_question(&self) -> bool {
+        false
+    }
+
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
-        let url = format!("{}/inference", self.endpoint.trim_end_matches('/'));
+        let url = format!("{}/inference", crate::tz::gateway_base(&self.endpoint));
         let function = self.function.clone();
         let timeout = self.timeout;
         let mut tag_map = self
@@ -389,7 +393,7 @@ impl AgentBackend for TensorZeroBackend {
 
 impl TensorZeroBackend {
     fn feedback(&self, episode_id: &str, metric: &str, value: Value) {
-        let url = format!("{}/feedback", self.endpoint.trim_end_matches('/'));
+        let url = format!("{}/feedback", crate::tz::gateway_base(&self.endpoint));
         let mut body = json!({ "episode_id": episode_id, "metric_name": metric, "value": value });
         if self.tags.as_object().is_some_and(|o| !o.is_empty()) {
             body["tags"] = self.tags.clone();

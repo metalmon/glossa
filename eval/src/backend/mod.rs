@@ -10,6 +10,10 @@ use std::path::Path;
 
 pub trait AgentBackend {
     fn needs_corpus(&self) -> bool;
+    /// Per-question HotpotQA corpus wipe + `kb index`. Off for TensorZero (pre-built `kb-test`).
+    fn rebuild_corpus_each_question(&self) -> bool {
+        self.needs_corpus()
+    }
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String>;
 }
 
