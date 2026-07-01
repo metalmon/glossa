@@ -16,7 +16,7 @@ eval-data/
 /eval-corpus/
 /eval-*.json
 
-# GEPA dump/optimize artifacts (query.jsonl/select.jsonl derived from the corpus — never commit)
+# GEPA dump/optimize artifacts (search.jsonl/select.jsonl derived from the corpus — never commit)
 /gepa-out/
 
 # TensorZero local secrets + the fullwiki corpus/archive (large/secret, not committed)
@@ -30,4 +30,8 @@ episode_*.txt
 g.json
 run-chain.sh
 _test_strip.sh
+*.minijinja.bak
+prof-*.jsonl
+kb-build.log
+gepa-out/gepa-long.current
 .cursor/
