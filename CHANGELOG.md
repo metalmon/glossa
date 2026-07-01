@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-06-28
+
 ### Added
 
 - **Quad GEPA**: optimize prod `answer_hotpot` prompt against search, grep, glob, and read micro-tasks via TensorZero (`functions.search`, `grep`, `glob`, `read`, `gepa_reflect`).
@@ -34,6 +36,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Initial public release: file-first index, graph, MCP server, BM25 search, grep, glob, read.
 
-[Unreleased]: https://github.com/metalmon/glossa/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/metalmon/glossa/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/metalmon/glossa/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/metalmon/glossa/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/metalmon/glossa/releases/tag/v1.0.0

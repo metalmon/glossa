@@ -1,4 +1,4 @@
-glossa_version: "1.0.0"
+glossa_version: "1.2.0"
 glossa_repo: "metalmon/glossa"
 glossa_install_dir: "/opt/glossa"
 glossa_bin_dir: "{{ glossa_install_dir }}/bin"
