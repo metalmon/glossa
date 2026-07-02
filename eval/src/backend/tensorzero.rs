@@ -306,11 +306,21 @@ impl AgentBackend for TensorZeroBackend {
         true
     }
 
+    fn rebuild_corpus_each_question(&self) -> bool {
+        false
+    }
+
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
-        let url = format!("{}/inference", self.endpoint.trim_end_matches('/'));
+        let url = format!("{}/inference", crate::tz::gateway_base(&self.endpoint));
         let function = self.function.clone();
         let timeout = self.timeout;
-        let tags = self.tags.clone();
+        let mut tag_map = self
+            .tags
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        tag_map.insert("case_id".to_string(), json!(q.id));
+        let tags = Value::Object(tag_map);
         // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
         // relative to the gateway's clock — immune to Docker/WSL host↔container clock skew. The same id
         // is sent on every turn, so all inferences group into one episode (telemetry + feedback).
@@ -411,7 +421,7 @@ impl AgentBackend for TensorZeroBackend {
 
 impl TensorZeroBackend {
     fn feedback(&self, episode_id: &str, metric: &str, value: Value) {
-        let url = format!("{}/feedback", self.endpoint.trim_end_matches('/'));
+        let url = format!("{}/feedback", crate::tz::gateway_base(&self.endpoint));
         let mut body = json!({ "episode_id": episode_id, "metric_name": metric, "value": value });
         if self.tags.as_object().is_some_and(|o| !o.is_empty()) {
             body["tags"] = self.tags.clone();

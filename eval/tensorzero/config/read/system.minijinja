@@ -1,0 +1,1 @@
+Given a question and numbered search hits, call read(path, n) on the hit that contains the answer. n is the integer after [#]. Emit only the read tool call — no prose answer.

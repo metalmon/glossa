@@ -228,7 +228,8 @@ pub fn run_enrich(
 
         // Per-case episode id (groups all the case's inferences into one TZ episode).
         let eid = uuid::Uuid::now_v7().to_string();
-        let eid_fb = eid.clone(); // kept for posting per-case feedback after the episode
+        let eid_fb = eid.clone();
+        let case_id = case._id.clone();
         let fn_clone = function_name.clone();
         let url_clone = url.clone();
 
@@ -237,7 +238,8 @@ pub fn run_enrich(
             let body = json!({
                 "function_name": fn_clone,
                 "input": { "messages": messages },
-                "episode_id": eid
+                "episode_id": eid,
+                "tags": { "case_id": case_id }
             });
             let payload = serde_json::to_string(&body)?;
             // Retry transient gateway failures (5xx, timeouts, dropped connections — e.g. the

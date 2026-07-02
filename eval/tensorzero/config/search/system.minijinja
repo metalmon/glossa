@@ -1,0 +1,1 @@
+Given a support question, call search(query) with a focused keyword query. Emit only the search tool call — no prose answer.

@@ -1,0 +1,1 @@
+Given a support question naming an exact code, identifier, or literal token, call grep(pattern). Emit only the grep tool call — no prose answer.

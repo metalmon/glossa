@@ -112,51 +112,105 @@ extra_body = [
   { pointer = "/transforms", value = ["middle-out"] },
 ]
 
-# ── GEPA reflection model: DeepSeek-R1 via OpenRouter ──
-# The mutator for `kb-train optimize` — it reads select-prompt failures and proposes an
-# improved prompt. Low volume (a handful of calls per run), high leverage, so a strong
-# reasoning model is worth it; R1 is cheap (~cents/run). Routed THROUGH the gateway so it
-# reuses the gateway's OPENROUTER_API_KEY and shows up as a TZ inference (observability).
-# Reference as model "tensorzero::model_name::deepseek_r1".
-[models.deepseek_r1]
+# ── GEPA mutator: Qwen3.6-35B via OpenRouter (separate TZ model name from `qwen3_coder`/Zed) ──
+[models.gepa_mutator]
 routing = ["openrouter"]
 
-[models.deepseek_r1.providers.openrouter]
+[models.gepa_mutator.providers.openrouter]
 type = "openai"
 api_base = "https://openrouter.ai/api/v1"
-model_name = "deepseek/deepseek-r1"
+model_name = "qwen/qwen3.6-35b-a3b"
 api_key_location = "env::OPENROUTER_API_KEY"
 
-# ── GEPA select micro-task: pick the gold chunk ord from numbered search hits ──
-# `kb-train optimize` passes the evolving system prompt via `input.system` on each /inference call.
-[functions.select]
+# ── GEPA search micro-task: emit search(query) for a question ──
+# `kb-train optimize` passes the evolving prod prompt via `input.system` on each /inference call.
+[functions.search]
 type = "chat"
+tools = ["search"]
+parallel_tool_calls = false
 
-[functions.select.variants.baseline]
+[functions.search.variants.baseline]
 type = "chat_completion"
 model = "qwen"
-system_template = "select/system.minijinja"
-temperature = 0.0
-max_tokens = 16
+system_template = "search/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
 
-# Add experiment variants (weight = 0) and pass `--variant <name>` to filter runs in the TZ UI:
-# [functions.select.variants.gepa_v1]
-# type = "chat_completion"
-# model = "qwen"
-# system_template = "select/system.minijinja"
-# temperature = 0.0
-# max_tokens = 16
-# weight = 0
+# ── GEPA read micro-task: pick read(path,n) after prefilled search hits ──
+[functions.read]
+type = "chat"
+tools = ["read"]
+parallel_tool_calls = false
 
-# ── GEPA reflection: mutator proposes an improved select system prompt from failures ──
+[functions.read.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "read/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA grep micro-task: emit grep(pattern) for exact-token questions ──
+[functions.grep]
+type = "chat"
+tools = ["grep"]
+parallel_tool_calls = false
+
+[functions.grep.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "grep/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA glob micro-task: emit glob(pattern) to find a document by path mask ──
+[functions.glob]
+type = "chat"
+tools = ["glob"]
+parallel_tool_calls = false
+
+[functions.glob.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "glob/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── GEPA reflection: mutator proposes an improved answer_hotpot system prompt ──
 [functions.gepa_reflect]
 type = "chat"
 
 [functions.gepa_reflect.variants.baseline]
 type = "chat_completion"
-model = "deepseek_r1"
+model = "gepa_mutator"
 temperature = 1.0
-max_tokens = 4096
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+  { pointer = "/reasoning", value = { enabled = false } },
+  { pointer = "/transforms", value = ["middle-out"] },
+  ]
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]
@@ -173,7 +227,6 @@ system_template = "answer_hotpot/system.minijinja"
 # Sampling preset tuned to curb the small model's repetition/looping without crushing
 # exploration. top_k/min_p/repetition_penalty are llama.cpp params → passed via extra_body.
 # max_tokens caps any runaway turn.
-max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -197,7 +250,6 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen"
 system_template = "answer_hotpot_nograph/system.minijinja"
-max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -339,7 +391,6 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen"
 system_template = "enrich/system.minijinja"
-max_tokens = 2048
 # Reasoning OFF — fixes the Qwen3.x agentic empty-turn early-stop (finish_reason=stop, tool_calls=0).
 # Sampling KEEPS the proven anti-loop combo (temp 0.8 + min_p 0.1 + repetition_penalty 1.1): lower
 # temp made the agentic loop repeat rejected calls, and presence_penalty 1.5 alone did not hold it.
@@ -414,13 +465,88 @@ type = "float"
 optimize = "min"
 level = "episode"
 
-# ── GEPA select optimization (posted by `kb-train optimize` per run) ──
-[metrics.select_acc]
+# ── GEPA prod optimization (posted by `kb-train optimize` per run) ──
+[metrics.gepa_baseline_search]
 type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.select_baseline_acc]
+[metrics.gepa_baseline_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_baseline_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_baseline_glob]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_baseline_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_search]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_glob]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_iter_candidates]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_search]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_read]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_grep]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_glob]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_final_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_combined_acc]
 type = "float"
 optimize = "max"
 level = "episode"

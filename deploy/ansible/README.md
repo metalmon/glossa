@@ -13,7 +13,7 @@ Installs `kb` from a release tarball, creates a corpus directory, runs an initia
 ```bash
 cd deploy/ansible
 ansible-playbook -i inventory playbook.yml \
-  -e glossa_version=1.0.0 \
+  -e glossa_version=1.2.0 \
   -e glossa_corpus_path=/srv/glossa/corpus
 ```
 
@@ -23,7 +23,7 @@ Set in `group_vars/all.yml` or pass with `-e`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `glossa_version` | `1.0.0` | Release tag without `v` |
+| `glossa_version` | `1.2.0` | Release tag without `v` |
 | `glossa_corpus_path` | `/srv/glossa/corpus` | Document folder (must be readable by `glossa_user`) |
 | `glossa_profile` | `reader` | MCP profile: `reader`, `editor`, or `full` |
 | `glossa_bind` | `127.0.0.1:8080` | HTTP bind address |
