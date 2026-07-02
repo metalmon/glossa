@@ -41,10 +41,13 @@ pub fn id_for(ont: &Ontology, node_type: &str, label: &str) -> String {
 pub fn sanitize_label_for_upsert(ont: &Ontology, node_type: &str, label: &str) -> String {
     let prefix = format!("{}:", ont.id_abbrev(node_type));
     let trimmed = label.trim();
-    if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(&prefix) {
-        trimmed[prefix.len()..].trim_start().to_string()
-    } else {
-        trimmed.to_string()
+    // `get` (not byte slicing): prefix.len() may fall inside a multi-byte char of a
+    // non-ASCII label, and a slice there panics.
+    match trimmed.get(..prefix.len()) {
+        Some(head) if trimmed.len() > prefix.len() && head.eq_ignore_ascii_case(&prefix) => {
+            trimmed[prefix.len()..].trim_start().to_string()
+        }
+        _ => trimmed.to_string(),
     }
 }
 
@@ -982,6 +985,22 @@ strict = true
         assert!(g.get_node(&expected).unwrap().is_some());
         assert!(out.message.contains("Written:"), "{}", out.message);
         assert!(out.message.contains(&expected), "{}", out.message);
+    }
+
+    /// Cyrillic label where the type-prefix byte length lands mid-char — must not panic.
+    #[test]
+    fn sanitize_survives_multibyte_label() {
+        const ONT: &str = r#"
+[entities.EnumType]
+id_prefix = "enum"
+props = []
+[validation]
+strict = true
+"#;
+        let ont = Ontology::parse(ONT).unwrap();
+        // prefix "enum:" is 5 bytes; byte 5 falls inside 'п' (bytes 4..6) of "Тип_Enum"
+        assert_eq!(sanitize_label_for_upsert(&ont, "EnumType", "Тип_Enum"), "Тип_Enum");
+        assert_eq!(sanitize_label_for_upsert(&ont, "EnumType", "enum: Тип_Enum"), "Тип_Enum");
     }
 
     /// Edge endpoint may reference an existing node by id.

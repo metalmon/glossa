@@ -290,6 +290,18 @@ struct NameArg { name: String }
 #[derive(Debug, Deserialize)]
 struct Empty {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct ConstraintSolveArgs {
+    #[schemars(description = "GOST document source_path (which document's constraints to load)")]
+    source_path: String,
+    #[schemars(description = "mode: validate | infer | check")]
+    mode: String,
+    #[serde(default)]
+    #[schemars(description = "field assignments for validation mode (JSON object of field→value)")]
+    assignment: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
 // No-arg tools take `Parameters<Empty>`. A derived empty-struct schema is a bare
 // `{"type":"object"}` (schemars omits an empty `properties`), but LM Studio's OpenAI-tools
 // validator REJECTS a tool whose `function.parameters` lacks a `properties` object (400 → the
@@ -459,6 +471,115 @@ impl GlossaServer {
     async fn resolve(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
+    }
+
+    #[tool(description = "Return the knowledge-base ontology as JSON: entities, relations, constraint types, and node prefixes. Use this to discover what graph nodes/edges are valid and what constraint types the CSP solver supports.")]
+    async fn get_ontology(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+        let ont = Ontology::load_or_default(&self.root);
+        let mut entities: Vec<String> = ont.entity_types().iter().cloned().collect();
+        entities.sort();
+        let prefix_map: std::collections::BTreeMap<String, String> = entities
+            .iter()
+            .map(|e| (e.clone(), ont.id_abbrev(e)))
+            .collect();
+
+        #[derive(serde::Serialize)]
+        struct RelationView {
+            from: Vec<String>,
+            to: Vec<String>,
+        }
+
+        let relations: std::collections::BTreeMap<String, RelationView> = ont
+            .raw_relations()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    RelationView {
+                        from: v.from.clone(),
+                        to: v.to.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        #[derive(serde::Serialize)]
+        struct CtypeView {
+            params: Vec<String>,
+        }
+
+        let ctypes: std::collections::BTreeMap<String, CtypeView> = ont
+            .constraint_types()
+            .iter()
+            .map(|(k, v)| (k.clone(), CtypeView { params: v.params.clone() }))
+            .collect();
+
+        #[derive(serde::Serialize)]
+        struct OntologyJson {
+            entities: Vec<String>,
+            relations: std::collections::BTreeMap<String, RelationView>,
+            constraint_types: std::collections::BTreeMap<String, CtypeView>,
+            node_prefixes: std::collections::BTreeMap<String, String>,
+            strict: bool,
+        }
+
+        let j = OntologyJson {
+            entities,
+            relations,
+            constraint_types: ctypes,
+            node_prefixes: prefix_map,
+            strict: ont.strict(),
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&j).unwrap_or_else(|_| "{}".into()),
+        )]))
+    }
+
+
+    #[cfg_attr(not(feature = "constraint"), allow(dead_code))]
+    #[tool(description = "CSP solver for GOST constraint graphs. Three modes: validate (check field values against constraints), infer (infer each field's valid domain), check (internal consistency of the constraint graph).")]
+    async fn constraint_solve(&self, Parameters(_a): Parameters<ConstraintSolveArgs>) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "constraint")]
+        {
+            let a = _a;
+            let g = GraphStore::open(&self.root).map_err(internal)?;
+            let ont = Ontology::load_or_default(&self.root);
+            let problem = crate::constraint_adapter::load_problem(&g, &ont, &a.source_path)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+            let mode = match a.mode.as_str() {
+                "validate" => glossa_constraint::SolveMode::Validate,
+                "infer" => glossa_constraint::SolveMode::Infer,
+                "check" => glossa_constraint::SolveMode::Check,
+                other => {
+                    return Err(McpError::internal_error(
+                        format!("unknown mode '{other}': use validate | infer | check"),
+                        None,
+                    ));
+                }
+            };
+
+            let assignment: Vec<(String, serde_json::Value)> = a
+                .assignment
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
+            let result = glossa_constraint::solver::solve(&problem, mode, &assignment);
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()),
+            )]));
+        }
+
+        #[cfg(not(feature = "constraint"))]
+        {
+            Err(McpError::internal_error(
+                String::from("constraint feature is not enabled. Build glossa with --features constraint"),
+                None,
+            ))
+        }
     }
 
     #[tool(description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call.")]

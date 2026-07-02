@@ -15,6 +15,9 @@ pub mod trace;
 pub mod cli_fmt;
 pub mod tz_export;
 
+#[cfg(feature = "constraint")]
+pub mod constraint_adapter;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

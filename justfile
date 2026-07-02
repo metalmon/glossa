@@ -104,6 +104,21 @@ eval-reset:
     @just ch "ALTER TABLE tensorzero.BooleanMetricFeedback DELETE WHERE metric_name IN ('em', 'retrieved')"
     @echo "eval-reset: mutations queued — wait ~5s then: just eval-metrics"
 
+# Average constraint-eval metrics grouped by the `run` tag ('-' = untagged runs).
+constraint-metrics:
+    @just ch "SELECT coalesce(tr.value, '-') AS run, countIf(f.metric_name='field_coverage') AS n, round(avgIf(f.value, f.metric_name='field_coverage'), 3) AS fields, round(avgIf(f.value, f.metric_name='constraint_coverage'), 3) AS constraints, round(avgIf(f.value, f.metric_name='literal_coverage'), 3) AS literals, round(avgIf(f.value, f.metric_name='tools_used'), 1) AS rounds, round(avgIf(f.value, f.metric_name='agent_graph_node_count'), 1) AS nodes, round(avgIf(f.value, f.metric_name='agent_graph_edge_count'), 1) AS edges FROM tensorzero.FloatMetricFeedback f LEFT JOIN tensorzero.FloatMetricFeedbackTagView tr ON f.id = tr.feedback_id AND tr.key = 'run' WHERE f.metric_name IN ('field_coverage','constraint_coverage','literal_coverage','tools_used','agent_graph_node_count','agent_graph_edge_count') GROUP BY run ORDER BY run DESC FORMAT PrettyCompact"
+    @just ch "SELECT coalesce(tr.value, '-') AS run, countIf(f.metric_name='csp_agreement') AS n, round(avgIf(toFloat64(f.value), f.metric_name='csp_agreement'), 3) AS csp_agree, round(avgIf(toFloat64(f.value), f.metric_name='llm_correct'), 3) AS llm_correct FROM tensorzero.BooleanMetricFeedback f LEFT JOIN tensorzero.BooleanMetricFeedbackTagView tr ON f.id = tr.feedback_id AND tr.key = 'run' WHERE f.metric_name IN ('csp_agreement','llm_correct') GROUP BY run ORDER BY run DESC FORMAT PrettyCompact"
+
+# Wipe constraint-eval history in ClickHouse (constraint_validate inferences + its episode metrics). Does not touch enrich/GEPA/HotpotQA/coding.
+constraint-reset:
+    @just ch "ALTER TABLE tensorzero.ModelInference DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name = 'constraint_validate')"
+    @just ch "ALTER TABLE tensorzero.InferenceTag DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name = 'constraint_validate')"
+    @just ch "ALTER TABLE tensorzero.ChatInference DELETE WHERE function_name = 'constraint_validate'"
+    @just ch "ALTER TABLE tensorzero.FeedbackTag DELETE WHERE feedback_id IN (SELECT id FROM tensorzero.FloatMetricFeedback WHERE metric_name IN ('field_coverage', 'constraint_coverage', 'literal_coverage', 'tools_used', 'agent_graph_node_count', 'agent_graph_edge_count') UNION ALL SELECT id FROM tensorzero.BooleanMetricFeedback WHERE metric_name IN ('csp_agreement', 'llm_correct'))"
+    @just ch "ALTER TABLE tensorzero.FloatMetricFeedback DELETE WHERE metric_name IN ('field_coverage', 'constraint_coverage', 'literal_coverage', 'tools_used', 'agent_graph_node_count', 'agent_graph_edge_count')"
+    @just ch "ALTER TABLE tensorzero.BooleanMetricFeedback DELETE WHERE metric_name IN ('csp_agreement', 'llm_correct')"
+    @echo "constraint-reset: mutations queued — wait ~5s then: just constraint-metrics"
+
 # ── inspect ─────────────────────────────────────────────────────────────────
 graph-stats: build-kb
     {{kb_bin}} graph stats {{work}}

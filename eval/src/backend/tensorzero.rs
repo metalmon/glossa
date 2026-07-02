@@ -11,6 +11,11 @@ pub struct EpisodeOutcome {
     pub answer: String,
     pub episode_id: Option<String>,
     pub surfaced_titles: Vec<String>,
+    /// True when the episode ended via the `done` control tool (stop_on_done
+    /// policies) — the eval reads this; `done` itself is intercepted, never executed.
+    pub done: bool,
+    /// Rounds actually consumed (model turns).
+    pub rounds: usize,
 }
 
 /// A single TensorZero `/inference` turn result.
@@ -82,10 +87,25 @@ where
     // (name, args) of read-only calls already executed this episode — backs the dedup guard.
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
+    let mut rounds: usize = 0;
     for _ in 0..max_rounds {
+        rounds += 1;
         let turn = chat(&messages, episode_id.as_deref())?;
         if !turn.episode_id.is_empty() {
             episode_id = Some(turn.episode_id.clone());
+        }
+
+        // TEMP: log what the model returned
+        if std::env::var_os("KB_TRACE").is_some() {
+            for (ti, b) in turn.content.iter().enumerate() {
+                let typ = b.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                let detail = match typ {
+                    "tool_call" => format!(" name={}", b.get("name").and_then(|n| n.as_str()).unwrap_or("?")),
+                    "text" => format!(" text={:.80}", b.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+                    _ => String::new(),
+                };
+                eprintln!("  [TZ] block[{ti}] type={typ}{detail}");
+            }
         }
 
         let tool_calls: Vec<&Value> = turn
@@ -103,7 +123,7 @@ where
                 .collect::<Vec<_>>()
                 .join("");
             if !policy.stop_on_done {
-                return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles });
+                return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles, done: false, rounds });
             }
             // Narrate-then-stop: the model described its next action but emitted no tool call. Don't
             // end the episode — record what it said and nudge it to act or to signal completion.
@@ -122,7 +142,7 @@ where
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
                     .to_string();
-                return Ok(EpisodeOutcome { answer: note, episode_id, surfaced_titles });
+                return Ok(EpisodeOutcome { answer: note, episode_id, surfaced_titles, done: true, rounds });
             }
         }
 
@@ -148,15 +168,23 @@ where
             })
             .collect();
 
-        // ONE assistant message whose content array contains ALL tool_call blocks
-        // for this round (correctly represents parallel tool calls as a single turn).
+        // Preserve the model's non-tool_call blocks (text, thought) AND add tool_call blocks
+        // in a single assistant message. Previously we dropped text/thought — that starved the
+        // model of its own reasoning in subsequent turns, creating a search-forever loop.
+        let preserved: Vec<Value> = turn
+            .content
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) != Some("tool_call"))
+            .cloned()
+            .collect();
         let tool_call_blocks: Vec<Value> = calls
             .iter()
             .map(|(id, name, args)| {
                 json!({ "type": "tool_call", "id": id, "name": name, "arguments": args })
             })
             .collect();
-        messages.push(json!({ "role": "assistant", "content": tool_call_blocks }));
+        let merged: Vec<Value> = preserved.into_iter().chain(tool_call_blocks).collect();
+        messages.push(json!({ "role": "assistant", "content": merged }));
 
         // Dedup: skip a call whose (name,args) is still "current" in `seen`; `done`/control is never
         // deduped. Then invalidate `seen` for the next turn — a graph mutation makes prior graph
@@ -232,7 +260,7 @@ where
         }
     }
     // Out of rounds: best-effort empty answer (the report still scores it).
-    Ok(EpisodeOutcome { answer: String::new(), episode_id, surfaced_titles })
+    Ok(EpisodeOutcome { answer: String::new(), episode_id, surfaced_titles, done: false, rounds })
 }
 
 /// Build a user message carrying the read's images as TZ image content blocks (vision input),

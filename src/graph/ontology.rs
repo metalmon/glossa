@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 const CORE_NODES: &[&str] = crate::graph::STRUCTURAL_NODES;
 const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
 
-#[derive(Debug, Deserialize, Default)]
-struct RawRelation {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct RawRelation {
     #[serde(default)]
-    from: Vec<String>,
+    pub from: Vec<String>,
     #[serde(default)]
-    to: Vec<String>,
+    pub to: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -52,6 +52,19 @@ struct RawReasoning {
     structural: Vec<String>,
 }
 
+/// A type of constraint that can be applied to fields (e.g. Range, Regex, Enum).
+/// Defines which edge types a constraint of this type expects as parameters.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawConstraintType {
+    #[serde(default)]
+    params: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ConstraintType {
+    pub params: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawOntology {
     #[serde(default)]
@@ -62,6 +75,8 @@ struct RawOntology {
     validation: RawValidation,
     #[serde(default)]
     reasoning: RawReasoning,
+    #[serde(default)]
+    constraint_types: BTreeMap<String, RawConstraintType>,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +87,7 @@ pub struct Ontology {
     relations: BTreeMap<String, RawRelation>,
     strict: bool,
     reasoning: RawReasoning,
+    constraint_types: BTreeMap<String, ConstraintType>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -92,6 +108,9 @@ impl Ontology {
             relations: raw.relations,
             strict: raw.validation.strict,
             reasoning: raw.reasoning,
+            constraint_types: raw.constraint_types.into_iter().map(|(k, v)| {
+                (k, ConstraintType { params: v.params })
+            }).collect(),
         })
     }
 
@@ -124,6 +143,31 @@ impl Ontology {
             .filter(|r| r.len() == 3)
             .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
             .collect()
+    }
+
+    /// The set of declared entity type names.
+    pub fn entity_types(&self) -> &std::collections::BTreeSet<String> {
+        &self.entity_types
+    }
+
+    /// The raw relations map (primarily for JSON export).
+    pub fn raw_relations(&self) -> &BTreeMap<String, RawRelation> {
+        &self.relations
+    }
+
+    /// Whether validation is strict (unknown entity types rejected).
+    pub fn strict(&self) -> bool {
+        self.strict
+    }
+
+    /// Get the map of defined constraint types (e.g. "Range" → {params: ["min", "max"]}).
+    pub fn constraint_types(&self) -> &BTreeMap<String, ConstraintType> {
+        &self.constraint_types
+    }
+
+    /// Check if a constraint type is defined in the ontology.
+    pub fn has_constraint_type(&self, name: &str) -> bool {
+        self.constraint_types.contains_key(name)
     }
 
     /// The structural (never-reasoning) types. Declared override, else the core nodes.
@@ -179,8 +223,11 @@ impl Ontology {
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
+        // Constraint types (Range, Enum, Formula, …) are node types too: the agent
+        // instantiates them and links Field → CONSTRAINED_BY → <constraint node>.
         if CORE_NODES.contains(&node_type)
             || self.entity_types.contains(node_type)
+            || self.constraint_types.contains_key(node_type)
             || !self.strict
         {
             Ok(())
@@ -222,6 +269,10 @@ from = ["Document"]
 to = ["Person"]
 [validation]
 strict = true
+[constraint_types.Range]
+params = ["min", "max"]
+[constraint_types.Regex]
+params = ["pattern"]
 "#;
 
     #[test]
@@ -229,6 +280,30 @@ strict = true
         let o = Ontology::parse(TOML).unwrap();
         assert!(o.validate_node("Document").is_ok());
         assert!(o.validate_edge("CONTAINS", "Document", "Section").is_ok());
+    }
+
+    #[test]
+    fn constraint_types_parsed() {
+        let o = Ontology::parse(TOML).unwrap();
+        assert!(o.has_constraint_type("Range"));
+        assert!(o.has_constraint_type("Regex"));
+        assert!(!o.has_constraint_type("Enum"));
+        let range = o.constraint_types().get("Range").unwrap();
+        assert_eq!(range.params, vec!["min", "max"]);
+    }
+
+    #[test]
+    fn constraint_types_absent_by_default() {
+        let o = Ontology::default();
+        assert!(o.constraint_types().is_empty());
+    }
+
+    #[test]
+    fn constraint_types_are_valid_node_types_under_strict() {
+        let o = Ontology::parse(TOML).unwrap();
+        assert!(o.validate_node("Range").is_ok());
+        assert!(o.validate_node("Regex").is_ok());
+        assert!(o.validate_node("Enum").is_err()); // not declared in this ontology
     }
 
     #[test]

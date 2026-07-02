@@ -20,7 +20,9 @@ Deploy a domain overlay at:
 <corpus-root>/.glossa/ontology.toml
 ```
 
-Reference implementation for technical support: [`eval/ontology-support.toml`](../eval/ontology-support.toml).
+Reference implementations:
+- Technical-support knowledge base: [`eval/ontology-support.toml`](../eval/ontology-support.toml).
+- Constraint/CSP validation (GOST, ISO, regulatory): [`eval/ontology-constraint.toml`](../eval/ontology-constraint.toml).
 
 ### Entity types (support example)
 
@@ -95,6 +97,31 @@ kb graph node sym:abc123 ./my-corpus
 ```
 
 MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
+
+## Constraint workflow (feature-gated)
+
+Requires glossa built with `--features constraint`. Deploy the constraint ontology:
+
+```bash
+mkdir -p ./my-corpus/.glossa
+cp eval/ontology-constraint.toml ./my-corpus/.glossa/ontology.toml
+kb index ./my-corpus
+```
+
+Then model requirement constraints via `graph_upsert`:
+
+1. **Create Field nodes** for each constrained parameter.
+2. **Create constraint-type nodes** (`Range`, `Regex`, `Enum`, `Required`, `Forbidden`, `Formula`).
+3. **Link** `Field --CONSTRAINED_BY--> constraint-node`.
+4. **Attach parameters** via edges like `HAS_MIN`, `HAS_MAX`, `HAS_PATTERN`, `HAS_LITERAL` to `Literal` nodes.
+
+Solve via the `constraint_solve` MCP tool in three modes:
+
+| Mode | Purpose |
+|------|---------|
+| `validate` | Check concrete field values against constraints |
+| `infer` | Compute allowed domains for each field |
+| `check` | Detect inconsistencies in the constraint graph itself |
 
 ## MCP graph editing
 

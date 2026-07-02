@@ -273,6 +273,59 @@ description = "Signal that the reasoning graph for this case is complete — the
 parameters = "tools/done.json"
 # <<< GENERATED TOOLS
 
+# ── Constraint tools ──
+[tools.get_ontology]
+description = "Return the full constraint ontology: entity types, relation types, constraint types, prefixes, and the strict validation flag."
+parameters = "tools/get_ontology.json"
+
+[tools.constraint_solve]
+description = "Run the CSP constraint solver. Modes: validate (check field assignments), infer (show valid domains for each field), check (consistency of the constraint graph). Returns structured violation/domain/issue data."
+parameters = "tools/constraint_solve.json"
+
+# ── Constraint validation function: agent builds graph from GOST then validates ──
+# Tools = all glossa tools so the agent can search/read the GOST document,
+# build the constraint graph via graph_upsert, self-check with constraint_solve,
+# and signal completion with done.
+[functions.constraint_validate]
+type = "chat"
+tools = [
+  "search", "read", "grep", "glob",
+  "get_ontology",
+  "graph_upsert", "graph_delete", "graph_update",
+  "graph_stats", "graph_generalize",
+  "constraint_solve",
+  "done",
+]
+parallel_tool_calls = true
+
+# Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)
+[functions.constraint_validate.variants.qwen35]
+type = "chat_completion"
+model = "qwen3_coder"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+extra_body = [
+  { pointer = "/top_k", value = 20 },
+  { pointer = "/min_p", value = 0 },
+  { pointer = "/reasoning", value = { enabled = false } },
+  { pointer = "/transforms", value = ["middle-out"] },
+]
+
+# Lightweight variant: Qwen3.5-4B via LM Studio (for quick tests)
+[functions.constraint_validate.variants.qwen4b]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 2048
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
 # (the enricher is a read+edit agent → its tool list is the Editor profile, generated from MCP.)
 [functions.enrich]
@@ -383,6 +436,68 @@ optimize = "max"
 level = "episode"
 
 [metrics.gepa_examples_val]
+type = "float"
+optimize = "max"
+level = "episode"
+
+# ── Constraint eval feedback (CSP solver + LLM epistemic comparison) ──
+[metrics.csp_violations]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.csp_consistency_issues]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.llm_correct]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+[metrics.csp_agreement]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+[metrics.llm_false_positive]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.llm_false_negative]
+type = "float"
+optimize = "min"
+level = "episode"
+
+[metrics.tools_used]
+type = "float"
+optimize = "max"
+level = "episode"
+
+# ── Agent graph quality eval (full agent mode, not csp-only) ──
+[metrics.field_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.constraint_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.literal_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.agent_graph_node_count]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.agent_graph_edge_count]
 type = "float"
 optimize = "max"
 level = "episode"

@@ -1,0 +1,116 @@
+# Constraint-domain ontology overlay for glossa.
+#
+# Defines the constraint validation types used to model regulatory requirements
+# (GOST, ISO, etc.) as a Constraint Satisfaction Problem (CSP).
+# Core structural types (Document, Section, Term, Topic) and core edges
+# (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN and bypass validation.
+#
+# An agent models a requirement by:
+#   1. Creating a Field node for each constrained parameter.
+#   2. Creating a constraint-type node (Range, Regex, Enum, …).
+#   3. Linking Field → CONSTRAINED_BY → constraint node.
+#   4. Adding parameter edges (HAS_MIN, HAS_MAX, HAS_PATTERN, …) to Literal nodes.
+#
+# The constraint_solve MCP tool then translates this subgraph into a CSP Problem
+# and runs validate / infer / check modes.
+#
+# Deploy: copy this to <corpus-root>/.glossa/ontology.toml (e.g.:
+#   cp eval/ontology-constraint.toml ./my-corpus/.glossa/ontology.toml
+# ).
+#
+# Requires: glossa built with --features constraint.
+
+# ── GOST 7805-70 bolt example ──
+# Model hex bolt parameters as fields with constraints:
+#   Field "thread_diameter" (мм) → Enum {2, 2.5, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 27, 30, 36}
+#   Field "pitch" (мм)          → Enum {0.4, 0.45, 0.5, 0.7, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4}
+#   Field "wrench_size" (мм)    → Enum (17 values, paired with d per GOST table)
+#   Field "length" (мм)          → Enum {8, 10, 12, 14, 16, 18, 20, … 200} (46 values)
+#   Field "tolerance"            → Enum {6e, 6g, 6h, 8g}
+#   Field "strength_class"       → Enum {3.6, 4.6, 4.8, 5.6, 5.8, 6.6, 6.8, 8.8, 9.8, 10.9, 12.9}
+#   Formula(d, S):               S = d × 1.7 (approx wrench = 1.7× thread diameter)
+#
+# Graph structure for one bolt specification:
+#   fld:diam     ──CONSTRAINED_BY──► enum:diam_vals
+#   fld:diam     ──CONSTRAINED_BY──► formula:diam_S
+#   enum:diam_vals ──HAS_DOMAIN──► dom:diam_set
+#   dom:diam_set   ──HAS_LITERAL──► lit:2, lit:2.5, …, lit:36
+#   formula:diam_S ──HAS_EXPRESSION──► lit:"S = d * 1.7"
+
+# ── Entities (the constraint domain's nouns) ──
+[entities.Field]       # A parameter whose value is constrained
+id_prefix = "fld"
+
+[entities.Literal]     # A concrete value (number, string, regex pattern)
+id_prefix = "lit"
+
+[entities.Domain]      # A named set of allowed literal values (for Enum)
+id_prefix = "dom"
+
+# ── Relations ──
+[relations.CONSTRAINED_BY]
+from = ["Field"]
+to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
+
+[relations.HAS_MIN]
+from = ["Range"]
+to   = ["Literal"]
+
+[relations.HAS_MAX]
+from = ["Range"]
+to   = ["Literal"]
+
+[relations.HAS_PATTERN]
+from = ["Regex"]
+to   = ["Literal"]
+
+[relations.HAS_DOMAIN]
+from = ["Enum"]
+to   = ["Domain"]
+
+[relations.HAS_LITERAL]
+from = ["Enum", "Domain"]
+to   = ["Literal"]
+
+[relations.HAS_EXPRESSION]
+from = ["Formula"]
+to   = ["Literal"]
+
+# Conditional branches (future: a Condition node type)
+[relations.IF_FIELD]
+from = ["Conditional"]
+to   = ["Literal"]
+
+[relations.IF_VALUE]
+from = ["Conditional"]
+to   = ["Literal"]
+
+[relations.HAS_CONSTRAINT]
+from = ["Conditional"]
+to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula"]
+
+# Strict: graph_upsert rejects undeclared node/edge types.
+[validation]
+strict = true
+
+# ── Constraint type definitions (consumed by constraint_solve MCP tool) ──
+[constraint_types.Range]
+params = ["min", "max"]
+
+[constraint_types.Regex]
+params = ["pattern"]
+
+[constraint_types.Enum]
+params = ["values"]
+
+[constraint_types.Formula]
+params = ["expression"]
+
+[constraint_types.Required]
+params = []
+
+[constraint_types.Forbidden]
+params = []
+
+[constraint_types.Conditional]
+params = ["condition_field", "condition_value"]

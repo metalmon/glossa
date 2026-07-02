@@ -125,6 +125,12 @@ mkdir -p ./my-corpus/.glossa
 cp eval/ontology-support.toml ./my-corpus/.glossa/ontology.toml
 ```
 
+For constraint/CSP validation (GOST, ISO, regulatory), requires `--features constraint`:
+
+```bash
+cp eval/ontology-constraint.toml ./my-corpus/.glossa/ontology.toml
+```
+
 Then re-index or run enrich (see [graph-and-ontology.md](graph-and-ontology.md)).
 
 ## MCP server (local)
