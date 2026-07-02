@@ -569,7 +569,7 @@ impl GlossaServer {
             let result = glossa_constraint::solver::solve(&problem, mode, &assignment);
 
             return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()),
+                crate::constraint_adapter::format_solve_feedback(&problem, &result, &assignment, &a.source_path),
             )]));
         }
 

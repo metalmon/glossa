@@ -31,6 +31,29 @@ pub struct FieldDomain {
     pub domain: Domain,
 }
 
+/// Value equality tolerant of the String/Number split: the graph stores literals
+/// as strings while assignments may carry JSON numbers ("41" ≡ 41).
+fn values_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    if a == b {
+        return true;
+    }
+    let as_f64 = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    };
+    match (as_f64(a), as_f64(b)) {
+        (Some(x), Some(y)) => (x - y).abs() < f64::EPSILON,
+        _ => match (a, b) {
+            (Value::String(x), Value::String(y)) => x.trim() == y.trim(),
+            _ => false,
+        },
+    }
+}
+
 /// Validate field assignments against constraints.
 pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -> Vec<Violation> {
     let mut violations = Vec::new();
@@ -43,7 +66,7 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                 Constraint::Conditional { condition_field, condition_value, .. } => {
                     assign_map
                         .get(condition_field.as_str())
-                        .is_some_and(|v| *v == condition_value)
+                        .is_some_and(|v| values_eq(v, condition_value))
                 }
                 _ => true,
             };
@@ -207,13 +230,55 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
     violations
 }
 
-/// Infer the valid domain for each field from constraints.
-pub fn infer_domains(problem: &Problem) -> Vec<FieldDomain> {
+/// Infer the valid domain for each field from constraints, narrowed by any
+/// partial `assignment`:
+/// - a `Conditional` unfolds into its inner constraint when the condition field
+///   is assigned and matches (unassigned/mismatching conditions contribute nothing);
+/// - a `Formula` of the form `<field> = <expr>` pins the field to the computed
+///   value once every variable on the right-hand side is assigned.
+pub fn infer_domains(problem: &Problem, assignment: &[(String, serde_json::Value)]) -> Vec<FieldDomain> {
+    let assign_map: std::collections::HashMap<&str, &serde_json::Value> =
+        assignment.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let mut vars: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (k, v) in assignment {
+        let n = match v {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        };
+        if let Some(n) = n {
+            vars.insert(k.clone(), n);
+        }
+    }
+
     problem
         .fields
         .iter()
         .map(|fc| {
-            let domain = intersect_domains(&fc.constraints);
+            // Unfold conditionals whose condition currently holds.
+            let effective: Vec<&Constraint> = fc
+                .constraints
+                .iter()
+                .filter_map(|c| match c {
+                    Constraint::Conditional { condition_field, condition_value, inner } => assign_map
+                        .get(condition_field.as_str())
+                        .is_some_and(|v| values_eq(v, condition_value))
+                        .then(|| inner.as_ref()),
+                    other => Some(other),
+                })
+                .collect();
+
+            let mut domain = intersect_domains(&effective);
+
+            // A resolvable formula pins the field to a single value.
+            for c in &effective {
+                if let Constraint::Formula { expression } = c {
+                    if let Some(v) = formula_pinned_value(&fc.name, expression, &vars) {
+                        domain = intersect_domain(domain, Domain::Set { values: vec![fmt_num(v)] });
+                    }
+                }
+            }
+
             FieldDomain {
                 field: fc.name.clone(),
                 domain,
@@ -222,7 +287,46 @@ pub fn infer_domains(problem: &Problem) -> Vec<FieldDomain> {
         .collect()
 }
 
-fn intersect_domains(constraints: &[Constraint]) -> Domain {
+/// For a formula shaped `<field> = <expr>` (a single `=` that is not part of a
+/// comparison operator), evaluate `<expr>` when all its variables are assigned.
+/// `expr::eval` is this crate's own arithmetic parser over f64 variables — no
+/// code execution.
+fn formula_pinned_value(
+    field: &str,
+    expression: &str,
+    vars: &std::collections::HashMap<String, f64>,
+) -> Option<f64> {
+    let bytes = expression.as_bytes();
+    let mut eq_pos: Option<usize> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'=' {
+            let prev = i.checked_sub(1).map(|p| bytes[p]);
+            let next = bytes.get(i + 1);
+            if matches!(prev, Some(b'<') | Some(b'>') | Some(b'!') | Some(b'=')) || next == Some(&b'=') {
+                continue; // part of ==, <=, >=, !=
+            }
+            if eq_pos.is_some() {
+                return None; // more than one bare '=' — not a simple definition
+            }
+            eq_pos = Some(i);
+        }
+    }
+    let pos = eq_pos?;
+    if expression[..pos].trim() != field {
+        return None;
+    }
+    crate::expr::eval(expression[pos + 1..].trim(), vars).ok()
+}
+
+fn fmt_num(n: f64) -> String {
+    if n.fract() == 0.0 && n.is_finite() {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+fn intersect_domains(constraints: &[&Constraint]) -> Domain {
     let mut domains: Vec<Domain> = Vec::new();
     for c in constraints {
         match c {
@@ -243,7 +347,9 @@ fn intersect_domains(constraints: &[Constraint]) -> Domain {
             Constraint::Forbidden => {
                 domains.push(Domain::Empty);
             }
-            _ => {} // Formula, Conditional — skip for now
+            // Formula and Conditional are handled by infer_domains: conditionals
+            // unfold before this call, resolvable formulas pin the value after it.
+            _ => {}
         }
     }
 
@@ -380,7 +486,7 @@ pub fn solve(problem: &Problem, mode: SolveMode, assignment: &[(String, serde_js
             }
         }
         SolveMode::Infer => {
-            let domains = infer_domains(problem);
+            let domains = infer_domains(problem, assignment);
             SolveResult {
                 mode: "infer".into(),
                 valid: true,
@@ -509,7 +615,7 @@ mod tests {
     #[test]
     fn infer_range_domain() {
         let problem = make_problem(vec![("x", vec![make_range(0.0, 100.0)])]);
-        let domains = infer_domains(&problem);
+        let domains = infer_domains(&problem, &[]);
         assert_eq!(domains.len(), 1);
         assert_eq!(
             domains[0].domain,
@@ -523,7 +629,7 @@ mod tests {
     #[test]
     fn infer_enum_domain() {
         let problem = make_problem(vec![("x", vec![make_enum(&["A", "B"])])]);
-        let domains = infer_domains(&problem);
+        let domains = infer_domains(&problem, &[]);
         assert_eq!(
             domains[0].domain,
             Domain::Set {
@@ -609,5 +715,62 @@ mod tests {
                 values: vec!["50".into()]
             }
         );
+    }
+
+    /// A `S = d * 1.7` formula pins S once d is assigned; without d it pins nothing.
+    #[test]
+    fn infer_formula_pins_dependent_field() {
+        let problem = make_problem(vec![
+            ("d", vec![make_range(2.0, 36.0)]),
+            ("S", vec![Constraint::Formula { expression: "S = d * 1.7".into() }]),
+        ]);
+        let domains = infer_domains(&problem, &[make_assignment("d", serde_json::json!(10))]);
+        let s = domains.iter().find(|d| d.field == "S").unwrap();
+        assert_eq!(s.domain, Domain::Set { values: vec!["17".into()] });
+
+        let domains = infer_domains(&problem, &[]);
+        let s = domains.iter().find(|d| d.field == "S").unwrap();
+        assert_eq!(s.domain, Domain::Any);
+    }
+
+    /// A Conditional unfolds into its inner domain only when the condition holds;
+    /// the condition matches across the String/Number split ("41" ≡ 41).
+    #[test]
+    fn infer_conditional_unfolds_when_condition_met() {
+        let cond = Constraint::Conditional {
+            condition_field: "mode".into(),
+            condition_value: serde_json::json!("41"),
+            inner: Box::new(make_enum(&["a", "b"])),
+        };
+        let problem = make_problem(vec![("x", vec![cond])]);
+
+        let met = infer_domains(&problem, &[make_assignment("mode", serde_json::json!(41))]);
+        assert_eq!(met[0].domain, Domain::Set { values: vec!["a".into(), "b".into()] });
+
+        let unmet = infer_domains(&problem, &[make_assignment("mode", serde_json::json!("42"))]);
+        assert_eq!(unmet[0].domain, Domain::Any);
+
+        let unassigned = infer_domains(&problem, &[]);
+        assert_eq!(unassigned[0].domain, Domain::Any);
+    }
+
+    /// validate applies a Conditional whose condition value type differs from the
+    /// assignment's (graph literal "41" vs JSON number 41).
+    #[test]
+    fn validate_conditional_condition_matches_across_value_types() {
+        let cond = Constraint::Conditional {
+            condition_field: "mode".into(),
+            condition_value: serde_json::json!("41"),
+            inner: Box::new(make_enum(&["a"])),
+        };
+        let problem = make_problem(vec![("x", vec![cond])]);
+        let violations = validate(
+            &problem,
+            &[
+                make_assignment("mode", serde_json::json!(41)),
+                make_assignment("x", serde_json::json!("z")),
+            ],
+        );
+        assert_eq!(violations.len(), 1, "condition met — inner enum must fire");
     }
 }

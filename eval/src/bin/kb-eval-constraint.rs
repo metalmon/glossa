@@ -66,6 +66,8 @@ struct ColInfo {
     /// dictionary) — this is what the agent can plausibly derive from the GOST.
     /// MDM GUIDs are translation keys only and never leave the loader.
     name: String,
+    /// Unit of measure, split off by convert-xlsx ("Наружный диаметр [мм]" → "мм").
+    unit: Option<String>,
     valid: Vec<String>,
 }
 
@@ -98,6 +100,7 @@ fn cell_to_string(v: &Value) -> Option<String> {
 /// Files whose stem starts with `_` are metadata and skipped.
 fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<BTreeMap<String, String>>)> {
     let mut col_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut unit_map: BTreeMap<String, String> = BTreeMap::new();
     let mut all_rows: Vec<BTreeMap<String, String>> = Vec::new();
 
     for entry in std::fs::read_dir(val_dir)? {
@@ -110,6 +113,13 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
         let tables = data["tables"].as_array().context("no tables array")?;
 
         for tbl in tables {
+            if let Some(units) = tbl["units"].as_object() {
+                for (name, u) in units {
+                    if let Some(u) = u.as_str() {
+                        unit_map.entry(name.clone()).or_insert_with(|| u.to_string());
+                    }
+                }
+            }
             let rows = tbl["rows"].as_array().context("no rows array")?;
             for row in rows {
                 let row = row.as_object().context("bad row")?;
@@ -125,7 +135,10 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
     }
 
     let cols: Vec<ColInfo> = col_map.into_iter()
-        .map(|(name, vals)| ColInfo { name, valid: vals.into_iter().collect() })
+        .map(|(name, vals)| {
+            let unit = unit_map.get(&name).cloned();
+            ColInfo { name, unit, valid: vals.into_iter().collect() }
+        })
         .collect();
     Ok((cols, all_rows))
 }
@@ -426,7 +439,16 @@ fn main() -> Result<()> {
         std::fs::write(&ont_path, &ontology_toml).unwrap();
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
-        let assign_desc: String = case.assignments.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ");
+        // Units travel separately from values: "Наружный диаметр=125 (unit: мм)".
+        let unit_by_field: BTreeMap<&str, &str> = cols.iter()
+            .filter_map(|c| c.unit.as_deref().map(|u| (c.name.as_str(), u)))
+            .collect();
+        let assign_desc: String = case.assignments.iter()
+            .map(|(k, v)| {
+                let u = unit_by_field.get(k.as_str()).map(|u| format!(" (unit: {u})")).unwrap_or_default();
+                format!("{k}={v}{u}")
+            })
+            .collect::<Vec<_>>().join(", ");
         let prompt = format!(
             "You are validating field assignments against the regulatory document '{src_doc}'.\n\n\
              === PHASE 1: Build constraint graph ===\n\
@@ -479,8 +501,11 @@ fn main() -> Result<()> {
                     let assignments: Vec<(String, Value)> = args.get("field_assignments").and_then(|v| v.as_object())
                         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         .unwrap_or_default();
-                    let result = solve_csp(&agent_g_dir_clone, &g, sm, &assignments, &src_doc_exec);
-                    (serde_json::to_string(&result).unwrap_or_default(), vec![], vec![])
+                    // Same feedback the MCP server gives: empty problems and
+                    // unmatched assignment keys are called out, not hidden in JSON.
+                    let problem = glossa::constraint_adapter::load_problem(&g, &ont, &src_doc_exec).unwrap();
+                    let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
+                    (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc_exec), vec![], vec![])
                 }
                 "get_ontology" => {
                     // Full machine-usable ontology: node types (constraint types ARE

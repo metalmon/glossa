@@ -5,6 +5,11 @@
 //! artifacts of the source system — they are CUT here so the JSON is clean:
 //! every column is keyed by its human-readable name, every value is a datum.
 //!
+//! Units of measure are separated, not lost: a column "Наружный диаметр [мм]"
+//! with values "125 [мм]" becomes column "Наружный диаметр" with value 125 and
+//! a `units` map entry {"Наружный диаметр": "мм"} per table. Columns with
+//! mixed units keep their values verbatim.
+//!
 //! Files whose stem starts with `_` are metadata by convention and are still
 //! converted, but the eval loader ignores them.
 
@@ -42,6 +47,19 @@ fn cell_text(c: &calamine::Data) -> String {
         calamine::Data::Error(e) => format!("{e:?}"),
         _ => format!("{c:?}"),
     }
+}
+
+/// Split a trailing bracketed unit: "Наружный диаметр [мм]" → ("Наружный диаметр", Some("мм")).
+fn split_unit(s: &str) -> (&str, Option<&str>) {
+    let t = s.trim();
+    if let (Some(open), true) = (t.rfind('['), t.ends_with(']')) {
+        let unit = t[open + 1..t.len() - 1].trim();
+        let base = t[..open].trim_end();
+        if !unit.is_empty() && !base.is_empty() {
+            return (base, Some(unit));
+        }
+    }
+    (t, None)
 }
 
 fn typed_value(s: &str) -> Value {
@@ -100,48 +118,70 @@ fn main() -> anyhow::Result<()> {
             let data_rows = &raw[data_start.min(raw.len())..];
 
             // Keep a column when it has a human-readable name, is not itself a
-            // UID column, and its data is not just UID references. On duplicate
-            // names keep the first survivor.
+            // UID column, and its data is not just UID references (GUID values
+            // only — bare numbers are real data, e.g. type "41"). The trailing
+            // bracketed unit is split off the header; the column unit is the
+            // header's, else the unanimous value unit. Duplicate names keep the
+            // first survivor.
             let mut seen_names: std::collections::BTreeSet<String> = Default::default();
-            let keep: Vec<usize> = headers
-                .iter()
-                .enumerate()
-                .filter(|(ci, h)| {
-                    let h = h.trim();
-                    if h.is_empty() || is_mdm_id(h) {
-                        return false;
-                    }
-                    let mut data = data_rows
-                        .iter()
-                        .filter_map(|r| r.get(*ci))
-                        .filter(|v| !v.trim().is_empty())
-                        .peekable();
-                    if data.peek().is_some() && data.all(|v| is_guid(v)) {
-                        return false; // UID-reference column (GUID values only —
-                                      // bare numbers are real data, e.g. type "41")
-                    }
-                    seen_names.insert(h.to_string())
-                })
-                .map(|(ci, _)| ci)
-                .collect();
+            let mut cols: Vec<(usize, String, Option<String>)> = Vec::new();
+            for (ci, h) in headers.iter().enumerate() {
+                let h = h.trim();
+                if h.is_empty() || is_mdm_id(h) {
+                    continue;
+                }
+                let mut data = data_rows
+                    .iter()
+                    .filter_map(|r| r.get(ci))
+                    .filter(|v| !v.trim().is_empty())
+                    .peekable();
+                if data.peek().is_some() && data.all(|v| is_guid(v)) {
+                    continue;
+                }
+                let (name, header_unit) = split_unit(h);
+                if !seen_names.insert(name.to_string()) {
+                    continue;
+                }
+                let value_units: std::collections::BTreeSet<&str> = data_rows
+                    .iter()
+                    .filter_map(|r| r.get(ci))
+                    .filter_map(|v| split_unit(v).1)
+                    .collect();
+                let unit = match (header_unit, value_units.len()) {
+                    (Some(u), _) => Some(u.to_string()),
+                    (None, 1) => value_units.iter().next().map(|u| u.to_string()),
+                    _ => None, // no unit, or mixed value units — keep values verbatim
+                };
+                cols.push((ci, name.to_string(), unit));
+            }
 
             let rows: Vec<Map<String, Value>> = data_rows
                 .iter()
                 .map(|r| {
-                    keep.iter()
-                        .map(|&ci| {
-                            (
-                                headers[ci].trim().to_string(),
-                                r.get(ci).map(|s| typed_value(s)).unwrap_or(Value::Null),
-                            )
+                    cols.iter()
+                        .map(|(ci, name, unit)| {
+                            let raw_cell = r.get(*ci).map(String::as_str).unwrap_or("");
+                            // Strip the unit from a value only when it matches
+                            // the column unit — a differing unit stays attached.
+                            let val = match (split_unit(raw_cell), unit) {
+                                ((base, Some(u)), Some(cu)) if u == cu => base,
+                                _ => raw_cell.trim(),
+                            };
+                            (name.clone(), typed_value(val))
                         })
                         .collect()
                 })
                 .filter(|m: &Map<String, Value>| m.values().any(|v| !v.is_null()))
                 .collect();
 
+            let units: Map<String, Value> = cols
+                .iter()
+                .filter_map(|(_, n, u)| u.as_ref().map(|u| (n.clone(), Value::String(u.clone()))))
+                .collect();
+
             tables.push(serde_json::json!({
                 "sheet": sname,
+                "units": units,
                 "rows": rows
             }));
         }

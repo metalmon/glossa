@@ -74,6 +74,102 @@ pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: &str) -> anyhow
     })
 }
 
+/// Render a solver outcome as actionable tool feedback for the agent.
+///
+/// A raw `SolveResult` JSON hides the two failure modes that matter most to a
+/// model: an EMPTY problem (0 fields for the source → every mode is vacuously
+/// "valid") and assignments whose field names matched nothing in the graph
+/// (silently not checked). Both are called out explicitly here.
+pub fn format_solve_feedback(
+    problem: &Problem,
+    result: &glossa_constraint::solver::SolveResult,
+    assignment: &[(String, serde_json::Value)],
+    source_path: &str,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    if problem.fields.is_empty() {
+        let _ = writeln!(
+            out,
+            "WARNING: 0 Field nodes cite source_path '{source_path}' — nothing was solved; any 'valid' verdict below is vacuous.\n\
+             Build the constraint graph first: Field nodes must cite this document via source_path (see graph_stats)."
+        );
+    }
+
+    let _ = writeln!(out, "mode={}  valid={}", result.mode, result.valid);
+    let field_names: Vec<&str> = problem.fields.iter().map(|f| f.name.as_str()).collect();
+    let n_constraints: usize = problem.fields.iter().map(|f| f.constraints.len()).sum();
+    let _ = writeln!(
+        out,
+        "problem: {} fields, {} constraints from '{source_path}'",
+        field_names.len(),
+        n_constraints
+    );
+    if !field_names.is_empty() {
+        let shown = field_names.iter().take(30).cloned().collect::<Vec<_>>().join(", ");
+        let more = if field_names.len() > 30 { format!(" … +{} more", field_names.len() - 30) } else { String::new() };
+        let _ = writeln!(out, "fields: {shown}{more}");
+    }
+
+    if !assignment.is_empty() {
+        let known: std::collections::HashSet<&str> = field_names.iter().copied().collect();
+        let unmatched: Vec<&str> = assignment
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| !known.contains(k))
+            .collect();
+        let _ = writeln!(
+            out,
+            "assignments: {} given, {} matched a field",
+            assignment.len(),
+            assignment.len() - unmatched.len()
+        );
+        if !unmatched.is_empty() {
+            let _ = writeln!(
+                out,
+                "  NOT CHECKED (no Field with this label in the graph — assignment keys must match Field labels exactly): {}",
+                unmatched.join(", ")
+            );
+        }
+    }
+
+    for v in &result.violations {
+        let _ = writeln!(
+            out,
+            "violation: field '{}' [{}] {} (expected: {}; actual: {})",
+            v.field, v.constraint, v.message, v.expected, v.actual
+        );
+    }
+    for i in &result.issues {
+        let _ = writeln!(out, "issue [{}]: field '{}': {}", i.severity, i.field, i.message);
+    }
+    if let Some(domains) = &result.domains {
+        for d in domains {
+            let _ = writeln!(out, "domain: {} = {}", d.field, format_domain(&d.domain));
+        }
+    }
+    if result.valid && result.violations.is_empty() && result.issues.is_empty() && !problem.fields.is_empty() {
+        let _ = writeln!(out, "no violations or issues.");
+    }
+    out.trim_end().to_string()
+}
+
+fn format_domain(d: &glossa_constraint::Domain) -> String {
+    use glossa_constraint::Domain;
+    match d {
+        Domain::Interval { min, max } => format!("[{min}, {max}]"),
+        Domain::Set { values } => {
+            let shown = values.iter().take(40).cloned().collect::<Vec<_>>().join(", ");
+            let more = if values.len() > 40 { format!(" … +{} more", values.len() - 40) } else { String::new() };
+            format!("{{ {shown}{more} }}")
+        }
+        Domain::Any => "any (unconstrained)".into(),
+        Domain::Empty => "EMPTY (unsatisfiable — constraints conflict)".into(),
+        Domain::Regex { pattern } => format!("matching /{pattern}/"),
+    }
+}
+
 /// Build Constraint variants from a constraint graph node.
 fn build_constraint(
     cn: &crate::graph::store::Node,
@@ -137,7 +233,36 @@ fn build_constraint(
             Ok(vec![Constraint::Formula { expression }])
         }
         "Conditional" => {
-            Ok(vec![]) // Conditional is reconstructed during agent graph building
+            // Ontology shape: Conditional ──IF_FIELD──► Literal (the field name),
+            // ──IF_VALUE──► Literal (the trigger value), ──HAS_CONSTRAINT──► the
+            // constraint node(s) that apply while the condition holds. Each inner
+            // constraint is wrapped; a Conditional missing its condition or inner
+            // constraints contributes nothing (malformed).
+            let condition_field = literals.get("IF_FIELD").cloned().unwrap_or_default();
+            let condition_value = literals.get("IF_VALUE").cloned().unwrap_or_default();
+            if condition_field.is_empty() {
+                return Ok(vec![]);
+            }
+            let mut wrapped = Vec::new();
+            if let Some(edges) = outgoing.get(&cn.id) {
+                for (edge_type, to_id) in edges {
+                    if edge_type != "HAS_CONSTRAINT" {
+                        continue;
+                    }
+                    let Some(inner_node) = all_nodes.iter().find(|n| n.id == *to_id) else { continue };
+                    if inner_node.node_type == "Conditional" {
+                        continue; // ontology forbids nesting; also guards against cycles
+                    }
+                    for inner in build_constraint(inner_node, outgoing, all_nodes, _ont)? {
+                        wrapped.push(Constraint::Conditional {
+                            condition_field: condition_field.clone(),
+                            condition_value: serde_json::Value::String(condition_value.clone()),
+                            inner: Box::new(inner),
+                        });
+                    }
+                }
+            }
+            Ok(wrapped)
         }
         _ => Ok(vec![]),
     }
@@ -352,5 +477,51 @@ params = ["expression"]
             && f.constraints.contains(&Constraint::Required)));
         assert!(problem.fields.iter().any(|f| f.name == "B"
             && f.constraints.contains(&Constraint::Forbidden)));
+    }
+
+    /// Conditional reconstructed from the graph: IF_FIELD/IF_VALUE literals give
+    /// the condition, each HAS_CONSTRAINT target becomes a wrapped inner constraint.
+    #[test]
+    fn load_conditional_from_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        insert_node(&g, "fld:x", "Field", "X", "gost.pdf");
+        insert_node(&g, "cond:x", "Conditional", "X when mode=41", "gost.pdf");
+        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "cond:x", "gost.pdf");
+
+        insert_node(&g, "lit:field", "Literal", "mode", "gost.pdf");
+        insert_node(&g, "lit:value", "Literal", "41", "gost.pdf");
+        insert_edge(&g, "cond:x", "IF_FIELD", "lit:field", "gost.pdf");
+        insert_edge(&g, "cond:x", "IF_VALUE", "lit:value", "gost.pdf");
+
+        insert_node(&g, "req:x", "Required", "X required", "gost.pdf");
+        insert_edge(&g, "cond:x", "HAS_CONSTRAINT", "req:x", "gost.pdf");
+
+        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let x = problem.fields.iter().find(|f| f.name == "X").expect("field X");
+        let cond = x.constraints.iter().find_map(|c| match c {
+            Constraint::Conditional { condition_field, condition_value, inner } =>
+                Some((condition_field.clone(), condition_value.clone(), inner.clone())),
+            _ => None,
+        });
+        let (cf, cv, inner) = cond.expect("Conditional must be reconstructed, not dropped");
+        assert_eq!(cf, "mode");
+        assert_eq!(cv, serde_json::Value::String("41".into()));
+        assert_eq!(*inner, Constraint::Required);
+
+        // The condition actually gates validation end-to-end.
+        let v_active = glossa_constraint::solver::validate(
+            &problem,
+            &[("mode".to_string(), serde_json::json!(41))],
+        );
+        assert!(v_active.iter().any(|v| v.field == "X" && v.constraint == "Required"),
+            "condition met + X missing → Required must fire: {v_active:?}");
+        let v_inactive = glossa_constraint::solver::validate(
+            &problem,
+            &[("mode".to_string(), serde_json::json!("other"))],
+        );
+        assert!(v_inactive.is_empty(), "condition not met → no violations: {v_inactive:?}");
     }
 }
