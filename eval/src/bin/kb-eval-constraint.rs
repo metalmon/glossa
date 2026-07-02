@@ -466,7 +466,9 @@ fn main() -> Result<()> {
              Call constraint_solve(mode=\"{mode_label}\", field_assignments={{...}}) to check.\n\
              Compare solver result with your own analysis.\n\n\
              === DONE ===\n\
-             Call done(note=\"summary\") when finished."
+             Call done(note=\"summary\") ONLY when: every parameter from the document is a Field,\n\
+             every allowed value is attached as a Literal (an Enum without literals is an empty,\n\
+             useless constraint), and constraint_solve(mode=\"check\") reports no issues."
         );
 
         let agent_g_dir_clone = agent_g_dir.clone();
@@ -569,6 +571,12 @@ fn main() -> Result<()> {
         match &outcome {
             Ok(out) => {
                 print!("done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}  csp_agree={csp_agreement}");
+                if !csp_agreement {
+                    let vs: Vec<String> = csp_agent.violations.iter().take(3)
+                        .map(|v| format!("{} [{}] expected {}, actual {}", v.field, v.constraint, v.expected, v.actual))
+                        .collect();
+                    print!("\n    agent_csp: valid={} (ref valid={}) {}", csp_agent.valid, csp_ref.valid, vs.join("; "));
+                }
                 let llm_text = &out.answer;
                 let csp_has_violations = !csp_ref.violations.is_empty();
                 let llm_correct = if csp_has_violations {

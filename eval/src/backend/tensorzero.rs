@@ -251,6 +251,9 @@ where
         // Push one tool_result user message per call (in original call order),
         // followed by any image blocks. Result MUST be a string.
         for (id, name, result, titles, images) in results {
+            if std::env::var_os("KB_TRACE").is_some() {
+                eprintln!("  [TZ] result[{name}] {:.300}", result.replace('\n', " ⏎ "));
+            }
             surfaced_titles.extend(titles);
             messages.push(json!({
                 "role": "user",
