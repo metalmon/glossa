@@ -60,7 +60,9 @@ fn tool_kind(name: &str) -> ToolKind {
         "done" => ToolKind::Control,
         "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => ToolKind::GraphMutate,
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
-        "glossary" | "neighbors" | "resolve" | "graph_stats" => ToolKind::GraphRead,
+        // constraint_solve reads the graph: an identical call MUST re-run after any
+        // graph mutation, else the model sees a stale verdict and fights the "cache".
+        "glossary" | "neighbors" | "resolve" | "graph_stats" | "constraint_solve" => ToolKind::GraphRead,
         _ => ToolKind::Corpus,
     }
 }
@@ -816,6 +818,37 @@ mod tests {
         let c = counts.lock().unwrap();
         assert_eq!(c.get("glossary").copied().unwrap_or(0), 2, "repeat glossary deduped, but re-runs after the upsert (graph changed)");
         assert_eq!(c.get("graph_upsert").copied().unwrap_or(0), 1);
+    }
+
+    /// constraint_solve is a graph READ: an identical call must re-run after a
+    /// graph mutation (a stale "valid" verdict sends the model chasing a phantom cache).
+    #[test]
+    fn enrich_graph_mutation_invalidates_repeated_constraint_solve() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        // solve, solve(dup), upsert, solve(now stale → re-runs), done.
+        let chat = |_: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            let i = *r;
+            *r += 1;
+            let block = match i {
+                0 | 1 | 3 => json!({ "type": "tool_call", "id": format!("c{i}"), "name": "constraint_solve", "arguments": { "mode": "check" } }),
+                2 => json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} }),
+                _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
+            };
+            Ok(TzTurn { content: vec![block], episode_id: "e".into() })
+        };
+        let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cc = Arc::clone(&counts);
+        let exec = move |name: &str, _: &Value| {
+            *cc.lock().unwrap().entry(name.to_string()).or_default() += 1;
+            (String::new(), Vec::new(), Vec::new())
+        };
+        run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
+        let c = counts.lock().unwrap();
+        assert_eq!(c.get("constraint_solve").copied().unwrap_or(0), 2, "repeat solve deduped, but re-runs after the upsert (graph changed)");
     }
 
     #[test]

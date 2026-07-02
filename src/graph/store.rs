@@ -728,7 +728,9 @@ impl GraphStore {
         }
     }
 
-    /// Delete a node by id AND every edge that references it. Returns (#nodes + #edges) removed.
+    /// Delete a node by id AND every edge that references it, plus its `node_meta`
+    /// row (else graph_stats keeps reporting the node's community as a phantom).
+    /// Returns (#nodes + #edges) removed.
     pub fn delete_node(&self, id: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
         c.execute(
@@ -740,6 +742,7 @@ impl GraphStore {
         c.execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
             .context("delete node")?;
         let nodes_deleted = c.changes() as usize;
+        let _ = c.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![id]);
         Ok(nodes_deleted + edges_deleted)
     }
 
@@ -1051,6 +1054,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(g.edge_count().unwrap(), 1);
+    }
+
+    /// The singular delete must also drop the node's `node_meta` row — stale meta
+    /// made graph_stats report phantom community members after the agent's deletes.
+    #[test]
+    fn delete_node_singular_also_drops_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&Node {
+            id: "a".into(),
+            node_type: "Symptom".into(),
+            label: "a".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+        g.replace_node_meta(&[("a".into(), NodeMeta { community: Some(0), pagerank: Some(0.5), degree: Some(1) })])
+            .unwrap();
+
+        g.delete_node("a").unwrap();
+        assert!(g.get_node("a").unwrap().is_none());
+        assert!(g.node_meta("a").unwrap().is_none(), "meta must not survive the node");
+        assert_eq!(g.node_meta_count().unwrap(), 0);
     }
 
     #[test]
