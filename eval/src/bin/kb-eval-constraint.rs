@@ -567,6 +567,9 @@ fn main() -> Result<()> {
              The knowledge base holds these standards: {kb_docs_list}. A parameter's allowed\n\
              values may live in the main GOST or in a standard it references (e.g. grit, hardness,\n\
              marking are defined in referenced GOSTs) — use search/read across ALL of them.\n\
+             To get the COMPLETE parameter set, find the product's designation example\n\
+             ('условное обозначение' / 'Пример') — that one string enumerates every parameter in\n\
+             order; enumerating from scattered value tables misses parameters.\n\
              Call get_ontology first to see the legal node types and relation signatures.\n\
              For EACH parameter create exactly two nodes: a Field node and an Enum node, linked\n\
              Field --CONSTRAINED_BY--> Enum. Put ALL of the parameter's allowed values into the\n\
@@ -594,11 +597,16 @@ fn main() -> Result<()> {
                 "{prompt}\n\n\
                  === SOP ENFORCEMENT ===\n\
                  This task runs as an SOP with a gated completion:\n\
-                 Step 1: read the document's parameter table and create ONE Checklist node whose\n\
-                 `aliases` list the name of EVERY parameter in it (this is your commitment to the\n\
-                 full set).\n\
-                 Step 2: for each parameter on the checklist create a Field and an Enum\n\
-                 (Field --CONSTRAINED_BY--> Enum) with all allowed values in the Enum's aliases.\n\
+                 Step 1 (COMPLETE parameter set): find the product's designation / marking example\n\
+                 in the GOST — search for 'условное обозначение' / 'Пример'. That single designation\n\
+                 string enumerates EVERY parameter of the product in order, and the sentence right\n\
+                 before it names each one. Read that sentence and that string, and take the full\n\
+                 parameter list from them — it is authoritative and complete. Do NOT assemble the\n\
+                 set by scanning value tables (you will miss parameters).\n\
+                 Create ONE Checklist node whose `aliases` are the parameter names you read there.\n\
+                 Step 2: for each checklist parameter create a Field and an Enum\n\
+                 (Field --CONSTRAINED_BY--> Enum) with all allowed values in the Enum's aliases —\n\
+                 the values may be in the main GOST or a referenced standard.\n\
                  Step 3: constraint_solve(check) must be clean.\n\
                  `done` is REJECTED — with the list of what is still missing — until every checklist\n\
                  parameter has a Field with a non-empty Enum and the check passes. Do not stop early."
