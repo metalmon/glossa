@@ -74,6 +74,40 @@ pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: &str) -> anyhow
     })
 }
 
+/// Re-key an assignment onto the graph's actual Field labels using glossa's
+/// morphology-aware resolver (`GraphStore::resolve`, the same one graph_upsert
+/// uses for edge endpoints). A value keyed by a paraphrase of a parameter name
+/// ("h, высота") still lands on the Field the agent created ("высота" / "Высота Т"),
+/// so a faithful domain isn't silently skipped over a wording difference.
+/// Keys that already match a Field, or resolve to no Field, pass through
+/// unchanged (the latter then surface as NOT CHECKED in the feedback).
+pub fn resolve_assignment_fields(
+    g: &GraphStore,
+    problem: &Problem,
+    assignment: &[(String, serde_json::Value)],
+) -> Vec<(String, serde_json::Value)> {
+    let field_names: std::collections::HashSet<&str> =
+        problem.fields.iter().map(|f| f.name.as_str()).collect();
+    assignment
+        .iter()
+        .map(|(k, v)| {
+            if field_names.contains(k.as_str()) {
+                return (k.clone(), v.clone());
+            }
+            let resolved = g.resolve(k).ok().and_then(|ids| {
+                ids.iter().find_map(|id| {
+                    g.get_node(id)
+                        .ok()
+                        .flatten()
+                        .filter(|n| n.node_type == "Field" && field_names.contains(n.label.as_str()))
+                        .map(|n| n.label)
+                })
+            });
+            (resolved.unwrap_or_else(|| k.clone()), v.clone())
+        })
+        .collect()
+}
+
 /// Render a solver outcome as actionable tool feedback for the agent.
 ///
 /// A raw `SolveResult` JSON hides the two failure modes that matter most to a
@@ -527,6 +561,33 @@ params = ["expression"]
             &[("Наружный диаметр".into(), serde_json::json!(150))]).is_empty());
         assert!(!glossa_constraint::solver::validate(&problem,
             &[("Наружный диаметр".into(), serde_json::json!(137))]).is_empty());
+    }
+
+    /// A value keyed by a paraphrase of the parameter name must still hit the
+    /// Field the agent built, via the morphology resolver — otherwise a faithful
+    /// domain is silently skipped and a bad value slips through as "valid".
+    #[test]
+    fn assignment_resolves_paraphrased_field_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        // Agent named the field "Высота Т"; the assignment keys it "h, высота".
+        insert_node(&g, "fld:h", "Field", "Высота Т", "gost.pdf");
+        insert_node_aliases(&g, "enum:h", "Enum", "Высота Т enum", &["0,6", "0,8", "1,2"], "gost.pdf");
+        insert_edge(&g, "fld:h", "CONSTRAINED_BY", "enum:h", "gost.pdf");
+
+        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let raw = vec![("h, высота".to_string(), serde_json::json!("99"))];
+
+        // Without resolution the key misses the field and the bad value passes.
+        assert!(glossa_constraint::solver::validate(&problem, &raw).is_empty());
+
+        // With resolution it re-keys onto "Высота Т" and the enum rejects 99.
+        let resolved = resolve_assignment_fields(&g, &problem, &raw);
+        assert_eq!(resolved[0].0, "Высота Т");
+        assert!(!glossa_constraint::solver::validate(&problem, &resolved).is_empty(),
+            "99 ∉ {{0,6; 0,8; 1,2}} must be caught after resolution");
     }
 
     /// Conditional reconstructed from the graph: IF_FIELD/IF_VALUE literals give

@@ -206,7 +206,10 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
 fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)], src: &str) -> SolveResult {
     let ont = Ontology::load_or_default(dir);
     let problem = glossa::constraint_adapter::load_problem(g, &ont, src).unwrap();
-    glossa_constraint::solver::solve(&problem, mode, assignments)
+    // Re-key onto the graph's Field labels so a paraphrased parameter name still
+    // hits its constraint (matches the MCP tool's behaviour).
+    let assignments = glossa::constraint_adapter::resolve_assignment_fields(g, &problem, assignments);
+    glossa_constraint::solver::solve(&problem, mode, &assignments)
 }
 
 fn setup(dir: &std::path::Path, ontology_toml: &str, cols: &[ColInfo], src: &str) -> GraphStore {

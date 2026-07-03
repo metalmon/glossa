@@ -565,6 +565,9 @@ impl GlossaServer {
                 .unwrap_or_default()
                 .into_iter()
                 .collect();
+            // Re-key onto the graph's Field labels via the morphology resolver, so a
+            // value keyed by a paraphrase of a parameter name still hits its constraint.
+            let assignment = crate::constraint_adapter::resolve_assignment_fields(&g, &problem, &assignment);
 
             let result = glossa_constraint::solver::solve(&problem, mode, &assignment);
 
