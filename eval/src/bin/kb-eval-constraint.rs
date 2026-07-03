@@ -543,8 +543,10 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // ── Full agentic eval ──
-        eprintln!("[{}/{}] {} {}  agentic...", i + 1, cases.len(), case.name, mode_label);
+        // ── DISCOVERY (once): the agent builds the constraint graph; every row is
+        //    then validated against it below. Runs on the first non-csp_only case,
+        //    then breaks — the graph does not depend on the row.
+        eprintln!("[discovery] building the constraint graph from the GOST...");
         let eid = kb_eval::tz::backdated_episode_id(30);
         let eid_chat = eid.clone();
         let url = cli.gateway.clone();
@@ -566,16 +568,6 @@ fn main() -> Result<()> {
         std::fs::write(&ont_path, &ontology_toml).unwrap();
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
-        // Units travel separately from values: "Наружный диаметр=125 (unit: мм)".
-        let unit_by_field: BTreeMap<&str, &str> = cols.iter()
-            .filter_map(|c| c.unit.as_deref().map(|u| (c.name.as_str(), u)))
-            .collect();
-        let assign_desc: String = case.assignments.iter()
-            .map(|(k, v)| {
-                let u = unit_by_field.get(k.as_str()).map(|u| format!(" (unit: {u})")).unwrap_or_default();
-                format!("{k}={v}{u}")
-            })
-            .collect::<Vec<_>>().join(", ");
         let prompt = format!(
             "You are building the constraint set for a product specified by GOST '{src_doc}'.\n\n\
              === PHASE 1: Build constraint graph ===\n\
@@ -595,12 +587,6 @@ fn main() -> Result<()> {
              Batch: one graph_upsert call carries every Field/Enum node and edge at once.\n\n\
              === PHASE 2: Self-check ===\n\
              Call constraint_solve(mode=\"check\") to verify graph consistency.\n\n\
-             === PHASE 3: Validate ===\n\
-             Check these field assignments:\n\
-             Mode: {mode_label}\n\
-             {assign_desc}\n\n\
-             Call constraint_solve(mode=\"{mode_label}\", field_assignments={{...}}) to check.\n\
-             Compare solver result with your own analysis.\n\n\
              === DONE ===\n\
              Call done(note=\"summary\") ONLY when: every parameter from the document is a Field,\n\
              each Field's allowed values are in its Enum node's aliases (an Enum with empty aliases\n\
@@ -716,53 +702,65 @@ fn main() -> Result<()> {
         let was_done = outcome.as_ref().map(|o| o.done).unwrap_or(false);
         let rounds = outcome.as_ref().map(|o| o.rounds).unwrap_or(0);
 
-        // csp_agreement: does the agent's graph give the same verdict as the reference
-        // graph for this case's assignments? This is the end-to-end usefulness metric.
-        // Guard against a degenerate win: an empty/constraint-less graph calls every
-        // valid row "valid" vacuously, so require the agent to actually constrain
-        // something (≥1 CONSTRAINED_BY link) for the agreement to count.
-        let csp_ref = solve_csp(ref_dir.path(), &ref_g, case.mode, &case.assignments);
-        let csp_agent = solve_csp(&agent_g_dir, &agent_g, case.mode, &case.assignments);
-        let agent_constrains = agent_g.all_edges().unwrap_or_default().iter()
-            .any(|e| e.edge_type == "CONSTRAINED_BY");
-        let csp_agreement = csp_agent.valid == csp_ref.valid && agent_constrains;
-
-        // Post feedback
+        // ── DISCOVERY coverage feedback (one build) ──
         let cli_gateway = &cli.gateway;
         kb_eval::tz::post_feedback(cli_gateway, &eid, "field_coverage", json!(field_cov), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "constraint_coverage", json!(constraint_cov), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "literal_coverage", json!(literal_cov), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "agent_graph_node_count", json!(agent_nodes as f64), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "agent_graph_edge_count", json!(agent_edges as f64), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "csp_agreement", json!(csp_agreement), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "tools_used", json!(rounds as f64), &tags);
+        if let Err(e) = &outcome { println!("EPISODE ERROR: {e}"); }
+        println!("DISCOVERY  done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}");
 
-        print!("[{}/{}] {} {}  ", i + 1, cases.len(), case.name, mode_label);
-        match &outcome {
-            Ok(out) => {
-                print!("done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}  csp_agree={csp_agreement}");
-                if !csp_agreement {
-                    let vs: Vec<String> = csp_agent.violations.iter().take(3)
-                        .map(|v| format!("{} [{}] expected {}, actual {}", v.field, v.constraint, v.expected, v.actual))
-                        .collect();
-                    print!("\n    agent_csp: valid={} (ref valid={}) {}", csp_agent.valid, csp_ref.valid, vs.join("; "));
-                }
-                let llm_text = &out.answer;
-                let csp_has_violations = !csp_ref.violations.is_empty();
-                let llm_correct = if csp_has_violations {
-                    llm_text.to_lowercase().contains("violation")
-                } else {
-                    llm_text.to_lowercase().contains("valid") || llm_text.to_lowercase().contains("no violation")
-                };
-                kb_eval::tz::post_feedback(cli_gateway, &eid, "llm_correct", json!(llm_correct), &tags);
-                print!("  llm_correct={llm_correct}");
-                if !llm_correct {
-                    print!("  answer: {llm_text:.100}");
-                }
-                println!();
-            }
-            Err(e) => println!("EPISODE ERROR: {e}"),
+        // ── VALIDATION: sweep EVERY row through the AGENT graph (algorithmic, no LLM) ──
+        // The GOST (agent) and MDM (rows) use different names for a parameter, so map
+        // each MDM column to the agent field whose Enum domain matches it, then re-key
+        // the row before solving.
+        let agent_nodes_v = agent_g.all_nodes().unwrap_or_default();
+        let agent_edges_v = agent_g.all_edges().unwrap_or_default();
+        let agent_field_domains: Vec<(String, BTreeSet<String>)> = agent_nodes_v.iter()
+            .filter(|n| n.node_type == "Field")
+            .filter_map(|f| {
+                let enum_id = agent_edges_v.iter()
+                    .find(|e| e.edge_type == "CONSTRAINED_BY" && e.from == f.id)
+                    .map(|e| e.to.clone())?;
+                let dom: BTreeSet<String> = agent_nodes_v.iter()
+                    .find(|n| n.id == enum_id && n.node_type == "Enum")
+                    .map(|n| n.aliases.iter().map(|s| norm_value(s)).collect())?;
+                Some((f.label.clone(), dom))
+            })
+            .collect();
+        let mdm_to_agent: BTreeMap<String, String> = cols.iter().filter_map(|c| {
+            let dom: BTreeSet<String> = c.valid.iter().map(|s| norm_value(s)).collect();
+            if dom.is_empty() { return None; }
+            agent_field_domains.iter()
+                .find(|(_, ad)| dom.iter().filter(|v| ad.contains(*v)).count() as f64 / dom.len() as f64 >= 0.5)
+                .map(|(label, _)| (c.name.clone(), label.clone()))
+        }).collect();
+        let agent_constrains = agent_edges_v.iter().any(|e| e.edge_type == "CONSTRAINED_BY");
+
+        let (mut vpass, mut vtot, mut icatch, mut itot) = (0usize, 0usize, 0usize, 0usize);
+        for c in &cases {
+            let assign: Vec<(String, Value)> = c.assignments.iter()
+                .map(|(k, v)| (mdm_to_agent.get(k).cloned().unwrap_or_else(|| k.clone()), v.clone()))
+                .collect();
+            let csp = solve_csp(&agent_g_dir, &agent_g, c.mode, &assign);
+            let expected_valid = !c.name.contains("invalid");
+            let ok = csp.valid == expected_valid;
+            if expected_valid { vtot += 1; if ok { vpass += 1; } }
+            else { itot += 1; if ok { icatch += 1; } }
         }
+        let val_acc = if cases.is_empty() { 0.0 } else { (vpass + icatch) as f64 / cases.len() as f64 };
+        let valid_pass_rate = if vtot == 0 { 0.0 } else { vpass as f64 / vtot as f64 };
+        let invalid_catch_rate = if itot == 0 { 0.0 } else { icatch as f64 / itot as f64 };
+        kb_eval::tz::post_feedback(cli_gateway, &eid, "validation_accuracy", json!(val_acc), &tags);
+        kb_eval::tz::post_feedback(cli_gateway, &eid, "valid_pass_rate", json!(valid_pass_rate), &tags);
+        kb_eval::tz::post_feedback(cli_gateway, &eid, "invalid_catch_rate", json!(invalid_catch_rate), &tags);
+        println!("VALIDATION over {} rows (mapped {}/{} params)  acc={val_acc:.3}  valid_pass={vpass}/{vtot}  invalid_catch={icatch}/{itot}{}",
+            cases.len(), mdm_to_agent.len(), cols.len(),
+            if agent_constrains { "" } else { "  [WARN: agent graph has no constraints]" });
+        break;
     }
 
     Ok(())

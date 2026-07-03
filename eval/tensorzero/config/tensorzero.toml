@@ -587,6 +587,22 @@ type = "boolean"
 optimize = "max"
 level = "episode"
 
+# Discover-once → validate-all: one built graph is swept over the whole row corpus.
+[metrics.validation_accuracy]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.valid_pass_rate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.invalid_catch_rate]
+type = "float"
+optimize = "max"
+level = "episode"
+
 [metrics.llm_false_positive]
 type = "float"
 optimize = "min"
