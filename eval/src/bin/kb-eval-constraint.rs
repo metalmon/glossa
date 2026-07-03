@@ -220,19 +220,47 @@ fn sop_gate_check(dir: &std::path::Path, src: &str) -> Option<String> {
     };
     let nodes = g.all_nodes().unwrap_or_default();
     let edges = g.all_edges().unwrap_or_default();
-    let fields: Vec<&Node> = nodes.iter().filter(|n| n.node_type == "Field").collect();
-    if fields.is_empty() {
-        return Some("no Field nodes yet: Step 1 is to create a Field for EVERY parameter in the document's table.".into());
-    }
-    let incomplete: Vec<&str> = fields
-        .iter()
-        .filter(|f| {
-            !edges.iter().any(|e| {
-                e.edge_type == "CONSTRAINED_BY"
-                    && e.from == f.id
-                    && nodes.iter().any(|n| n.id == e.to && n.node_type == "Enum" && !n.aliases.is_empty())
-            })
+
+    // A Field is "complete" when it has a CONSTRAINED_BY edge to an Enum with values.
+    let field_complete = |f: &Node| -> bool {
+        edges.iter().any(|e| {
+            e.edge_type == "CONSTRAINED_BY"
+                && e.from == f.id
+                && nodes.iter().any(|n| n.id == e.to && n.node_type == "Enum" && !n.aliases.is_empty())
         })
+    };
+
+    // Step 1: the Checklist node commits to the full parameter set.
+    let checklist: Vec<&String> = nodes.iter()
+        .filter(|n| n.node_type == "Checklist")
+        .flat_map(|n| n.aliases.iter())
+        .collect();
+    if checklist.is_empty() {
+        return Some("Step 1 is unmet: create ONE Checklist node whose aliases list EVERY parameter in the document's table.".into());
+    }
+
+    // Step 2: every checklist parameter must resolve to a complete Field.
+    let uncovered: Vec<&str> = checklist.iter()
+        .filter(|param| {
+            let hit = g.resolve(param).ok().and_then(|ids| {
+                ids.iter().find_map(|id| nodes.iter().find(|n| &n.id == id && n.node_type == "Field"))
+                    .map(|f| field_complete(f))
+            });
+            !hit.unwrap_or(false)
+        })
+        .map(|s| s.as_str())
+        .collect();
+    if !uncovered.is_empty() {
+        return Some(format!(
+            "these checklist parameters still have no Field with a non-empty Enum (Step 2): {}.",
+            uncovered.join(", ")
+        ));
+    }
+
+    // Also reject any half-built Field that isn't on the checklist.
+    let fields: Vec<&Node> = nodes.iter().filter(|n| n.node_type == "Field").collect();
+    let incomplete: Vec<&str> = fields.iter()
+        .filter(|f| !field_complete(f))
         .map(|f| f.label.as_str())
         .collect();
     if !incomplete.is_empty() {
@@ -562,11 +590,15 @@ fn main() -> Result<()> {
             format!(
                 "{prompt}\n\n\
                  === SOP ENFORCEMENT ===\n\
-                 This task runs as an SOP. Step 1: create a Field for EVERY parameter in the\n\
-                 document's table up front. Step 2: attach each Field's full allowed-value set as\n\
-                 its Enum aliases. Step 3: constraint_solve(check) must be clean. `done` is GATED —\n\
-                 it is rejected, with the list of what is still missing, until every Field has an\n\
-                 Enum with values and the check passes. Cover every parameter; do not stop early."
+                 This task runs as an SOP with a gated completion:\n\
+                 Step 1: read the document's parameter table and create ONE Checklist node whose\n\
+                 `aliases` list the name of EVERY parameter in it (this is your commitment to the\n\
+                 full set).\n\
+                 Step 2: for each parameter on the checklist create a Field and an Enum\n\
+                 (Field --CONSTRAINED_BY--> Enum) with all allowed values in the Enum's aliases.\n\
+                 Step 3: constraint_solve(check) must be clean.\n\
+                 `done` is REJECTED — with the list of what is still missing — until every checklist\n\
+                 parameter has a Field with a non-empty Enum and the check passes. Do not stop early."
             )
         } else {
             prompt
@@ -709,4 +741,50 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(g: &GraphStore, id: &str, nt: &str, label: &str, aliases: &[&str]) {
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: nt.into(),
+            label: label.into(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            prov: prov("gost.docx"),
+        }).unwrap();
+    }
+    fn edge(g: &GraphStore, from: &str, to: &str) {
+        g.put_edge(&Edge { from: from.into(), to: to.into(), edge_type: "CONSTRAINED_BY".into(), prov: prov("gost.docx") }).unwrap();
+    }
+
+    /// The SOP gate blocks `done` until every checklist parameter has a complete
+    /// Field, then clears — the completeness guarantee against the declared set.
+    #[test]
+    fn sop_gate_enforces_checklist_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // No checklist → Step 1 unmet.
+        assert!(sop_gate_check(dir.path(), "gost.docx").unwrap().contains("Checklist"));
+
+        // Checklist commits to two parameters; none built yet.
+        put(&g, "chk:1", "Checklist", "parameters", &["высота", "диаметр"]);
+        assert!(sop_gate_check(dir.path(), "gost.docx").unwrap().contains("диаметр"));
+
+        // Build "высота" fully; "диаметр" still uncovered.
+        put(&g, "fld:h", "Field", "высота", &[]);
+        put(&g, "enum:h", "Enum", "высота enum", &["1", "2"]);
+        edge(&g, "fld:h", "enum:h");
+        let r = sop_gate_check(dir.path(), "gost.docx").unwrap();
+        assert!(r.contains("диаметр") && !r.contains("высота"), "{r}");
+
+        // Build "диаметр" fully → gate clears.
+        put(&g, "fld:d", "Field", "диаметр", &[]);
+        put(&g, "enum:d", "Enum", "диаметр enum", &["10", "20"]);
+        edge(&g, "fld:d", "enum:d");
+        assert!(sop_gate_check(dir.path(), "gost.docx").is_none(), "all covered → done allowed");
+    }
 }

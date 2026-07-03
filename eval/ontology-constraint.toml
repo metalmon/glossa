@@ -58,6 +58,9 @@ id_prefix = "lit"
 [entities.Domain]      # A named set of allowed literal values (for Enum)
 id_prefix = "dom"
 
+[entities.Checklist]   # SOP Step-1 output: one node whose `aliases` list every
+id_prefix = "chk"      # parameter in the document — the completeness gate's target set
+
 # ── Relations ──
 [relations.CONSTRAINED_BY]
 from = ["Field"]
