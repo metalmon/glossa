@@ -63,6 +63,12 @@ struct Cli {
     /// values and constraint_solve(check) is clean. Off = the plain agentic loop.
     #[arg(long)]
     sop: bool,
+    /// Directory holding a zeroclaw-format SOP (SOP.toml + SOP.md). When set,
+    /// discovery is driven step-by-step through the vendored SOP engine (one
+    /// focused episode per step; step 2 loops per checklist parameter) instead of
+    /// one all-at-once episode. Portable: the same directory runs under zeroclaw.
+    #[arg(long)]
+    sop_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -280,6 +286,151 @@ fn sop_gate_check(dir: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+// ── Agent step execution (shared by the single-episode and SOP-driven paths) ──
+
+/// The tool executor for an agent episode: search/read/grep/glob + the graph and
+/// constraint tools, all bound to one agent graph dir and KB. A fresh one is made
+/// per episode (the SOP driver runs one episode per step).
+fn make_exec(
+    agent_g_dir: std::path::PathBuf,
+    kb: std::path::PathBuf,
+    src_doc: String,
+) -> impl Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync {
+    let idx_kb = DocIndex::open_or_create(&kb).expect("open kb index");
+    let spec_kb = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&kb));
+    let trace_kb = TraceLog::disabled();
+    move |name: &str, args: &Value| {
+        let g = GraphStore::open(&agent_g_dir).unwrap();
+        let ont = Ontology::load_or_default(&agent_g_dir);
+        match name {
+            "search" | "read" | "grep" | "glob" => {
+                kb_eval::backend::glossa_tools::exec(name, args, &idx_kb, Some(&g), &spec_kb, &trace_kb)
+            }
+            "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
+            "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
+            "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
+            "graph_stats" => (glossa::tools::graph_stats(&g), vec![], vec![]),
+            "graph_generalize" => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])
+            }
+            "constraint_solve" => {
+                let sm = match args.get("mode").and_then(|v| v.as_str()).unwrap_or("validate") {
+                    "infer" => SolveMode::Infer,
+                    "check" => SolveMode::Check,
+                    _ => SolveMode::Validate,
+                };
+                let assignments: Vec<(String, Value)> = args.get("field_assignments").and_then(|v| v.as_object())
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+                let problem = glossa::constraint_adapter::load_problem(&g, &ont, None).unwrap();
+                let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
+                (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc), vec![], vec![])
+            }
+            "get_ontology" => {
+                let relations: serde_json::Map<String, Value> = ont.raw_relations().iter()
+                    .map(|(name, r)| (name.clone(), json!({"from": r.from, "to": r.to})))
+                    .collect();
+                let constraint_types: serde_json::Map<String, Value> = ont.constraint_types().iter()
+                    .map(|(name, ct)| (name.clone(), json!({"params": ct.params})))
+                    .collect();
+                let node_types: Vec<&str> = ont.entity_types().iter().map(|s| s.as_str())
+                    .chain(ont.constraint_types().keys().map(|s| s.as_str()))
+                    .collect();
+                (serde_json::to_string(&json!({
+                    "node_types": node_types, "relations": relations,
+                    "constraint_types": constraint_types, "strict": ont.strict(),
+                })).unwrap_or_default(), vec![], vec![])
+            }
+            "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
+            other => (format!("unknown tool: {other}"), vec![], vec![]),
+        }
+    }
+}
+
+/// A TensorZero chat closure for one episode against `constraint_validate`.
+fn make_chat(
+    url: String,
+    fn_name: String,
+    tags: Value,
+    timeout: Duration,
+    eid: String,
+) -> impl FnMut(&[Value], Option<&str>) -> Result<TzTurn> {
+    move |messages: &[Value], ep: Option<&str>| {
+        let e = ep.unwrap_or(&eid);
+        let turn = kb_eval::tz::infer(&url, &fn_name, e, messages, &tags, timeout, None, None)?;
+        Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
+    }
+}
+
+/// (first uncovered checklist parameter, count of uncovered) — a checklist param
+/// is "covered" when it resolves to a Field with a non-empty Enum. Drives the SOP
+/// build loop's `$.steps.N.remaining` condition.
+fn checklist_status(agent_g_dir: &std::path::Path) -> (Option<String>, usize) {
+    let Ok(g) = GraphStore::open(agent_g_dir) else { return (None, 0) };
+    let nodes = g.all_nodes().unwrap_or_default();
+    let edges = g.all_edges().unwrap_or_default();
+    let checklist: Vec<String> = nodes.iter()
+        .filter(|n| n.node_type == "Checklist")
+        .flat_map(|n| n.aliases.clone())
+        .collect();
+    let covered = |param: &str| -> bool {
+        g.resolve(param).ok().map(|ids| ids.iter().any(|id| {
+            nodes.iter().any(|n| &n.id == id && n.node_type == "Field"
+                && edges.iter().any(|e| e.edge_type == "CONSTRAINED_BY" && e.from == n.id
+                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())))
+        })).unwrap_or(false)
+    };
+    let uncovered: Vec<&String> = checklist.iter().filter(|p| !covered(p)).collect();
+    (uncovered.first().map(|s| (*s).clone()), uncovered.len())
+}
+
+/// SOP-driven discovery: run the authored SOP (zeroclaw format) via the vendored
+/// engine. Each step's `body` from SOP.md is the agent instruction; step 2
+/// self-routes per uncovered checklist parameter, so the agent builds one
+/// parameter per focused episode instead of drowning in an all-at-once build.
+#[allow(clippy::too_many_arguments)]
+fn run_sop_discovery(
+    sop_dir: &std::path::Path,
+    agent_g_dir: &std::path::Path,
+    kb: &std::path::Path,
+    src_doc: &str,
+    kb_docs_list: &str,
+    gateway: &str,
+    tags: &Value,
+    timeout: Duration,
+) -> Result<usize> {
+    use kb_eval::sop;
+    let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
+        .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
+    eprintln!("[sop] loaded '{}' ({} steps) from {}", sop_def.name, sop_def.steps.len(), sop_dir.display());
+    let cfg = sop::driver::DriverConfig::default();
+    let report = sop::driver::run_sop(&sop_def, &cfg, |step, _run_data, visit| {
+        let (target, _) = checklist_status(agent_g_dir);
+        let mut prompt = format!(
+            "You are building the constraint set for regulatory document '{src_doc}'.\n\
+             Knowledge base standards: {kb_docs_list}.\n\n{}",
+            step.body
+        );
+        if step.number >= 2 {
+            match &target {
+                Some(t) => prompt.push_str(&format!("\n\nThe parameter to build in THIS step is: «{t}». Build only it.")),
+                None => return sop::driver::StepOutcome::completed("{\"remaining\": 0}"),
+            }
+        }
+        let eid = kb_eval::tz::backdated_episode_id(30);
+        let exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
+        let chat = make_chat(gateway.to_string(), "constraint_validate".to_string(), tags.clone(), timeout, eid);
+        let _ = run_episode(chat, &prompt, exec, 20, EpisodePolicy::enrich());
+        let (_, remaining) = checklist_status(agent_g_dir);
+        eprintln!("  [sop] step {} (visit {}) done → {remaining} params still uncovered", step.number, visit);
+        sop::driver::StepOutcome::completed(format!("{{\"remaining\": {remaining}}}"))
+    });
+    eprintln!("[sop] run {:?} after {} step-episodes{}", report.status, report.steps_run,
+        report.fail_reason.map(|r| format!(" ({r})")).unwrap_or_default());
+    Ok(report.steps_run)
 }
 
 fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)]) -> SolveResult {
@@ -685,7 +836,17 @@ fn main() -> Result<()> {
         let t1 = std::time::Instant::now();
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
-        let outcome = if cli.sop {
+        let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
+            // SOP-driven: the vendored engine drives one focused episode per step
+            // (step 2 loops per checklist parameter). The single prompt/chat/exec
+            // built above are unused in this path — the driver builds its own.
+            let steps = run_sop_discovery(&sop_dir, &agent_g_dir, &cli.kb, &src_doc,
+                &kb_docs_list, &cli.gateway, &tags, timeout).unwrap_or(0);
+            Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
+                answer: String::new(), episode_id: None, surfaced_titles: vec![],
+                done: true, rounds: steps,
+            })
+        } else if cli.sop {
             let gate_dir = agent_g_dir.clone();
             run_episode_gated(chat, &prompt, exec, 50, EpisodePolicy::enrich(),
                 move || sop_gate_check(&gate_dir))
