@@ -10,5 +10,6 @@ pub mod gepa;
 pub mod prep;
 pub mod run;
 pub mod score;
+pub mod sop;
 pub mod trace_read;
 pub mod tz;

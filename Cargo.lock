@@ -1522,6 +1522,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "toml 0.8.23",
  "ureq",
  "uuid",
 ]
