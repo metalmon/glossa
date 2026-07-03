@@ -9,7 +9,18 @@
 #   1. Creating a Field node for each constrained parameter.
 #   2. Creating a constraint-type node (Range, Regex, Enum, …).
 #   3. Linking Field → CONSTRAINED_BY → constraint node.
-#   4. Adding parameter edges (HAS_MIN, HAS_MAX, HAS_PATTERN, …) to Literal nodes.
+#   4. Attaching the constraint's parameters:
+#      - Enum  → the allowed values go in the Enum node's `aliases` list (compact:
+#        one node carries the whole domain, no node-per-value explosion).
+#      - Range → HAS_MIN / HAS_MAX edges to two Literal nodes.
+#      - Regex → HAS_PATTERN edge to a Literal node.
+#      - Formula → HAS_EXPRESSION edge to a Literal node.
+#
+# NOTE: a numeric parameter whose standard lists specific allowed values is an
+# Enum of exactly those values, NOT a Range — a Range would admit forbidden
+# in-between values. The legacy Enum shape (HAS_DOMAIN → Domain → HAS_LITERAL)
+# is still accepted by the adapter for back-compat, but the aliases form is
+# preferred and is what the eval's reference graph uses.
 #
 # The constraint_solve MCP tool then translates this subgraph into a CSP Problem
 # and runs validate / infer / check modes.

@@ -145,28 +145,23 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
 
 // ── Reference graph ──
 
+/// Compact constraint graph: one Field and one Enum per parameter, allowed
+/// values carried as the Enum node's `aliases`. ~2 nodes + 1 edge per field
+/// instead of a Literal node per value — the representation the agent targets.
 fn build_reference_graph(g: &GraphStore, cols: &[ColInfo], src: &str) {
     for (ci, col) in cols.iter().enumerate() {
         if col.valid.len() <= 1 { continue; }
         let fld_id = format!("fld:{ci}");
         let enum_id = format!("enum:{ci}");
-        let dom_id = format!("dom:{ci}");
         g.put_node(&Node { id: fld_id.clone(), node_type: "Field".into(), label: col.name.clone(), aliases: vec![], prov: prov(src) }).unwrap();
-        g.put_node(&Node { id: enum_id.clone(), node_type: "Enum".into(), label: format!("{} enum", col.name), aliases: vec![], prov: prov(src) }).unwrap();
-        g.put_node(&Node { id: dom_id.clone(), node_type: "Domain".into(), label: col.name.clone(), aliases: vec![], prov: prov(src) }).unwrap();
-        g.put_edge(&Edge { from: fld_id, edge_type: "CONSTRAINED_BY".into(), to: enum_id.clone(), prov: prov(src) }).unwrap();
-        g.put_edge(&Edge { from: enum_id, edge_type: "HAS_DOMAIN".into(), to: dom_id.clone(), prov: prov(src) }).unwrap();
-        for (vi, v) in col.valid.iter().enumerate() {
-            let lid = format!("lit:{ci}_{vi}");
-            g.put_node(&Node { id: lid.clone(), node_type: "Literal".into(), label: v.clone(), aliases: vec![], prov: prov(src) }).unwrap();
-            g.put_edge(&Edge { from: dom_id.clone(), edge_type: "HAS_LITERAL".into(), to: lid, prov: prov(src) }).unwrap();
-        }
+        g.put_node(&Node { id: enum_id.clone(), node_type: "Enum".into(), label: format!("{} enum", col.name), aliases: col.valid.clone(), prov: prov(src) }).unwrap();
+        g.put_edge(&Edge { from: fld_id, edge_type: "CONSTRAINED_BY".into(), to: enum_id, prov: prov(src) }).unwrap();
     }
 }
 
 fn export_graph(g: &GraphStore) -> Value {
     let nodes: Vec<Value> = g.all_nodes().unwrap_or_default().iter()
-        .map(|n| json!({"id": n.id, "type": n.node_type, "label": n.label}))
+        .map(|n| json!({"id": n.id, "type": n.node_type, "label": n.label, "aliases": n.aliases}))
         .collect();
     let edges: Vec<Value> = g.all_edges().unwrap_or_default().iter()
         .map(|e| json!({"from": e.from, "edge_type": e.edge_type, "to": e.to}))
@@ -314,18 +309,37 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
                 .count() as f64 / ref_field_labels.len() as f64
         };
 
-    // Literal coverage: how many reference literals are in agent graph (unit-stripped exact match)
+    // Value coverage: allowed values are the Enum nodes' aliases (compact form).
+    // We also union any legacy Literal-node labels the agent may still emit, so a
+    // graph in either representation is scored fairly.
     let ref_lits: BTreeSet<String> = ref_nodes.iter()
-        .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Literal"))
-        .filter_map(|n| n.get("label").and_then(|l| l.as_str()))
+        .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Enum"))
+        .filter_map(|n| n.get("aliases").and_then(|a| a.as_array()))
+        .flatten()
+        .filter_map(|v| v.as_str())
         .map(norm_metric)
         .collect();
     let agent_lits: BTreeSet<String> = agent_nodes.iter()
-        .filter(|n| n.node_type == "Literal")
-        .map(|n| norm_metric(&n.label))
+        .flat_map(|n| {
+            let enum_vals = if n.node_type == "Enum" { n.aliases.clone() } else { vec![] };
+            let legacy = if n.node_type == "Literal" { vec![n.label.clone()] } else { vec![] };
+            enum_vals.into_iter().chain(legacy)
+        })
+        .map(|s| norm_metric(&s))
         .collect();
     let literal_cov = if ref_lits.is_empty() { 1.0 }
         else { ref_lits.iter().filter(|l| agent_lits.contains(*l)).count() as f64 / ref_lits.len() as f64 };
+
+    if std::env::var_os("KB_TRACE").is_some() {
+        use std::collections::BTreeMap;
+        let mut hist: BTreeMap<&str, usize> = BTreeMap::new();
+        for n in &agent_nodes { *hist.entry(n.node_type.as_str()).or_default() += 1; }
+        eprintln!("  [CMP] agent node types: {hist:?}");
+        let a_sample: Vec<&String> = agent_lits.iter().take(12).collect();
+        let r_sample: Vec<&String> = ref_lits.iter().take(12).collect();
+        eprintln!("  [CMP] agent enum values (norm, {}): {a_sample:?}", agent_lits.len());
+        eprintln!("  [CMP] ref   enum values (norm, {}): {r_sample:?}", ref_lits.len());
+    }
 
     // Edge coverage: shared edges (edge_type + from_label + to_label)
     // (approximate: count edge type matches)
@@ -453,10 +467,14 @@ fn main() -> Result<()> {
             "You are validating field assignments against the regulatory document '{src_doc}'.\n\n\
              === PHASE 1: Build constraint graph ===\n\
              The document is in the knowledge base. Use search/read to find its parameter tables.\n\
-             Build the constraint graph via graph_upsert: for each parameter, create a Field node,\n\
-             CONSTRAINED_BY an Enum constraint, HAS_DOMAIN a Domain node, HAS_LITERAL for each valid value.\n\
              Call get_ontology first to see the legal node types and relation signatures.\n\
-             Batch aggressively: one graph_upsert call can carry many nodes and edges at once.\n\n\
+             For EACH parameter create exactly two nodes: a Field node and an Enum node, linked\n\
+             Field --CONSTRAINED_BY--> Enum. Put ALL of the parameter's allowed values into the\n\
+             Enum node's `aliases` list — do NOT create a separate node per value.\n\
+             A numeric parameter whose table lists specific allowed values (e.g. diameters\n\
+             125, 150, ...) is an Enum of exactly those values, NOT a Range: a Range would admit\n\
+             in-between values the standard forbids.\n\
+             Batch: one graph_upsert call carries every Field/Enum node and edge at once.\n\n\
              === PHASE 2: Self-check ===\n\
              Call constraint_solve(mode=\"check\") to verify graph consistency.\n\n\
              === PHASE 3: Validate ===\n\
@@ -467,8 +485,8 @@ fn main() -> Result<()> {
              Compare solver result with your own analysis.\n\n\
              === DONE ===\n\
              Call done(note=\"summary\") ONLY when: every parameter from the document is a Field,\n\
-             every allowed value is attached as a Literal (an Enum without literals is an empty,\n\
-             useless constraint), and constraint_solve(mode=\"check\") reports no issues."
+             each Field's allowed values are in its Enum node's aliases (an Enum with empty aliases\n\
+             is a useless constraint), and constraint_solve(mode=\"check\") reports no issues."
         );
 
         let agent_g_dir_clone = agent_g_dir.clone();
@@ -553,9 +571,14 @@ fn main() -> Result<()> {
 
         // csp_agreement: does the agent's graph give the same verdict as the reference
         // graph for this case's assignments? This is the end-to-end usefulness metric.
+        // Guard against a degenerate win: an empty/constraint-less graph calls every
+        // valid row "valid" vacuously, so require the agent to actually constrain
+        // something (≥1 CONSTRAINED_BY link) for the agreement to count.
         let csp_ref = solve_csp(ref_dir.path(), &ref_g, case.mode, &case.assignments, &src_doc);
         let csp_agent = solve_csp(&agent_g_dir, &agent_g, case.mode, &case.assignments, &src_doc);
-        let csp_agreement = csp_agent.valid == csp_ref.valid;
+        let agent_constrains = agent_g.all_edges().unwrap_or_default().iter()
+            .any(|e| e.edge_type == "CONSTRAINED_BY");
+        let csp_agreement = csp_agent.valid == csp_ref.valid && agent_constrains;
 
         // Post feedback
         let cli_gateway = &cli.gateway;

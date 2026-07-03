@@ -204,28 +204,33 @@ fn build_constraint(
         "Required" => Ok(vec![Constraint::Required]),
         "Forbidden" => Ok(vec![Constraint::Forbidden]),
         "Enum" => {
-            // For enum, HAS_DOMAIN points to a Domain node whose HAS_LITERAL edges are the enum values
-            let domain_id = outgoing.get(&cn.id).and_then(|edges| {
-                edges
-                    .iter()
-                    .find(|(et, _)| et == "HAS_DOMAIN")
-                    .map(|(_, to_id)| to_id.clone())
-            });
-            let values = match domain_id {
-                Some(ref did) => outgoing
-                    .get(did)
-                    .map(|edges| {
-                        edges
-                            .iter()
-                            .filter(|(et, _)| et == "HAS_LITERAL")
-                            .filter_map(|(_, to_id)| {
-                                all_nodes.iter().find(|n| n.id == *to_id).map(|n| n.label.clone())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => vec![],
-            };
+            // Compact form (preferred): the allowed values are the Enum node's
+            // `aliases` — one graph_upsert call carries the whole domain, so the
+            // graph stays ~26 nodes/GOST instead of one Literal node per value.
+            let mut values: Vec<String> = cn.aliases.clone();
+            // Legacy form (back-compat): HAS_DOMAIN → Domain → HAS_LITERAL → values.
+            if values.is_empty() {
+                let domain_id = outgoing.get(&cn.id).and_then(|edges| {
+                    edges
+                        .iter()
+                        .find(|(et, _)| et == "HAS_DOMAIN")
+                        .map(|(_, to_id)| to_id.clone())
+                });
+                if let Some(ref did) = domain_id {
+                    values = outgoing
+                        .get(did)
+                        .map(|edges| {
+                            edges
+                                .iter()
+                                .filter(|(et, _)| et == "HAS_LITERAL")
+                                .filter_map(|(_, to_id)| {
+                                    all_nodes.iter().find(|n| n.id == *to_id).map(|n| n.label.clone())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
+            }
             Ok(vec![Constraint::Enum { values }])
         }
         "Formula" => {
@@ -283,6 +288,24 @@ mod tests {
             node_type: node_type.into(),
             label: label.into(),
             aliases: vec![],
+            prov: Provenance {
+                source_path: src.into(),
+                range: None,
+                file_sig: None,
+                origin: "agent".into(),
+                confidence: 0.8,
+                created_at: 1,
+            },
+        })
+        .unwrap();
+    }
+
+    fn insert_node_aliases(g: &GraphStore, id: &str, node_type: &str, label: &str, aliases: &[&str], src: &str) {
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: node_type.into(),
+            label: label.into(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
             prov: Provenance {
                 source_path: src.into(),
                 range: None,
@@ -477,6 +500,33 @@ params = ["expression"]
             && f.constraints.contains(&Constraint::Required)));
         assert!(problem.fields.iter().any(|f| f.name == "B"
             && f.constraints.contains(&Constraint::Forbidden)));
+    }
+
+    /// Compact Enum: allowed values live in the Enum node's aliases, no Domain/Literal
+    /// nodes. One Field + one Enum + one edge is the whole constraint.
+    #[test]
+    fn load_enum_from_aliases_compact() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        insert_node(&g, "fld:d", "Field", "Наружный диаметр", "gost.pdf");
+        insert_node_aliases(&g, "enum:d", "Enum", "Наружный диаметр enum", &["125", "150", "115"], "gost.pdf");
+        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "enum:d", "gost.pdf");
+
+        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let f = problem.fields.iter().find(|f| f.name == "Наружный диаметр").unwrap();
+        let values = f.constraints.iter().find_map(|c| match c {
+            Constraint::Enum { values } => Some(values.clone()),
+            _ => None,
+        }).expect("Enum constraint from aliases");
+        assert_eq!(values, vec!["125", "150", "115"]);
+
+        // The solver honours it: 150 passes, 137 (in-between) is rejected.
+        assert!(glossa_constraint::solver::validate(&problem,
+            &[("Наружный диаметр".into(), serde_json::json!(150))]).is_empty());
+        assert!(!glossa_constraint::solver::validate(&problem,
+            &[("Наружный диаметр".into(), serde_json::json!(137))]).is_empty());
     }
 
     /// Conditional reconstructed from the graph: IF_FIELD/IF_VALUE literals give
