@@ -12,24 +12,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Resolve the source document the constraints are extracted from: `--doc` when
-/// given (canonicalized against the index), otherwise auto-detect — a KB with a
-/// single indexed document needs no configuration.
-/// This must be the CANONICAL indexed path: `load_problem` isolates fields by
-/// exact `prov.source_path` match, and agent nodes get the canonical path from
-/// `ops::graph_upsert`.
-fn resolve_source_doc(idx: &DocIndex, requested: Option<&str>) -> Result<String> {
-    if let Some(doc) = requested {
-        return idx.canonical_document_path(doc)
-            .ok_or_else(|| anyhow::anyhow!("--doc {doc:?} is not an indexed document in the knowledge base"));
+/// List the knowledge base's documents and pick a primary. A product's
+/// constraints are now assembled from several standards (the main GOST + the ones
+/// it references), so solving unions across ALL of them (`load_problem(None)`);
+/// the primary is only a representative label for reference provenance and the
+/// prompt. `--doc` pins the primary to a specific indexed document.
+fn resolve_source_doc(idx: &DocIndex, requested: Option<&str>) -> Result<(String, Vec<String>)> {
+    let mut set = BTreeSet::new();
+    idx.iter_chunks(|path, _, _, _| { set.insert(path.to_string()); })?;
+    let docs: Vec<String> = set.into_iter().collect();
+    if docs.is_empty() {
+        anyhow::bail!("knowledge base has no indexed documents");
     }
-    let mut docs = BTreeSet::new();
-    idx.iter_chunks(|path, _, _, _| { docs.insert(path.to_string()); })?;
-    match docs.len() {
-        0 => anyhow::bail!("knowledge base has no indexed documents"),
-        1 => Ok(docs.into_iter().next().unwrap()),
-        n => anyhow::bail!("knowledge base has {n} documents — pass --doc <path> to pick the source: {docs:?}"),
-    }
+    let primary = match requested {
+        Some(doc) => idx.canonical_document_path(doc)
+            .ok_or_else(|| anyhow::anyhow!("--doc {doc:?} is not an indexed document in the knowledge base"))?,
+        None => docs[0].clone(),
+    };
+    Ok((primary, docs))
 }
 
 // ── CLI ──
@@ -213,7 +213,7 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
 /// CONSTRAINED_BY edge to an Enum with values and constraint_solve(check) reports
 /// no issues. Returns `Some(feedback)` naming what is missing, or `None` to accept
 /// `done`. Universal — reads only the agent's own graph, never the reference.
-fn sop_gate_check(dir: &std::path::Path, src: &str) -> Option<String> {
+fn sop_gate_check(dir: &std::path::Path) -> Option<String> {
     let g = match GraphStore::open(dir) {
         Ok(g) => g,
         Err(_) => return Some("the constraint graph could not be opened.".into()),
@@ -270,7 +270,7 @@ fn sop_gate_check(dir: &std::path::Path, src: &str) -> Option<String> {
         ));
     }
     let ont = Ontology::load_or_default(dir);
-    if let Ok(problem) = glossa::constraint_adapter::load_problem(&g, &ont, src) {
+    if let Ok(problem) = glossa::constraint_adapter::load_problem(&g, &ont, None) {
         let check = glossa_constraint::solver::solve(&problem, SolveMode::Check, &[]);
         if !check.issues.is_empty() {
             let first = check.issues.iter().take(3)
@@ -282,9 +282,9 @@ fn sop_gate_check(dir: &std::path::Path, src: &str) -> Option<String> {
     None
 }
 
-fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)], src: &str) -> SolveResult {
+fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)]) -> SolveResult {
     let ont = Ontology::load_or_default(dir);
-    let problem = glossa::constraint_adapter::load_problem(g, &ont, src).unwrap();
+    let problem = glossa::constraint_adapter::load_problem(g, &ont, None).unwrap();
     // Re-key onto the graph's Field labels so a paraphrased parameter name still
     // hits its constraint (matches the MCP tool's behaviour).
     let assignments = glossa::constraint_adapter::resolve_assignment_fields(g, &problem, assignments);
@@ -471,8 +471,9 @@ fn main() -> Result<()> {
     Ontology::parse(&ontology_toml).context("ontology parse")?;
 
     let idx_kb = DocIndex::open_or_create(&cli.kb).context("open kb index")?;
-    let src_doc = resolve_source_doc(&idx_kb, cli.doc.as_deref())?;
+    let (src_doc, kb_docs) = resolve_source_doc(&idx_kb, cli.doc.as_deref())?;
     drop(idx_kb);
+    let kb_docs_list = kb_docs.join(", ");
 
     let (cols, rows) = load_validation_data(&cli.val_dir).context("load validation tables")?;
     eprintln!("Loaded {}: {} columns, {} valid rows", cli.val_dir.display(), cols.len(), rows.len());
@@ -507,7 +508,7 @@ fn main() -> Result<()> {
             let dir = tempfile::tempdir().context("csp tempdir")?;
             let g = setup(dir.path(), &ontology_toml, &cols, &src_doc);
             let t0 = std::time::Instant::now();
-            let csp = solve_csp(dir.path(), &g, case.mode, &case.assignments, &src_doc);
+            let csp = solve_csp(dir.path(), &g, case.mode, &case.assignments);
             let csp_ms = t0.elapsed().as_millis();
 
             let expected_valid = !case.name.contains("invalid");
@@ -561,9 +562,11 @@ fn main() -> Result<()> {
             })
             .collect::<Vec<_>>().join(", ");
         let prompt = format!(
-            "You are validating field assignments against the regulatory document '{src_doc}'.\n\n\
+            "You are building the constraint set for a product specified by GOST '{src_doc}'.\n\n\
              === PHASE 1: Build constraint graph ===\n\
-             The document is in the knowledge base. Use search/read to find its parameter tables.\n\
+             The knowledge base holds these standards: {kb_docs_list}. A parameter's allowed\n\
+             values may live in the main GOST or in a standard it references (e.g. grit, hardness,\n\
+             marking are defined in referenced GOSTs) — use search/read across ALL of them.\n\
              Call get_ontology first to see the legal node types and relation signatures.\n\
              For EACH parameter create exactly two nodes: a Field node and an Enum node, linked\n\
              Field --CONSTRAINED_BY--> Enum. Put ALL of the parameter's allowed values into the\n\
@@ -638,7 +641,7 @@ fn main() -> Result<()> {
                         .unwrap_or_default();
                     // Same feedback the MCP server gives: empty problems and
                     // unmatched assignment keys are called out, not hidden in JSON.
-                    let problem = glossa::constraint_adapter::load_problem(&g, &ont, &src_doc_exec).unwrap();
+                    let problem = glossa::constraint_adapter::load_problem(&g, &ont, None).unwrap();
                     let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
                     (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc_exec), vec![], vec![])
                 }
@@ -675,9 +678,8 @@ fn main() -> Result<()> {
         // fields with hundreds of literals + solve + done needs room to work.
         let outcome = if cli.sop {
             let gate_dir = agent_g_dir.clone();
-            let gate_src = src_doc.clone();
             run_episode_gated(chat, &prompt, exec, 50, EpisodePolicy::enrich(),
-                move || sop_gate_check(&gate_dir, &gate_src))
+                move || sop_gate_check(&gate_dir))
         } else {
             run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich())
         };
@@ -696,8 +698,8 @@ fn main() -> Result<()> {
         // Guard against a degenerate win: an empty/constraint-less graph calls every
         // valid row "valid" vacuously, so require the agent to actually constrain
         // something (≥1 CONSTRAINED_BY link) for the agreement to count.
-        let csp_ref = solve_csp(ref_dir.path(), &ref_g, case.mode, &case.assignments, &src_doc);
-        let csp_agent = solve_csp(&agent_g_dir, &agent_g, case.mode, &case.assignments, &src_doc);
+        let csp_ref = solve_csp(ref_dir.path(), &ref_g, case.mode, &case.assignments);
+        let csp_agent = solve_csp(&agent_g_dir, &agent_g, case.mode, &case.assignments);
         let agent_constrains = agent_g.all_edges().unwrap_or_default().iter()
             .any(|e| e.edge_type == "CONSTRAINED_BY");
         let csp_agreement = csp_agent.valid == csp_ref.valid && agent_constrains;
@@ -768,23 +770,23 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
 
         // No checklist → Step 1 unmet.
-        assert!(sop_gate_check(dir.path(), "gost.docx").unwrap().contains("Checklist"));
+        assert!(sop_gate_check(dir.path()).unwrap().contains("Checklist"));
 
         // Checklist commits to two parameters; none built yet.
         put(&g, "chk:1", "Checklist", "parameters", &["высота", "диаметр"]);
-        assert!(sop_gate_check(dir.path(), "gost.docx").unwrap().contains("диаметр"));
+        assert!(sop_gate_check(dir.path()).unwrap().contains("диаметр"));
 
         // Build "высота" fully; "диаметр" still uncovered.
         put(&g, "fld:h", "Field", "высота", &[]);
         put(&g, "enum:h", "Enum", "высота enum", &["1", "2"]);
         edge(&g, "fld:h", "enum:h");
-        let r = sop_gate_check(dir.path(), "gost.docx").unwrap();
+        let r = sop_gate_check(dir.path()).unwrap();
         assert!(r.contains("диаметр") && !r.contains("высота"), "{r}");
 
         // Build "диаметр" fully → gate clears.
         put(&g, "fld:d", "Field", "диаметр", &[]);
         put(&g, "enum:d", "Enum", "диаметр enum", &["10", "20"]);
         edge(&g, "fld:d", "enum:d");
-        assert!(sop_gate_check(dir.path(), "gost.docx").is_none(), "all covered → done allowed");
+        assert!(sop_gate_check(dir.path()).is_none(), "all covered → done allowed");
     }
 }

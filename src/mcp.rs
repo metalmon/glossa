@@ -545,7 +545,7 @@ impl GlossaServer {
             let a = _a;
             let g = GraphStore::open(&self.root).map_err(internal)?;
             let ont = Ontology::load_or_default(&self.root);
-            let problem = crate::constraint_adapter::load_problem(&g, &ont, &a.source_path)
+            let problem = crate::constraint_adapter::load_problem(&g, &ont, Some(&a.source_path))
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
             let mode = match a.mode.as_str() {

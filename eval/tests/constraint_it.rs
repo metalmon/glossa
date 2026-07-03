@@ -85,7 +85,7 @@ fn solve(
     assignment: Vec<(&str, serde_json::Value)>,
 ) -> serde_json::Value {
     let ont = glossa::graph::ontology::Ontology::load_or_default(dir);
-    let problem = glossa::constraint_adapter::load_problem(g, &ont, source_path).unwrap();
+    let problem = glossa::constraint_adapter::load_problem(g, &ont, Some(source_path)).unwrap();
 
     let solve_mode = match mode {
         "validate" => glossa_constraint::SolveMode::Validate,

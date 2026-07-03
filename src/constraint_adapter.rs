@@ -19,7 +19,15 @@ const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_DOMAIN"
 /// 3. For each constraint node, follows parameter edges → literals.
 ///
 /// Returns None when the constraint feature is disabled (compile-time gate).
-pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: &str) -> anyhow::Result<Problem> {
+/// Load a constraint problem from the graph.
+///
+/// `source_path`:
+/// - `Some(path)` — only Field nodes citing that document (multi-tenant isolation:
+///   several products/GOSTs share one base, keep them apart). The MCP tool uses this.
+/// - `None` — every Field in the graph. A single product's constraints are now
+///   assembled from several standards (the main GOST + the ones it references),
+///   so the eval unions across all source documents.
+pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: Option<&str>) -> anyhow::Result<Problem> {
     let all_nodes = g.all_nodes()?;
     let all_edges = g.all_edges()?;
 
@@ -33,10 +41,10 @@ pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: &str) -> anyhow
             .push((e.edge_type.clone(), e.to.clone()));
     }
 
-    // Find all Field nodes for this source_path
+    // Field nodes in scope: all of them, or only those citing `source_path`.
     let fields: Vec<_> = all_nodes
         .iter()
-        .filter(|n| n.node_type == "Field" && n.prov.source_path == source_path)
+        .filter(|n| n.node_type == "Field" && source_path.map_or(true, |src| n.prov.source_path == src))
         .collect();
 
     let mut field_constraints = Vec::new();
@@ -313,7 +321,7 @@ mod tests {
     use crate::graph::store::{GraphStore, Node, Provenance, Edge};
 
     fn make_adapter_problem(g: &GraphStore, ont: &Ontology, src: &str) -> Problem {
-        load_problem(g, ont, src).unwrap()
+        load_problem(g, ont, Some(src)).unwrap()
     }
 
     fn insert_node(g: &GraphStore, id: &str, node_type: &str, label: &str, src: &str) {
