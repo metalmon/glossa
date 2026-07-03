@@ -370,12 +370,6 @@ fn norm_value(s: &str) -> String {
     glossa_constraint::solver::canon_scalar(&stripped)
 }
 
-/// Field-name match: normalized equality, or containment for wording variants
-/// ("h, высота" vs "высота"). Guarded by length so short names don't match everything.
-fn field_labels_match(a: &str, b: &str) -> bool {
-    a == b || (a.len() >= 4 && b.len() >= 4 && (a.contains(b) || b.contains(a)))
-}
-
 fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     let ref_nodes = ref_json["nodes"].as_array().map(|a| a.as_slice()).unwrap_or_default();
     let ref_edges = ref_json["edges"].as_array().map(|a| a.as_slice()).unwrap_or_default();
@@ -383,24 +377,44 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     let agent_nodes = agent_g.all_nodes().unwrap_or_default();
     let agent_edges = agent_g.all_edges().unwrap_or_default();
 
-    // Field coverage: which reference fields are present in agent graph
-    let ref_field_labels: BTreeSet<String> = ref_nodes.iter()
+    // Field coverage BY DOMAIN, not by name: the GOST and the MDM reference name
+    // the same parameter differently ("предельная рабочая скорость" vs "максимальная
+    // скорость вращения"), so a name match under-counts. Instead a reference
+    // parameter counts as covered when some agent Enum reproduces the majority of
+    // its allowed-value set — the domain identifies the parameter, the label doesn't.
+    let ref_id_enum: std::collections::HashMap<&str, BTreeSet<String>> = ref_nodes.iter()
+        .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Enum"))
+        .filter_map(|n| {
+            let id = n.get("id")?.as_str()?;
+            let vals = n.get("aliases")?.as_array()?.iter().filter_map(|v| v.as_str()).map(norm_value).collect();
+            Some((id, vals))
+        })
+        .collect();
+    // (reference parameter label, its allowed-value set)
+    let ref_params: Vec<(String, BTreeSet<String>)> = ref_nodes.iter()
         .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Field"))
-        .filter_map(|n| n.get("label").and_then(|l| l.as_str()))
-        .map(norm_metric)
+        .filter_map(|f| {
+            let fid = f.get("id")?.as_str()?;
+            let label = norm_metric(f.get("label")?.as_str()?);
+            let enum_id = ref_edges.iter().find(|e| {
+                e.get("edge_type").and_then(|t| t.as_str()) == Some("CONSTRAINED_BY")
+                    && e.get("from").and_then(|x| x.as_str()) == Some(fid)
+            }).and_then(|e| e.get("to").and_then(|x| x.as_str()))?;
+            Some((label, ref_id_enum.get(enum_id).cloned().unwrap_or_default()))
+        })
         .collect();
-    let agent_field_labels: BTreeSet<String> = agent_nodes.iter()
-        .filter(|n| n.node_type == "Field")
-        .flat_map(|n| std::iter::once(n.label.as_str()).chain(n.aliases.iter().map(|a| a.as_str())))
-        .map(norm_metric)
+    let agent_domains: Vec<BTreeSet<String>> = agent_nodes.iter()
+        .filter(|n| n.node_type == "Enum" && !n.aliases.is_empty())
+        .map(|n| n.aliases.iter().map(|s| norm_value(s)).collect())
         .collect();
-
-    let field_cov = if ref_field_labels.is_empty() { 1.0 }
-        else {
-            ref_field_labels.iter()
-                .filter(|r| agent_field_labels.iter().any(|a| field_labels_match(r, a)))
-                .count() as f64 / ref_field_labels.len() as f64
-        };
+    // covered = some agent Enum holds ≥ half of this parameter's reference values.
+    let covered = |dom: &BTreeSet<String>| -> bool {
+        !dom.is_empty() && agent_domains.iter().any(|ad| {
+            dom.iter().filter(|v| ad.contains(*v)).count() as f64 / dom.len() as f64 >= 0.5
+        })
+    };
+    let field_cov = if ref_params.is_empty() { 1.0 }
+        else { ref_params.iter().filter(|(_, d)| covered(d)).count() as f64 / ref_params.len() as f64 };
 
     // Value coverage: allowed values are the Enum nodes' aliases (compact form).
     // We also union any legacy Literal-node labels the agent may still emit, so a
@@ -432,10 +446,11 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
         let r_sample: Vec<&String> = ref_lits.iter().take(12).collect();
         eprintln!("  [CMP] agent enum values (norm, {}): {a_sample:?}", agent_lits.len());
         eprintln!("  [CMP] ref   enum values (norm, {}): {r_sample:?}", ref_lits.len());
-        let missing: Vec<&String> = ref_field_labels.iter()
-            .filter(|r| !agent_field_labels.iter().any(|a| field_labels_match(r, a)))
+        let missing: Vec<&String> = ref_params.iter()
+            .filter(|(_, d)| !covered(d))
+            .map(|(label, _)| label)
             .collect();
-        eprintln!("  [CMP] missing fields ({}/{}): {missing:?}", missing.len(), ref_field_labels.len());
+        eprintln!("  [CMP] missing fields by domain ({}/{}): {missing:?}", missing.len(), ref_params.len());
     }
 
     // Edge coverage: shared edges (edge_type + from_label + to_label)
