@@ -67,13 +67,10 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-/// Drive a TensorZero episode to a final outcome.
-///
-/// `chat(messages, episode_id)` performs one `/inference` call (episode_id is None on the first turn,
-/// then the id returned by the first turn). `tool_call` blocks are executed via `exec(name, args)`
-/// and fed back as `tool_result` blocks. Termination + dedup follow `policy` (see `EpisodePolicy`).
+/// Drive a TensorZero episode to a final outcome (no completion gate — the plain
+/// agentic loop, unchanged). See [`run_episode_gated`] to add an SOP-style gate.
 pub fn run_episode<C, X>(
-    mut chat: C,
+    chat: C,
     user_question: &str,
     exec: X,
     max_rounds: usize,
@@ -82,6 +79,33 @@ pub fn run_episode<C, X>(
 where
     C: FnMut(&[Value], Option<&str>) -> anyhow::Result<TzTurn>,
     X: Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync,
+{
+    // No-op gate: `done` is always accepted, exactly the prior behaviour.
+    run_episode_gated(chat, user_question, exec, max_rounds, policy, || None)
+}
+
+/// Like [`run_episode`], plus an optional completion gate mirroring the zeroclaw
+/// SOP engine's `validate_step_output` + `finish_run`: when the model calls
+/// `done`, `done_gate()` inspects external state (e.g. the graph) and returns
+/// `Some(feedback)` to REJECT completion — the feedback is fed back and the loop
+/// continues — or `None` to accept. Deterministic, prompt-agnostic, so it works
+/// with the plain loop, TZ, and GEPA (which optimizes the prompt, not the gate).
+///
+/// `chat(messages, episode_id)` performs one `/inference` call (episode_id is None on the first turn,
+/// then the id returned by the first turn). `tool_call` blocks are executed via `exec(name, args)`
+/// and fed back as `tool_result` blocks. Termination + dedup follow `policy` (see `EpisodePolicy`).
+pub fn run_episode_gated<C, X, G>(
+    mut chat: C,
+    user_question: &str,
+    exec: X,
+    max_rounds: usize,
+    policy: EpisodePolicy,
+    done_gate: G,
+) -> anyhow::Result<EpisodeOutcome>
+where
+    C: FnMut(&[Value], Option<&str>) -> anyhow::Result<TzTurn>,
+    X: Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync,
+    G: Fn() -> Option<String>,
 {
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user_question })];
     let mut episode_id: Option<String> = None;
@@ -135,7 +159,7 @@ where
             continue;
         }
 
-        // Explicit completion signal (enrich): the model called `done` → the episode is finished.
+        // Explicit completion signal (enrich): the model called `done`.
         if policy.stop_on_done {
             if let Some(done) = tool_calls.iter().find(|c| c.get("name").and_then(|n| n.as_str()) == Some("done")) {
                 let note = done
@@ -144,6 +168,14 @@ where
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
                     .to_string();
+                // SOP-style completion gate: reject `done` while the step contract is
+                // unmet, feed back what's missing, and keep going. None → accept.
+                if let Some(reject) = done_gate() {
+                    messages.push(json!({ "role": "assistant", "content": turn.content }));
+                    messages.push(json!({ "role": "user", "content": [{ "type": "text", "text":
+                        format!("Not finished — {reject} Continue; call `done` only once that is resolved.") }] }));
+                    continue;
+                }
                 return Ok(EpisodeOutcome { answer: note, episode_id, surfaced_titles, done: true, rounds });
             }
         }
@@ -852,6 +884,30 @@ mod tests {
         run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
         let c = counts.lock().unwrap();
         assert_eq!(c.get("constraint_solve").copied().unwrap_or(0), 2, "repeat solve deduped, but re-runs after the upsert (graph changed)");
+    }
+
+    /// The SOP-style completion gate rejects `done` until it is satisfied: the model
+    /// calls `done` every round, the gate refuses the first two, then accepts.
+    #[test]
+    fn gated_done_is_rejected_until_gate_passes() {
+        use std::cell::RefCell;
+        let chat = |_: &[Value], _: Option<&str>| {
+            Ok(TzTurn {
+                content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } })],
+                episode_id: "e".into(),
+            })
+        };
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
+        let gate_calls = RefCell::new(0usize);
+        let gate = || -> Option<String> {
+            let mut n = gate_calls.borrow_mut();
+            *n += 1;
+            if *n < 3 { Some(format!("still missing item {n}.")) } else { None }
+        };
+        let out = run_episode_gated(chat, "q", exec, 10, EpisodePolicy::enrich(), gate).unwrap();
+        assert!(out.done, "episode must end via done once the gate passes");
+        assert_eq!(out.rounds, 3, "done accepted only on the 3rd round; first two rejected");
+        assert_eq!(*gate_calls.borrow(), 3, "gate consulted each done attempt");
     }
 
     #[test]

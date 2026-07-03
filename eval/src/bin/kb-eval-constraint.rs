@@ -6,7 +6,7 @@ use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use glossa_constraint::solver::{SolveMode, SolveResult};
-use kb_eval::backend::tensorzero::{run_episode, EpisodePolicy, TzTurn};
+use kb_eval::backend::tensorzero::{run_episode, run_episode_gated, EpisodePolicy, TzTurn};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -58,6 +58,11 @@ struct Cli {
     csp_only: bool,
     #[arg(long, default_value_t = 0)]
     limit: usize,
+    /// Enable the SOP-style completion gate: the episode is structured as
+    /// numbered steps and `done` is rejected until every Field has an Enum with
+    /// values and constraint_solve(check) is clean. Off = the plain agentic loop.
+    #[arg(long)]
+    sop: bool,
 }
 
 #[derive(Clone)]
@@ -202,6 +207,52 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
 }
 
 // ── CSP solver ──
+
+/// SOP-style completion gate (mirrors the zeroclaw engine's `validate_step_output`
+/// + `finish_run`): the graph is "step-complete" only when every Field has a
+/// CONSTRAINED_BY edge to an Enum with values and constraint_solve(check) reports
+/// no issues. Returns `Some(feedback)` naming what is missing, or `None` to accept
+/// `done`. Universal — reads only the agent's own graph, never the reference.
+fn sop_gate_check(dir: &std::path::Path, src: &str) -> Option<String> {
+    let g = match GraphStore::open(dir) {
+        Ok(g) => g,
+        Err(_) => return Some("the constraint graph could not be opened.".into()),
+    };
+    let nodes = g.all_nodes().unwrap_or_default();
+    let edges = g.all_edges().unwrap_or_default();
+    let fields: Vec<&Node> = nodes.iter().filter(|n| n.node_type == "Field").collect();
+    if fields.is_empty() {
+        return Some("no Field nodes yet: Step 1 is to create a Field for EVERY parameter in the document's table.".into());
+    }
+    let incomplete: Vec<&str> = fields
+        .iter()
+        .filter(|f| {
+            !edges.iter().any(|e| {
+                e.edge_type == "CONSTRAINED_BY"
+                    && e.from == f.id
+                    && nodes.iter().any(|n| n.id == e.to && n.node_type == "Enum" && !n.aliases.is_empty())
+            })
+        })
+        .map(|f| f.label.as_str())
+        .collect();
+    if !incomplete.is_empty() {
+        return Some(format!(
+            "these Field(s) still have no Enum with allowed values (Step 2): {}.",
+            incomplete.join(", ")
+        ));
+    }
+    let ont = Ontology::load_or_default(dir);
+    if let Ok(problem) = glossa::constraint_adapter::load_problem(&g, &ont, src) {
+        let check = glossa_constraint::solver::solve(&problem, SolveMode::Check, &[]);
+        if !check.issues.is_empty() {
+            let first = check.issues.iter().take(3)
+                .map(|i| format!("{}: {}", i.field, i.message))
+                .collect::<Vec<_>>().join("; ");
+            return Some(format!("constraint_solve(check) still reports issues (Step 3): {first}."));
+        }
+    }
+    None
+}
 
 fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)], src: &str) -> SolveResult {
     let ont = Ontology::load_or_default(dir);
@@ -353,6 +404,10 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
         let r_sample: Vec<&String> = ref_lits.iter().take(12).collect();
         eprintln!("  [CMP] agent enum values (norm, {}): {a_sample:?}", agent_lits.len());
         eprintln!("  [CMP] ref   enum values (norm, {}): {r_sample:?}", ref_lits.len());
+        let missing: Vec<&String> = ref_field_labels.iter()
+            .filter(|r| !agent_field_labels.iter().any(|a| field_labels_match(r, a)))
+            .collect();
+        eprintln!("  [CMP] missing fields ({}/{}): {missing:?}", missing.len(), ref_field_labels.len());
     }
 
     // Edge coverage: shared edges (edge_type + from_label + to_label)
@@ -502,6 +557,20 @@ fn main() -> Result<()> {
              each Field's allowed values are in its Enum node's aliases (an Enum with empty aliases\n\
              is a useless constraint), and constraint_solve(mode=\"check\") reports no issues."
         );
+        // SOP mode: tell the model completion is gated, so it can't stop early.
+        let prompt = if cli.sop {
+            format!(
+                "{prompt}\n\n\
+                 === SOP ENFORCEMENT ===\n\
+                 This task runs as an SOP. Step 1: create a Field for EVERY parameter in the\n\
+                 document's table up front. Step 2: attach each Field's full allowed-value set as\n\
+                 its Enum aliases. Step 3: constraint_solve(check) must be clean. `done` is GATED —\n\
+                 it is rejected, with the list of what is still missing, until every Field has an\n\
+                 Enum with values and the check passes. Cover every parameter; do not stop early."
+            )
+        } else {
+            prompt
+        };
 
         let agent_g_dir_clone = agent_g_dir.clone();
         let src_doc_exec = src_doc.clone();
@@ -572,7 +641,14 @@ fn main() -> Result<()> {
         let t1 = std::time::Instant::now();
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
-        let outcome = run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich());
+        let outcome = if cli.sop {
+            let gate_dir = agent_g_dir.clone();
+            let gate_src = src_doc.clone();
+            run_episode_gated(chat, &prompt, exec, 50, EpisodePolicy::enrich(),
+                move || sop_gate_check(&gate_dir, &gate_src))
+        } else {
+            run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich())
+        };
         let tz_ms = t1.elapsed().as_millis();
 
         // ── Post-episode: compare agent graph with reference ──
