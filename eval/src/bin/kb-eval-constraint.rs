@@ -280,6 +280,17 @@ fn norm_metric(s: &str) -> String {
     }
 }
 
+/// Value normalisation for domain coverage: strip a trailing unit, then collapse
+/// decimal notation via the solver's canonical form ("1,0"/"1.0"/"1" → "1"), so
+/// the metric matches the same way the solver compares.
+fn norm_value(s: &str) -> String {
+    let stripped = match s.rfind('[') {
+        Some(p) if s.trim_end().ends_with(']') => s[..p].trim_end().to_string(),
+        _ => s.to_string(),
+    };
+    glossa_constraint::solver::canon_scalar(&stripped)
+}
+
 /// Field-name match: normalized equality, or containment for wording variants
 /// ("h, высота" vs "высота"). Guarded by length so short names don't match everything.
 fn field_labels_match(a: &str, b: &str) -> bool {
@@ -320,7 +331,7 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
         .filter_map(|n| n.get("aliases").and_then(|a| a.as_array()))
         .flatten()
         .filter_map(|v| v.as_str())
-        .map(norm_metric)
+        .map(norm_value)
         .collect();
     let agent_lits: BTreeSet<String> = agent_nodes.iter()
         .flat_map(|n| {
@@ -328,7 +339,7 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
             let legacy = if n.node_type == "Literal" { vec![n.label.clone()] } else { vec![] };
             enum_vals.into_iter().chain(legacy)
         })
-        .map(|s| norm_metric(&s))
+        .map(|s| norm_value(&s))
         .collect();
     let literal_cov = if ref_lits.is_empty() { 1.0 }
         else { ref_lits.iter().filter(|l| agent_lits.contains(*l)).count() as f64 / ref_lits.len() as f64 };

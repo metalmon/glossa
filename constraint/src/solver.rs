@@ -31,27 +31,39 @@ pub struct FieldDomain {
     pub domain: Domain,
 }
 
-/// Value equality tolerant of the String/Number split: the graph stores literals
-/// as strings while assignments may carry JSON numbers ("41" ≡ 41).
-fn values_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    if a == b {
-        return true;
+/// The raw scalar text of a JSON value — no surrounding quotes (unlike `Display`
+/// on a `Value::String`).
+pub fn scalar_str(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
     }
-    let as_f64 = |v: &Value| -> Option<f64> {
-        match v {
-            Value::Number(n) => n.as_f64(),
-            Value::String(s) => s.trim().parse().ok(),
-            _ => None,
+}
+
+/// Canonical form of a scalar for comparison. A decimal written with either a
+/// comma (Russian standards: "0,6", "1,0") or a dot collapses to one numeric
+/// form, so "1,0" == "1.0" == "1" and "152,4" == "152.4". Non-numeric values
+/// (e.g. "F46", "23-25", "12a") are trimmed and lowercased. Symmetric, so it is
+/// safe to apply on both sides of both validation and metric comparisons.
+pub fn canon_scalar(s: &str) -> String {
+    let t = s.trim();
+    if let Ok(n) = t.replace(',', ".").parse::<f64>() {
+        if n.is_finite() && n.fract() == 0.0 {
+            return format!("{}", n as i64);
         }
-    };
-    match (as_f64(a), as_f64(b)) {
-        (Some(x), Some(y)) => (x - y).abs() < f64::EPSILON,
-        _ => match (a, b) {
-            (Value::String(x), Value::String(y)) => x.trim() == y.trim(),
-            _ => false,
-        },
+        return format!("{n}"); // f64 Display drops trailing zeros
     }
+    t.to_lowercase()
+}
+
+/// Value equality tolerant of the String/Number split and of decimal notation:
+/// the graph stores literals as strings (possibly comma-decimals) while
+/// assignments may carry JSON numbers ("41" ≡ 41, "1,0" ≡ 1).
+fn values_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    a == b || canon_scalar(&scalar_str(a)) == canon_scalar(&scalar_str(b))
 }
 
 /// Validate field assignments against constraints.
@@ -157,18 +169,11 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                 }
                 Constraint::Enum { values } => {
                     if let Some(val) = assign_map.get(fc.name.as_str()) {
-                        let matches = |v: &str| -> bool {
-                            match val {
-                                serde_json::Value::String(s) => v == s,
-                                serde_json::Value::Number(n) => n
-                                    .as_f64()
-                                    .and_then(|a| v.parse::<f64>().ok().map(|b| (a, b)))
-                                    .is_some_and(|(a, b)| (a - b).abs() < f64::EPSILON),
-                                _ => false,
-                            }
-                        };
-                        let s = format!("{val}");
-                        if !values.iter().any(|v| matches(v)) {
+                        // Compare in canonical form so "1,0" (comma-decimal literal)
+                        // matches the number 1, and "125" matches "125".
+                        let s = scalar_str(val);
+                        let target = canon_scalar(&s);
+                        if !values.iter().any(|v| canon_scalar(v) == target) {
                             violations.push(Violation {
                                 field: fc.name.clone(),
                                 constraint: "Enum".into(),
@@ -715,6 +720,30 @@ mod tests {
                 values: vec!["50".into()]
             }
         );
+    }
+
+    #[test]
+    fn canon_scalar_collapses_decimal_notation() {
+        assert_eq!(canon_scalar("1,0"), "1");
+        assert_eq!(canon_scalar("1.0"), "1");
+        assert_eq!(canon_scalar("1"), "1");
+        assert_eq!(canon_scalar("10,0"), "10");
+        assert_eq!(canon_scalar("152,4"), "152.4");
+        assert_eq!(canon_scalar("0,6"), "0.6");
+        // non-numeric passes through, lowercased
+        assert_eq!(canon_scalar("23-25"), "23-25");
+        assert_eq!(canon_scalar("F46"), "f46");
+    }
+
+    /// A comma-decimal enum literal ("1,0") matches the assigned number 1 and its
+    /// dot/plain spellings; a value outside the set is still rejected.
+    #[test]
+    fn validate_enum_matches_comma_decimals() {
+        let problem = make_problem(vec![("h", vec![make_enum(&["0,6", "1,0", "152,4"])])]);
+        for ok in [serde_json::json!(1), serde_json::json!("1.0"), serde_json::json!("1,0"), serde_json::json!(152.4)] {
+            assert!(validate(&problem, &[make_assignment("h", ok.clone())]).is_empty(), "{ok} should pass");
+        }
+        assert!(!validate(&problem, &[make_assignment("h", serde_json::json!(2))]).is_empty(), "2 ∉ set");
     }
 
     /// A `S = d * 1.7` formula pins S once d is assigned; without d it pins nothing.
