@@ -45,16 +45,6 @@ type = "openai"
 api_base = "https://openrouter.ai/api/v1"
 model_name = "qwen/qwen3.6-35b-a3b"
 api_key_location = "env::OPENROUTER_API_KEY"
-# Route ONLY to providers that support every request parameter — critically the
-# `tools` field. OpenRouter otherwise round-robins across ALL providers, some with
-# absent or degraded tool-calling; that produced wild agentic variance (one build
-# read 67 times and never called graph_upsert). `require_parameters` still allows
-# fallback across the tool-supporting providers, so it doesn't reintroduce the 429
-# pinning problem. Set at the provider level → applies to every function using this
-# model (coding + constraint_validate).
-extra_body = [
-  { pointer = "/provider", value = { require_parameters = true } },
-]
 
 # ── Coding function: the sampling params live HERE so clients (Zed) can't fall
 # back to looping defaults. Reference it as model "tensorzero::function_name::coding".
@@ -98,10 +88,6 @@ type = "openai"
 api_base = "https://openrouter.ai/api/v1"
 model_name = "qwen/qwen3.6-27b"
 api_key_location = "env::OPENROUTER_API_KEY"
-# Only tool-/param-capable providers (see qwen3_coder note).
-extra_body = [
-  { pointer = "/provider", value = { require_parameters = true } },
-]
 
 # Reference from Zed as model "tensorzero::function_name::coding_27b".
 [functions.coding_27b]
@@ -135,10 +121,6 @@ type = "openai"
 api_base = "https://openrouter.ai/api/v1"
 model_name = "qwen/qwen3.6-35b-a3b"
 api_key_location = "env::OPENROUTER_API_KEY"
-# Only tool-/param-capable providers (see qwen3_coder note).
-extra_body = [
-  { pointer = "/provider", value = { require_parameters = true } },
-]
 
 # ── GEPA search micro-task: emit search(query) for a question ──
 # `kb-train optimize` passes the evolving prod prompt via `input.system` on each /inference call.
