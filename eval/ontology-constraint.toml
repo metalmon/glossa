@@ -51,7 +51,7 @@
 # ── Entities (the constraint domain's nouns) ──
 [entities.Field]       # A parameter whose value is constrained
 id_prefix = "fld"
-description = "A product parameter. Create ONE Field per parameter, its `label` the parameter's name. Its allowed values go in a single Enum linked Field --CONSTRAINED_BY--> Enum."
+description = "A parameter of the product — the thing being constrained. One Field per parameter; its label is the parameter's name as the document writes it, human-readable and in the document's own language (this label is what a later table export shows). Its allowed values live in a constraint node the Field links to with CONSTRAINED_BY."
 
 [entities.Literal]     # A concrete value (number, string, regex pattern)
 id_prefix = "lit"
@@ -66,7 +66,7 @@ id_prefix = "chk"      # The parameter set is derived from Field nodes; a Checkl
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
-description = "Field --CONSTRAINED_BY--> the ONE constraint node that holds its allowed values (usually an Enum). One edge per field."
+description = "Links a Field to the node holding its constraint — usually an Enum of allowed values (or Range/Regex/Formula). The Field and its constraint node are separate nodes; the graph tells them apart by node type, so they can share the parameter's name as their label."
 
 [relations.HAS_MIN]
 from = ["Range"]
@@ -120,7 +120,7 @@ description = "A string pattern. One Literal (the regex) linked HAS_PATTERN."
 
 [constraint_types.Enum]
 params = ["values"]
-description = "The set of allowed values of a field. Create ONE Enum node whose `aliases` list ALL the values as separate strings; link it Field --CONSTRAINED_BY--> Enum. Do NOT create one Enum per value, and do NOT put any value in the label."
+description = "A parameter's set of allowed values. One Enum node carrying every value in its `aliases`, linked from the Field by CONSTRAINED_BY. Its label names the same parameter as the Field, written coherently in the parameter's own language (it reads alongside the Field in a table export) — the values themselves stay in `aliases`, not in the label."
 
 [constraint_types.Formula]
 params = ["expression"]

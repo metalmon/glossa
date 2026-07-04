@@ -337,12 +337,16 @@ fn make_exec(
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
             "graph_stats" => {
-                // Same shared op as the MCP server: `doc` adds the checklist-coverage block.
+                // Always attach the per-parameter coverage for the document being built:
+                // the model needs to see WHICH parameters still lack values, not bare
+                // counts. Accept the arg under the names it reaches for and fall back to
+                // the run's document — the coverage is the point of calling graph_stats.
+                let doc = ["doc", "document", "source", "path"].iter()
+                    .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+                    .unwrap_or(src_doc.as_str());
                 let mut out = glossa::tools::graph_stats(&g);
-                if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
-                    out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
-                }
+                out.push('\n');
+                out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
                 (out, vec![], vec![])
             }
             "graph_generalize" => {
@@ -959,14 +963,15 @@ fn main() -> Result<()> {
                 "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
                 "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
                 "graph_stats" => {
-                // Same shared op as the MCP server: `doc` adds the checklist-coverage block.
-                let mut out = glossa::tools::graph_stats(&g);
-                if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
+                    // Always attach per-parameter coverage for the document being built.
+                    let doc = ["doc", "document", "source", "path"].iter()
+                        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+                        .unwrap_or(src_doc_exec.as_str());
+                    let mut out = glossa::tools::graph_stats(&g);
                     out.push('\n');
                     out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                    (out, vec![], vec![])
                 }
-                (out, vec![], vec![])
-            }
                 "graph_generalize" => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                     (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])
