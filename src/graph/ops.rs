@@ -257,14 +257,26 @@ pub fn graph_upsert(
     // (3) build NodeSpec list (valid nodes only)
     let nodespecs: Vec<NodeSpec> = valid_nodes
         .iter()
-        .map(|(nd, canonical)| NodeSpec {
-            id: id_for(ont, &nd.node_type, &nd.label),
-            node_type: nd.node_type.clone(),
-            label: nd.label.clone(),
-            aliases: nd.aliases.clone(),
-            source_path: canonical.clone(),
-            range: None,
-            confidence: None,
+        .map(|(nd, canonical)| {
+            let id = id_for(ont, &nd.node_type, &nd.label);
+            // Preserve existing aliases when this upsert omits them. Re-sending a node
+            // to touch its label/source (or to re-anchor a dropped edge) must NOT
+            // silently wipe an Enum's values — a common small-model self-correction
+            // that otherwise blanked the domain.
+            let aliases = if nd.aliases.is_empty() {
+                g.get_node(&id).ok().flatten().map(|n| n.aliases).unwrap_or_default()
+            } else {
+                nd.aliases.clone()
+            };
+            NodeSpec {
+                id,
+                node_type: nd.node_type.clone(),
+                label: nd.label.clone(),
+                aliases,
+                source_path: canonical.clone(),
+                range: None,
+                confidence: None,
+            }
         })
         .collect();
 
@@ -1117,6 +1129,32 @@ strict = true
             outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#"),
             "MENTIONS edge to a section ref must land; got: {:?}",
             outgoing.iter().map(|e| (e.edge_type.clone(), e.to.clone())).collect::<Vec<_>>()
+        );
+    }
+
+    /// Re-upserting a node with NO aliases must not wipe the values it already has —
+    /// the small model does this while fixing something else, and it blanked domains.
+    #[test]
+    fn reupsert_without_aliases_preserves_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "d.md".into(),
+            location: "Intro".into(),
+            file_type: "md".into(),
+            text: "content".into(),
+        }]).unwrap();
+        let mut n = unode("Symptom", "Тип", "d.md");
+        n.aliases = vec!["41".into(), "42".into()];
+        assert!(!graph_upsert(&idx, &g, &ont, vec![n], vec![], 1).rejected);
+        // Re-send the same node with no aliases (e.g. re-anchoring a dropped edge).
+        assert!(!graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Тип", "d.md")], vec![], 2).rejected);
+        let node = g.get_node(&id_for(&ont, "Symptom", "Тип")).unwrap().unwrap();
+        assert_eq!(
+            node.aliases, vec!["41".to_string(), "42".to_string()],
+            "aliases must survive a no-alias re-upsert"
         );
     }
 
