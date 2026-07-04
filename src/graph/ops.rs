@@ -301,19 +301,34 @@ pub fn graph_upsert(
         let mut to_resolved: Option<String> = None;
         let mut edge_ok = true;
 
+        // A bare section anchor "#N" (no document) means "section N of this edge's
+        // own document": qualify it with the edge's source_path so it resolves
+        // instead of dropping. The model knows the document — it set source_path —
+        // but writes the target as a short "#1".
+        let qualify = |ep: &str| -> String {
+            match ep.strip_prefix('#') {
+                Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                    format!("{edge_source_path}#{n}")
+                }
+                _ => ep.to_string(),
+            }
+        };
+        let from_ep = qualify(&ue.from);
+        let to_ep = qualify(&ue.to);
+
         // resolve from endpoint
-        match resolve_section_ref(idx, &ue.from) {
+        match resolve_section_ref(idx, &from_ep) {
             Err(m) => {
                 errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
-            Ok(v) if v != ue.from => {
+            Ok(v) if v != from_ep => {
                 // numeric section ref resolved to section id
                 from_resolved = Some(v);
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &ue.from) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &from_ep) {
                     Some(id) => from_resolved = Some(id),
                     None => {
                         errs.push(format!(
@@ -326,18 +341,18 @@ pub fn graph_upsert(
         }
 
         // resolve to endpoint
-        match resolve_section_ref(idx, &ue.to) {
+        match resolve_section_ref(idx, &to_ep) {
             Err(m) => {
                 errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
-            Ok(v) if v != ue.to => {
+            Ok(v) if v != to_ep => {
                 // numeric section ref resolved to section id
                 to_resolved = Some(v);
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &ue.to) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &to_ep) {
                     Some(id) => to_resolved = Some(id),
                     None => {
                         errs.push(format!(
