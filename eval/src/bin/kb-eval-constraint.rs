@@ -392,14 +392,11 @@ fn coverage(agent_g_dir: &std::path::Path, doc: &str) -> Option<glossa::graph::o
     glossa::graph::ops::checklist_coverage(&g, doc).ok().flatten()
 }
 
-/// Parameters still needing work — unbuilt OR unmapped, in checklist order.
-/// This is the build loop's gate metric: the loop keeps going until every
-/// parameter has both its constraint (Field→Enum) and its source (DEFINED_IN).
+/// Parameters still without a constraint — a Field with no Enum of values yet.
+/// The observability metric logged beside the agent's own `remaining` report.
 fn pending_params(cov: &Option<glossa::graph::ops::ChecklistCoverage>) -> Vec<String> {
     match cov {
-        Some(c) => c.params.iter()
-            .filter(|p| c.unbuilt.contains(p) || c.unmapped.contains(p))
-            .cloned().collect(),
+        Some(c) => c.unbuilt.clone(),
         None => Vec::new(),
     }
 }
@@ -437,7 +434,7 @@ fn run_sop_conversation(
     agent_g_dir: &std::path::Path,
     kb: &std::path::Path,
     src_doc: &str,
-    kb_docs_list: &str,
+    _kb_docs_list: &str,
     gateway: &str,
     tags: &Value,
     timeout: Duration,
@@ -458,8 +455,8 @@ fn run_sop_conversation(
         "name": "sop_advance",
         "description": "Finish the CURRENT SOP step and receive the next one. Call it once the step's \
             work is done. `output` is a JSON-object string carrying the step's result; for these steps \
-            it is {\"remaining\": N} where N is how many checklist parameters graph_stats(doc=…) still \
-            lists as unbuilt or unmapped.",
+            it is {\"remaining\": N} where N is how many parameters graph_stats(doc=…) still lists as \
+            without values (no Field→Enum).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -480,14 +477,24 @@ fn run_sop_conversation(
             step.number, n_steps, step.title, step.body, tools_line)
     };
 
-    let intro = format!(
-        "You are building the constraint set for regulatory document '{src_doc}'.\n\
-         Knowledge base standards: {kb_docs_list}.\n\n\
-         You are running an SOP as ONE continuous session. Do the current step's work with the tools, \
-         then call `sop_advance` to finish it and receive the next step. When `sop_advance` replies \
-         that the SOP is complete, call `done`.\n\n"
+    // The SOP.md preamble (everything before "## Steps") is the behavioural guide
+    // — mental model, vocabulary, illustrative example. The step parser ignores
+    // it, so surface it here as the run's opening context. SOP.md stays the
+    // single source; under zeroclaw the same preamble is the SOP's guide.
+    let guide = std::fs::read_to_string(sop_dir.join("SOP.md"))
+        .ok()
+        .and_then(|md| md.split("## Steps").next().map(|s| s.trim().to_string()))
+        .unwrap_or_default();
+    // We name only the document to work from — NOT the rest of the knowledge
+    // base. In production a corpus may hold one standard or many; the agent finds
+    // any standard THIS document references by searching, the same as it will
+    // there. Handing it the file list would be a hint it won't get in prod.
+    let first_prompt = format!(
+        "{guide}\n\n\
+         The document to work from is '{src_doc}'. Any standard it references, locate in the \
+         knowledge base yourself with `search`/`read`.\n\n{}",
+        step_ctx(&sop_def.steps[0])
     );
-    let first_prompt = format!("{intro}{}", step_ctx(&sop_def.steps[0]));
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Mutex::new(sop::driver::minimal_run(&sop_def));

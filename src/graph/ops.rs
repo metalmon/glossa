@@ -5,7 +5,7 @@
 
 use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{GraphStore, Node, normalize_label};
+use crate::graph::store::{GraphStore, normalize_label};
 use crate::index::store::DocIndex;
 
 // ── label-based input types ───────────────────────────────────────────────────
@@ -115,7 +115,7 @@ fn resolve_endpoint_label(
     if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
         return Some(id);
     }
-    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic", "Standard"];
+    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
     let ids = g.resolve(label).ok()?;
     ids.into_iter()
         .filter_map(|id| g.get_node(&id).ok().flatten())
@@ -390,7 +390,7 @@ pub fn graph_upsert(
 
     // (6) Nothing well-formed at all → full rejection with a label-matching hint.
     if nodespecs.is_empty() && edgespecs.is_empty() {
-        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic", "Standard"];
+        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
         let existing: Vec<String> = g
             .all_nodes()
             .unwrap_or_default()
@@ -525,108 +525,66 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     }
 }
 
-/// Coverage of one document's parameter checklist, scoped by provenance so
-/// several documents' pipelines can share one graph without polluting each
-/// other's statistics (a same-named Field built for another document never
-/// counts here).
-///
-/// Scope: the Checklist whose `prov.source_path` equals `doc` (a canonical
-/// indexed path), plus the document's citation set — its own Standard node(s)
-/// and every Standard reachable from them over MENTIONS edges. A Field counts
-/// for a parameter only when it is inside that scope: its provenance is the
-/// document itself or a cited standard, or it is DEFINED_IN one of the scope's
-/// Standards.
-///
-/// Shared by the MCP `graph_stats(doc=…)` tool and the constraint-eval SOP
-/// driver so both derive the SAME numbers from the same code — the feedback
-/// stays stateless and graph-derived (no attempt counters anywhere).
+/// Coverage of one document's parameters, scoped by ownership: a `Field`'s
+/// `source_path` is the target document (the product's GOST), so several GOSTs
+/// can share one graph without polluting each other — a same-named Field owned
+/// by another document never counts here. (Where a Field's *values* were read is
+/// recorded separately by a `MENTIONS` edge; that provenance does not affect
+/// ownership.) Shared by the MCP `graph_stats(doc=…)` tool and the constraint-eval
+/// SOP driver so both derive the SAME numbers from the same code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChecklistCoverage {
-    /// Checklist parameter names, in checklist order.
+    /// Parameter names owned by the document, in first-seen order.
     pub params: Vec<String>,
-    /// Parameters with no in-scope Field --CONSTRAINED_BY--> Enum(values).
+    /// Parameters with no Field --CONSTRAINED_BY--> Enum(values) yet.
     pub unbuilt: Vec<String>,
-    /// Parameters with no in-scope Field --DEFINED_IN--> Standard.
-    pub unmapped: Vec<String>,
-    /// The reference map: (parameter, Standard label it is DEFINED_IN), for
-    /// every mapped parameter — so a report can tell the agent WHERE a still
-    /// unbuilt parameter's values are defined.
-    pub mapped_to: Vec<(String, String)>,
 }
 
-/// `None` when the graph has no Checklist for `doc` (step 1 hasn't run).
+/// `None` when the document owns no parameters yet (no Field, no Checklist).
 pub fn checklist_coverage(
     g: &GraphStore,
     doc: &str,
 ) -> anyhow::Result<Option<ChecklistCoverage>> {
     let nodes = g.all_nodes()?;
     let edges = g.all_edges()?;
-    let params: Vec<String> = nodes
+    // The parameter set: every Field the document owns (source_path == doc), plus
+    // any Checklist aliases if one exists. The Field set IS the list — a model
+    // expresses parameters as Field nodes, so no separate Checklist is required.
+    let mut params: Vec<String> = nodes
         .iter()
         .filter(|n| n.node_type == "Checklist" && n.prov.source_path == doc)
         .flat_map(|n| n.aliases.clone())
         .collect();
+    let mut seen: std::collections::BTreeSet<String> = params.iter().map(|p| normalize_label(p)).collect();
+    for f in nodes.iter().filter(|n| n.node_type == "Field" && n.prov.source_path == doc) {
+        if seen.insert(normalize_label(&f.label)) {
+            params.push(f.label.clone());
+        }
+    }
     if params.is_empty() {
         return Ok(None);
     }
-    // Citation set: the doc's own Standard node(s) + MENTIONS-reachable Standards.
-    let mut scope_std: std::collections::BTreeSet<String> = nodes
-        .iter()
-        .filter(|n| n.node_type == "Standard" && n.prov.source_path == doc)
-        .map(|n| n.id.clone())
-        .collect();
-    loop {
-        let grown: Vec<String> = edges
-            .iter()
-            .filter(|e| e.edge_type == "MENTIONS" && scope_std.contains(&e.from) && !scope_std.contains(&e.to))
-            .filter(|e| nodes.iter().any(|n| n.id == e.to && n.node_type == "Standard"))
-            .map(|e| e.to.clone())
-            .collect();
-        if grown.is_empty() {
-            break;
-        }
-        scope_std.extend(grown);
-    }
-    let scope_paths: std::collections::BTreeSet<&str> = nodes
-        .iter()
-        .filter(|n| scope_std.contains(&n.id))
-        .map(|n| n.prov.source_path.as_str())
-        .chain(std::iter::once(doc))
-        .collect();
-    let in_scope = |f: &Node| {
-        scope_paths.contains(f.prov.source_path.as_str())
-            || edges.iter().any(|e| e.edge_type == "DEFINED_IN" && e.from == f.id && scope_std.contains(&e.to))
-    };
-    let (mut unbuilt, mut unmapped, mut mapped_to) = (Vec::new(), Vec::new(), Vec::new());
+    // Built = a Field the document owns resolves from the name and is
+    // CONSTRAINED_BY an Enum carrying values.
+    let mut unbuilt = Vec::new();
     for p in &params {
-        let ids = g.resolve(p).unwrap_or_default();
-        let fields: Vec<&Node> = ids
-            .iter()
-            .filter_map(|id| nodes.iter().find(|n| &n.id == id && n.node_type == "Field"))
-            .filter(|f| in_scope(f))
-            .collect();
-        let built = fields.iter().any(|f| {
-            edges.iter().any(|e| {
-                e.edge_type == "CONSTRAINED_BY"
-                    && e.from == f.id
-                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
+        let built = g.resolve(p).unwrap_or_default().iter().any(|id| {
+            nodes.iter().any(|n| {
+                &n.id == id
+                    && n.node_type == "Field"
+                    && n.prov.source_path == doc
+                    && edges.iter().any(|e| {
+                        e.edge_type == "CONSTRAINED_BY"
+                            && e.from == n.id
+                            && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
+                    })
             })
-        });
-        let mapped_std = fields.iter().find_map(|f| {
-            edges.iter()
-                .filter(|e| e.edge_type == "DEFINED_IN" && e.from == f.id)
-                .find_map(|e| nodes.iter().find(|m| m.id == e.to && m.node_type == "Standard"))
-                .map(|m| m.label.clone())
         });
         if !built {
             unbuilt.push(p.clone());
         }
-        match mapped_std {
-            Some(s) => mapped_to.push((p.clone(), s)),
-            None => unmapped.push(p.clone()),
-        }
     }
-    Ok(Some(ChecklistCoverage { params, unbuilt, unmapped, mapped_to }))
+    Ok(Some(ChecklistCoverage { params, unbuilt }))
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -635,7 +593,7 @@ pub fn checklist_coverage(
 mod tests {
     use super::*;
     use crate::graph::agent::NodeUpdate;
-    use crate::graph::store::{Edge, Provenance};
+    use crate::graph::store::{Edge, Node, Provenance};
 
     fn cov_node(g: &GraphStore, id: &str, nt: &str, label: &str, aliases: &[&str], src: &str) {
         g.put_node(&Node {
@@ -658,45 +616,29 @@ mod tests {
     }
 
     #[test]
-    fn checklist_coverage_scoped_by_provenance_and_citations() {
+    fn checklist_coverage_scoped_by_ownership() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
 
-        // Document A: checklist of 3 params; its Standard cites ref.docx via MENTIONS.
-        cov_node(&g, "chk:a", "Checklist", "params A", &["высота", "зернистость", "диаметр"], "a.docx");
-        cov_node(&g, "std:a", "Standard", "ГОСТ А", &[], "a.docx");
-        cov_node(&g, "std:ref", "Standard", "ГОСТ REF", &[], "ref.docx");
-        cov_edge(&g, "std:a", "MENTIONS", "std:ref");
-
-        // высота: built + mapped in A's own doc.
+        // Document A owns two parameters (Field.source_path == a.docx).
+        // высота: Field + Enum with values → built. зернистость: Field, no Enum → unbuilt.
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
         cov_node(&g, "enum:vys-a", "Enum", "высота enum", &["10", "20"], "a.docx");
         cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
-        cov_edge(&g, "fld:vys-a", "DEFINED_IN", "std:a");
+        cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "a.docx");
 
-        // зернистость: mapped to the cited standard (in scope via MENTIONS), no Enum yet.
-        cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "ref.docx");
-        cov_edge(&g, "fld:zer-a", "DEFINED_IN", "std:ref");
-
-        // диаметр: only document B built it — same name, out of A's scope.
-        cov_node(&g, "std:b", "Standard", "ГОСТ B", &[], "b.docx");
+        // Document B owns a same-named parameter — must NOT count for A.
         cov_node(&g, "fld:dia-b", "Field", "диаметр", &[], "b.docx");
         cov_node(&g, "enum:dia-b", "Enum", "диаметр enum", &["1"], "b.docx");
         cov_edge(&g, "fld:dia-b", "CONSTRAINED_BY", "enum:dia-b");
-        cov_edge(&g, "fld:dia-b", "DEFINED_IN", "std:b");
 
-        let c = checklist_coverage(&g, "a.docx").unwrap().expect("checklist exists");
-        assert_eq!(c.params.len(), 3);
-        // высота built+mapped; зернистость mapped but unbuilt; диаметр neither (B's field is out of scope).
-        assert_eq!(c.unbuilt, vec!["зернистость".to_string(), "диаметр".to_string()]);
-        assert_eq!(c.unmapped, vec!["диаметр".to_string()]);
-        // The reference map names each mapped parameter's source standard.
-        assert_eq!(c.mapped_to, vec![
-            ("высота".to_string(), "ГОСТ А".to_string()),
-            ("зернистость".to_string(), "ГОСТ REF".to_string()),
-        ]);
+        let c = checklist_coverage(&g, "a.docx").unwrap().expect("A owns params");
+        let mut params = c.params.clone();
+        params.sort();
+        assert_eq!(params, vec!["высота".to_string(), "зернистость".to_string()]);
+        assert_eq!(c.unbuilt, vec!["зернистость".to_string()]);
 
-        // No checklist for an unknown doc.
+        // A document that owns no parameters.
         assert!(checklist_coverage(&g, "zzz.docx").unwrap().is_none());
     }
 

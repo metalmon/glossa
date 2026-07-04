@@ -458,23 +458,15 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
 pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
     match crate::graph::ops::checklist_coverage(g, doc) {
         Ok(Some(c)) => {
-            // An unbuilt-but-mapped parameter is annotated with WHERE its values
-            // are defined, so the agent opens the right document directly.
-            let unbuilt: Vec<String> = c.unbuilt.iter().map(|p| {
-                match c.mapped_to.iter().find(|(param, _)| param == p) {
-                    Some((_, std)) => format!("«{p}» (values in «{std}»)"),
-                    None => format!("«{p}»"),
-                }
-            }).collect();
-            let list = |v: &[String]| if v.is_empty() { "-".to_string() } else { v.join(", ") };
-            let unmapped: Vec<String> = c.unmapped.iter().map(|p| format!("«{p}»")).collect();
+            let unbuilt = if c.unbuilt.is_empty() { "-".to_string() }
+                else { c.unbuilt.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
             format!(
-                "checklist({doc}): {} params, {} unbuilt, {} unmapped\nunbuilt: {}\nunmapped: {}",
-                c.params.len(), c.unbuilt.len(), c.unmapped.len(), list(&unbuilt), list(&unmapped)
+                "params({doc}): {} total, {} still without values (no Field→Enum)\nunbuilt: {}",
+                c.params.len(), c.unbuilt.len(), unbuilt
             )
         }
-        Ok(None) => format!("checklist({doc}): no Checklist node for this document yet"),
-        Err(e) => format!("checklist({doc}): error: {e}"),
+        Ok(None) => format!("params({doc}): no Field for this document yet"),
+        Err(e) => format!("params({doc}): error: {e}"),
     }
 }
 
