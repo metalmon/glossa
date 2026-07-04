@@ -69,9 +69,15 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
         let suffix = &s[pos + 1..];
         if let Ok(n) = suffix.parse::<u64>() {
             let raw = &s[..pos];
-            let path = idx
-                .canonical_document_path(raw)
-                .unwrap_or_else(|| raw.to_string());
+            // A path that resolves to no indexed document is the real failure here —
+            // say so plainly instead of blaming the chunk number, which sends the model
+            // chasing a different number when it should fix the document path (e.g. it
+            // wrote the name transliterated, "гост…" for "gost…", instead of copying it).
+            let Some(path) = idx.canonical_document_path(raw) else {
+                return Err(format!(
+                    "no document '{raw}' in the base — copy the document path exactly as grep/read prints it, character for character"
+                ));
+            };
             return match idx.location_for_ord(&path, n) {
                 Ok(Some(loc)) => Ok(Some(crate::graph::build::section_id(&path, &loc))),
                 Ok(None) => Err(format!(

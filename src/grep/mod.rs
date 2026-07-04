@@ -75,7 +75,23 @@ impl GrepHit {
 /// pattern contains an uppercase letter — so a lowercase query matches mixed-case text; `-i`
 /// forces folding unconditionally.
 fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
-    let mut body = if opts.fixed { regex::escape(pattern) } else { pattern.to_string() };
+    let mut body = if opts.fixed {
+        // Forgiving literal: a small model often sets `fixed` yet writes a regex
+        // alternation `A|B`. Take that at its intent — "any of these literal
+        // alternatives" — by escaping each `|`-separated part rather than searching
+        // for a literal pipe (which matches nothing).
+        if pattern.contains('|') {
+            pattern
+                .split('|')
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join("|")
+        } else {
+            regex::escape(pattern)
+        }
+    } else {
+        pattern.to_string()
+    };
     if opts.word {
         body = format!(r"\b(?:{body})\b");
     }
@@ -484,6 +500,17 @@ mod tests {
         let got: Vec<_> = h.iter().map(|x| x.line.as_str()).collect();
         assert_eq!(got, vec!["A12", "A34"]);
         assert!(h.iter().all(|x| x.kind == HitKind::Match));
+    }
+
+    #[test]
+    fn fixed_alternation_builds_literal_alternatives() {
+        // A small model often sets fixed=true yet writes `A|B`; take it as "either
+        // literal alternative" — the `|` is honoured, and each side stays literal (the
+        // dot matches a real dot, not any character), so `aXb` does not match.
+        let re = build_matcher("a.b|c.d", &GrepOpts { fixed: true, ..Default::default() }).unwrap();
+        assert!(re.is_match("hit a.b"));
+        assert!(re.is_match("hit c.d"));
+        assert!(!re.is_match("no aXb"));
     }
 
     #[test]
