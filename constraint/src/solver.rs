@@ -57,12 +57,37 @@ fn fold_homoglyph(c: char) -> char {
     }
 }
 
+/// Unify the dash variants (em/en/minus/hyphen) to `-` and drop spaces around it,
+/// so a range label reads the same however it was typed: "41—43" == "41 - 43" ==
+/// "41-43". Non-dash text is untouched.
+fn normalize_dashes(s: &str) -> String {
+    let unified: String = s
+        .chars()
+        .map(|c| if matches!(c, '—' | '–' | '−' | '‐' | '-') { '-' } else { c })
+        .collect();
+    if unified.contains('-') {
+        unified.split('-').map(str::trim).collect::<Vec<_>>().join("-")
+    } else {
+        unified
+    }
+}
+
+/// Parse a range label `a-b` (after canonicalisation) into `(lo, hi)`. `None` when
+/// it is not a two-number range (a plain value, a code, a negative number).
+pub fn parse_range(v: &str) -> Option<(f64, f64)> {
+    let c = canon_scalar(v);
+    let (a, b) = c.split_once('-')?;
+    let (a, b): (f64, f64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    Some(if a <= b { (a, b) } else { (b, a) })
+}
+
 /// Canonical form of a scalar for comparison. A decimal written with either a
 /// comma (Russian standards: "0,6", "1,0") or a dot collapses to one numeric
 /// form, so "1,0" == "1.0" == "1" and "152,4" == "152.4". Non-numeric values
-/// (e.g. "F46", "23-25", "12a") are trimmed, lowercased, and have Cyrillic/Latin
-/// homoglyphs folded to one script ("14А" == "14a", "В" == "b"). Symmetric, so it
-/// is safe to apply on both sides of both validation and metric comparisons.
+/// (e.g. "F46", "23-25", "12a") are trimmed, lowercased, have Cyrillic/Latin
+/// homoglyphs folded to one script ("14А" == "14a", "В" == "b"), and dash variants
+/// unified ("41—43" == "41-43"). Symmetric, so it is safe to apply on both sides
+/// of both validation and metric comparisons.
 pub fn canon_scalar(s: &str) -> String {
     let t = s.trim();
     if let Ok(n) = t.replace(',', ".").parse::<f64>() {
@@ -71,7 +96,8 @@ pub fn canon_scalar(s: &str) -> String {
         }
         return format!("{n}"); // f64 Display drops trailing zeros
     }
-    t.to_lowercase().chars().map(fold_homoglyph).collect()
+    let folded: String = t.to_lowercase().chars().map(fold_homoglyph).collect();
+    normalize_dashes(&folded)
 }
 
 /// Value equality tolerant of the String/Number split and of decimal notation:
@@ -188,7 +214,13 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                         // matches the number 1, and "125" matches "125".
                         let s = scalar_str(val);
                         let target = canon_scalar(&s);
-                        if !values.iter().any(|v| canon_scalar(v) == target) {
+                        let exact = values.iter().any(|v| canon_scalar(v) == target);
+                        // Range containment: a numeric marking falls inside an allowed
+                        // range LABEL — "42" is valid against the allowed value "41-43".
+                        let in_range = target.parse::<f64>().ok().is_some_and(|n| {
+                            values.iter().any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
+                        });
+                        if !exact && !in_range {
                             violations.push(Violation {
                                 field: fc.name.clone(),
                                 constraint: "Enum".into(),
@@ -607,6 +639,29 @@ mod tests {
         assert!(validate(&problem, &assignment).is_empty());
         let assignment2 = vec![make_assignment("x", serde_json::json!("D"))];
         assert!(!validate(&problem, &assignment2).is_empty());
+    }
+
+    #[test]
+    fn range_label_normalization_and_parse() {
+        assert_eq!(canon_scalar("41—43"), "41-43"); // em-dash
+        assert_eq!(canon_scalar("41 - 43"), "41-43"); // spaces around hyphen
+        assert_eq!(canon_scalar("23–25"), "23-25"); // en-dash
+        assert_eq!(parse_range("23-25"), Some((23.0, 25.0)));
+        assert_eq!(parse_range("41—43"), Some((41.0, 43.0)));
+        assert_eq!(parse_range("F46"), None);
+        assert_eq!(parse_range("125"), None);
+    }
+
+    #[test]
+    fn validate_enum_range_label_membership_and_containment() {
+        // A parameter whose allowed values are RANGE LABELS (e.g. sound index).
+        let problem = make_problem(vec![("зи", vec![make_enum(&["23-25", "41-43"])])]);
+        let ok = |v: serde_json::Value| validate(&problem, &vec![make_assignment("зи", v)]).is_empty();
+        assert!(ok(serde_json::json!("41—43")), "exact label match, dash variant");
+        assert!(ok(serde_json::json!(42)), "number inside an allowed range");
+        assert!(ok(serde_json::json!("24")), "number-as-string inside a range");
+        assert!(!ok(serde_json::json!(30)), "number outside every range");
+        assert!(!ok(serde_json::json!("50-52")), "label not in the set");
     }
 
     #[test]

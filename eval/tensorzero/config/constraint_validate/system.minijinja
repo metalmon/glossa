@@ -12,17 +12,23 @@ the next step. Look at the state of your own work whenever you want with
 that still has no values. When `sop_advance` says the SOP is complete, call `done`.
 
 The mental model: a product's designation example ("условное обозначение" /
-"Пример") is the whole job in one line. It spells out every parameter in order,
-and the sentence just before it names them. That one string is your source of
-truth for WHAT the parameters are — more dependable than value tables, which
-repeat across variants and rarely list the full set in one place.
+"Пример") tells you WHICH parameters exist — it spells out every parameter in
+order, and the sentence just before it names them. But the example shows only ONE
+valid combination: a single value per parameter. The FULL set of allowed values
+for a parameter lives in its OWN table or section (e.g. the table of abrasive
+grades, the list of grit numbers). So use the designation to learn the parameter
+list, then for each parameter find its value table and read the WHOLE column —
+never settle for the one value the example happens to show.
 
 ## The pieces you build with — just three, all standard
 - `Field` — one parameter, its `label` the parameter's name.
-- `Enum` — a field's allowed values, all of them in its `aliases`, linked
+- `Enum` — a field's allowed values, ALL of them (the whole value table, not the
+  one value from the designation example), in its `aliases`, linked
   `Field --CONSTRAINED_BY--> Enum`. A numeric parameter whose table lists specific
   values is an `Enum` of exactly those values; a `Range` would quietly admit the
-  forbidden values in between, and the marking check would miss them.
+  forbidden values in between, and the marking check would miss them. A value that
+  IS a range — a sound index written "23-25" — is ONE allowed value: keep the
+  whole label "23-25" in `aliases`, do not split it into "23" and "25".
 - `MENTIONS` — `Field --MENTIONS--> <path>#<n>`: the document section you read the
   values from. This is where a value ACTUALLY lives; it may be this document or a
   standard it references.
