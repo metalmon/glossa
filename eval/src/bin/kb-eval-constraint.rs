@@ -299,13 +299,32 @@ fn sop_gate_check(dir: &std::path::Path) -> Option<String> {
 /// The tool executor for an agent episode: search/read/grep/glob + the graph and
 /// constraint tools, all bound to one agent graph dir and KB. A fresh one is made
 /// per episode (the SOP driver runs one episode per step).
+/// Recursively copy a directory (used to seed the agent's store from the indexed KB).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// The tool executor for an agent episode. Index AND graph open the SAME store
+/// (`agent_g_dir`, a per-run copy of the indexed KB) — as in prod and the glossa
+/// kb-train eval — so the document's Section nodes are present and a MENTIONS edge
+/// resolves to a real section, not a fabricated node.
 fn make_exec(
     agent_g_dir: std::path::PathBuf,
-    kb: std::path::PathBuf,
     src_doc: String,
 ) -> impl Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync {
-    let idx_kb = DocIndex::open_or_create(&kb).expect("open kb index");
-    let spec_kb = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&kb));
+    let idx_kb = DocIndex::open_or_create(&agent_g_dir).expect("open agent store index");
+    let spec_kb = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&agent_g_dir));
     let trace_kb = TraceLog::disabled();
     move |name: &str, args: &Value| {
         let g = GraphStore::open(&agent_g_dir).unwrap();
@@ -418,7 +437,6 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
 fn run_sop_conversation(
     sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
-    kb: &std::path::Path,
     src_doc: &str,
     _kb_docs_list: &str,
     gateway: &str,
@@ -484,7 +502,7 @@ fn run_sop_conversation(
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Mutex::new(sop::driver::minimal_run(&sop_def));
-    let normal_exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
+    let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
 
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name != "sop_advance" {
@@ -618,32 +636,13 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
             errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
         }
     }
-    // Normalization feedback: flag values whose Cyrillic/Latin homoglyphs fold, so
-    // the model knows a Cyrillic-typed value ("14А") still matches a Latin-typed
-    // marking ("14a") — the same canon that validation and metrics compare on.
-    const HOMO: &[char] = &['а', 'в', 'е', 'к', 'м', 'н', 'о', 'р', 'с', 'т', 'у', 'х'];
-    let mut folds: Vec<String> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for n in &nodes {
-        for a in &n.aliases {
-            if a.chars().any(|c| c.to_lowercase().next().is_some_and(|l| HOMO.contains(&l))) {
-                let canon = glossa_constraint::solver::canon_scalar(a);
-                if canon != *a && seen.insert(a.clone()) {
-                    folds.push(format!("{a}→{canon}"));
-                }
-            }
-        }
-    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);
-    let mut msg = if errs.is_empty() { out.message } else { format!("{}\n{}", errs.join("\n"), out.message) };
-    if !folds.is_empty() {
-        msg.push_str(&format!(
-            "\nnote: mixed-script values fold to Latin for matching (they'll match a Latin-typed marking): {}",
-            folds.join(", ")
-        ));
+    if errs.is_empty() {
+        out.message
+    } else {
+        format!("{}\n{}", errs.join("\n"), out.message)
     }
-    msg
 }
 
 fn exec_graph_delete(idx: &DocIndex, g: &GraphStore, args: &Value) -> String {
@@ -884,7 +883,12 @@ fn main() -> Result<()> {
         let agent_dir = tempfile::tempdir().context("agent tempdir")?;
         let agent_g_dir = agent_dir.path().to_path_buf();
         let ont_path = agent_g_dir.join(".glossa").join("ontology.toml");
-        std::fs::create_dir_all(agent_g_dir.join(".glossa")).unwrap();
+        // Seed the agent's store with a per-run copy of the indexed KB (index + graph,
+        // including the Document/Section nodes) so index and graph share ONE store, as
+        // in prod and the glossa kb-train eval. Runs stay isolated (fresh temp copy) and
+        // the shared KB is never mutated; the constraint ontology then overrides the copy.
+        copy_dir_all(&cli.kb.join(".glossa"), &agent_g_dir.join(".glossa"))
+            .context("seed agent store from KB")?;
         std::fs::write(&ont_path, &ontology_toml).unwrap();
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
@@ -997,7 +1001,7 @@ fn main() -> Result<()> {
             // SOP-driven: the vendored engine drives one focused episode per step
             // (step 2 loops per checklist parameter). The single prompt/chat/exec
             // built above are unused in this path — the driver builds its own.
-            let steps = run_sop_conversation(&sop_dir, &agent_g_dir, &cli.kb, &src_doc,
+            let steps = run_sop_conversation(&sop_dir, &agent_g_dir, &src_doc,
                 &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()).unwrap_or(0);
             Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
                 answer: String::new(), episode_id: None, surfaced_titles: vec![],
