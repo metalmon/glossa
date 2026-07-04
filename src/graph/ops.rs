@@ -5,7 +5,7 @@
 
 use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{GraphStore, normalize_label};
+use crate::graph::store::{GraphStore, Node, normalize_label};
 use crate::index::store::DocIndex;
 
 // ── label-based input types ───────────────────────────────────────────────────
@@ -80,9 +80,13 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
 
 /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
 /// morphology match against existing reasoning nodes (the small model often paraphrases its own
-/// label — a truncation or wording variant). Returns None when nothing matches.
+/// label — a truncation or wording variant). As a last resort, strip a leading node-TYPE token the
+/// model prefixed onto its own label ("Standard ГОСТ Р 57978-2017" → "ГОСТ Р 57978-2017") — gated
+/// on the token naming a declared type, so ordinary multi-word labels are never mangled.
+/// Returns None when nothing matches.
 fn resolve_endpoint_label(
     g: &GraphStore,
+    ont: &Ontology,
     label_to_id: &std::collections::HashMap<String, String>,
     label: &str,
 ) -> Option<String> {
@@ -91,6 +95,20 @@ fn resolve_endpoint_label(
     }
     if let Some(id) = label_to_id.get(&normalize_label(label)) {
         return Some(id.clone());
+    }
+    if let Some((first, rest)) = label.split_once(char::is_whitespace) {
+        let rest = rest.trim();
+        let is_type = !rest.is_empty()
+            && (ont.entity_types().iter().any(|t| t.eq_ignore_ascii_case(first))
+                || ["Document", "Section", "Term", "Topic"].iter().any(|t| t.eq_ignore_ascii_case(first)));
+        if is_type {
+            if let Some(id) = label_to_id.get(&normalize_label(rest)) {
+                return Some(id.clone());
+            }
+            if let Some(id) = g.ids_by_label_norm(rest).ok()?.into_iter().next() {
+                return Some(id);
+            }
+        }
     }
     // Exact match against EXISTING nodes via the label_norm index (replaces the old prebuilt
     // all_nodes map — same unfiltered "first exact" semantics, but O(log N) instead of O(N)).
@@ -295,7 +313,7 @@ pub fn graph_upsert(
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, &label_to_id, &ue.from) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &ue.from) {
                     Some(id) => from_resolved = Some(id),
                     None => {
                         errs.push(format!(
@@ -319,7 +337,7 @@ pub fn graph_upsert(
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, &label_to_id, &ue.to) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &ue.to) {
                     Some(id) => to_resolved = Some(id),
                     None => {
                         errs.push(format!(
@@ -507,12 +525,171 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     }
 }
 
+/// Coverage of one document's parameter checklist, scoped by provenance so
+/// several documents' pipelines can share one graph without polluting each
+/// other's statistics (a same-named Field built for another document never
+/// counts here).
+///
+/// Scope: the Checklist whose `prov.source_path` equals `doc` (a canonical
+/// indexed path), plus the document's citation set — its own Standard node(s)
+/// and every Standard reachable from them over MENTIONS edges. A Field counts
+/// for a parameter only when it is inside that scope: its provenance is the
+/// document itself or a cited standard, or it is DEFINED_IN one of the scope's
+/// Standards.
+///
+/// Shared by the MCP `graph_stats(doc=…)` tool and the constraint-eval SOP
+/// driver so both derive the SAME numbers from the same code — the feedback
+/// stays stateless and graph-derived (no attempt counters anywhere).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChecklistCoverage {
+    /// Checklist parameter names, in checklist order.
+    pub params: Vec<String>,
+    /// Parameters with no in-scope Field --CONSTRAINED_BY--> Enum(values).
+    pub unbuilt: Vec<String>,
+    /// Parameters with no in-scope Field --DEFINED_IN--> Standard.
+    pub unmapped: Vec<String>,
+}
+
+/// `None` when the graph has no Checklist for `doc` (step 1 hasn't run).
+pub fn checklist_coverage(
+    g: &GraphStore,
+    doc: &str,
+) -> anyhow::Result<Option<ChecklistCoverage>> {
+    let nodes = g.all_nodes()?;
+    let edges = g.all_edges()?;
+    let params: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.node_type == "Checklist" && n.prov.source_path == doc)
+        .flat_map(|n| n.aliases.clone())
+        .collect();
+    if params.is_empty() {
+        return Ok(None);
+    }
+    // Citation set: the doc's own Standard node(s) + MENTIONS-reachable Standards.
+    let mut scope_std: std::collections::BTreeSet<String> = nodes
+        .iter()
+        .filter(|n| n.node_type == "Standard" && n.prov.source_path == doc)
+        .map(|n| n.id.clone())
+        .collect();
+    loop {
+        let grown: Vec<String> = edges
+            .iter()
+            .filter(|e| e.edge_type == "MENTIONS" && scope_std.contains(&e.from) && !scope_std.contains(&e.to))
+            .filter(|e| nodes.iter().any(|n| n.id == e.to && n.node_type == "Standard"))
+            .map(|e| e.to.clone())
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        scope_std.extend(grown);
+    }
+    let scope_paths: std::collections::BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| scope_std.contains(&n.id))
+        .map(|n| n.prov.source_path.as_str())
+        .chain(std::iter::once(doc))
+        .collect();
+    let in_scope = |f: &Node| {
+        scope_paths.contains(f.prov.source_path.as_str())
+            || edges.iter().any(|e| e.edge_type == "DEFINED_IN" && e.from == f.id && scope_std.contains(&e.to))
+    };
+    let (mut unbuilt, mut unmapped) = (Vec::new(), Vec::new());
+    for p in &params {
+        let ids = g.resolve(p).unwrap_or_default();
+        let fields: Vec<&Node> = ids
+            .iter()
+            .filter_map(|id| nodes.iter().find(|n| &n.id == id && n.node_type == "Field"))
+            .filter(|f| in_scope(f))
+            .collect();
+        let built = fields.iter().any(|f| {
+            edges.iter().any(|e| {
+                e.edge_type == "CONSTRAINED_BY"
+                    && e.from == f.id
+                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
+            })
+        });
+        let mapped = fields.iter().any(|f| {
+            edges.iter().any(|e| {
+                e.edge_type == "DEFINED_IN"
+                    && e.from == f.id
+                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Standard")
+            })
+        });
+        if !built {
+            unbuilt.push(p.clone());
+        }
+        if !mapped {
+            unmapped.push(p.clone());
+        }
+    }
+    Ok(Some(ChecklistCoverage { params, unbuilt, unmapped }))
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::agent::NodeUpdate;
+    use crate::graph::store::{Edge, Provenance};
+
+    fn cov_node(g: &GraphStore, id: &str, nt: &str, label: &str, aliases: &[&str], src: &str) {
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: nt.into(),
+            label: label.into(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            prov: Provenance { source_path: src.into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 },
+        })
+        .unwrap();
+    }
+    fn cov_edge(g: &GraphStore, from: &str, et: &str, to: &str) {
+        g.put_edge(&Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: et.into(),
+            prov: Provenance { source_path: "a.docx".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 },
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn checklist_coverage_scoped_by_provenance_and_citations() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // Document A: checklist of 3 params; its Standard cites ref.docx via MENTIONS.
+        cov_node(&g, "chk:a", "Checklist", "params A", &["высота", "зернистость", "диаметр"], "a.docx");
+        cov_node(&g, "std:a", "Standard", "ГОСТ А", &[], "a.docx");
+        cov_node(&g, "std:ref", "Standard", "ГОСТ REF", &[], "ref.docx");
+        cov_edge(&g, "std:a", "MENTIONS", "std:ref");
+
+        // высота: built + mapped in A's own doc.
+        cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
+        cov_node(&g, "enum:vys-a", "Enum", "высота enum", &["10", "20"], "a.docx");
+        cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
+        cov_edge(&g, "fld:vys-a", "DEFINED_IN", "std:a");
+
+        // зернистость: mapped to the cited standard (in scope via MENTIONS), no Enum yet.
+        cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "ref.docx");
+        cov_edge(&g, "fld:zer-a", "DEFINED_IN", "std:ref");
+
+        // диаметр: only document B built it — same name, out of A's scope.
+        cov_node(&g, "std:b", "Standard", "ГОСТ B", &[], "b.docx");
+        cov_node(&g, "fld:dia-b", "Field", "диаметр", &[], "b.docx");
+        cov_node(&g, "enum:dia-b", "Enum", "диаметр enum", &["1"], "b.docx");
+        cov_edge(&g, "fld:dia-b", "CONSTRAINED_BY", "enum:dia-b");
+        cov_edge(&g, "fld:dia-b", "DEFINED_IN", "std:b");
+
+        let c = checklist_coverage(&g, "a.docx").unwrap().expect("checklist exists");
+        assert_eq!(c.params.len(), 3);
+        // высота built+mapped; зернистость mapped but unbuilt; диаметр neither (B's field is out of scope).
+        assert_eq!(c.unbuilt, vec!["зернистость".to_string(), "диаметр".to_string()]);
+        assert_eq!(c.unmapped, vec!["диаметр".to_string()]);
+
+        // No checklist for an unknown doc.
+        assert!(checklist_coverage(&g, "zzz.docx").unwrap().is_none());
+    }
 
     const DEDUP_ONT: &str = r#"
 [entities.Symptom]
@@ -679,6 +856,36 @@ strict = true
             outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
             "RESOLVED_BY edge not found from {sym_id} to {res_id}: {outgoing:?}"
         );
+    }
+
+    /// The model routinely prefixes an endpoint label with the node's TYPE
+    /// ("Symptom Потеря связи" for the node labelled "Потеря связи"); the edge used
+    /// to drop and the agent retried forever. Strip the type token and resolve.
+    #[test]
+    fn edge_endpoint_with_type_prefixed_label_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let nodes = vec![
+            unode("Symptom", "Потеря связи", "case1.docx"),
+            unode("Resolution", "Перезапуск", "case1.docx"),
+        ];
+        // Both endpoints written type-prefixed, the way the model actually does it.
+        let edges = vec![uedge("Symptom Потеря связи", "RESOLVED_BY", "Resolution Перезапуск", "case1.docx")];
+
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        assert_eq!(out.edges, 1, "type-prefixed endpoints should resolve: {}", out.message);
+        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let res_id = id_for(&ont, "Resolution", "Перезапуск");
+        assert!(g.outgoing(&sym_id).unwrap().iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id));
+
+        // An ordinary multi-word label whose first word is NOT a type is untouched:
+        // "Потеря связи" itself still resolves as before (no mangling).
+        let ok = resolve_endpoint_label(&g, &ont, &Default::default(), "Потеря связи");
+        assert_eq!(ok, Some(sym_id));
     }
 
     /// Edge whose `to` label has no corresponding node is rejected; message names the label.

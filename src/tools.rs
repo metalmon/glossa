@@ -451,6 +451,24 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     out
 }
 
+/// Checklist-coverage block for `graph_stats(doc=…)`: which of `doc`'s checklist
+/// parameters still lack a constraint (unbuilt) or a DEFINED_IN source (unmapped).
+/// Formats `ops::checklist_coverage` — the same shared op the constraint-eval SOP
+/// driver reads, so an agent asking the tool and the eval's gate see ONE truth.
+pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
+    match crate::graph::ops::checklist_coverage(g, doc) {
+        Ok(Some(c)) => {
+            let list = |v: &[String]| if v.is_empty() { "-".to_string() } else { v.join(", ") };
+            format!(
+                "checklist({doc}): {} params, {} unbuilt, {} unmapped\nunbuilt: {}\nunmapped: {}",
+                c.params.len(), c.unbuilt.len(), c.unmapped.len(), list(&c.unbuilt), list(&c.unmapped)
+            )
+        }
+        Ok(None) => format!("checklist({doc}): no Checklist node for this document yet"),
+        Err(e) => format!("checklist({doc}): error: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

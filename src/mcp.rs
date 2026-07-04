@@ -287,6 +287,13 @@ struct NeighborsArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NameArg { name: String }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphStatsArgs {
+    #[serde(default)]
+    #[schemars(description = "document source_path: also report that document's checklist coverage (params still unbuilt / unmapped)")]
+    doc: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Empty {}
 
@@ -631,10 +638,15 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
     }
 
-    #[tool(description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank).")]
-    async fn graph_stats(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's checklist coverage: which parameters still lack a constraint (unbuilt) or a DEFINED_IN source standard (unmapped).")]
+    async fn graph_stats(&self, Parameters(a): Parameters<GraphStatsArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::graph_stats(&g))]))
+        let mut out = crate::tools::graph_stats(&g);
+        if let Some(doc) = a.doc.as_deref() {
+            out.push('\n');
+            out.push_str(&crate::tools::checklist_coverage_report(&g, doc));
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
     #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]

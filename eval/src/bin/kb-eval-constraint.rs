@@ -311,7 +311,15 @@ fn make_exec(
             "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
-            "graph_stats" => (glossa::tools::graph_stats(&g), vec![], vec![]),
+            "graph_stats" => {
+                // Same shared op as the MCP server: `doc` adds the checklist-coverage block.
+                let mut out = glossa::tools::graph_stats(&g);
+                if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
+                    out.push('\n');
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                }
+                (out, vec![], vec![])
+            }
             "graph_generalize" => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])
@@ -368,23 +376,25 @@ fn make_chat(
 /// (first uncovered checklist parameter, count of uncovered) — a checklist param
 /// is "covered" when it resolves to a Field with a non-empty Enum. Drives the SOP
 /// build loop's `$.steps.N.remaining` condition.
-fn checklist_status(agent_g_dir: &std::path::Path) -> (Option<String>, usize) {
-    let Ok(g) = GraphStore::open(agent_g_dir) else { return (None, 0) };
-    let nodes = g.all_nodes().unwrap_or_default();
-    let edges = g.all_edges().unwrap_or_default();
-    let checklist: Vec<String> = nodes.iter()
-        .filter(|n| n.node_type == "Checklist")
-        .flat_map(|n| n.aliases.clone())
-        .collect();
-    let covered = |param: &str| -> bool {
-        g.resolve(param).ok().map(|ids| ids.iter().any(|id| {
-            nodes.iter().any(|n| &n.id == id && n.node_type == "Field"
-                && edges.iter().any(|e| e.edge_type == "CONSTRAINED_BY" && e.from == n.id
-                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())))
-        })).unwrap_or(false)
-    };
-    let uncovered: Vec<&String> = checklist.iter().filter(|p| !covered(p)).collect();
-    (uncovered.first().map(|s| (*s).clone()), uncovered.len())
+/// The shared coverage op (`glossa::graph::ops::checklist_coverage`), scoped to
+/// `doc`'s checklist + citation set — the SAME numbers `graph_stats(doc=…)`
+/// reports to the agent, so the SOP gate and the model see one truth.
+/// None until step 1 has created the checklist.
+fn coverage(agent_g_dir: &std::path::Path, doc: &str) -> Option<glossa::graph::ops::ChecklistCoverage> {
+    let g = GraphStore::open(agent_g_dir).ok()?;
+    glossa::graph::ops::checklist_coverage(&g, doc).ok().flatten()
+}
+
+/// Parameters still needing work — unbuilt OR unmapped, in checklist order.
+/// This is the build loop's gate metric: the loop keeps going until every
+/// parameter has both its constraint (Field→Enum) and its source (DEFINED_IN).
+fn pending_params(cov: &Option<glossa::graph::ops::ChecklistCoverage>) -> Vec<String> {
+    match cov {
+        Some(c) => c.params.iter()
+            .filter(|p| c.unbuilt.contains(p) || c.unmapped.contains(p))
+            .cloned().collect(),
+        None => Vec::new(),
+    }
 }
 
 /// The Standard a checklist parameter's values are DEFINED_IN, per step 2's
@@ -439,13 +449,19 @@ fn run_sop_discovery(
              Knowledge base standards: {kb_docs_list}.\n\n{}",
             step.body
         );
-        // Step 1 (checklist) and step 2 (resolve references) run once with just
-        // their body. Step 3+ is the per-parameter build loop.
+        // Step 1 (checklist) and step 2 (bulk reference map) run once. Step 3+ is
+        // the per-parameter tail loop — the ONLY loop shape the SOP engine
+        // supports (`when: false` COMPLETES the run, so a mid-SOP gate would end
+        // it before the build step; see route/mod.rs). Step 3 therefore drives
+        // BOTH gates: a parameter pends until it is built (Field→Enum) AND
+        // mapped (DEFINED_IN); step 2's map is healed here per-parameter.
         if step.number >= 3 {
-            let (target, remaining_now) = checklist_status(agent_g_dir);
-            let Some(t) = target else {
+            let cov = coverage(agent_g_dir, src_doc);
+            let pending = pending_params(&cov);
+            let Some(t) = pending.first().cloned() else {
                 return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
             };
+            let remaining_now = pending.len();
             // No-progress backstop: bail out of the build loop after a generous
             // window of visits that did not reduce `remaining`, instead of
             // grinding one hard parameter to `max_step_visits`. Reporting
@@ -458,32 +474,52 @@ fn run_sop_discovery(
                 stall += 1;
             }
             if stall >= MAX_STALL {
-                eprintln!("  [sop] build loop stalled at {remaining_now} uncovered after {stall} \
-                    no-progress visits — stopping (param «{t}» left uncovered: values likely in a \
+                eprintln!("  [sop] build loop stalled at {remaining_now} pending after {stall} \
+                    no-progress visits — stopping (param «{t}» left pending: values likely in a \
                     referenced standard not in the KB)");
                 return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
             }
-            // Surface step 2's reference map (read from the graph) so the agent
-            // opens the right document instead of blind-searching every standard.
-            let src_hint = defined_in_standard(agent_g_dir, &t)
-                .map(|s| format!(" Its values are defined in «{s}» (per the step-2 reference map) — open that document first."))
-                .unwrap_or_default();
-            // Feedback is derived only from the graph (checklist_status): what is
-            // verifiably true now, covering both failure modes — not yet built,
-            // or built under a label that does not resolve from the name.
-            prompt.push_str(&format!(
-                "\n\nThe parameter to build in THIS step is: «{t}». Build ONLY it.{src_hint}\n\
-                 «{t}» is still uncovered: the graph has no Field that resolves from the name «{t}» \
-                 and is CONSTRAINED_BY an Enum with values. Either (a) you have not built its Enum yet — \
-                 read its values and create Field --CONSTRAINED_BY--> Enum; or (b) you built the Field \
-                 under a different label — add «{t}» to that Field's aliases so it resolves."));
+            let unbuilt = cov.as_ref().map(|c| c.unbuilt.contains(&t)).unwrap_or(true);
+            let unmapped = cov.as_ref().map(|c| c.unmapped.contains(&t)).unwrap_or(true);
+            // Feedback is derived only from the graph (the shared coverage op):
+            // what is verifiably true now — missing constraint, missing source
+            // mapping, or a Field built under a label that does not resolve.
+            prompt.push_str(&format!("\n\nThe parameter to work on in THIS step is: «{t}». Work ONLY on it."));
+            if unmapped {
+                prompt.push_str(&format!(
+                    "\n«{t}» has no source mapping yet: make sure the MAIN document's Standard node \
+                     exists (source_path = '{src_doc}'); if its values come from a cited GOST, create \
+                     that standard's node (source_path = its indexed path) and link the main Standard \
+                     --MENTIONS--> it; then link «{t}»'s Field --DEFINED_IN--> the Standard its values \
+                     are defined in."));
+            }
+            if unbuilt {
+                // Surface the reference map (read from the graph) so the agent
+                // opens the right document instead of blind-searching every standard.
+                let src_hint = defined_in_standard(agent_g_dir, &t)
+                    .map(|s| format!(" Its values are defined in «{s}» (per the reference map) — open that document first."))
+                    .unwrap_or_default();
+                prompt.push_str(&format!(
+                    "\n«{t}» has no constraint yet: the graph has no Field that resolves from the name \
+                     «{t}» and is CONSTRAINED_BY an Enum with values.{src_hint} Either (a) you have not \
+                     built its Enum yet — read its allowed values and create Field --CONSTRAINED_BY--> \
+                     Enum; or (b) you built the Field under a different label — add «{t}» to that \
+                     Field's aliases so it resolves."));
+            }
         }
         let eid = kb_eval::tz::backdated_episode_id(30);
         let exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
         let chat = make_chat(gateway.to_string(), "constraint_validate".to_string(), tags.clone(), timeout, eid);
         let _ = run_episode(chat, &prompt, exec, 20, EpisodePolicy::enrich());
-        let (_, remaining) = checklist_status(agent_g_dir);
-        eprintln!("  [sop] step {} (visit {}) done → {remaining} params still uncovered", step.number, visit);
+        // Gate metric from the shared coverage op: steps 1–2 log their own view
+        // (informational), the tail loop (3+) gates on pending = unbuilt ∪ unmapped.
+        let cov_after = coverage(agent_g_dir, src_doc);
+        let (remaining, what) = match step.number {
+            2 => (cov_after.as_ref().map(|c| c.unmapped.len()).unwrap_or(0), "unmapped"),
+            n if n >= 3 => (pending_params(&cov_after).len(), "pending (unbuilt or unmapped)"),
+            _ => (cov_after.as_ref().map(|c| c.unbuilt.len()).unwrap_or(0), "uncovered"),
+        };
+        eprintln!("  [sop] step {} (visit {}) done → {remaining} params still {what}", step.number, visit);
         sop::driver::StepOutcome::completed(format!("{{\"remaining\": {remaining}}}"))
     });
     eprintln!("[sop] run {:?} after {} step-episodes{}", report.status, report.steps_run,
@@ -527,8 +563,19 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
     }
 
     let mut errs: Vec<String> = Vec::new();
-    let nodes: Vec<glossa::graph::ops::UpsertNode> = parse_items(args, "nodes", &mut errs);
+    let mut nodes: Vec<glossa::graph::ops::UpsertNode> = parse_items(args, "nodes", &mut errs);
     let edges: Vec<glossa::graph::ops::UpsertEdge> = parse_items(args, "edges", &mut errs);
+    // The model sometimes sends ONE node as a flat object instead of {"nodes":[…]}
+    // (same tolerance graph_update already has for its flat form). Without this the
+    // call wrote nothing and the model misread the outcome as "this node_type is
+    // invalid", derailing the whole episode.
+    if nodes.is_empty() && edges.is_empty() {
+        if let Ok(n) = serde_json::from_value::<glossa::graph::ops::UpsertNode>(args.clone()) {
+            nodes.push(n);
+        } else if errs.is_empty() {
+            errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
+        }
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);
     if errs.is_empty() {
@@ -843,7 +890,15 @@ fn main() -> Result<()> {
                 "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
                 "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
                 "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
-                "graph_stats" => (glossa::tools::graph_stats(&g), vec![], vec![]),
+                "graph_stats" => {
+                // Same shared op as the MCP server: `doc` adds the checklist-coverage block.
+                let mut out = glossa::tools::graph_stats(&g);
+                if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
+                    out.push('\n');
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                }
+                (out, vec![], vec![])
+            }
                 "graph_generalize" => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                     (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])

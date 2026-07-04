@@ -1,5 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "properties": {},
+  "properties": {
+    "doc": {
+      "type": "string",
+      "description": "Optional document source_path: also report that document's checklist coverage — which parameters still lack a constraint (unbuilt) or a DEFINED_IN source standard (unmapped)."
+    }
+  },
   "type": "object"
 }
