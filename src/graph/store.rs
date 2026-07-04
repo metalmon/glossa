@@ -775,7 +775,27 @@ impl GraphStore {
                 .map(|n| n.node_type.clone())
                 .or_else(|| Self::get_node_c(&c, id).ok().flatten().map(|n| n.node_type))
         };
-        for e in edges {
+        // Auto-correct a reversed edge: a relation's direction is unambiguous (e.g.
+        // CONSTRAINED_BY is always Field->Enum), so if the declared direction is invalid
+        // but the flipped one is valid, the model clearly meant this edge — swap its
+        // endpoints instead of rejecting it and making it retry.
+        let edges: Vec<Edge> = edges
+            .iter()
+            .map(|e| {
+                let ft = type_of(&e.from, nodes).unwrap_or_default();
+                let tt = type_of(&e.to, nodes).unwrap_or_default();
+                if ont.validate_edge(&e.edge_type, &ft, &tt).is_err()
+                    && ont.validate_edge(&e.edge_type, &tt, &ft).is_ok()
+                {
+                    let mut f = e.clone();
+                    std::mem::swap(&mut f.from, &mut f.to);
+                    f
+                } else {
+                    e.clone()
+                }
+            })
+            .collect();
+        for e in &edges {
             if e.prov.source_path.is_empty() {
                 anyhow::bail!("edge {}->{} has empty provenance", e.from, e.to);
             }
@@ -790,7 +810,7 @@ impl GraphStore {
         for n in nodes {
             Self::put_node_c(&txn, n)?;
         }
-        for e in edges {
+        for e in &edges {
             Self::put_edge_c(&txn, e)?;
         }
         txn.commit().context("commit upsert")?;
