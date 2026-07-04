@@ -45,6 +45,12 @@ describing your next action in prose, make that tool call instead. If
 `graph_stats(doc)` and your own sense of progress disagree, trust `graph_stats`:
 it reads the graph you actually built.
 
+When you write an Enum, put EVERY value you found into its `aliases` in the SAME
+call — it is easy to name several values in your reasoning but write only the
+first into the array. `graph_upsert` echoes back how many values landed
+(`Enum … — N value(s): [...]`); check that N matches what you read, and if it is
+short, upsert the Enum again with the full list.
+
 ## An illustrative `graph_upsert` (a made-up standard — NOT your document)
 ```
 {

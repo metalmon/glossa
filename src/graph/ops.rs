@@ -379,10 +379,20 @@ pub fn graph_upsert(
         }
     }
 
-    // (5) build dump lines (resolved state, for the caller to log)
+    // (5) build dump lines (resolved state, for the caller to log). Echo a node's
+    // `aliases` when it has any — for an Enum these ARE the allowed values, so the
+    // model sees exactly how many landed and catches a value it dropped while
+    // writing the array (it may have named more in its reasoning than it wrote).
     let mut dump = Vec::new();
     for nd in &nodespecs {
-        dump.push(format!("node {} [{}] {}", nd.id, nd.node_type, nd.label));
+        if nd.aliases.is_empty() {
+            dump.push(format!("node {} [{}] {}", nd.id, nd.node_type, nd.label));
+        } else {
+            dump.push(format!(
+                "node {} [{}] {} — {} value(s): [{}]",
+                nd.id, nd.node_type, nd.label, nd.aliases.len(), nd.aliases.join(", ")
+            ));
+        }
     }
     for e in &edgespecs {
         dump.push(format!("edge {} -{}-> {}", e.from, e.edge_type, e.to));

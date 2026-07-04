@@ -343,21 +343,7 @@ fn make_exec(
                 let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
                 (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc), vec![], vec![])
             }
-            "get_ontology" => {
-                let relations: serde_json::Map<String, Value> = ont.raw_relations().iter()
-                    .map(|(name, r)| (name.clone(), json!({"from": r.from, "to": r.to})))
-                    .collect();
-                let constraint_types: serde_json::Map<String, Value> = ont.constraint_types().iter()
-                    .map(|(name, ct)| (name.clone(), json!({"params": ct.params})))
-                    .collect();
-                let node_types: Vec<&str> = ont.entity_types().iter().map(|s| s.as_str())
-                    .chain(ont.constraint_types().keys().map(|s| s.as_str()))
-                    .collect();
-                (serde_json::to_string(&json!({
-                    "node_types": node_types, "relations": relations,
-                    "constraint_types": constraint_types, "strict": ont.strict(),
-                })).unwrap_or_default(), vec![], vec![])
-            }
+            "get_ontology" => (ontology_info(&ont), vec![], vec![]),
             "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
             other => (format!("unknown tool: {other}"), vec![], vec![]),
         }
@@ -574,6 +560,34 @@ fn setup(dir: &std::path::Path, ontology_toml: &str, cols: &[ColInfo], src: &str
 }
 
 // ── Agent graph tools ──
+
+/// The `get_ontology` payload: node types, relation endpoint signatures, and
+/// constraint-type params — each carrying its how-to `description` from the
+/// ontology so the model builds the right shape (e.g. one Enum holding all values
+/// in `aliases`, not one node per value) instead of guessing. The built-in
+/// `MENTIONS` edge is surfaced too, since it is not declared in `[relations]`.
+fn ontology_info(ont: &Ontology) -> String {
+    let mut relations: serde_json::Map<String, Value> = ont.raw_relations().iter()
+        .map(|(name, r)| (name.clone(), json!({"from": r.from, "to": r.to, "description": ont.description(name)})))
+        .collect();
+    relations.insert("MENTIONS".into(), json!({
+        "from": ["any node"], "to": ["a document section written path#n"],
+        "description": ont.description("MENTIONS").unwrap_or(
+            "Cite where a fact was read: from a node to a document section written as path#n, where \
+             path is the document and n is a chunk number taken from a search/read result for it."),
+    }));
+    let constraint_types: serde_json::Map<String, Value> = ont.constraint_types().iter()
+        .map(|(name, ct)| (name.clone(), json!({"params": ct.params, "description": ont.description(name)})))
+        .collect();
+    let node_types: serde_json::Map<String, Value> = ont.entity_types().iter().map(|s| s.as_str())
+        .chain(ont.constraint_types().keys().map(|s| s.as_str()))
+        .map(|n| (n.to_string(), json!(ont.description(n))))
+        .collect();
+    serde_json::to_string(&json!({
+        "node_types": node_types, "relations": relations,
+        "constraint_types": constraint_types, "strict": ont.strict(),
+    })).unwrap_or_default()
+}
 
 /// Funnel through the same shared op as the MCP server (`glossa::graph::ops::graph_upsert`):
 /// label-based nodes (canonical id derived from node_type+label), per-item validation with
@@ -949,27 +963,7 @@ fn main() -> Result<()> {
                     let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
                     (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc_exec), vec![], vec![])
                 }
-                "get_ontology" => {
-                    // Full machine-usable ontology: node types (constraint types ARE
-                    // node types) and relation endpoint signatures — without the
-                    // signatures the model has to guess legal edges by trial and error.
-                    let relations: serde_json::Map<String, Value> = ont.raw_relations().iter()
-                        .map(|(name, r)| (name.clone(), json!({"from": r.from, "to": r.to})))
-                        .collect();
-                    let constraint_types: serde_json::Map<String, Value> = ont.constraint_types().iter()
-                        .map(|(name, ct)| (name.clone(), json!({"params": ct.params})))
-                        .collect();
-                    let node_types: Vec<&str> = ont.entity_types().iter().map(|s| s.as_str())
-                        .chain(ont.constraint_types().keys().map(|s| s.as_str()))
-                        .collect();
-                    let info = json!({
-                        "node_types": node_types,
-                        "relations": relations,
-                        "constraint_types": constraint_types,
-                        "strict": ont.strict(),
-                    });
-                    (serde_json::to_string(&info).unwrap_or_default(), vec![], vec![])
-                }
+                "get_ontology" => (ontology_info(&ont), vec![], vec![]),
                 // `done` is a control signal — run_episode intercepts it and never
                 // reaches exec; this arm only guards against policy changes.
                 "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),

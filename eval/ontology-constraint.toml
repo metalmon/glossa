@@ -51,6 +51,7 @@
 # ── Entities (the constraint domain's nouns) ──
 [entities.Field]       # A parameter whose value is constrained
 id_prefix = "fld"
+description = "A product parameter. Create ONE Field per parameter, its `label` the parameter's name. Its allowed values go in a single Enum linked Field --CONSTRAINED_BY--> Enum."
 
 [entities.Literal]     # A concrete value (number, string, regex pattern)
 id_prefix = "lit"
@@ -65,6 +66,7 @@ id_prefix = "chk"      # The parameter set is derived from Field nodes; a Checkl
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
+description = "Field --CONSTRAINED_BY--> the ONE constraint node that holds its allowed values (usually an Enum). One edge per field."
 
 [relations.HAS_MIN]
 from = ["Range"]
@@ -110,15 +112,19 @@ strict = true
 # ── Constraint type definitions (consumed by constraint_solve MCP tool) ──
 [constraint_types.Range]
 params = ["min", "max"]
+description = "A continuous numeric interval. Two Literal nodes linked HAS_MIN and HAS_MAX. Use ONLY for a true range; a table listing specific values is an Enum, not a Range."
 
 [constraint_types.Regex]
 params = ["pattern"]
+description = "A string pattern. One Literal (the regex) linked HAS_PATTERN."
 
 [constraint_types.Enum]
 params = ["values"]
+description = "The set of allowed values of a field. Create ONE Enum node whose `aliases` list ALL the values as separate strings; link it Field --CONSTRAINED_BY--> Enum. Do NOT create one Enum per value, and do NOT put any value in the label."
 
 [constraint_types.Formula]
 params = ["expression"]
+description = "A computed relationship. One Literal (the expression) linked HAS_EXPRESSION."
 
 [constraint_types.Required]
 params = []

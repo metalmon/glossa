@@ -10,6 +10,10 @@ pub struct RawRelation {
     pub from: Vec<String>,
     #[serde(default)]
     pub to: Vec<String>,
+    /// Optional human/agent-facing note on what the relation means and how to use
+    /// it — surfaced by `get_ontology` so the model builds the right shape.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -58,6 +62,8 @@ struct RawReasoning {
 struct RawConstraintType {
     #[serde(default)]
     params: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +94,9 @@ pub struct Ontology {
     strict: bool,
     reasoning: RawReasoning,
     constraint_types: BTreeMap<String, ConstraintType>,
+    /// How-to notes keyed by entity / relation / constraint-type name, surfaced by
+    /// `get_ontology`. Optional per type; empty when the ontology declares none.
+    descriptions: BTreeMap<String, String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -102,6 +111,24 @@ impl Ontology {
             .iter()
             .filter_map(|(name, v)| entity_id_prefix(v).map(|p| (name.clone(), p)))
             .collect();
+        // Collect how-to notes from entities, relations, and constraint types into
+        // one map keyed by name (they share a type namespace in the graph).
+        let mut descriptions: BTreeMap<String, String> = BTreeMap::new();
+        for (name, v) in &raw.entities {
+            if let Some(d) = v.get("description").and_then(|d| d.as_str()) {
+                descriptions.insert(name.clone(), d.to_string());
+            }
+        }
+        for (name, r) in &raw.relations {
+            if let Some(d) = &r.description {
+                descriptions.insert(name.clone(), d.clone());
+            }
+        }
+        for (name, c) in &raw.constraint_types {
+            if let Some(d) = &c.description {
+                descriptions.insert(name.clone(), d.clone());
+            }
+        }
         Ok(Ontology {
             entity_types: raw.entities.keys().cloned().collect(),
             id_prefixes,
@@ -111,7 +138,14 @@ impl Ontology {
             constraint_types: raw.constraint_types.into_iter().map(|(k, v)| {
                 (k, ConstraintType { params: v.params })
             }).collect(),
+            descriptions,
         })
+    }
+
+    /// How-to note for an entity / relation / constraint-type name, if the
+    /// ontology declares one. Surfaced by `get_ontology`.
+    pub fn description(&self, name: &str) -> Option<&str> {
+        self.descriptions.get(name).map(|s| s.as_str())
     }
 
     /// Prefix used when deriving a node id for `node_type` (`id_for` / label sanitize).
