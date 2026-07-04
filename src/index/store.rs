@@ -411,6 +411,13 @@ impl DocIndex {
 
     /// Agent-supplied path → canonical index key. Fast exact hit, else [`Self::resolve_path`].
     pub fn canonical_document_path(&self, input: &str) -> Option<String> {
+        // Read/section tools print a chunk as `path #ord · label`; when the model
+        // reuses that path in graph_upsert it arrives as `path#ord`. Strip the
+        // trailing `#<ord>` anchor so a real document still resolves — the exact and
+        // tolerant matches below keep the hallucination guard (a stripped path that
+        // is not indexed still returns None).
+        let input = strip_section_anchor(input);
+        let input = input.as_str();
         if self.has_document(input).unwrap_or(false) {
             return Some(input.to_string());
         }
@@ -475,6 +482,19 @@ impl DocIndex {
             }
         }
         Ok(None)
+    }
+}
+
+/// Strip a trailing section anchor (`#<ord>`, optionally followed by ` · label`) that
+/// the read/section tools append when printing a chunk, so `doc.docx#3` collapses to
+/// `doc.docx`. Only a `#` immediately followed by a digit counts as an anchor — a `#`
+/// that is part of the real filename (e.g. `C#_notes.md`) is left untouched.
+fn strip_section_anchor(input: &str) -> String {
+    match input.rfind('#') {
+        Some(h) if input[h + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
+            input[..h].trim_end().to_string()
+        }
+        _ => input.to_string(),
     }
 }
 
@@ -1092,6 +1112,16 @@ mod search_tests {
         assert_eq!(idx.canonical_document_path("real.pdf").as_deref(), Some("real.pdf"));
         assert_eq!(idx.canonical_document_path("kb-manual\\real.pdf").as_deref(), Some("real.pdf"));
         assert!(idx.canonical_document_path("missing.pdf").is_none());
+        // Section-anchored paths from read/section tool output (`path #ord · label`)
+        // reach graph_upsert as `real.pdf#1`; strip the trailing `#<ord>` anchor so a
+        // genuinely indexed document still resolves (the model copies the anchored path
+        // exactly as the tool prints it). Hallucination guard is preserved below.
+        assert_eq!(idx.canonical_document_path("real.pdf#1").as_deref(), Some("real.pdf"));
+        assert_eq!(idx.canonical_document_path("real.pdf#12").as_deref(), Some("real.pdf"));
+        assert_eq!(idx.canonical_document_path("kb-manual\\real.pdf#3").as_deref(), Some("real.pdf"));
+        assert_eq!(idx.canonical_document_path("real.pdf  #3").as_deref(), Some("real.pdf"));
+        // Stripping the anchor does not resolve a document that is not indexed.
+        assert!(idx.canonical_document_path("missing.pdf#2").is_none());
     }
 
     #[test]
