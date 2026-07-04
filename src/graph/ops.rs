@@ -58,7 +58,13 @@ pub fn sanitize_label_for_upsert(ont: &Ontology, node_type: &str, label: &str) -
 /// (`sym:…`) and already-resolved `<path>#<location>` refs (non-numeric suffix) pass through.
 /// A numeric chunk ord that does NOT exist in the document is REJECTED with an actionable message
 /// — so the model re-anchors to a real chunk instead of writing a dangling edge.
-fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
+/// Returns `Ok(Some(id))` when `s` was a numeric section ref that resolved to a real
+/// Section node id, `Ok(None)` when `s` is not a section ref (a label / reasoning slug
+/// to resolve elsewhere), and `Err` when it was a section ref to a non-existent chunk.
+/// This is a distinct signal — do NOT infer "was a section ref" from the string
+/// changing, since a resolved id can equal the input (e.g. `<path>#1` for a heading-less
+/// chunk whose location is its ordinal).
+fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String> {
     if let Some(pos) = s.rfind('#') {
         let suffix = &s[pos + 1..];
         if let Ok(n) = suffix.parse::<u64>() {
@@ -67,7 +73,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
                 .canonical_document_path(raw)
                 .unwrap_or_else(|| raw.to_string());
             return match idx.location_for_ord(&path, n) {
-                Ok(Some(loc)) => Ok(crate::graph::build::section_id(&path, &loc)),
+                Ok(Some(loc)) => Ok(Some(crate::graph::build::section_id(&path, &loc))),
                 Ok(None) => Err(format!(
                     "chunk #{n} does not exist in {path}; take the chunk number from a search/grep/read on THIS document — never reuse a number from another file"
                 )),
@@ -75,7 +81,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<String, String> {
             };
         }
     }
-    Ok(s.to_string())
+    Ok(None)
 }
 
 /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
@@ -340,12 +346,12 @@ pub fn graph_upsert(
                 errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
-            Ok(v) if v != from_ep => {
+            Ok(Some(v)) => {
                 // numeric section ref resolved to section id
                 from_resolved = Some(v);
                 from_is_section = true;
             }
-            Ok(_) => {
+            Ok(None) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
                 match resolve_endpoint_label(g, ont, &label_to_id, &from_ep) {
                     Some(id) => from_resolved = Some(id),
@@ -365,12 +371,12 @@ pub fn graph_upsert(
                 errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
                 edge_ok = false;
             }
-            Ok(v) if v != to_ep => {
+            Ok(Some(v)) => {
                 // numeric section ref resolved to section id
                 to_resolved = Some(v);
                 to_is_section = true;
             }
-            Ok(_) => {
+            Ok(None) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
                 match resolve_endpoint_label(g, ont, &label_to_id, &to_ep) {
                     Some(id) => to_resolved = Some(id),
@@ -519,8 +525,8 @@ pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, ed
     let edges: Vec<EdgeRef> = edges.into_iter().map(|e| {
         let from_orig = e.from;
         let to_orig = e.to;
-        let from = resolve_section_ref(idx, &from_orig).unwrap_or(from_orig);
-        let to = resolve_section_ref(idx, &to_orig).unwrap_or(to_orig);
+        let from = resolve_section_ref(idx, &from_orig).ok().flatten().unwrap_or(from_orig);
+        let to = resolve_section_ref(idx, &to_orig).ok().flatten().unwrap_or(to_orig);
         EdgeRef { from, edge_type: e.edge_type, to }
     }).collect();
     match apply_delete(g, node_labels, edges) {
@@ -1095,14 +1101,15 @@ strict = true
             text: "section content".into(),
         }]).unwrap();
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
-        assert_eq!(resolved, "docs\\real.md#Introduction");
+        assert_eq!(resolved, Some("docs\\real.md#Introduction".to_string()));
     }
 
     /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a
     /// MENTIONS target that resolves to a real section is NOT a node in the agent graph.
     /// The edge must still land — a bare "#1" is qualified by the edge's source_path, and
     /// a resolved section ref is exempt from the node-existence check. A single-chunk
-    /// heading-less doc has an empty location, so its section id is "gost.docx#".
+    /// heading-less doc has no location, so its location falls back to the ordinal and
+    /// its section id is "gost.docx#1".
     #[test]
     fn mentions_to_section_ref_survives_separate_agent_graph() {
         let dir = tempfile::tempdir().unwrap();
@@ -1126,7 +1133,7 @@ strict = true
         let from_id = id_for(&ont, "Symptom", "Тип");
         let outgoing = g.outgoing(&from_id).unwrap();
         assert!(
-            outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#"),
+            outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#1"),
             "MENTIONS edge to a section ref must land; got: {:?}",
             outgoing.iter().map(|e| (e.edge_type.clone(), e.to.clone())).collect::<Vec<_>>()
         );

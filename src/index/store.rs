@@ -160,11 +160,17 @@ impl DocIndex {
         }
         for (i, c) in chunks.iter().enumerate() {
             let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
+            // A heading-less chunk has no location, which would make its section id a
+            // bare "<path>#" — meaningless and, to the agent, indistinguishable from a
+            // broken empty path. Fall back to the chunk's ordinal so every section has a
+            // real id ("<path>#<ord>") that matches how the agent references it (#n) and
+            // resolves the same way in the section node, resolve_section_ref, and read.
+            let location = if c.location.is_empty() { ord.to_string() } else { c.location.clone() };
             writer.add_document(doc!(
                 self.fields.body => c.text.clone(),
                 self.fields.body_trigrams => c.text.clone(),
                 self.fields.path => c.doc_path.to_string_lossy().to_string(),
-                self.fields.location => c.location.clone(),
+                self.fields.location => location,
                 self.fields.file_type => c.file_type.clone(),
                 self.fields.ord => ord,
             ))?;
@@ -714,6 +720,15 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             }
             seq += 1;
             let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
+            // A heading-less chunk has no location, which makes its section id a bare
+            // "<path>#" — meaningless, and to the agent indistinguishable from a broken
+            // empty path. Fall back to the ordinal so every section has a real id
+            // ("<path>#<ord>"). Set it here, at the single indexing boundary and AFTER
+            // ord is computed, so the index, the structural graph (build_section /
+            // section_id below) and resolve_section_ref all speak the same form.
+            if c.location.is_empty() {
+                c.location = ord.to_string();
+            }
             let _ = writer.add_document(doc!(
                 idx.fields.body => c.text.clone(),
                 idx.fields.body_trigrams => c.text.clone(),
