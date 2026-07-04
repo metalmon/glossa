@@ -20,17 +20,25 @@ grades, the list of grit numbers). So use the designation to learn the parameter
 list, then for each parameter find its value table and read the WHOLE column —
 never settle for the one value the example happens to show.
 
-One honest exception. A parameter's values may be defined in a standard the
-document only REFERENCES ("по ГОСТ 28818"). Follow that reference — search the
-base and try to open and read that standard's actual value table. If it IS in the
-base, read the whole table. But if the base has only MENTIONS of it (no document
-you can open whose own body is that standard, so its value table is unreachable),
-then the full table simply is not available to you: record the value(s) the
-designation itself shows, and move on — do NOT loop hunting for a table that is
-not in the base. Such a parameter counts as done-as-far-as-possible (one value is
-enough to stop it blocking you); say plainly in your result which standard is
-missing. When only these remain, report `remaining: 0` and finish — a graph that
-is honest about a missing source beats one that never terminates.
+Where a parameter's values live — and how you know you have looked enough. Each
+parameter's allowed values come from ONE authoritative place: a table in this
+document, or the single standard this document names as their source ("по
+ГОСТ 28818"). So locating them is a short, finite check, not an open-ended hunt:
+- if they are tabulated in this document, read that table;
+- if the document points to another standard, search the base once for that
+  standard and try to OPEN it. Either you open a document whose own body IS that
+  standard and read its table — or the base holds only passing mentions of it
+  (other documents citing it), which means that standard is not loaded and its
+  table is nowhere in reach.
+
+Once you have checked that one source, you have looked enough: a value table that
+is not in the base will not appear no matter how many more searches you run — more
+searching cannot summon a document that was never loaded. When the source is
+missing, take the value(s) the designation itself shows, write them, say which
+standard is absent, and treat the parameter as resolved (a parameter that has at
+least one value no longer counts toward `remaining`). This is the honest outcome:
+the graph records what the base can support and names what it lacks, and the run
+finishes instead of circling a document that is not there.
 
 ## The pieces you build with — just three, all standard
 - `Field` — one parameter, its `label` the parameter's name.
