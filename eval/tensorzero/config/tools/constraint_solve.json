@@ -1,22 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "assignment": {
+      "additionalProperties": true,
+      "default": null,
+      "description": "field assignments for validation mode (JSON object of field→value)",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "mode": {
-      "description": "Solve mode: validate (check assignments), infer (show valid domains), check (graph consistency)",
-      "enum": ["validate", "infer", "check"],
+      "description": "mode: validate | infer | check",
       "type": "string"
     },
-    "field_assignments": {
-      "default": null,
-      "description": "Field name → value map for validate mode (e.g. {\"Диаметр\": 150, \"Тип\": \"A\"})",
-      "type": ["object", "null"]
-    },
-    "field": {
-      "default": null,
-      "description": "Field name to infer domain for (infer mode, optional — omit to infer all fields)",
-      "type": ["string", "null"]
+    "source_path": {
+      "description": "GOST document source_path (which document's constraints to load)",
+      "type": "string"
     }
   },
-  "required": ["mode"],
+  "required": [
+    "source_path",
+    "mode"
+  ],
   "type": "object"
 }
