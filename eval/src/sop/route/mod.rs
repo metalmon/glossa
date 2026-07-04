@@ -37,16 +37,30 @@ pub fn resolve_next(ctx: &RouteCtx<'_>) -> NextStep {
         return NextStep::Complete;
     };
 
-    if let Some(when) = current.routing.when.as_deref() {
-        if !evaluate_condition(when, Some(&ctx.run_data.to_payload().to_string())) {
-            return NextStep::Complete;
-        }
-    }
-
-    let explicit_next = current.routing.next;
-    let next_step = explicit_next.unwrap_or_else(|| ctx.run.current_step.saturating_add(1));
+    // `when` gates the loop back-edge, not the whole run: while the condition holds we
+    // follow the explicit `next` (usually a self-loop); once it clears, the loop is done
+    // and control falls through to the linear next step (current + 1), completing only if
+    // that runs off the end. This lets a value-loop be followed by a review step. NOTE:
+    // upstream zeroclaw ends the run on a false `when` — this is the local behaviour
+    // proposed in zeroclaw-labs/zeroclaw#8719 and is a deliberate, backward-compatible
+    // divergence (a tail-loop whose loop step is last still completes here, as current+1
+    // runs off the end).
+    let when_holds = current
+        .routing
+        .when
+        .as_deref()
+        .map(|w| evaluate_condition(w, Some(&ctx.run_data.to_payload().to_string())));
+    let (next_step, followed_explicit) = if when_holds == Some(false) {
+        (ctx.run.current_step.saturating_add(1), false)
+    } else {
+        let explicit_next = current.routing.next;
+        (
+            explicit_next.unwrap_or_else(|| ctx.run.current_step.saturating_add(1)),
+            explicit_next.is_some(),
+        )
+    };
     let Some(step) = ctx.sop.steps.iter().find(|step| step.number == next_step) else {
-        return if explicit_next.is_none() && next_step > ctx.run.total_steps {
+        return if !followed_explicit && next_step > ctx.run.total_steps {
             NextStep::Complete
         } else {
             NextStep::Fail(format!("step {next_step} does not exist"))
