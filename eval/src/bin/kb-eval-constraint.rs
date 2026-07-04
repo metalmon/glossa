@@ -618,13 +618,32 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
             errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
         }
     }
+    // Normalization feedback: flag values whose Cyrillic/Latin homoglyphs fold, so
+    // the model knows a Cyrillic-typed value ("14А") still matches a Latin-typed
+    // marking ("14a") — the same canon that validation and metrics compare on.
+    const HOMO: &[char] = &['а', 'в', 'е', 'к', 'м', 'н', 'о', 'р', 'с', 'т', 'у', 'х'];
+    let mut folds: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for n in &nodes {
+        for a in &n.aliases {
+            if a.chars().any(|c| c.to_lowercase().next().is_some_and(|l| HOMO.contains(&l))) {
+                let canon = glossa_constraint::solver::canon_scalar(a);
+                if canon != *a && seen.insert(a.clone()) {
+                    folds.push(format!("{a}→{canon}"));
+                }
+            }
+        }
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);
-    if errs.is_empty() {
-        out.message
-    } else {
-        format!("{}\n{}", errs.join("\n"), out.message)
+    let mut msg = if errs.is_empty() { out.message } else { format!("{}\n{}", errs.join("\n"), out.message) };
+    if !folds.is_empty() {
+        msg.push_str(&format!(
+            "\nnote: mixed-script values fold to Latin for matching (they'll match a Latin-typed marking): {}",
+            folds.join(", ")
+        ));
     }
+    msg
 }
 
 fn exec_graph_delete(idx: &DocIndex, g: &GraphStore, args: &Value) -> String {

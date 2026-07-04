@@ -43,11 +43,26 @@ pub fn scalar_str(v: &serde_json::Value) -> String {
     }
 }
 
+/// Fold the Cyrillic letters that are visual homoglyphs of a Latin letter to
+/// that Latin letter (input already lowercased). Russian technical data mixes
+/// scripts freely in codes — a grade "14А" typed with Cyrillic А and "14a" typed
+/// with Latin a are the SAME value, but different Unicode. Folding to one script
+/// makes them compare equal. Only the ~12 look-alikes are touched; any other
+/// Cyrillic letter (a real word) is left as-is.
+fn fold_homoglyph(c: char) -> char {
+    match c {
+        'а' => 'a', 'в' => 'b', 'е' => 'e', 'к' => 'k', 'м' => 'm', 'н' => 'h',
+        'о' => 'o', 'р' => 'p', 'с' => 'c', 'т' => 't', 'у' => 'y', 'х' => 'x',
+        other => other,
+    }
+}
+
 /// Canonical form of a scalar for comparison. A decimal written with either a
 /// comma (Russian standards: "0,6", "1,0") or a dot collapses to one numeric
 /// form, so "1,0" == "1.0" == "1" and "152,4" == "152.4". Non-numeric values
-/// (e.g. "F46", "23-25", "12a") are trimmed and lowercased. Symmetric, so it is
-/// safe to apply on both sides of both validation and metric comparisons.
+/// (e.g. "F46", "23-25", "12a") are trimmed, lowercased, and have Cyrillic/Latin
+/// homoglyphs folded to one script ("14А" == "14a", "В" == "b"). Symmetric, so it
+/// is safe to apply on both sides of both validation and metric comparisons.
 pub fn canon_scalar(s: &str) -> String {
     let t = s.trim();
     if let Ok(n) = t.replace(',', ".").parse::<f64>() {
@@ -56,7 +71,7 @@ pub fn canon_scalar(s: &str) -> String {
         }
         return format!("{n}"); // f64 Display drops trailing zeros
     }
-    t.to_lowercase()
+    t.to_lowercase().chars().map(fold_homoglyph).collect()
 }
 
 /// Value equality tolerant of the String/Number split and of decimal notation:
@@ -733,6 +748,23 @@ mod tests {
         // non-numeric passes through, lowercased
         assert_eq!(canon_scalar("23-25"), "23-25");
         assert_eq!(canon_scalar("F46"), "f46");
+    }
+
+    #[test]
+    fn canon_scalar_folds_cyrillic_latin_homoglyphs() {
+        // Grade "14А" (Cyrillic А) and "14a" (Latin a) are the same value.
+        assert_eq!(canon_scalar("14А"), canon_scalar("14a"));
+        assert_eq!(canon_scalar("14А"), "14a");
+        // Bond codes: "В"(Cyrillic) == "b", "Р"(Cyrillic) folds to "p" while the
+        // non-homoglyph "д" is left as-is (so only real look-alikes are touched).
+        assert_eq!(canon_scalar("В"), "b");
+        assert_eq!(canon_scalar("Рд"), "pд");
+        // Grit with Cyrillic М: "М50" == "m50".
+        assert_eq!(canon_scalar("М50"), "m50");
+        // A Latin-only value is unchanged (only case folds).
+        assert_eq!(canon_scalar("BF"), "bf");
+        // A non-homoglyph Cyrillic letter is left alone (not mangled): б stays б.
+        assert_eq!(canon_scalar("аб"), "aб"); // а→a (homoglyph); б has no Latin look-alike
     }
 
     /// A comma-decimal enum literal ("1,0") matches the assigned number 1 and its
