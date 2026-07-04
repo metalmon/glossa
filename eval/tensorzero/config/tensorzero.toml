@@ -216,7 +216,7 @@ extra_body = [
 [functions.answer_hotpot]
 type = "chat"
 # >>> GENERATED TOOL LIST
-tools = ["glob", "glossary", "grep", "neighbors", "read", "resolve", "search"]
+tools = ["constraint_solve", "get_ontology", "glob", "glossary", "grep", "neighbors", "read", "resolve", "search"]
 # <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
@@ -260,6 +260,14 @@ extra_body = [
 
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
+[tools.constraint_solve]
+description = "CSP solver for GOST constraint graphs. Three modes: validate (check field values against constraints), infer (infer each field's valid domain), check (internal consistency of the constraint graph)."
+parameters = "tools/constraint_solve.json"
+
+[tools.get_ontology]
+description = "Return the knowledge-base ontology as JSON: entities, relations, constraint types, and node prefixes. Use this to discover what graph nodes/edges are valid and what constraint types the CSP solver supports."
+parameters = "tools/get_ontology.json"
+
 [tools.glob]
 description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count)."
 parameters = "tools/glob.json"
@@ -277,7 +285,7 @@ description = "Recompute the graph's DERIVED layer from what is currently stored
 parameters = "tools/graph_generalize.json"
 
 [tools.graph_stats]
-description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank)."
+description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's checklist coverage: which parameters still lack a constraint (unbuilt) or a DEFINED_IN source standard (unmapped)."
 parameters = "tools/graph_stats.json"
 
 [tools.graph_update]
@@ -289,7 +297,7 @@ description = "Create/update reasoning nodes and directed edges. Each node needs
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
-description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`."
+description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; a context line (from -A/-B/-C) uses `-` instead of `:`; read the full chunk with `read(path, n)`. Flags mirror ripgrep: -i/-F/-w, -A/-B/-C context, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
 parameters = "tools/grep.json"
 
 [tools.index]
@@ -383,7 +391,7 @@ extra_body = [
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
+tools = ["constraint_solve", "get_ontology", "glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 

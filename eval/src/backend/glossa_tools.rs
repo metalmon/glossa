@@ -71,12 +71,23 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
         }
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let usize_arg = |k: &str| args.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
+            let bool_arg = |k: &str| args.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+            let context = usize_arg("context");
             let opts = glossa::grep::GrepOpts {
-                ignore_case: args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false),
-                fixed: args.get("fixed").and_then(|v| v.as_bool()).unwrap_or(false),
-                word: args.get("word").and_then(|v| v.as_bool()).unwrap_or(false),
+                ignore_case: bool_arg("ignore_case"),
+                fixed: bool_arg("fixed"),
+                word: bool_arg("word"),
                 glob: args.get("glob").and_then(|v| v.as_str()).map(String::from),
                 file_type: args.get("file_type").and_then(|v| v.as_str()).map(String::from),
+                // -A/-B override the shared -C on their respective side.
+                before: usize_arg("before").or(context).unwrap_or(0),
+                after: usize_arg("after").or(context).unwrap_or(0),
+                only_matching: bool_arg("only_matching"),
+                line_number: bool_arg("line_number"),
+                count: bool_arg("count"),
+                max_count: usize_arg("max_count"),
+                multiline: bool_arg("multiline"),
             };
             let (body, titles) = run_grep(idx, pattern, opts, trace);
             (body, titles, Vec::new())

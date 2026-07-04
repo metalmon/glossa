@@ -345,6 +345,30 @@ struct GrepArgs {
     #[serde(default)]
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
     file_type: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "emit N context lines both before AND after each match (-C); -A/-B override a side")]
+    context: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "emit N context lines before each match (-B)")]
+    before: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "emit N context lines after each match (-A)")]
+    after: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "print only the matched substring(s), one per line, not the whole line (-o)")]
+    only_matching: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "prefix each line with its 1-based line number within the chunk (-n)")]
+    line_number: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "output only a count of matching lines per chunk, not the lines (-c)")]
+    count: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "stop after N matching lines per chunk (-m)")]
+    max_count: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)")]
+    multiline: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -649,11 +673,25 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
-    #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`.")]
+    #[tool(description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; a context line (from -A/-B/-C) uses `-` instead of `:`; read the full chunk with `read(path, n)`. Flags mirror ripgrep: -i/-F/-w, -A/-B/-C context, -o only-matching, -n line-number, -c count, -m max-count, -U multiline.")]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let opts = crate::grep::GrepOpts { ignore_case: a.ignore_case.unwrap_or(false), fixed: a.fixed.unwrap_or(false), word: a.word.unwrap_or(false), glob: a.glob, file_type: a.file_type };
+        let opts = crate::grep::GrepOpts {
+            ignore_case: a.ignore_case.unwrap_or(false),
+            fixed: a.fixed.unwrap_or(false),
+            word: a.word.unwrap_or(false),
+            glob: a.glob,
+            file_type: a.file_type,
+            // -A/-B take precedence over the shared -C on their respective side.
+            before: a.before.or(a.context).unwrap_or(0),
+            after: a.after.or(a.context).unwrap_or(0),
+            only_matching: a.only_matching.unwrap_or(false),
+            line_number: a.line_number.unwrap_or(false),
+            count: a.count.unwrap_or(false),
+            max_count: a.max_count,
+            multiline: a.multiline.unwrap_or(false),
+        };
         Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
     }
 
@@ -755,6 +793,7 @@ mod tests {
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
         let out = srv.grep(Parameters(GrepArgs {
             pattern: "maxTsdr".into(), ignore_case: None, fixed: None, word: None, glob: None, file_type: None,
+            context: None, before: None, after: None, only_matching: None, line_number: None, count: None, max_count: None, multiline: None,
         })).await.unwrap();
         assert!(format!("{:?}", out).contains("maxTsdr"));
         assert!(format!("{:?}", out).contains(":#")); // carries the #n read key

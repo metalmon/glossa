@@ -1,6 +1,44 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "after": {
+      "default": null,
+      "description": "emit N context lines after each match (-A)",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "before": {
+      "default": null,
+      "description": "emit N context lines before each match (-B)",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "context": {
+      "default": null,
+      "description": "emit N context lines both before AND after each match (-C); -A/-B override a side",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "count": {
+      "default": null,
+      "description": "output only a count of matching lines per chunk, not the lines (-c)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "file_type": {
       "default": null,
       "description": "only this file type, e.g. pdf (-t)",
@@ -28,6 +66,40 @@
     "ignore_case": {
       "default": null,
       "description": "case-insensitive matching (-i)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "line_number": {
+      "default": null,
+      "description": "prefix each line with its 1-based line number within the chunk (-n)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "max_count": {
+      "default": null,
+      "description": "stop after N matching lines per chunk (-m)",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "multiline": {
+      "default": null,
+      "description": "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "only_matching": {
+      "default": null,
+      "description": "print only the matched substring(s), one per line, not the whole line (-o)",
       "type": [
         "boolean",
         "null"

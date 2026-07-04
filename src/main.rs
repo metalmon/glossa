@@ -92,6 +92,14 @@ enum Cmd {
         #[arg(short = 'w', long)] word: bool,
         #[arg(short = 'g', long)] glob: Option<String>,
         #[arg(short = 't', long = "type")] file_type: Option<String>,
+        #[arg(short = 'A', long, help = "N context lines after each match (-A)")] after: Option<usize>,
+        #[arg(short = 'B', long, help = "N context lines before each match (-B)")] before: Option<usize>,
+        #[arg(short = 'C', long, help = "N context lines before AND after each match (-C)")] context: Option<usize>,
+        #[arg(short = 'o', long = "only-matching", help = "print only the matched substrings (-o)")] only_matching: bool,
+        #[arg(short = 'n', long = "line-number", help = "prefix each line with its chunk line number (-n)")] line_number: bool,
+        #[arg(short = 'c', long, help = "print only a count of matching lines per chunk (-c)")] count: bool,
+        #[arg(short = 'm', long = "max-count", help = "stop after N matching lines per chunk (-m)")] max_count: Option<usize>,
+        #[arg(short = 'U', long, help = "let the pattern span lines (-U)")] multiline: bool,
     },
     /// List documents whose PATH matches a shell glob (matches file paths, NOT text inside them —
     /// for content use `search` or `grep`).
@@ -554,11 +562,17 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
+        Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type, after, before, context, only_matching, line_number, count, max_count, multiline } => {
             let path = glossa::root::resolve_root(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-            let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
+            let opts = glossa::grep::GrepOpts {
+                ignore_case, fixed, word, glob, file_type,
+                // -A/-B override the shared -C on their respective side.
+                before: before.or(context).unwrap_or(0),
+                after: after.or(context).unwrap_or(0),
+                only_matching, line_number, count, max_count, multiline,
+            };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
                 println!("{}", h.display_line());
             }
