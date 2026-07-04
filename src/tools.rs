@@ -458,11 +458,12 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
 pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
     match crate::graph::ops::checklist_coverage(g, doc) {
         Ok(Some(c)) => {
-            let unbuilt = if c.unbuilt.is_empty() { "-".to_string() }
-                else { c.unbuilt.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
+            let fmt = |v: &[String]| if v.is_empty() { "—".to_string() }
+                else { v.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
+            let built: Vec<String> = c.params.iter().filter(|p| !c.unbuilt.contains(*p)).cloned().collect();
             format!(
-                "params({doc}): {} total, {} still without values (no Field→Enum)\nunbuilt: {}",
-                c.params.len(), c.unbuilt.len(), unbuilt
+                "params({doc}): {} of {} have values\nwith values: {}\nstill to value: {}",
+                built.len(), c.params.len(), fmt(&built), fmt(&c.unbuilt)
             )
         }
         Ok(None) => format!("params({doc}): no Field for this document yet"),

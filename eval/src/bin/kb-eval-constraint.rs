@@ -152,6 +152,11 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
     }
 
     let cols: Vec<ColInfo> = col_map.into_iter()
+        // A column with a single value is document metadata (product name, the
+        // accompanying-document reference, an abrasive flag), not a constrained
+        // parameter — a one-value "domain" is nothing to model or measure. Keep only
+        // columns whose values actually form a set the agent must reproduce.
+        .filter(|(_, vals)| vals.len() >= 2)
         .map(|(name, vals)| {
             let unit = unit_map.get(&name).cloned();
             ColInfo { name, unit, valid: vals.into_iter().collect() }
