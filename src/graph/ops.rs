@@ -299,6 +299,12 @@ pub fn graph_upsert(
 
         let mut from_resolved: Option<String> = None;
         let mut to_resolved: Option<String> = None;
+        // An endpoint that resolved to a real indexed section (via resolve_section_ref)
+        // is a valid document location even when that Section node is not materialised
+        // in this graph — e.g. the eval keeps the corpus index and the agent's graph in
+        // separate stores. Such endpoints skip the graph-node existence check below.
+        let mut from_is_section = false;
+        let mut to_is_section = false;
         let mut edge_ok = true;
 
         // A bare section anchor "#N" (no document) means "section N of this edge's
@@ -325,6 +331,7 @@ pub fn graph_upsert(
             Ok(v) if v != from_ep => {
                 // numeric section ref resolved to section id
                 from_resolved = Some(v);
+                from_is_section = true;
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
@@ -349,6 +356,7 @@ pub fn graph_upsert(
             Ok(v) if v != to_ep => {
                 // numeric section ref resolved to section id
                 to_resolved = Some(v);
+                to_is_section = true;
             }
             Ok(_) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
@@ -368,9 +376,16 @@ pub fn graph_upsert(
             let from_id = from_resolved.unwrap();
             let to_id = to_resolved.unwrap();
 
-            // post-resolution existence check
+            // post-resolution existence check (a resolved section ref is validated by
+            // the index, so it is exempt — its Section node need not live in this graph)
             let mut exists_ok = true;
-            for (role, id) in [("from", from_id.clone()), ("to", to_id.clone())] {
+            for (role, id, is_section) in [
+                ("from", from_id.clone(), from_is_section),
+                ("to", to_id.clone(), to_is_section),
+            ] {
+                if is_section {
+                    continue;
+                }
                 let exists =
                     batch_ids.contains(&id) || g.get_node(&id).ok().flatten().is_some();
                 if !exists {
@@ -1069,6 +1084,40 @@ strict = true
         }]).unwrap();
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
         assert_eq!(resolved, "docs\\real.md#Introduction");
+    }
+
+    /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a
+    /// MENTIONS target that resolves to a real section is NOT a node in the agent graph.
+    /// The edge must still land — a bare "#1" is qualified by the edge's source_path, and
+    /// a resolved section ref is exempt from the node-existence check. A single-chunk
+    /// heading-less doc has an empty location, so its section id is "gost.docx#".
+    #[test]
+    fn mentions_to_section_ref_survives_separate_agent_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "gost.docx".into(),
+            location: String::new(),
+            file_type: "docx".into(),
+            text: "table of allowed values".into(),
+        }]).unwrap();
+        // Bare "#1" target (no path) — the model's short form.
+        let out = graph_upsert(
+            &idx, &g, &ont,
+            vec![unode("Symptom", "Тип", "gost.docx")],
+            vec![uedge("Тип", "MENTIONS", "#1", "gost.docx")],
+            1,
+        );
+        assert!(!out.rejected, "upsert rejected: {}", out.message);
+        let from_id = id_for(&ont, "Symptom", "Тип");
+        let outgoing = g.outgoing(&from_id).unwrap();
+        assert!(
+            outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#"),
+            "MENTIONS edge to a section ref must land; got: {:?}",
+            outgoing.iter().map(|e| (e.edge_type.clone(), e.to.clone())).collect::<Vec<_>>()
+        );
     }
 
     /// Fix 2 — graph_delete resolves `<path>#<n>` section refs (symmetry with upsert).
