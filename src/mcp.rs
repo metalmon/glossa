@@ -328,13 +328,13 @@ impl JsonSchema for Empty {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GrepArgs {
-    #[schemars(description = "ripgrep-style regex pattern (literal text also works)")]
+    #[schemars(description = "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window.")]
     pattern: String,
     #[serde(default)]
     #[schemars(description = "case-insensitive matching (-i)")]
     ignore_case: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "treat the pattern as a fixed string, not a regex (-F)")]
+    #[schemars(description = "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F).")]
     fixed: Option<bool>,
     #[serde(default)]
     #[schemars(description = "match whole words only (-w)")]
@@ -346,7 +346,7 @@ struct GrepArgs {
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
     file_type: Option<String>,
     #[serde(default)]
-    #[schemars(description = "emit N context lines both before AND after each match (-C); -A/-B override a side")]
+    #[schemars(description = "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C).")]
     context: Option<usize>,
     #[serde(default)]
     #[schemars(description = "emit N context lines before each match (-B)")]
@@ -358,7 +358,7 @@ struct GrepArgs {
     #[schemars(description = "print only the matched substring(s), one per line, not the whole line (-o)")]
     only_matching: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "prefix each line with its 1-based line number within the chunk (-n)")]
+    #[schemars(description = "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n).")]
     line_number: Option<bool>,
     #[serde(default)]
     #[schemars(description = "output only a count of matching lines per chunk, not the lines (-c)")]
