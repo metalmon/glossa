@@ -387,6 +387,25 @@ fn checklist_status(agent_g_dir: &std::path::Path) -> (Option<String>, usize) {
     (uncovered.first().map(|s| (*s).clone()), uncovered.len())
 }
 
+/// The Standard a checklist parameter's values are DEFINED_IN, per step 2's
+/// reference map — read from the graph so step 3 can point the agent at the right
+/// document without giving it a graph-read tool. None when step 2 mapped no
+/// source for this parameter.
+fn defined_in_standard(agent_g_dir: &std::path::Path, param: &str) -> Option<String> {
+    let g = GraphStore::open(agent_g_dir).ok()?;
+    let nodes = g.all_nodes().ok()?;
+    let edges = g.all_edges().ok()?;
+    let field_ids = g.resolve(param).ok()?;
+    let std_id = field_ids.iter().find_map(|fid| {
+        edges.iter()
+            .find(|e| e.edge_type == "DEFINED_IN" && &e.from == fid)
+            .map(|e| e.to.clone())
+    })?;
+    nodes.iter()
+        .find(|n| n.id == std_id && n.node_type == "Standard")
+        .map(|n| n.label.clone())
+}
+
 /// SOP-driven discovery: run the authored SOP (zeroclaw format) via the vendored
 /// engine. Each step's `body` from SOP.md is the agent instruction; step 2
 /// self-routes per uncovered checklist parameter, so the agent builds one
@@ -407,18 +426,57 @@ fn run_sop_discovery(
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     eprintln!("[sop] loaded '{}' ({} steps) from {}", sop_def.name, sop_def.steps.len(), sop_dir.display());
     let cfg = sop::driver::DriverConfig::default();
+    // Build-loop no-progress backstop. This is ORCHESTRATOR state (per SOP run,
+    // per agent) — it lives here in the driver, never in the graph or an MCP
+    // tool, so concurrent agents can never conflate each other's progress (the
+    // prod tools stay stateless; feedback below is derived from graph state).
+    const MAX_STALL: u32 = 8;
+    let mut last_remaining = usize::MAX;
+    let mut stall = 0u32;
     let report = sop::driver::run_sop(&sop_def, &cfg, |step, _run_data, visit| {
-        let (target, _) = checklist_status(agent_g_dir);
         let mut prompt = format!(
             "You are building the constraint set for regulatory document '{src_doc}'.\n\
              Knowledge base standards: {kb_docs_list}.\n\n{}",
             step.body
         );
-        if step.number >= 2 {
-            match &target {
-                Some(t) => prompt.push_str(&format!("\n\nThe parameter to build in THIS step is: «{t}». Build only it.")),
-                None => return sop::driver::StepOutcome::completed("{\"remaining\": 0}"),
+        // Step 1 (checklist) and step 2 (resolve references) run once with just
+        // their body. Step 3+ is the per-parameter build loop.
+        if step.number >= 3 {
+            let (target, remaining_now) = checklist_status(agent_g_dir);
+            let Some(t) = target else {
+                return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
+            };
+            // No-progress backstop: bail out of the build loop after a generous
+            // window of visits that did not reduce `remaining`, instead of
+            // grinding one hard parameter to `max_step_visits`. Reporting
+            // remaining=0 ends the loop; DISCOVERY metrics below read the real
+            // graph, so coverage stays honest. The skip is logged, not silent.
+            if remaining_now < last_remaining {
+                last_remaining = remaining_now;
+                stall = 0;
+            } else {
+                stall += 1;
             }
+            if stall >= MAX_STALL {
+                eprintln!("  [sop] build loop stalled at {remaining_now} uncovered after {stall} \
+                    no-progress visits — stopping (param «{t}» left uncovered: values likely in a \
+                    referenced standard not in the KB)");
+                return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
+            }
+            // Surface step 2's reference map (read from the graph) so the agent
+            // opens the right document instead of blind-searching every standard.
+            let src_hint = defined_in_standard(agent_g_dir, &t)
+                .map(|s| format!(" Its values are defined in «{s}» (per the step-2 reference map) — open that document first."))
+                .unwrap_or_default();
+            // Feedback is derived only from the graph (checklist_status): what is
+            // verifiably true now, covering both failure modes — not yet built,
+            // or built under a label that does not resolve from the name.
+            prompt.push_str(&format!(
+                "\n\nThe parameter to build in THIS step is: «{t}». Build ONLY it.{src_hint}\n\
+                 «{t}» is still uncovered: the graph has no Field that resolves from the name «{t}» \
+                 and is CONSTRAINED_BY an Enum with values. Either (a) you have not built its Enum yet — \
+                 read its values and create Field --CONSTRAINED_BY--> Enum; or (b) you built the Field \
+                 under a different label — add «{t}» to that Field's aliases so it resolves."));
         }
         let eid = kb_eval::tz::backdated_episode_id(30);
         let exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
@@ -858,8 +916,10 @@ fn main() -> Result<()> {
         // ── Post-episode: compare agent graph with reference ──
         let agent_g = GraphStore::open(&agent_g_dir).unwrap();
         let (field_cov, constraint_cov, literal_cov) = compare_graphs(&agent_g, &ref_json_clone);
-        let agent_nodes = agent_g.all_nodes().map(|v| v.len()).unwrap_or(0);
-        let agent_edges = agent_g.all_edges().map(|v| v.len()).unwrap_or(0);
+        // Exclude the reference map (Standard nodes, DEFINED_IN edges) from the
+        // counts — those measure the constraint graph, not the SOP scaffolding.
+        let agent_nodes = agent_g.all_nodes().map(|v| v.iter().filter(|n| n.node_type != "Standard").count()).unwrap_or(0);
+        let agent_edges = agent_g.all_edges().map(|v| v.iter().filter(|e| e.edge_type != "DEFINED_IN").count()).unwrap_or(0);
         let was_done = outcome.as_ref().map(|o| o.done).unwrap_or(false);
         let rounds = outcome.as_ref().map(|o| o.rounds).unwrap_or(0);
 

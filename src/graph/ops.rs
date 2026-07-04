@@ -97,7 +97,7 @@ fn resolve_endpoint_label(
     if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
         return Some(id);
     }
-    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
+    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic", "Standard"];
     let ids = g.resolve(label).ok()?;
     ids.into_iter()
         .filter_map(|id| g.get_node(&id).ok().flatten())
@@ -372,7 +372,7 @@ pub fn graph_upsert(
 
     // (6) Nothing well-formed at all → full rejection with a label-matching hint.
     if nodespecs.is_empty() && edgespecs.is_empty() {
-        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
+        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic", "Standard"];
         let existing: Vec<String> = g
             .all_nodes()
             .unwrap_or_default()

@@ -61,10 +61,21 @@ id_prefix = "dom"
 [entities.Checklist]   # SOP Step-1 output: one node whose `aliases` list every
 id_prefix = "chk"      # parameter in the document — the completeness gate's target set
 
+[entities.Standard]    # SOP Step-2 output: a regulatory document a parameter's values
+id_prefix = "std"      # are DEFINED_IN (the main doc, or a standard it references)
+
 # ── Relations ──
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
+
+# SOP Step-2 reference map: a parameter (or the whole checklist) points at the
+# document its allowed values are defined in — the main document, or a standard
+# it references. Structural scaffolding (see STRUCTURAL in src/graph/ops.rs): it
+# guides the build step and is excluded from constraint-coverage metrics.
+[relations.DEFINED_IN]
+from = ["Field", "Checklist"]
+to   = ["Standard"]
 
 [relations.HAS_MIN]
 from = ["Range"]
