@@ -18,17 +18,24 @@ between them, and a description of each — that is where the shape of the graph
 lives: what a parameter is, which node carries its allowed values, and how the two
 are linked. Model each parameter the way the ontology describes it, so the same
 approach works for any ontology, not only this one. The labels you give nodes are
-human-readable names that stay in the document's own language — they are what a
-later table export shows, so keep them coherent rather than a mix of languages.
+human-readable names in the document's own language — each parameter's own name as
+the document writes it, kept as-is rather than translated into English — because
+they are what a later table export shows and should read coherently in one
+language.
 
 ## Finding the parameters and their values
+Naming the parameters and giving them values are two separate phases: first you
+name every parameter, then — one parameter at a time — you find and record its full
+set of values. Rushing the second into the first is the usual mistake; the SOP
+keeps them apart for a reason.
+
 A product's designation example ("условное обозначение" / "Пример") tells you WHICH
 parameters exist — it spells out every parameter in order, and the sentence just
-before it names them. But the example shows only one valid combination: a single
-value per parameter. The full set of allowed values for a parameter lives in its
-own table or section. So use the designation to learn the parameter list, then for
-each parameter find its value table and read the whole column, rather than the one
-value the example happens to show.
+before it names them. That example shows only one valid combination: a single value
+per parameter. The full set of allowed values for a parameter lives in its own
+table or section, so when the time comes to value a parameter you go to its table
+and read the whole column, rather than keeping the one value the example happens to
+show.
 
 Each parameter's values come from one authoritative place: a table in this
 document, or the single standard this document names as their source. Locating
