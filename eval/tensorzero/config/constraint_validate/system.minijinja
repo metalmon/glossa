@@ -51,6 +51,14 @@ parameter that has at least one value no longer counts toward `remaining`. You k
 this case because you can name the standard the document points to and have seen
 the base does not hold it.
 
+## Reading a value table out of a large block
+A document may arrive as one big block of text. Reading the whole thing pulls a lot
+into the middle of your context, where attention is weakest — so a table sitting in
+the middle is easy to under-read. Instead, go straight to what you need: `grep` for
+the parameter's name or one of its values and ask for a few lines of context around
+each hit (grep's context option), so you pull just that table's window rather than
+the whole block. That focused window is where you read the whole column from.
+
 ## Getting the values right
 Put every value you find into the node's `aliases` in the same call — it is easy to
 name several in your reasoning but write only the first. `graph_upsert` echoes how
