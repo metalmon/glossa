@@ -57,7 +57,10 @@ enum ToolKind {
 
 fn tool_kind(name: &str) -> ToolKind {
     match name {
-        "done" => ToolKind::Control,
+        // `done` ends the episode; `sop_advance` transitions the SOP step — both
+        // are control signals: always executed, never deduped (an identical
+        // `{"remaining": 0}` on two different steps is two real transitions).
+        "done" | "sop_advance" => ToolKind::Control,
         "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => ToolKind::GraphMutate,
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
         // constraint_solve reads the graph: an identical call MUST re-run after any

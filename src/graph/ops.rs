@@ -548,6 +548,10 @@ pub struct ChecklistCoverage {
     pub unbuilt: Vec<String>,
     /// Parameters with no in-scope Field --DEFINED_IN--> Standard.
     pub unmapped: Vec<String>,
+    /// The reference map: (parameter, Standard label it is DEFINED_IN), for
+    /// every mapped parameter — so a report can tell the agent WHERE a still
+    /// unbuilt parameter's values are defined.
+    pub mapped_to: Vec<(String, String)>,
 }
 
 /// `None` when the graph has no Checklist for `doc` (step 1 hasn't run).
@@ -593,7 +597,7 @@ pub fn checklist_coverage(
         scope_paths.contains(f.prov.source_path.as_str())
             || edges.iter().any(|e| e.edge_type == "DEFINED_IN" && e.from == f.id && scope_std.contains(&e.to))
     };
-    let (mut unbuilt, mut unmapped) = (Vec::new(), Vec::new());
+    let (mut unbuilt, mut unmapped, mut mapped_to) = (Vec::new(), Vec::new(), Vec::new());
     for p in &params {
         let ids = g.resolve(p).unwrap_or_default();
         let fields: Vec<&Node> = ids
@@ -608,21 +612,21 @@ pub fn checklist_coverage(
                     && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
             })
         });
-        let mapped = fields.iter().any(|f| {
-            edges.iter().any(|e| {
-                e.edge_type == "DEFINED_IN"
-                    && e.from == f.id
-                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Standard")
-            })
+        let mapped_std = fields.iter().find_map(|f| {
+            edges.iter()
+                .filter(|e| e.edge_type == "DEFINED_IN" && e.from == f.id)
+                .find_map(|e| nodes.iter().find(|m| m.id == e.to && m.node_type == "Standard"))
+                .map(|m| m.label.clone())
         });
         if !built {
             unbuilt.push(p.clone());
         }
-        if !mapped {
-            unmapped.push(p.clone());
+        match mapped_std {
+            Some(s) => mapped_to.push((p.clone(), s)),
+            None => unmapped.push(p.clone()),
         }
     }
-    Ok(Some(ChecklistCoverage { params, unbuilt, unmapped }))
+    Ok(Some(ChecklistCoverage { params, unbuilt, unmapped, mapped_to }))
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -686,6 +690,11 @@ mod tests {
         // высота built+mapped; зернистость mapped but unbuilt; диаметр neither (B's field is out of scope).
         assert_eq!(c.unbuilt, vec!["зернистость".to_string(), "диаметр".to_string()]);
         assert_eq!(c.unmapped, vec!["диаметр".to_string()]);
+        // The reference map names each mapped parameter's source standard.
+        assert_eq!(c.mapped_to, vec![
+            ("высота".to_string(), "ГОСТ А".to_string()),
+            ("зернистость".to_string(), "ГОСТ REF".to_string()),
+        ]);
 
         // No checklist for an unknown doc.
         assert!(checklist_coverage(&g, "zzz.docx").unwrap().is_none());

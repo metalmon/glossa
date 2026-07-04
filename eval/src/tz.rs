@@ -72,6 +72,7 @@ pub fn infer(
     timeout: Duration,
     variant: Option<&str>,
     system: Option<&str>,
+    additional_tools: Option<&[Value]>,
 ) -> Result<InferenceTurn> {
     let base = gateway_base(gateway);
     let url = format!("{base}/inference");
@@ -86,6 +87,14 @@ pub fn infer(
     });
     if let Some(variant) = variant {
         body["variant_name"] = json!(variant);
+    }
+    // Dynamic tools supplied at inference time (not in the gateway's function
+    // config). Used to give the SOP-conversation agent the `sop_advance` tool,
+    // exactly as zeroclaw's runtime provides it in production.
+    if let Some(tools) = additional_tools {
+        if !tools.is_empty() {
+            body["additional_tools"] = json!(tools);
+        }
     }
     if tags.as_object().is_some_and(|o| !o.is_empty()) {
         body["tags"] = tags.clone();

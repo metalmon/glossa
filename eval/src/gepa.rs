@@ -384,6 +384,7 @@ fn infer_prompt(
         Duration::from_secs(120),
         Some(&cfg.variant),
         Some(prompt),
+        None,
     )
 }
 
@@ -1150,6 +1151,7 @@ fn reflect(cfg: &GepaConfig, ctx: &ReflectContext) -> Result<String> {
         &cfg.tags,
         Duration::from_secs(180),
         Some("baseline"),
+        None,
         None,
     )
     .context("gepa_reflect inference failed")?;

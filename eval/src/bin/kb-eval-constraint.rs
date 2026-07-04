@@ -69,6 +69,12 @@ struct Cli {
     /// one all-at-once episode. Portable: the same directory runs under zeroclaw.
     #[arg(long)]
     sop_dir: Option<PathBuf>,
+    /// Pin the TensorZero variant for `constraint_validate` (e.g. `qwen4b` for the
+    /// local 4B, `qwen35` for the 35B). Pinned = that variant ONLY, no silent
+    /// fallback to another on failure — so a run measures exactly one model.
+    /// Omit to let the gateway pick (fallback enabled).
+    #[arg(long)]
+    variant: Option<String>,
 }
 
 #[derive(Clone)]
@@ -365,10 +371,11 @@ fn make_chat(
     tags: Value,
     timeout: Duration,
     eid: String,
+    variant: Option<String>,
 ) -> impl FnMut(&[Value], Option<&str>) -> Result<TzTurn> {
     move |messages: &[Value], ep: Option<&str>| {
         let e = ep.unwrap_or(&eid);
-        let turn = kb_eval::tz::infer(&url, &fn_name, e, messages, &tags, timeout, None, None)?;
+        let turn = kb_eval::tz::infer(&url, &fn_name, e, messages, &tags, timeout, variant.as_deref(), None, None)?;
         Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
     }
 }
@@ -397,31 +404,35 @@ fn pending_params(cov: &Option<glossa::graph::ops::ChecklistCoverage>) -> Vec<St
     }
 }
 
-/// The Standard a checklist parameter's values are DEFINED_IN, per step 2's
-/// reference map — read from the graph so step 3 can point the agent at the right
-/// document without giving it a graph-read tool. None when step 2 mapped no
-/// source for this parameter.
-fn defined_in_standard(agent_g_dir: &std::path::Path, param: &str) -> Option<String> {
-    let g = GraphStore::open(agent_g_dir).ok()?;
-    let nodes = g.all_nodes().ok()?;
-    let edges = g.all_edges().ok()?;
-    let field_ids = g.resolve(param).ok()?;
-    let std_id = field_ids.iter().find_map(|fid| {
-        edges.iter()
-            .find(|e| e.edge_type == "DEFINED_IN" && &e.from == fid)
-            .map(|e| e.to.clone())
-    })?;
-    nodes.iter()
-        .find(|n| n.id == std_id && n.node_type == "Standard")
-        .map(|n| n.label.clone())
+/// The agent's step-output contract (the zeroclaw shape: the engine reads the
+/// payload the AGENT produced — the driver adds no numbers of its own): the
+/// episode's final answer must contain `"remaining": N`. The LAST occurrence
+/// wins (the final self-check overrides earlier narration). None when the agent
+/// failed to report — the SOP condition then fail-closes and the loop ends.
+fn parse_reported_remaining(answer: &str) -> Option<usize> {
+    let pos = answer.rfind("remaining")?;
+    let digits: String = answer[pos..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
-/// SOP-driven discovery: run the authored SOP (zeroclaw format) via the vendored
-/// engine. Each step's `body` from SOP.md is the agent instruction; step 2
-/// self-routes per uncovered checklist parameter, so the agent builds one
-/// parameter per focused episode instead of drowning in an all-at-once build.
+/// SOP-driven discovery, run exactly as it will run under zeroclaw: ONE
+/// continuous agent conversation. The agent does a step's work with the tools,
+/// then calls `sop_advance(status, output)` to finish it and receive the next
+/// step's context — the engine routes on the agent's `output` payload
+/// (`{"remaining": N}`), never on driver-computed numbers. `sop_advance` is
+/// provided as a dynamic tool via `additional_tools`, mirroring the tool
+/// zeroclaw's runtime injects; the same SOP.md therefore deploys unchanged.
+///
+/// The driver adds NO steering: it does not pick the target parameter, inject
+/// hints, or compute the gate. It only routes the agent's report through the
+/// vendored engine and surfaces the next step. Graph truth is logged next to the
+/// agent's report purely as an observability signal (a gap is a quality metric).
 #[allow(clippy::too_many_arguments)]
-fn run_sop_discovery(
+fn run_sop_conversation(
     sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
     kb: &std::path::Path,
@@ -430,101 +441,111 @@ fn run_sop_discovery(
     gateway: &str,
     tags: &Value,
     timeout: Duration,
+    variant: Option<&str>,
 ) -> Result<usize> {
     use kb_eval::sop;
+    use sop::route::{resolve_next, NextStep, RouteCtx};
+    use sop::types::{SopRunStatus, SopStep, SopStepResult, SopStepStatus};
     let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
-    eprintln!("[sop] loaded '{}' ({} steps) from {}", sop_def.name, sop_def.steps.len(), sop_dir.display());
-    let cfg = sop::driver::DriverConfig::default();
-    // Build-loop no-progress backstop. This is ORCHESTRATOR state (per SOP run,
-    // per agent) — it lives here in the driver, never in the graph or an MCP
-    // tool, so concurrent agents can never conflate each other's progress (the
-    // prod tools stay stateless; feedback below is derived from graph state).
-    const MAX_STALL: u32 = 8;
-    let mut last_remaining = usize::MAX;
-    let mut stall = 0u32;
-    let report = sop::driver::run_sop(&sop_def, &cfg, |step, _run_data, visit| {
-        let mut prompt = format!(
-            "You are building the constraint set for regulatory document '{src_doc}'.\n\
-             Knowledge base standards: {kb_docs_list}.\n\n{}",
-            step.body
-        );
-        // Step 1 (checklist) and step 2 (bulk reference map) run once. Step 3+ is
-        // the per-parameter tail loop — the ONLY loop shape the SOP engine
-        // supports (`when: false` COMPLETES the run, so a mid-SOP gate would end
-        // it before the build step; see route/mod.rs). Step 3 therefore drives
-        // BOTH gates: a parameter pends until it is built (Field→Enum) AND
-        // mapped (DEFINED_IN); step 2's map is healed here per-parameter.
-        if step.number >= 3 {
-            let cov = coverage(agent_g_dir, src_doc);
-            let pending = pending_params(&cov);
-            let Some(t) = pending.first().cloned() else {
-                return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
-            };
-            let remaining_now = pending.len();
-            // No-progress backstop: bail out of the build loop after a generous
-            // window of visits that did not reduce `remaining`, instead of
-            // grinding one hard parameter to `max_step_visits`. Reporting
-            // remaining=0 ends the loop; DISCOVERY metrics below read the real
-            // graph, so coverage stays honest. The skip is logged, not silent.
-            if remaining_now < last_remaining {
-                last_remaining = remaining_now;
-                stall = 0;
-            } else {
-                stall += 1;
-            }
-            if stall >= MAX_STALL {
-                eprintln!("  [sop] build loop stalled at {remaining_now} pending after {stall} \
-                    no-progress visits — stopping (param «{t}» left pending: values likely in a \
-                    referenced standard not in the KB)");
-                return sop::driver::StepOutcome::completed("{\"remaining\": 0}");
-            }
-            let unbuilt = cov.as_ref().map(|c| c.unbuilt.contains(&t)).unwrap_or(true);
-            let unmapped = cov.as_ref().map(|c| c.unmapped.contains(&t)).unwrap_or(true);
-            // Feedback is derived only from the graph (the shared coverage op):
-            // what is verifiably true now — missing constraint, missing source
-            // mapping, or a Field built under a label that does not resolve.
-            prompt.push_str(&format!("\n\nThe parameter to work on in THIS step is: «{t}». Work ONLY on it."));
-            if unmapped {
-                prompt.push_str(&format!(
-                    "\n«{t}» has no source mapping yet: make sure the MAIN document's Standard node \
-                     exists (source_path = '{src_doc}'); if its values come from a cited GOST, create \
-                     that standard's node (source_path = its indexed path) and link the main Standard \
-                     --MENTIONS--> it; then link «{t}»'s Field --DEFINED_IN--> the Standard its values \
-                     are defined in."));
-            }
-            if unbuilt {
-                // Surface the reference map (read from the graph) so the agent
-                // opens the right document instead of blind-searching every standard.
-                let src_hint = defined_in_standard(agent_g_dir, &t)
-                    .map(|s| format!(" Its values are defined in «{s}» (per the reference map) — open that document first."))
-                    .unwrap_or_default();
-                prompt.push_str(&format!(
-                    "\n«{t}» has no constraint yet: the graph has no Field that resolves from the name \
-                     «{t}» and is CONSTRAINED_BY an Enum with values.{src_hint} Either (a) you have not \
-                     built its Enum yet — read its allowed values and create Field --CONSTRAINED_BY--> \
-                     Enum; or (b) you built the Field under a different label — add «{t}» to that \
-                     Field's aliases so it resolves."));
-            }
+    let n_steps = sop_def.steps.len();
+    eprintln!("[sop] loaded '{}' ({} steps, continuous conversation) from {}", sop_def.name, n_steps, sop_dir.display());
+    let max_visits = sop::driver::DriverConfig::default().max_step_visits;
+
+    // Dynamic tool injected via additional_tools — the same `sop_advance` the
+    // zeroclaw runtime provides, so the SOP.md is portable as-is.
+    let tools = [json!({
+        "name": "sop_advance",
+        "description": "Finish the CURRENT SOP step and receive the next one. Call it once the step's \
+            work is done. `output` is a JSON-object string carrying the step's result; for these steps \
+            it is {\"remaining\": N} where N is how many checklist parameters graph_stats(doc=…) still \
+            lists as unbuilt or unmapped.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "completed | failed"},
+                "output": {"type": "string", "description": "JSON result string, e.g. {\"remaining\": 3}"}
+            },
+            "required": ["status", "output"]
         }
-        let eid = kb_eval::tz::backdated_episode_id(30);
-        let exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
-        let chat = make_chat(gateway.to_string(), "constraint_validate".to_string(), tags.clone(), timeout, eid);
-        let _ = run_episode(chat, &prompt, exec, 20, EpisodePolicy::enrich());
-        // Gate metric from the shared coverage op: steps 1–2 log their own view
-        // (informational), the tail loop (3+) gates on pending = unbuilt ∪ unmapped.
-        let cov_after = coverage(agent_g_dir, src_doc);
-        let (remaining, what) = match step.number {
-            2 => (cov_after.as_ref().map(|c| c.unmapped.len()).unwrap_or(0), "unmapped"),
-            n if n >= 3 => (pending_params(&cov_after).len(), "pending (unbuilt or unmapped)"),
-            _ => (cov_after.as_ref().map(|c| c.unbuilt.len()).unwrap_or(0), "uncovered"),
+    })];
+
+    let step_ctx = |step: &SopStep| -> String {
+        let tools_line = if step.suggested_tools.is_empty() { String::new() }
+            else { format!("\nTools: {}.", step.suggested_tools.join(", ")) };
+        format!(
+            "── SOP step {} of {}: {} ──\n{}{}\n\n\
+             When this step is done, call `sop_advance` with status=\"completed\" and \
+             output=\"{{\\\"remaining\\\": N}}\".",
+            step.number, n_steps, step.title, step.body, tools_line)
+    };
+
+    let intro = format!(
+        "You are building the constraint set for regulatory document '{src_doc}'.\n\
+         Knowledge base standards: {kb_docs_list}.\n\n\
+         You are running an SOP as ONE continuous session. Do the current step's work with the tools, \
+         then call `sop_advance` to finish it and receive the next step. When `sop_advance` replies \
+         that the SOP is complete, call `done`.\n\n"
+    );
+    let first_prompt = format!("{intro}{}", step_ctx(&sop_def.steps[0]));
+
+    // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
+    let run = std::sync::Mutex::new(sop::driver::minimal_run(&sop_def));
+    let normal_exec = make_exec(agent_g_dir.to_path_buf(), kb.to_path_buf(), src_doc.to_string());
+
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+        if name != "sop_advance" {
+            return normal_exec(name, args);
+        }
+        let output = args.get("output").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+        let status = match args.get("status").and_then(|v| v.as_str()) {
+            Some("failed") => SopStepStatus::Failed,
+            Some("skipped") => SopStepStatus::Skipped,
+            _ => SopStepStatus::Completed,
         };
-        eprintln!("  [sop] step {} (visit {}) done → {remaining} params still {what}", step.number, visit);
-        sop::driver::StepOutcome::completed(format!("{{\"remaining\": {remaining}}}"))
-    });
-    eprintln!("[sop] run {:?} after {} step-episodes{}", report.status, report.steps_run,
-        report.fail_reason.map(|r| format!(" ({r})")).unwrap_or_default());
-    Ok(report.steps_run)
+        let mut run = run.lock().unwrap();
+        let cur = run.current_step;
+        run.step_results.push(SopStepResult {
+            step_number: cur, status, output: output.clone(),
+            started_at: String::new(), completed_at: None,
+        });
+        let reported = parse_reported_remaining(&output).map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+        let truth = pending_params(&coverage(agent_g_dir, src_doc)).len();
+        eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining (graph: {truth} pending)");
+        // Route on the agent's payload — identical engine to zeroclaw.
+        let run_data = sop::rundata::RunData::from_step_results(&run.step_results);
+        let next = {
+            let ctx = RouteCtx { sop: &sop_def, run: &run, run_data: &run_data, last_status: status, max_step_visits: max_visits };
+            resolve_next(&ctx)
+        };
+        let msg = match next {
+            NextStep::Step(n) | NextStep::Wait(n) => {
+                run.current_step = n;
+                match sop_def.steps.iter().find(|s| s.number == n) {
+                    Some(s) => step_ctx(s),
+                    None => { run.status = SopRunStatus::Completed; "SOP complete. Call `done` to finish.".into() }
+                }
+            }
+            NextStep::Retry => sop_def.steps.iter().find(|s| s.number == cur)
+                .map(step_ctx).unwrap_or_else(|| "SOP complete. Call `done`.".into()),
+            NextStep::Complete => { run.status = SopRunStatus::Completed; "SOP complete — every step is done. Call `done` to finish.".into() }
+            NextStep::Fail(r) => { run.status = SopRunStatus::Failed; format!("SOP failed: {r}. Call `done` to finish.") }
+        };
+        (msg, vec![], vec![])
+    };
+
+    let eid = kb_eval::tz::backdated_episode_id(30);
+    let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
+        let e = ep.unwrap_or(&eid);
+        let turn = kb_eval::tz::infer(gateway, "constraint_validate", e, messages, tags, timeout, variant, None, Some(&tools))?;
+        Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
+    };
+
+    // One continuous episode over the whole SOP (round budget covers all steps).
+    let _ = run_episode(chat, &first_prompt, exec, 250, EpisodePolicy::enrich());
+    let run = run.into_inner().unwrap();
+    eprintln!("[sop] run {:?} after {} step-transitions", run.status, run.step_results.len());
+    Ok(run.step_results.len())
 }
 
 fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)]) -> SolveResult {
@@ -758,7 +779,9 @@ fn main() -> Result<()> {
         cases.iter().filter(|c| c.name.contains("invalid")).count());
 
     println!("constraint-eval  ontology={}  doc={src_doc}", cli.ontology.display());
-    println!("  val_dir={}  cols={}  cases={}  csp_only={}", cli.val_dir.display(), cols.len(), cases.len(), cli.csp_only);
+    println!("  val_dir={}  cols={}  cases={}  csp_only={}  variant={}",
+        cli.val_dir.display(), cols.len(), cases.len(), cli.csp_only,
+        cli.variant.as_deref().unwrap_or("(gateway default — fallback ON)"));
     println!();
 
     // Build reference graph once (for CSP-only and for comparison)
@@ -811,9 +834,10 @@ fn main() -> Result<()> {
         let ref_json_clone = ref_graph_json.clone();
         let tim = timeout;
 
+        let variant_chat = cli.variant.clone();
         let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
             let eid = ep.unwrap_or(&eid_chat);
-            let turn = kb_eval::tz::infer(&url, &fn_name, eid, messages, &tz_tags, tim, None, None)?;
+            let turn = kb_eval::tz::infer(&url, &fn_name, eid, messages, &tz_tags, tim, variant_chat.as_deref(), None, None)?;
             Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
         };
 
@@ -953,8 +977,8 @@ fn main() -> Result<()> {
             // SOP-driven: the vendored engine drives one focused episode per step
             // (step 2 loops per checklist parameter). The single prompt/chat/exec
             // built above are unused in this path — the driver builds its own.
-            let steps = run_sop_discovery(&sop_dir, &agent_g_dir, &cli.kb, &src_doc,
-                &kb_docs_list, &cli.gateway, &tags, timeout).unwrap_or(0);
+            let steps = run_sop_conversation(&sop_dir, &agent_g_dir, &cli.kb, &src_doc,
+                &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()).unwrap_or(0);
             Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
                 answer: String::new(), episode_id: None, surfaced_titles: vec![],
                 done: true, rounds: steps,
@@ -1045,6 +1069,17 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reported_remaining_contract() {
+        assert_eq!(parse_reported_remaining(r#"done. {"remaining": 7}"#), Some(7));
+        assert_eq!(parse_reported_remaining("remaining: 0"), Some(0));
+        // The LAST report wins — the final self-check overrides earlier narration.
+        assert_eq!(parse_reported_remaining(r#"{"remaining": 9} … after the upsert: {"remaining": 3}"#), Some(3));
+        assert_eq!(parse_reported_remaining("no report at all"), None);
+        assert_eq!(parse_reported_remaining("remaining params: none"), None);
+        assert_eq!(parse_reported_remaining(""), None);
+    }
 
     fn put(g: &GraphStore, id: &str, nt: &str, label: &str, aliases: &[&str]) {
         g.put_node(&Node {

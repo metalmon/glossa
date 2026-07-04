@@ -50,7 +50,7 @@ pub struct RunReport {
     pub fail_reason: Option<String>,
 }
 
-fn minimal_run(sop: &Sop) -> SopRun {
+pub fn minimal_run(sop: &Sop) -> SopRun {
     SopRun {
         run_id: format!("eval-{}", sop.name),
         sop_name: sop.name.clone(),
