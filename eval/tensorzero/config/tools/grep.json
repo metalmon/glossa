@@ -23,7 +23,7 @@
     },
     "context": {
       "default": null,
-      "description": "emit N context lines both before AND after each match (-C); -A/-B override a side",
+      "description": "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C).",
       "format": "uint",
       "minimum": 0,
       "type": [
@@ -49,7 +49,7 @@
     },
     "fixed": {
       "default": null,
-      "description": "treat the pattern as a fixed string, not a regex (-F)",
+      "description": "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F).",
       "type": [
         "boolean",
         "null"
@@ -73,7 +73,7 @@
     },
     "line_number": {
       "default": null,
-      "description": "prefix each line with its 1-based line number within the chunk (-n)",
+      "description": "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n).",
       "type": [
         "boolean",
         "null"
@@ -106,7 +106,7 @@
       ]
     },
     "pattern": {
-      "description": "ripgrep-style regex pattern (literal text also works)",
+      "description": "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window.",
       "type": "string"
     },
     "word": {
