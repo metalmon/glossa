@@ -84,6 +84,12 @@ again with the full list. A few ways values are written are easy to misread:
 - A domain written as a span of a graded series — a grit "F16—F220" naming the
   whole series — is the series: list the actual grades a marking can carry, not the
   two endpoints as one token.
+- A domain the standard fixes by FAMILY rather than by list — it names a category, or
+  the shape every member's code follows, instead of enumerating the members, and the
+  members themselves live in other standards you cannot open — is best held as a
+  PATTERN: a small regex a marking's value matches (digits followed by the category
+  letter, say). One pattern alias then accepts any real member of the family and
+  nothing else, without you having to enumerate what the base does not carry.
 - A decimal written with a comma — "22,23", "25,4" — is one value: keep it whole,
   without also emitting its integer part.
 
