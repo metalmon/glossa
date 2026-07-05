@@ -41,15 +41,17 @@ Each parameter's values come from one authoritative place: a table in this
 document, or the single standard this document names as their source. Locating
 them is a short, finite check. If they are tabulated in this document, read that
 table. If the document points to another standard, search the base for it and try
-to open it — either you open a document whose own body IS that standard and read
-its table, or the base holds only other documents citing it, which means that
-standard is not loaded and its table is out of reach. Once you have checked that
-one source you have looked enough; more searching cannot summon a document that was
-never loaded. When the source is missing, write the value the current document
-itself shows, note which standard is absent, and the parameter is resolved — a
-parameter that has at least one value no longer counts toward `remaining`. You know
-this case because you can name the standard the document points to and have seen
-the base does not hold it.
+to open it. Whether that standard is in the base decides where the values live.
+When it IS loaded — you open a document whose own body IS that standard — its table
+is the domain: read it in full and let the parameter's Enum be that table. The range
+or single example this document shows is only a pointer to that source, not the
+values themselves, so a parameter still stands open while its Enum holds just the
+pointer's worth. When the standard is genuinely absent — you searched and found only
+documents citing it, never one that IS it — then what this document itself shows is
+all that can be had, so record that and note the standard is absent; more searching
+cannot summon a document that was never loaded. A parameter is resolved when its
+values are as complete as its source allows: the whole table where that source is
+loaded, the in-document value where it is not.
 
 ## Reading a value table out of a large block
 A document may arrive as one big block of text. Reading the whole thing pulls a lot
