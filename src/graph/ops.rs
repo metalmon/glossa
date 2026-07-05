@@ -448,7 +448,10 @@ pub fn graph_upsert(
         } else {
             dump.push(format!(
                 "node {} [{}] {} — {} value(s): [{}]",
-                nd.id, nd.node_type, nd.label, nd.aliases.len(), nd.aliases.join(", ")
+                // Quote each value: many are decimals written with a comma ("22,23"),
+                // so a bare comma-join reads ambiguously (is "22,23" one value or two?).
+                nd.id, nd.node_type, nd.label, nd.aliases.len(),
+                nd.aliases.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ")
             ));
         }
     }
