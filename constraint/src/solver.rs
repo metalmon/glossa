@@ -220,7 +220,18 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                         let in_range = target.parse::<f64>().ok().is_some_and(|n| {
                             values.iter().any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
                         });
-                        if !exact && !in_range {
+                        // Pattern membership: an allowed value written as a regex (e.g.
+                        // "[0-9]+А" = any grade of category А, where the GOST constrains by
+                        // family, not an enumerated list) matches a specific marking ("14А").
+                        // A value is a pattern only when it carries regex metacharacters, so
+                        // plain literals stay literal; match the RAW marking so the pattern
+                        // keeps its meaning (canon_scalar would mangle the regex).
+                        let matches_pattern = values.iter().any(|v| {
+                            v.chars().any(|c| "[](){}+*?\\^$|".contains(c))
+                                && regex_lite::Regex::new(&format!("^(?:{v})$"))
+                                    .is_ok_and(|re| re.is_match(&s))
+                        });
+                        if !exact && !in_range && !matches_pattern {
                             violations.push(Violation {
                                 field: fc.name.clone(),
                                 constraint: "Enum".into(),
@@ -831,6 +842,20 @@ mod tests {
             assert!(validate(&problem, &[make_assignment("h", ok.clone())]).is_empty(), "{ok} should pass");
         }
         assert!(!validate(&problem, &[make_assignment("h", serde_json::json!(2))]).is_empty(), "2 ∉ set");
+    }
+
+    /// An allowed value written as a regex ("[0-9]+А") is a category pattern: a specific
+    /// grade "14А" matches, "14Х"/"А14"/"99" do not, while a plain literal ("Z") in the
+    /// same set stays literal.
+    #[test]
+    fn validate_enum_matches_category_pattern() {
+        let problem = make_problem(vec![("m", vec![make_enum(&["[0-9]+А", "Z", "[0-9]+С"])])]);
+        for ok in ["14А", "25А", "Z", "63С"] {
+            assert!(validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(), "{ok} should pass");
+        }
+        for bad in ["14Х", "А14", "99"] {
+            assert!(!validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(), "{bad} should fail");
+        }
     }
 
     /// A `S = d * 1.7` formula pins S once d is assigned; without d it pins nothing.
