@@ -75,20 +75,14 @@ impl GrepHit {
 /// pattern contains an uppercase letter — so a lowercase query matches mixed-case text; `-i`
 /// forces folding unconditionally.
 fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
-    let mut body = if opts.fixed {
-        // Forgiving literal: a small model often sets `fixed` yet writes a regex
-        // alternation `A|B`. Take that at its intent — "any of these literal
-        // alternatives" — by escaping each `|`-separated part rather than searching
-        // for a literal pipe (which matches nothing).
-        if pattern.contains('|') {
-            pattern
-                .split('|')
-                .map(regex::escape)
-                .collect::<Vec<_>>()
-                .join("|")
-        } else {
-            regex::escape(pattern)
-        }
+    // A small model routinely sets `fixed` yet writes a regex — `A|B`, `x.*y`. When the
+    // pattern carries regex metacharacters, honour that intent and treat it as a regex;
+    // only a pattern with no such characters is escaped to a true literal. (A bare `.`
+    // is deliberately NOT treated as meta so a decimal like "3.0" stays literal under
+    // `fixed`.)
+    let has_regex_meta = pattern.chars().any(|c| "|*+?[](){}\\^$".contains(c));
+    let mut body = if opts.fixed && !has_regex_meta {
+        regex::escape(pattern)
     } else {
         pattern.to_string()
     };
@@ -503,14 +497,19 @@ mod tests {
     }
 
     #[test]
-    fn fixed_alternation_builds_literal_alternatives() {
-        // A small model often sets fixed=true yet writes `A|B`; take it as "either
-        // literal alternative" — the `|` is honoured, and each side stays literal (the
-        // dot matches a real dot, not any character), so `aXb` does not match.
-        let re = build_matcher("a.b|c.d", &GrepOpts { fixed: true, ..Default::default() }).unwrap();
-        assert!(re.is_match("hit a.b"));
-        assert!(re.is_match("hit c.d"));
-        assert!(!re.is_match("no aXb"));
+    fn fixed_with_regex_metacharacters_honours_regex_intent() {
+        // A small model routinely sets fixed=true yet writes a regex (`A|B`, `x.*y`).
+        // When the pattern carries regex metacharacters, honour that intent.
+        let re = build_matcher("ab.*ef|xy", &GrepOpts { fixed: true, ..Default::default() }).unwrap();
+        assert!(re.is_match("ab___ef")); // `.*` wildcard honoured
+        assert!(re.is_match("say xy now")); // `|` alternation honoured
+        // No metacharacters → a true literal.
+        let lit = build_matcher("F24", &GrepOpts { fixed: true, ..Default::default() }).unwrap();
+        assert!(lit.is_match("grit F24 here"));
+        // A bare `.` is not treated as meta, so a decimal stays literal under fixed.
+        let dec = build_matcher("3.0", &GrepOpts { fixed: true, ..Default::default() }).unwrap();
+        assert!(dec.is_match("T = 3.0 mm"));
+        assert!(!dec.is_match("3X0"));
     }
 
     #[test]
