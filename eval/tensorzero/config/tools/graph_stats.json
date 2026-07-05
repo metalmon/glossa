@@ -3,7 +3,15 @@
   "properties": {
     "doc": {
       "default": null,
-      "description": "document source_path: also report that document's checklist coverage (params still unbuilt / unmapped)",
+      "description": "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "node": {
+      "default": null,
+      "description": "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge",
       "type": [
         "string",
         "null"
