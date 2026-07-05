@@ -34,7 +34,6 @@ impl fmt::Display for SopPriority {
 
 /// How much autonomy the agent has when executing an SOP.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SopExecutionMode {
     /// Execute all steps without human approval.
@@ -68,7 +67,6 @@ impl fmt::Display for SopExecutionMode {
 
 /// A normalized filesystem change kind reported by the watcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum FilesystemEventKind {
     Created,
@@ -100,7 +98,6 @@ impl std::str::FromStr for FilesystemEventKind {
 
 /// What event can activate an SOP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SopTrigger {
     /// MQTT message arrival. Live: delivered by the MQTT listener.
