@@ -129,10 +129,16 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
     let (path, chunk): (String, _) = match idx.read_chunk_by_ord(path, n) {
         Ok(Some(c)) => (path.to_string(), c),
         Ok(None) => match idx.last_chunk_ord(path) {
-            // Document exists; the chunk number is just out of range → report the valid range.
-            Ok(Some(max)) => return ReadOut {
-                text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
-                images: Vec::new(),
+            // Document exists; the chunk number is out of range. Rather than return an error a
+            // small model loops on (it reuses a chunk number from another doc — a 1-chunk file
+            // has no #3), CLAMP to the valid range and read that chunk. Its own header shows the
+            // real ordinal, so the model sees what it actually got.
+            Ok(Some(max)) => match idx.read_chunk_by_ord(path, n.clamp(1, max)) {
+                Ok(Some(c)) => (path.to_string(), c),
+                _ => return ReadOut {
+                    text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
+                    images: Vec::new(),
+                },
             },
             // No exact path match — try a tolerant resolve, then retry once.
             Ok(None) => match idx.canonical_document_path(path) {
@@ -798,9 +804,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
         assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
         assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
-        // Out-of-range read reports the valid chunk range so the model can self-correct.
+        // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
+        // #2 = "second") instead of an error the model loops on.
         let oor = read(&i, None, "d.md", 99, &t).text;
-        assert!(oor.contains("no chunk #99 in d.md") && oor.contains("2 chunks") && oor.contains("#1..#2"), "range hint: {oor}");
+        assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
         assert!(read(&i, None, "nope.md", 1, &t).text.contains("no document indexed at nope.md"));
     }
