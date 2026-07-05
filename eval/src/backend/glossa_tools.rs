@@ -89,7 +89,7 @@ pub fn exec(name: &str, args: &Value, idx: &DocIndex, graph: Option<&glossa::gra
                 max_count: usize_arg("max_count"),
                 multiline: bool_arg("multiline"),
             };
-            let (body, titles) = run_grep(idx, pattern, opts, trace);
+            let (body, titles) = run_grep(idx, pattern, opts.with_default_context(), trace);
             (body, titles, Vec::new())
         }
         "glossary" => {

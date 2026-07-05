@@ -33,6 +33,23 @@ pub struct GrepOpts {
     pub multiline: bool,
 }
 
+impl GrepOpts {
+    /// Tool-level default: a plain grep (no context / only-matching / count set) returns a
+    /// small WINDOW around each match. A small model greps heavily but never sets `context`,
+    /// so a bare matching line is useless for reading a value's table; a default window gives
+    /// it the surrounding rows without having to know the flag. The core `grep()` does NOT
+    /// apply this — it honours opts verbatim (its tests stay literal) — so only the tool
+    /// callers (MCP + eval), which share this method, window by default and stay identical.
+    pub fn with_default_context(mut self) -> Self {
+        const DEFAULT: usize = 8;
+        if self.before == 0 && self.after == 0 && !self.only_matching && !self.count {
+            self.before = DEFAULT;
+            self.after = DEFAULT;
+        }
+        self
+    }
+}
+
 /// What a [`GrepHit`] represents, so `display_line` can render it distinctly (ripgrep uses `:` for
 /// a match and `-` for a context line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

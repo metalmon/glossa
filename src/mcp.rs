@@ -698,7 +698,7 @@ impl GlossaServer {
             max_count: a.max_count,
             multiline: a.multiline.unwrap_or(false),
         };
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts.with_default_context(), &self.trace))]))
     }
 
     #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
