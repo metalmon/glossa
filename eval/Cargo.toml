@@ -27,6 +27,7 @@ path = "src/bin/convert-xlsx.rs"
 glossa = { path = "..", features = ["constraint"] }
 glossa-constraint = { path = "../constraint" }
 anyhow = "1"
+regex = "1"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -671,6 +671,18 @@ fn norm_value(s: &str) -> String {
     glossa_constraint::solver::canon_scalar(&stripped)
 }
 
+/// A reference value is covered by an agent domain by exact membership, or because the
+/// domain holds a regex PATTERN (e.g. "[0-9]+а" for a category) that the value matches.
+/// Both sides are already norm_value'd (canon folds Cyrillic↔Latin), so a pattern matches
+/// a normalised grade regardless of the source alphabet.
+fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
+    agent_dom.contains(ref_val)
+        || agent_dom.iter().any(|a| {
+            a.chars().any(|c| "[](){}+*?\\^$|".contains(c))
+                && regex::Regex::new(&format!("^(?:{a})$")).is_ok_and(|re| re.is_match(ref_val))
+        })
+}
+
 fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     let ref_nodes = ref_json["nodes"].as_array().map(|a| a.as_slice()).unwrap_or_default();
     let ref_edges = ref_json["edges"].as_array().map(|a| a.as_slice()).unwrap_or_default();
@@ -711,7 +723,7 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     // covered = some agent Enum holds ≥ half of this parameter's reference values.
     let covered = |dom: &BTreeSet<String>| -> bool {
         !dom.is_empty() && agent_domains.iter().any(|ad| {
-            dom.iter().filter(|v| ad.contains(*v)).count() as f64 / dom.len() as f64 >= 0.5
+            dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64 >= 0.5
         })
     };
     let field_cov = if ref_params.is_empty() { 1.0 }
@@ -736,7 +748,7 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
         .map(|s| norm_value(&s))
         .collect();
     let literal_cov = if ref_lits.is_empty() { 1.0 }
-        else { ref_lits.iter().filter(|l| agent_lits.contains(*l)).count() as f64 / ref_lits.len() as f64 };
+        else { ref_lits.iter().filter(|l| domain_covers(&agent_lits, l)).count() as f64 / ref_lits.len() as f64 };
 
     if std::env::var_os("KB_TRACE").is_some() {
         use std::collections::BTreeMap;
@@ -1045,7 +1057,7 @@ fn main() -> Result<()> {
             let dom: BTreeSet<String> = c.valid.iter().map(|s| norm_value(s)).collect();
             if dom.is_empty() { return None; }
             agent_field_domains.iter()
-                .find(|(_, ad)| dom.iter().filter(|v| ad.contains(*v)).count() as f64 / dom.len() as f64 >= 0.5)
+                .find(|(_, ad)| dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64 >= 0.5)
                 .map(|(label, _)| (c.name.clone(), label.clone()))
         }).collect();
         let agent_constrains = agent_edges_v.iter().any(|e| e.edge_type == "CONSTRAINED_BY");
