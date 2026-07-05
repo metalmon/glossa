@@ -289,6 +289,17 @@ impl Ontology {
             None => Ok(()),
         }
     }
+
+    /// Allowed (from-types, to-types) for a relation — empty vecs when the relation is
+    /// unknown or leaves an end unconstrained. Used to disambiguate an edge endpoint when
+    /// a Field and its Enum share a label (CONSTRAINED_BY `from` wants the Field, `to` the
+    /// Enum), so the two do not collide onto the same node.
+    pub fn endpoint_types(&self, edge_type: &str) -> (Vec<String>, Vec<String>) {
+        self.relations
+            .get(edge_type)
+            .map(|r| (r.from.clone(), r.to.clone()))
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

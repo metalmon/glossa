@@ -105,9 +105,24 @@ fn resolve_endpoint_label(
     ont: &Ontology,
     label_to_id: &std::collections::HashMap<String, String>,
     label: &str,
+    prefer_types: &[String],
 ) -> Option<String> {
     if g.get_node(label).ok().flatten().is_some() {
         return Some(label.to_string());
+    }
+    // When the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a Field, `to`
+    // an Enum) and a Field and its Enum share this label, pick the existing node of the
+    // wanted type so the two do not collide onto one node (the Enum->Enum rejection).
+    if !prefer_types.is_empty() {
+        if let Ok(ids) = g.ids_by_label_norm(label) {
+            for id in ids {
+                if let Ok(Some(n)) = g.get_node(&id) {
+                    if prefer_types.iter().any(|t| t == &n.node_type) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
     }
     if let Some(id) = label_to_id.get(&normalize_label(label)) {
         return Some(id.clone());
@@ -349,6 +364,7 @@ pub fn graph_upsert(
         };
         let from_ep = qualify(&ue.from);
         let to_ep = qualify(&ue.to);
+        let (from_types, to_types) = ont.endpoint_types(&ue.edge_type);
 
         // resolve from endpoint
         match resolve_section_ref(idx, &from_ep) {
@@ -363,7 +379,7 @@ pub fn graph_upsert(
             }
             Ok(None) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &from_ep) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &from_ep, &from_types) {
                     Some(id) => from_resolved = Some(id),
                     None => {
                         errs.push(format!(
@@ -388,7 +404,7 @@ pub fn graph_upsert(
             }
             Ok(None) => {
                 // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &to_ep) {
+                match resolve_endpoint_label(g, ont, &label_to_id, &to_ep, &to_types) {
                     Some(id) => to_resolved = Some(id),
                     None => {
                         errs.push(format!(
@@ -925,7 +941,7 @@ strict = true
 
         // An ordinary multi-word label whose first word is NOT a type is untouched:
         // "Потеря связи" itself still resolves as before (no mangling).
-        let ok = resolve_endpoint_label(&g, &ont, &Default::default(), "Потеря связи");
+        let ok = resolve_endpoint_label(&g, &ont, &Default::default(), "Потеря связи", &[]);
         assert_eq!(ok, Some(sym_id));
     }
 
