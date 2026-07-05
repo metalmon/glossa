@@ -427,12 +427,69 @@ fn stats_example_line(g: &crate::graph::store::GraphStore, id: &str, meta: &crat
     }
 }
 
+/// Domain-independent breakdown of the graph: how many nodes of each `node_type`
+/// and how many edges of each `edge_type` exist. Nothing here is hardcoded to a
+/// domain — the type/relation names come from whatever ontology populated the
+/// store (e.g. `nodes: Enum 8, Field 10, Section 40 | edges: CONSTRAINED_BY 8,
+/// CONTAINS 40, MENTIONS 10`).
+pub fn graph_type_counts(g: &crate::graph::store::GraphStore) -> String {
+    use std::collections::BTreeMap;
+    let mut node_types: BTreeMap<String, usize> = BTreeMap::new();
+    let mut edge_types: BTreeMap<String, usize> = BTreeMap::new();
+    for n in g.all_nodes().unwrap_or_default() {
+        *node_types.entry(n.node_type).or_default() += 1;
+    }
+    for e in g.all_edges().unwrap_or_default() {
+        *edge_types.entry(e.edge_type).or_default() += 1;
+    }
+    let join = |m: &BTreeMap<String, usize>| {
+        if m.is_empty() { "(none)".to_string() }
+        else { m.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ") }
+    };
+    format!("by type — nodes: {} | edges: {}", join(&node_types), join(&edge_types))
+}
+
+/// Universal "everything about one node" view: identity (`id`, `node_type`,
+/// `label`, `aliases`) plus every OUTGOING and INCOMING edge with the other
+/// endpoint's label. Fully domain-independent — used by `graph_stats(node=…)`.
+pub fn node_inspect(g: &crate::graph::store::GraphStore, id: &str) -> String {
+    let node = match g.get_node(id) {
+        Ok(Some(n)) => n,
+        Ok(None) => return format!("node {id}: not found"),
+        Err(e) => return format!("node {id}: error: {e}"),
+    };
+    let label_of = |other: &str| match g.get_node(other) {
+        Ok(Some(n)) => n.label,
+        _ => "?".to_string(),
+    };
+    let aliases = if node.aliases.is_empty() { "—".to_string() } else { node.aliases.join(", ") };
+    let mut out = format!(
+        "node {}\ntype: {}\nlabel: {}\naliases: {}",
+        node.id, node.node_type, node.label, aliases
+    );
+    let edges = g.all_edges().unwrap_or_default();
+    let mut outgoing: Vec<String> = edges.iter().filter(|e| e.from == node.id)
+        .map(|e| format!("  -{}-> {} ({})", e.edge_type, e.to, label_of(&e.to)))
+        .collect();
+    let mut incoming: Vec<String> = edges.iter().filter(|e| e.to == node.id)
+        .map(|e| format!("  {} ({}) -{}->", e.from, label_of(&e.from), e.edge_type))
+        .collect();
+    outgoing.sort();
+    incoming.sort();
+    out.push_str(&format!("\noutgoing ({}):", outgoing.len()));
+    out.push_str(&if outgoing.is_empty() { "\n  —".to_string() } else { format!("\n{}", outgoing.join("\n")) });
+    out.push_str(&format!("\nincoming ({}):", incoming.len()));
+    out.push_str(&if incoming.is_empty() { "\n  —".to_string() } else { format!("\n{}", incoming.join("\n")) });
+    out
+}
+
 /// Graph node/edge counts and, when `node_meta` exists, a per-community overview with up to
-/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank.
+/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank. The second line is a
+/// domain-independent breakdown by node/edge type ([`graph_type_counts`]).
 pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     let nodes = g.node_count().unwrap_or(0);
     let edges = g.edge_count().unwrap_or(0);
-    let mut out = format!("nodes: {nodes}, edges: {edges}");
+    let mut out = format!("nodes: {nodes}, edges: {edges}\n{}", graph_type_counts(g));
     if g.node_meta_count().unwrap_or(0) == 0 {
         return format!("{out}\ncommunities: (none)");
     }
@@ -451,23 +508,29 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     out
 }
 
-/// Checklist-coverage block for `graph_stats(doc=…)`: which of `doc`'s checklist
-/// parameters still lack a constraint (unbuilt) or a DEFINED_IN source (unmapped).
-/// Formats `ops::checklist_coverage` — the same shared op the constraint-eval SOP
-/// driver reads, so an agent asking the tool and the eval's gate see ONE truth.
+/// Per-Field coverage block for `graph_stats(doc=…)`: for every Field the document
+/// owns, does it have a SOURCE (an outgoing `MENTIONS` edge — SOP step 2) and does
+/// it have VALUES (a `CONSTRAINED_BY`→Enum carrying values — SOP step 3)? The two
+/// views sit side by side so step-2 (`to source`) and step-3 (`to value`) each read
+/// off an obvious remaining count. Formats `ops::checklist_coverage` — the same
+/// shared op the constraint-eval SOP driver reads, so an agent asking the tool and
+/// the eval's gate see ONE truth.
 pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
     match crate::graph::ops::checklist_coverage(g, doc) {
         Ok(Some(c)) => {
             let fmt = |v: &[String]| if v.is_empty() { "—".to_string() }
                 else { v.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
-            let built: Vec<String> = c.params.iter().filter(|p| !c.unbuilt.contains(*p)).cloned().collect();
+            let sourced: Vec<String> = c.params.iter().filter(|p| !c.unsourced.contains(*p)).cloned().collect();
+            let valued: Vec<String> = c.params.iter().filter(|p| !c.unbuilt.contains(*p)).cloned().collect();
             format!(
-                "params({doc}): {} of {} have values\nwith values: {}\nstill to value: {}",
-                built.len(), c.params.len(), fmt(&built), fmt(&c.unbuilt)
+                "fields({doc}): {total} total | with source: {ns} | with values: {nv}\n\
+                 sourced: {}\nto source: {}\nvalued: {}\nto value: {}",
+                fmt(&sourced), fmt(&c.unsourced), fmt(&valued), fmt(&c.unbuilt),
+                total = c.params.len(), ns = sourced.len(), nv = valued.len(),
             )
         }
-        Ok(None) => format!("params({doc}): no Field for this document yet"),
-        Err(e) => format!("params({doc}): error: {e}"),
+        Ok(None) => format!("fields({doc}): no Field for this document yet"),
+        Err(e) => format!("fields({doc}): error: {e}"),
     }
 }
 

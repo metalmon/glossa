@@ -14,7 +14,11 @@ pub fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
     if !rest.is_empty() && !rest.starts_with(' ') {
         return None;
     }
-    let title = rest.trim();
+    // Strip inline Markdown emphasis/code markers so `# **Title**` yields a clean
+    // location "Title"; otherwise the `*`/`` ` `` leak into the section id and its
+    // display (e.g. an edge target shown as `path#**КРУГИ ШЛИФОВАЛЬНЫЕ**`).
+    let title = rest.trim().replace(['*', '`'], "");
+    let title = title.trim();
     if title.is_empty() {
         return None;
     }
@@ -70,5 +74,11 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_type, "docx");
         assert_eq!(chunks[0].location, "H");
+    }
+
+    #[test]
+    fn heading_markdown_emphasis_is_stripped_from_location() {
+        let chunks = chunk_markdown(Path::new("x.docx"), "# **КРУГИ** > `code`\nbody\n", "docx");
+        assert_eq!(chunks[0].location, "КРУГИ > code");
     }
 }

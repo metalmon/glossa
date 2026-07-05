@@ -79,7 +79,11 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
                 ));
             };
             return match idx.location_for_ord(&path, n) {
-                Ok(Some(loc)) => Ok(Some(crate::graph::build::section_id(&path, &loc))),
+                // Keep the chunk ORDINAL the agent gave (`path#3`) as the reference, not
+                // the chunk's heading location — the agent works in chunk numbers (from
+                // grep/read), so a heading-based id never matches what it wrote and reads
+                // back as a "mangled" ref. We still resolve to confirm the chunk exists.
+                Ok(Some(_)) => Ok(Some(crate::graph::build::section_id(&path, &n.to_string()))),
                 Ok(None) => Err(format!(
                     "chunk #{n} does not exist in {path}; take the chunk number from a search/grep/read on THIS document — never reuse a number from another file"
                 )),
@@ -600,8 +604,11 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
 pub struct ChecklistCoverage {
     /// Parameter names owned by the document, in first-seen order.
     pub params: Vec<String>,
-    /// Parameters with no Field --CONSTRAINED_BY--> Enum(values) yet.
+    /// Parameters with no Field --CONSTRAINED_BY--> Enum(values) yet (step-3 remaining).
     pub unbuilt: Vec<String>,
+    /// Parameters whose Field has no outgoing `MENTIONS` edge yet, i.e. no source
+    /// located (step-2 remaining).
+    pub unsourced: Vec<String>,
 }
 
 /// `None` when the document owns no parameters yet (no Field, no Checklist).
@@ -628,27 +635,37 @@ pub fn checklist_coverage(
     if params.is_empty() {
         return Ok(None);
     }
-    // Built = a Field the document owns resolves from the name and is
-    // CONSTRAINED_BY an Enum carrying values.
+    // For each parameter, look at the Field(s) the document owns that resolve from
+    // its name. Two independent, domain-generic questions:
+    //   built   = a Field is CONSTRAINED_BY an Enum carrying values (step-3 done).
+    //   sourced = a Field has an outgoing MENTIONS edge, i.e. its source is located
+    //             (step-2 done).
     let mut unbuilt = Vec::new();
+    let mut unsourced = Vec::new();
     for p in &params {
-        let built = g.resolve(p).unwrap_or_default().iter().any(|id| {
-            nodes.iter().any(|n| {
-                &n.id == id
-                    && n.node_type == "Field"
-                    && n.prov.source_path == doc
-                    && edges.iter().any(|e| {
-                        e.edge_type == "CONSTRAINED_BY"
-                            && e.from == n.id
-                            && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
-                    })
+        let ids = g.resolve(p).unwrap_or_default();
+        let owned: Vec<_> = nodes
+            .iter()
+            .filter(|n| ids.contains(&n.id) && n.node_type == "Field" && n.prov.source_path == doc)
+            .collect();
+        let built = owned.iter().any(|n| {
+            edges.iter().any(|e| {
+                e.edge_type == "CONSTRAINED_BY"
+                    && e.from == n.id
+                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
             })
         });
+        let sourced = owned
+            .iter()
+            .any(|n| edges.iter().any(|e| e.edge_type == "MENTIONS" && e.from == n.id));
         if !built {
             unbuilt.push(p.clone());
         }
+        if !sourced {
+            unsourced.push(p.clone());
+        }
     }
-    Ok(Some(ChecklistCoverage { params, unbuilt }))
+    Ok(Some(ChecklistCoverage { params, unbuilt, unsourced }))
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -689,6 +706,10 @@ mod tests {
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
         cov_node(&g, "enum:vys-a", "Enum", "высота enum", &["10", "20"], "a.docx");
         cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
+        // высота's source is located (MENTIONS a section); зернистость has neither
+        // source nor values.
+        cov_node(&g, "sec:a1", "Section", "раздел 1", &[], "a.docx");
+        cov_edge(&g, "fld:vys-a", "MENTIONS", "sec:a1");
         cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "a.docx");
 
         // Document B owns a same-named parameter — must NOT count for A.
@@ -701,6 +722,8 @@ mod tests {
         params.sort();
         assert_eq!(params, vec!["высота".to_string(), "зернистость".to_string()]);
         assert_eq!(c.unbuilt, vec!["зернистость".to_string()]);
+        // высота is sourced (MENTIONS); зернистость still needs a source.
+        assert_eq!(c.unsourced, vec!["зернистость".to_string()]);
 
         // A document that owns no parameters.
         assert!(checklist_coverage(&g, "zzz.docx").unwrap().is_none());
@@ -1106,8 +1129,9 @@ strict = true
             file_type: "md".into(),
             text: "section content".into(),
         }]).unwrap();
+        // A numeric ref keeps its ordinal (`#1`), not the chunk's heading location.
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
-        assert_eq!(resolved, Some("docs\\real.md#Introduction".to_string()));
+        assert_eq!(resolved, Some("docs\\real.md#1".to_string()));
     }
 
     /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a

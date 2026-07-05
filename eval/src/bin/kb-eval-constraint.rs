@@ -342,17 +342,23 @@ fn make_exec(
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
             "graph_stats" => {
-                // Always attach the per-parameter coverage for the document being built:
-                // the model needs to see WHICH parameters still lack values, not bare
-                // counts. Accept the arg under the names it reaches for and fall back to
-                // the run's document — the coverage is the point of calling graph_stats.
-                let doc = ["doc", "document", "source", "path"].iter()
-                    .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
-                    .unwrap_or(src_doc.as_str());
-                let mut out = glossa::tools::graph_stats(&g);
-                out.push('\n');
-                out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
-                (out, vec![], vec![])
+                // Node mode: given a node id, report everything about it (type, label,
+                // aliases, every in/out edge) — the universal "all about this node" view.
+                if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
+                    (glossa::tools::node_inspect(&g, node), vec![], vec![])
+                } else {
+                    // Doc mode: generic node/edge type counts, then per-Field SOURCE and
+                    // VALUE coverage so step-2 (`to source`) and step-3 (`to value`) each
+                    // read off their own number. Accept the doc arg under any name it
+                    // reaches for and fall back to the run's document.
+                    let doc = ["doc", "document", "source", "path"].iter()
+                        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+                        .unwrap_or(src_doc.as_str());
+                    let mut out = glossa::tools::graph_stats(&g);
+                    out.push('\n');
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                    (out, vec![], vec![])
+                }
             }
             "graph_generalize" => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();

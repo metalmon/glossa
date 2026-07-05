@@ -290,8 +290,11 @@ struct NameArg { name: String }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphStatsArgs {
     #[serde(default)]
-    #[schemars(description = "document source_path: also report that document's checklist coverage (params still unbuilt / unmapped)")]
+    #[schemars(description = "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)")]
     doc: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge")]
+    node: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,9 +665,12 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
     }
 
-    #[tool(description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's checklist coverage: which parameters still lack a constraint (unbuilt) or a DEFINED_IN source standard (unmapped).")]
+    #[tool(description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have VALUES (a CONSTRAINED_BY→Enum) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label.")]
     async fn graph_stats(&self, Parameters(a): Parameters<GraphStatsArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
+        if let Some(id) = a.node.as_deref() {
+            return Ok(CallToolResult::success(vec![Content::text(crate::tools::node_inspect(&g, id))]));
+        }
         let mut out = crate::tools::graph_stats(&g);
         if let Some(doc) = a.doc.as_deref() {
             out.push('\n');
