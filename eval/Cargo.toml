@@ -3,6 +3,11 @@ name = "kb-eval"
 version = "1.2.0"
 edition = "2021"
 
+[features]
+# Off by default; enable to derive `schemars::JsonSchema` on the SOP types for
+# exporting their JSON schema (see the `schema-export` cfg_attr in src/sop/types.rs).
+schema-export = []
+
 [lib]
 name = "kb_eval"
 path = "src/lib.rs"

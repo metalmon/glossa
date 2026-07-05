@@ -83,8 +83,6 @@ struct ColInfo {
     /// dictionary) — this is what the agent can plausibly derive from the GOST.
     /// MDM GUIDs are translation keys only and never leave the loader.
     name: String,
-    /// Unit of measure, split off by convert-xlsx ("Наружный диаметр [мм]" → "мм").
-    unit: Option<String>,
     valid: Vec<String>,
 }
 
@@ -117,7 +115,6 @@ fn cell_to_string(v: &Value) -> Option<String> {
 /// Files whose stem starts with `_` are metadata and skipped.
 fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<BTreeMap<String, String>>)> {
     let mut col_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut unit_map: BTreeMap<String, String> = BTreeMap::new();
     let mut all_rows: Vec<BTreeMap<String, String>> = Vec::new();
 
     for entry in std::fs::read_dir(val_dir)? {
@@ -130,13 +127,6 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
         let tables = data["tables"].as_array().context("no tables array")?;
 
         for tbl in tables {
-            if let Some(units) = tbl["units"].as_object() {
-                for (name, u) in units {
-                    if let Some(u) = u.as_str() {
-                        unit_map.entry(name.clone()).or_insert_with(|| u.to_string());
-                    }
-                }
-            }
             let rows = tbl["rows"].as_array().context("no rows array")?;
             for row in rows {
                 let row = row.as_object().context("bad row")?;
@@ -157,10 +147,7 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
         // parameter — a one-value "domain" is nothing to model or measure. Keep only
         // columns whose values actually form a set the agent must reproduce.
         .filter(|(_, vals)| vals.len() >= 2)
-        .map(|(name, vals)| {
-            let unit = unit_map.get(&name).cloned();
-            ColInfo { name, unit, valid: vals.into_iter().collect() }
-        })
+        .map(|(name, vals)| ColInfo { name, valid: vals.into_iter().collect() })
         .collect();
     Ok((cols, all_rows))
 }
@@ -381,22 +368,6 @@ fn make_exec(
             "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
             other => (format!("unknown tool: {other}"), vec![], vec![]),
         }
-    }
-}
-
-/// A TensorZero chat closure for one episode against `constraint_validate`.
-fn make_chat(
-    url: String,
-    fn_name: String,
-    tags: Value,
-    timeout: Duration,
-    eid: String,
-    variant: Option<String>,
-) -> impl FnMut(&[Value], Option<&str>) -> Result<TzTurn> {
-    move |messages: &[Value], ep: Option<&str>| {
-        let e = ep.unwrap_or(&eid);
-        let turn = kb_eval::tz::infer(&url, &fn_name, e, messages, &tags, timeout, variant.as_deref(), None, None)?;
-        Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
     }
 }
 
