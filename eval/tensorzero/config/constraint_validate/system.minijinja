@@ -23,6 +23,18 @@ the document writes it, kept as-is rather than translated into English — becau
 they are what a later table export shows and should read coherently in one
 language.
 
+## Building one parameter's constraint
+Each parameter is a small, fixed shape you assemble the same way every time, in the
+ontology's own node and relation names. The parameter is one node. Its allowed values
+are a SEPARATE node that carries the whole set — the values live in that node's
+`aliases`. The two are joined by the ontology's constraining relation, directed FROM
+the parameter TO its value node: a parameter is constrained BY its values, not the
+other way round. The source is a `MENTIONS` link from the parameter to the section you
+read the values from, written `<path>#<n>` with `<n>` the integer chunk number a
+search/grep/read shows. The parameter node and its value node are two DISTINCT nodes
+even when they read alike; send both, plus the edges that join them, in the same call
+so every endpoint resolves at once.
+
 ## Finding the parameters and their values
 Naming the parameters and giving them values are two separate phases: first you
 name every parameter, then — one parameter at a time — you find and record its full
