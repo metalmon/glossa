@@ -502,12 +502,11 @@ fn run_sop_conversation(
     // base. In production a corpus may hold one standard or many; the agent finds
     // any standard THIS document references by searching, the same as it will
     // there. Handing it the file list would be a hint it won't get in prod.
-    let first_prompt = format!(
-        "{guide}\n\n\
-         The document to work from is '{src_doc}'. Any standard it references, locate in the \
-         knowledge base yourself with `search`/`read`.\n\n{}",
-        step_ctx(&sop_def.steps[0])
-    );
+    // The preamble (which document to work from, and that referenced standards are the
+    // agent's to find) now lives in SOP.md with a `{src_doc}` placeholder, so all prompt
+    // text is in files and editable without a rebuild.
+    let guide = guide.replace("{src_doc}", &src_doc.to_string());
+    let first_prompt = format!("{guide}\n\n{}", step_ctx(&sop_def.steps[0]));
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Mutex::new(sop::driver::minimal_run(&sop_def));
