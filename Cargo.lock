@@ -1518,6 +1518,7 @@ dependencies = [
  "glossa-constraint",
  "predicates",
  "rand 0.8.6",
+ "regex",
  "serde",
  "serde_json",
  "tar",

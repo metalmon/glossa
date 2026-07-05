@@ -293,7 +293,7 @@ description = "Edit an existing graph node in place — change its label or type
 parameters = "tools/graph_update.json"
 
 [tools.graph_upsert]
-description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
