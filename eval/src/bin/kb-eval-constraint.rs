@@ -896,28 +896,32 @@ fn main() -> Result<()> {
         let agent_edges_v = agent_g.all_edges().unwrap_or_default();
         let mut mdm_to_agent: BTreeMap<String, String> = BTreeMap::new();
         let mut mapping_parts: Vec<String> = Vec::new();
+        let mut candidates: Vec<(String, String, f64)> = Vec::new();
         for c in &cols {
             let dom: BTreeSet<String> = c.valid.iter().map(|s| norm_value(s)).collect();
             if dom.is_empty() {
                 continue;
             }
-            let Some(best) = agent_nodes_v
-                .iter()
-                .filter(|n| n.node_type == "Field")
-                .filter_map(|f| {
-                    let score =
-                        glossa::constraint_adapter::field_reference_overlap(&agent_g, &f.id, &ont_v, &dom)
-                            .ok()?;
-                    Some((f.label.clone(), score))
-                })
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            else {
-                continue;
-            };
-            if best.1 >= 0.5 {
-                mdm_to_agent.insert(c.name.clone(), best.0.clone());
-                mapping_parts.push(format!("{} → «{}» ({:.2})", c.name, best.0, best.1));
+            for f in agent_nodes_v.iter().filter(|n| n.node_type == "Field") {
+                let Ok(score) =
+                    glossa::constraint_adapter::field_reference_overlap(&agent_g, &f.id, &ont_v, &dom)
+                else {
+                    continue;
+                };
+                if score >= 0.5 {
+                    candidates.push((c.name.clone(), f.label.clone(), score));
+                }
             }
+        }
+        candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut used_cols: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut used_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (col, field, score) in candidates {
+            if !used_cols.insert(col.clone()) || !used_fields.insert(field.clone()) {
+                continue;
+            }
+            mdm_to_agent.insert(col.clone(), field.clone());
+            mapping_parts.push(format!("{col} → «{field}» ({score:.2})"));
         }
         let unmapped: Vec<&str> = cols
             .iter()
