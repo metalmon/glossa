@@ -71,8 +71,45 @@ pub struct ConstraintType {
     pub params: Vec<String>,
 }
 
+/// A documented graph-building pattern. `example` is for humans reading the TOML;
+/// agent-facing export omits it (models copy examples when uncertain).
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawPattern {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    example: Option<String>,
+}
+
+/// Parsed `[meta]` overlay — domain label and optional prose for operators/agents.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawMeta {
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub description: String,
+    /// Human-only illustration; not exported via `get_ontology`.
+    pub example: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Meta {
+    pub domain: Option<String>,
+    pub description: Option<String>,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawOntology {
+    #[serde(default)]
+    meta: RawMeta,
     #[serde(default)]
     entities: BTreeMap<String, toml::Value>,
     #[serde(default)]
@@ -83,10 +120,13 @@ struct RawOntology {
     reasoning: RawReasoning,
     #[serde(default)]
     constraint_types: BTreeMap<String, RawConstraintType>,
+    #[serde(default)]
+    patterns: BTreeMap<String, RawPattern>,
 }
 
 #[derive(Debug, Default)]
 pub struct Ontology {
+    meta: Meta,
     entity_types: std::collections::BTreeSet<String>,
     /// Optional per-entity id prefix (e.g. Symptom → "sym"). Unset types fall back to lowercase type name.
     id_prefixes: BTreeMap<String, String>,
@@ -94,6 +134,7 @@ pub struct Ontology {
     strict: bool,
     reasoning: RawReasoning,
     constraint_types: BTreeMap<String, ConstraintType>,
+    patterns: BTreeMap<String, Pattern>,
     /// How-to notes keyed by entity / relation / constraint-type name, surfaced by
     /// `get_ontology`. Optional per type; empty when the ontology declares none.
     descriptions: BTreeMap<String, String>,
@@ -129,7 +170,26 @@ impl Ontology {
                 descriptions.insert(name.clone(), d.clone());
             }
         }
+        let patterns = raw
+            .patterns
+            .into_iter()
+            .filter_map(|(name, p)| {
+                let description = p.description.filter(|d| !d.is_empty())?;
+                Some((
+                    name,
+                    Pattern {
+                        description,
+                        example: p.example.filter(|e| !e.is_empty()),
+                    },
+                ))
+            })
+            .collect();
         Ok(Ontology {
+            meta: Meta {
+                domain: raw.meta.domain.filter(|d| !d.is_empty()),
+                description: raw.meta.description.filter(|d| !d.is_empty()),
+                note: raw.meta.note.filter(|d| !d.is_empty()),
+            },
             entity_types: raw.entities.keys().cloned().collect(),
             id_prefixes,
             relations: raw.relations,
@@ -138,6 +198,7 @@ impl Ontology {
             constraint_types: raw.constraint_types.into_iter().map(|(k, v)| {
                 (k, ConstraintType { params: v.params })
             }).collect(),
+            patterns,
             descriptions,
         })
     }
@@ -146,6 +207,14 @@ impl Ontology {
     /// ontology declares one. Surfaced by `get_ontology`.
     pub fn description(&self, name: &str) -> Option<&str> {
         self.descriptions.get(name).map(|s| s.as_str())
+    }
+
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    pub fn patterns(&self) -> &BTreeMap<String, Pattern> {
+        &self.patterns
     }
 
     /// Prefix used when deriving a node id for `node_type` (`id_for` / label sanitize).
@@ -282,7 +351,11 @@ impl Ontology {
                 if ok(&r.from, from_type) && ok(&r.to, to_type) {
                     Ok(())
                 } else {
-                    Err(format!("relation '{edge_type}' endpoints {from_type}->{to_type} not allowed"))
+                    let hint = edge_validation_hint(edge_type, from_type, to_type);
+                    Err(format!(
+                        "relation '{edge_type}' endpoints {from_type}->{to_type} not allowed — \
+                         check get_ontology → relations.{edge_type} for allowed from/to types{hint}"
+                    ))
                 }
             }
             None if self.strict => Err(format!("unknown relation '{edge_type}' (strict)")),
@@ -299,6 +372,22 @@ impl Ontology {
             .get(edge_type)
             .map(|r| (r.from.clone(), r.to.clone()))
             .unwrap_or_default()
+    }
+}
+
+/// Extra guidance when a common mistake is detected (IF_FIELD/IF_VALUE → Field).
+fn edge_validation_hint(edge_type: &str, from_type: &str, to_type: &str) -> &'static str {
+    match (edge_type, from_type, to_type) {
+        ("IF_FIELD", "Conditional", "Field") => {
+            " — IF_FIELD must go to a Literal node (label = trigger field name as text), not a Field"
+        }
+        ("IF_VALUE", "Conditional", "Field") => {
+            " — IF_VALUE must go to a Literal node (label = trigger value as text), not a Field"
+        }
+        ("HAS_MIN" | "HAS_MAX" | "HAS_PATTERN" | "HAS_EXPRESSION", _, "Field") => {
+            " — parameter edges go to Literal nodes, not Field"
+        }
+        _ => "",
     }
 }
 
@@ -319,6 +408,27 @@ params = ["min", "max"]
 [constraint_types.Regex]
 params = ["pattern"]
 "#;
+
+    #[test]
+    fn meta_and_patterns_parsed() {
+        let toml = r#"
+[meta]
+domain = "gost-regulatory"
+description = "Test."
+
+[patterns.foo]
+description = "A pattern."
+example = "human only"
+
+[entities.X]
+description = "entity"
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        assert_eq!(o.meta().domain.as_deref(), Some("gost-regulatory"));
+        let p = o.patterns().get("foo").unwrap();
+        assert_eq!(p.description, "A pattern.");
+        assert_eq!(p.example.as_deref(), Some("human only"));
+    }
 
     #[test]
     fn core_types_always_allowed() {

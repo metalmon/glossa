@@ -5,7 +5,7 @@
 
 use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{GraphStore, normalize_label};
+use crate::graph::store::{GraphStore, normalize_label, Edge, Node};
 use crate::index::store::DocIndex;
 
 // ── label-based input types ───────────────────────────────────────────────────
@@ -216,6 +216,11 @@ pub fn format_upsert_response(out: &UpsertOutcome) -> String {
         ));
         for e in &out.dropped {
             parts.push(format!("- {e}"));
+        }
+        if out.dropped.iter().any(|e| e.contains("not allowed")) {
+            parts.push(
+                "Hint: call get_ontology — relations.<edge_type> lists allowed from/to node types.".into(),
+            );
         }
     }
     parts.join("\n")
@@ -623,29 +628,24 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
 pub struct ChecklistCoverage {
     /// Parameter names owned by the document, in first-seen order.
     pub params: Vec<String>,
-    /// Parameters with no Field --CONSTRAINED_BY--> Enum(values) yet (step-3 remaining).
+    /// Parameters with no materialized constraint yet (step-3 remaining).
     pub unbuilt: Vec<String>,
     /// Parameters whose Field has no outgoing `MENTIONS` edge yet, i.e. no source
     /// located (step-2 remaining).
     pub unsourced: Vec<String>,
 }
 
-/// `None` when the document owns no parameters yet (no Field, no Checklist).
+/// `None` when the document owns no parameters yet (no Field).
 pub fn checklist_coverage(
     g: &GraphStore,
     doc: &str,
+    ont: &crate::graph::ontology::Ontology,
 ) -> anyhow::Result<Option<ChecklistCoverage>> {
     let nodes = g.all_nodes()?;
     let edges = g.all_edges()?;
-    // The parameter set: every Field the document owns (source_path == doc), plus
-    // any Checklist aliases if one exists. The Field set IS the list — a model
-    // expresses parameters as Field nodes, so no separate Checklist is required.
-    let mut params: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.node_type == "Checklist" && n.prov.source_path == doc)
-        .flat_map(|n| n.aliases.clone())
-        .collect();
-    let mut seen: std::collections::BTreeSet<String> = params.iter().map(|p| normalize_label(p)).collect();
+    // The parameter set: every Field the document owns (source_path == doc).
+    let mut params: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for f in nodes.iter().filter(|n| n.node_type == "Field" && n.prov.source_path == doc) {
         if seen.insert(normalize_label(&f.label)) {
             params.push(f.label.clone());
@@ -654,11 +654,11 @@ pub fn checklist_coverage(
     if params.is_empty() {
         return Ok(None);
     }
+    let values_axis = !ont.constraint_types().is_empty();
     // For each parameter, look at the Field(s) the document owns that resolve from
     // its name. Two independent, domain-generic questions:
-    //   built   = a Field is CONSTRAINED_BY an Enum carrying values (step-3 done).
-    //   sourced = a Field has an outgoing MENTIONS edge, i.e. its source is located
-    //             (step-2 done).
+    //   built   = Field has a materialized constraint per ontology (step-3 done).
+    //   sourced = a Field has an outgoing MENTIONS edge (step-2 done).
     let mut unbuilt = Vec::new();
     let mut unsourced = Vec::new();
     for p in &params {
@@ -667,13 +667,11 @@ pub fn checklist_coverage(
             .iter()
             .filter(|n| ids.contains(&n.id) && n.node_type == "Field" && n.prov.source_path == doc)
             .collect();
-        let built = owned.iter().any(|n| {
-            edges.iter().any(|e| {
-                e.edge_type == "CONSTRAINED_BY"
-                    && e.from == n.id
-                    && nodes.iter().any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
-            })
-        });
+        let built = if !values_axis {
+            true
+        } else {
+            field_has_values(g, ont, &owned, &nodes, &edges)
+        };
         let sourced = owned
             .iter()
             .any(|n| edges.iter().any(|e| e.edge_type == "MENTIONS" && e.from == n.id));
@@ -685,6 +683,35 @@ pub fn checklist_coverage(
         }
     }
     Ok(Some(ChecklistCoverage { params, unbuilt, unsourced }))
+}
+
+fn field_has_values(
+    g: &GraphStore,
+    ont: &crate::graph::ontology::Ontology,
+    owned: &[&Node],
+    _nodes: &[Node],
+    _edges: &[Edge],
+) -> bool {
+    #[cfg(feature = "constraint")]
+    {
+        owned.iter().any(|n| {
+            crate::constraint_adapter::field_has_materialized_constraints(g, &n.id, ont)
+                .unwrap_or(false)
+        })
+    }
+    #[cfg(not(feature = "constraint"))]
+    {
+        let _ = (g, ont);
+        owned.iter().any(|n| {
+            _edges.iter().any(|e| {
+                e.edge_type == "CONSTRAINED_BY"
+                    && e.from == n.id
+                    && _nodes
+                        .iter()
+                        .any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
+            })
+        })
+    }
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -715,11 +742,23 @@ mod tests {
         .unwrap();
     }
 
+    use crate::graph::ontology::Ontology;
+
+    fn cov_ont() -> Ontology {
+        Ontology::parse(
+            r#"
+[constraint_types.Enum]
+params = ["values"]
+"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn checklist_coverage_scoped_by_ownership() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-
+        let ont = cov_ont();
         // Document A owns two parameters (Field.source_path == a.docx).
         // высота: Field + Enum with values → built. зернистость: Field, no Enum → unbuilt.
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
@@ -736,7 +775,7 @@ mod tests {
         cov_node(&g, "enum:dia-b", "Enum", "диаметр enum", &["1"], "b.docx");
         cov_edge(&g, "fld:dia-b", "CONSTRAINED_BY", "enum:dia-b");
 
-        let c = checklist_coverage(&g, "a.docx").unwrap().expect("A owns params");
+        let c = checklist_coverage(&g, "a.docx", &ont).unwrap().expect("A owns params");
         let mut params = c.params.clone();
         params.sort();
         assert_eq!(params, vec!["высота".to_string(), "зернистость".to_string()]);
@@ -745,7 +784,40 @@ mod tests {
         assert_eq!(c.unsourced, vec!["зернистость".to_string()]);
 
         // A document that owns no parameters.
-        assert!(checklist_coverage(&g, "zzz.docx").unwrap().is_none());
+        assert!(checklist_coverage(&g, "zzz.docx", &ont).unwrap().is_none());
+    }
+
+    #[cfg(feature = "constraint")]
+    #[test]
+    fn checklist_coverage_conditional_enum_is_built() {
+        use crate::graph::ontology::Ontology;
+
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(
+            r#"
+[constraint_types.Enum]
+params = ["values"]
+[constraint_types.Conditional]
+params = ["condition_field", "condition_value"]
+"#,
+        )
+        .unwrap();
+        let src = "gost.pdf";
+
+        cov_node(&g, "fld:d", "Field", "D", &[], src);
+        cov_node(&g, "cond:41", "Conditional", "D type 41", &[], src);
+        cov_edge(&g, "fld:d", "CONSTRAINED_BY", "cond:41");
+        cov_node(&g, "lit:f", "Literal", "type", &[], src);
+        cov_node(&g, "lit:v", "Literal", "41", &[], src);
+        cov_edge(&g, "cond:41", "IF_FIELD", "lit:f");
+        cov_edge(&g, "cond:41", "IF_VALUE", "lit:v");
+        cov_node(&g, "enum:41", "Enum", "D41", &["50", "63"], src);
+        cov_edge(&g, "cond:41", "HAS_CONSTRAINT", "enum:41");
+
+        let c = checklist_coverage(&g, src, &ont).unwrap().expect("owns D");
+        assert_eq!(c.params, vec!["D".to_string()]);
+        assert!(c.unbuilt.is_empty(), "Conditional→Enum counts as built: {:?}", c.unbuilt);
     }
 
     const DEDUP_ONT: &str = r#"
@@ -1151,6 +1223,28 @@ strict = true
         // A numeric ref keeps its ordinal (`#1`), not the chunk's heading location.
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
         assert_eq!(resolved, Some("docs\\real.md#1".to_string()));
+    }
+
+    #[test]
+    fn resolve_section_ref_blank_pdf_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            crate::model::Chunk {
+                doc_path: "gost.pdf".into(),
+                location: "p.3".into(),
+                file_type: "pdf".into(),
+                text: "body".into(),
+            },
+            crate::model::Chunk {
+                doc_path: "gost.pdf".into(),
+                location: "p.4".into(),
+                file_type: "pdf".into(),
+                text: String::new(),
+            },
+        ]).unwrap();
+        let resolved = resolve_section_ref(&idx, "gost.pdf#4").unwrap();
+        assert_eq!(resolved, Some("gost.pdf#4".to_string()));
     }
 
     /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a

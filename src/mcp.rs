@@ -507,72 +507,17 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
     }
 
-    #[tool(description = "Return the knowledge-base ontology as JSON: entities, relations, constraint types, and node prefixes. Use this to discover what graph nodes/edges are valid and what constraint types the CSP solver supports.")]
+    #[tool(description = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert.")]
     async fn get_ontology(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
         let ont = Ontology::load_or_default(&self.root);
-        let mut entities: Vec<String> = ont.entity_types().iter().cloned().collect();
-        entities.sort();
-        let prefix_map: std::collections::BTreeMap<String, String> = entities
-            .iter()
-            .map(|e| (e.clone(), ont.id_abbrev(e)))
-            .collect();
-
-        #[derive(serde::Serialize)]
-        struct RelationView {
-            from: Vec<String>,
-            to: Vec<String>,
-        }
-
-        let relations: std::collections::BTreeMap<String, RelationView> = ont
-            .raw_relations()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    RelationView {
-                        from: v.from.clone(),
-                        to: v.to.clone(),
-                    },
-                )
-            })
-            .collect();
-
-        #[derive(serde::Serialize)]
-        struct CtypeView {
-            params: Vec<String>,
-        }
-
-        let ctypes: std::collections::BTreeMap<String, CtypeView> = ont
-            .constraint_types()
-            .iter()
-            .map(|(k, v)| (k.clone(), CtypeView { params: v.params.clone() }))
-            .collect();
-
-        #[derive(serde::Serialize)]
-        struct OntologyJson {
-            entities: Vec<String>,
-            relations: std::collections::BTreeMap<String, RelationView>,
-            constraint_types: std::collections::BTreeMap<String, CtypeView>,
-            node_prefixes: std::collections::BTreeMap<String, String>,
-            strict: bool,
-        }
-
-        let j = OntologyJson {
-            entities,
-            relations,
-            constraint_types: ctypes,
-            node_prefixes: prefix_map,
-            strict: ont.strict(),
-        };
-
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&j).unwrap_or_else(|_| "{}".into()),
+            crate::graph::ontology_export::export_pretty(&ont),
         )]))
     }
 
 
     #[cfg_attr(not(feature = "constraint"), allow(dead_code))]
-    #[tool(description = "CSP solver for GOST constraint graphs. Three modes: validate (check field values against constraints), infer (infer each field's valid domain), check (internal consistency of the constraint graph).")]
+    #[tool(description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels.")]
     async fn constraint_solve(&self, Parameters(_a): Parameters<ConstraintSolveArgs>) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "constraint")]
         {
@@ -665,7 +610,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
     }
 
-    #[tool(description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have VALUES (a CONSTRAINED_BY→Enum) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label.")]
+    #[tool(description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have a materialized constraint (per ontology) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label.")]
     async fn graph_stats(&self, Parameters(a): Parameters<GraphStatsArgs>) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         if let Some(id) = a.node.as_deref() {
@@ -673,8 +618,9 @@ impl GlossaServer {
         }
         let mut out = crate::tools::graph_stats(&g);
         if let Some(doc) = a.doc.as_deref() {
+            let ont = Ontology::load_or_default(&self.root);
             out.push('\n');
-            out.push_str(&crate::tools::checklist_coverage_report(&g, doc));
+            out.push_str(&crate::tools::checklist_coverage_report(&g, doc, &ont));
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
@@ -701,7 +647,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts.with_default_context(), &self.trace))]))
     }
 
-    #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count).")]
+    #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; for PDFs every page 1..N is addressable (blank pages return empty text).")]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;

@@ -102,11 +102,23 @@ fn read_node(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: crate::g
     let mut images = Vec::new();
     for (attr, p, ord) in &chunks {
         if let Ok(Some(c)) = idx.read_chunk_by_ord(p, *ord) {
-            text.push_str(&format!("\n\n── {attr} · {p} #{ord} ──\n{}", c.body));
+            text.push_str(&format!(
+                "\n\n── {attr} · {p} #{ord} ──\n{}",
+                format_chunk_body(*ord, &c.body)
+            ));
         }
         images.extend(crate::read::extract_images(&idx.doc_file(p), *ord, 4).unwrap_or_default());
     }
     ReadOut { text, images }
+}
+
+/// Human-readable body for a chunk whose stored text may be empty (blank PDF page).
+pub fn format_chunk_body(ord: u64, body: &str) -> String {
+    if body.trim().is_empty() {
+        format!("(page #{ord} — no extractable text)")
+    } else {
+        body.to_string()
+    }
 }
 
 /// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
@@ -170,7 +182,8 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
         (None, None) => String::new(),
     };
     let images = crate::read::extract_images(&idx.doc_file(path), n, 4).unwrap_or_default();
-    ReadOut { text: format!("{}{}", chunk.body, footer), images }
+    let body = format_chunk_body(n, &chunk.body);
+    ReadOut { text: format!("{}{}", body, footer), images }
 }
 
 /// List documents by path mask; model text only.
@@ -516,13 +529,17 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
 
 /// Per-Field coverage block for `graph_stats(doc=…)`: for every Field the document
 /// owns, does it have a SOURCE (an outgoing `MENTIONS` edge — SOP step 2) and does
-/// it have VALUES (a `CONSTRAINED_BY`→Enum carrying values — SOP step 3)? The two
+/// it have VALUES (a materialized constraint per ontology — SOP step 3)? The two
 /// views sit side by side so step-2 (`to source`) and step-3 (`to value`) each read
 /// off an obvious remaining count. Formats `ops::checklist_coverage` — the same
 /// shared op the constraint-eval SOP driver reads, so an agent asking the tool and
 /// the eval's gate see ONE truth.
-pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
-    match crate::graph::ops::checklist_coverage(g, doc) {
+pub fn checklist_coverage_report(
+    g: &crate::graph::store::GraphStore,
+    doc: &str,
+    ont: &crate::graph::ontology::Ontology,
+) -> String {
+    match crate::graph::ops::checklist_coverage(g, doc, ont) {
         Ok(Some(c)) => {
             let fmt = |v: &[String]| if v.is_empty() { "—".to_string() }
                 else { v.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
@@ -555,6 +572,22 @@ mod tests {
             Chunk { doc_path: PathBuf::from("АБАК.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
         ]).unwrap();
         (d, i)
+    }
+
+    #[test]
+    fn read_empty_pdf_page_returns_success_with_label() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "alpha".into() },
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.2".into(), file_type: "pdf".into(), text: String::new() },
+            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.3".into(), file_type: "pdf".into(), text: "charlie".into() },
+        ]).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(&i, None, "d.pdf", 2, &t);
+        assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
+        assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
+        assert!(out.text.contains("prev #1") && out.text.contains("next #3"), "footer: {}", out.text);
     }
 
     fn prov() -> Provenance {

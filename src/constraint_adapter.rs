@@ -8,9 +8,8 @@ use crate::graph::store::GraphStore;
 use glossa_constraint::{Constraint, FieldConstraints, Problem};
 
 /// Edge types used as parameter edges from constraint nodes to literals.
-/// Defined in ontology.toml under [relations].
 #[allow(dead_code)]
-const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_DOMAIN", "HAS_EXPRESSION"];
+const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_EXPRESSION"];
 
 /// Load a constraint problem from the graph for a given GOST document.
 ///
@@ -31,15 +30,7 @@ pub fn load_problem(g: &GraphStore, ont: &Ontology, source_path: Option<&str>) -
     let all_nodes = g.all_nodes()?;
     let all_edges = g.all_edges()?;
 
-    // Index edges by source id for efficient lookup
-    let mut outgoing: std::collections::HashMap<String, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    for e in &all_edges {
-        outgoing
-            .entry(e.from.clone())
-            .or_default()
-            .push((e.edge_type.clone(), e.to.clone()));
-    }
+    let outgoing = build_outgoing(&all_edges);
 
     // Field nodes in scope: all of them, or only those citing `source_path`.
     let fields: Vec<_> = all_nodes
@@ -213,6 +204,169 @@ fn format_domain(d: &glossa_constraint::Domain) -> String {
 }
 
 /// Build Constraint variants from a constraint graph node.
+pub fn constraints_from_node(
+    cn: &crate::graph::store::Node,
+    outgoing: &std::collections::HashMap<String, Vec<(String, String)>>,
+    all_nodes: &[crate::graph::store::Node],
+    ont: &Ontology,
+) -> anyhow::Result<Vec<Constraint>> {
+    build_constraint(cn, outgoing, all_nodes, ont)
+}
+
+/// Whether a reconstructed constraint carries actionable domain (not malformed/empty).
+pub fn constraint_meaningful(c: &Constraint) -> bool {
+    match c {
+        Constraint::Enum { values } => !values.is_empty(),
+        Constraint::Regex { pattern } => !pattern.is_empty(),
+        Constraint::Formula { expression } => !expression.is_empty(),
+        Constraint::Range { min, max } => min.is_finite() && max.is_finite() && min <= max,
+        Constraint::Required | Constraint::Forbidden => true,
+        Constraint::Conditional {
+            condition_field,
+            inner,
+            ..
+        } => !condition_field.is_empty() && constraint_meaningful(inner),
+    }
+}
+
+fn build_outgoing(
+    all_edges: &[crate::graph::store::Edge],
+) -> std::collections::HashMap<String, Vec<(String, String)>> {
+    let mut outgoing: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for e in all_edges {
+        outgoing
+            .entry(e.from.clone())
+            .or_default()
+            .push((e.edge_type.clone(), e.to.clone()));
+    }
+    outgoing
+}
+
+/// All meaningful constraints on one Field (same extraction as `load_problem`).
+pub fn field_constraints(
+    g: &GraphStore,
+    field_id: &str,
+    ont: &Ontology,
+) -> anyhow::Result<Vec<Constraint>> {
+    let all_nodes = g.all_nodes()?;
+    let outgoing = build_outgoing(&g.all_edges()?);
+    let Some(field) = all_nodes.iter().find(|n| n.id == field_id) else {
+        return Ok(vec![]);
+    };
+    if field.node_type != "Field" {
+        return Ok(vec![]);
+    }
+    let mut constraints = Vec::new();
+    if let Some(edges) = outgoing.get(field_id) {
+        for (edge_type, constraint_id) in edges {
+            if edge_type != "CONSTRAINED_BY" {
+                continue;
+            }
+            let Some(cn) = all_nodes.iter().find(|n| n.id == *constraint_id) else {
+                continue;
+            };
+            constraints.extend(constraints_from_node(cn, &outgoing, &all_nodes, ont)?);
+        }
+    }
+    Ok(constraints
+        .into_iter()
+        .filter(|c| constraint_meaningful(c))
+        .collect())
+}
+
+/// Field has at least one materialized constraint on any `CONSTRAINED_BY` target.
+pub fn field_has_materialized_constraints(
+    g: &GraphStore,
+    field_id: &str,
+    ont: &Ontology,
+) -> anyhow::Result<bool> {
+    Ok(!field_constraints(g, field_id, ont)?.is_empty())
+}
+
+/// Phase-A mapping score: fraction of MDM column values covered by the Field's
+/// constraint union (Enum aliases across all Conditional branches; Range intervals).
+pub fn field_reference_overlap(
+    g: &GraphStore,
+    field_id: &str,
+    ont: &Ontology,
+    mdm_valid: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<f64> {
+    if mdm_valid.is_empty() {
+        return Ok(0.0);
+    }
+    let constraints = field_constraints(g, field_id, ont)?;
+    if constraints.is_empty() {
+        return Ok(0.0);
+    }
+    let agent_dom = enum_reference_union(&constraints);
+    let covered = mdm_valid
+        .iter()
+        .filter(|v| reference_value_covered(&constraints, &agent_dom, v))
+        .count();
+    Ok(covered as f64 / mdm_valid.len() as f64)
+}
+
+/// Union of normalized Enum reference strings (Conditional branches flattened).
+fn enum_reference_union(constraints: &[Constraint]) -> std::collections::BTreeSet<String> {
+    use glossa_constraint::solver::canon_scalar;
+    let mut out = std::collections::BTreeSet::new();
+    fn walk(c: &Constraint, out: &mut std::collections::BTreeSet<String>) {
+        match c {
+            Constraint::Enum { values } => {
+                for v in values {
+                    out.insert(canon_scalar(v));
+                }
+            }
+            Constraint::Conditional { inner, .. } => walk(inner, out),
+            _ => {}
+        }
+    }
+    for c in constraints {
+        walk(c, &mut out);
+    }
+    out
+}
+
+fn reference_value_covered(
+    constraints: &[Constraint],
+    agent_dom: &std::collections::BTreeSet<String>,
+    ref_val: &str,
+) -> bool {
+    use glossa_constraint::solver::canon_scalar;
+    let target = canon_scalar(ref_val);
+    if agent_dom.contains(&target)
+        || agent_dom
+            .iter()
+            .any(|a| glossa_constraint::enum_alias_matches(a, ref_val))
+    {
+        return true;
+    }
+    constraints
+        .iter()
+        .any(|c| constraint_covers_scalar_for_mapping(c, ref_val))
+}
+
+fn constraint_covers_scalar_for_mapping(c: &Constraint, ref_val: &str) -> bool {
+    match c {
+        Constraint::Enum { values } => {
+            let target = glossa_constraint::solver::canon_scalar(ref_val);
+            values.iter().any(|a| {
+                glossa_constraint::solver::canon_scalar(a) == target
+                    || glossa_constraint::enum_alias_matches(a, ref_val)
+            })
+        }
+        Constraint::Conditional { inner, .. } => constraint_covers_scalar_for_mapping(inner, ref_val),
+        Constraint::Range { min, max } => ref_val
+            .parse::<f64>()
+            .ok()
+            .is_some_and(|n| n >= *min && n <= *max),
+        Constraint::Regex { pattern } => glossa_constraint::regex_constraint_matches(pattern, ref_val),
+        _ => false,
+    }
+}
+
+/// Build Constraint variants from a constraint graph node.
 fn build_constraint(
     cn: &crate::graph::store::Node,
     outgoing: &std::collections::HashMap<String, Vec<(String, String)>>,
@@ -246,34 +400,9 @@ fn build_constraint(
         "Required" => Ok(vec![Constraint::Required]),
         "Forbidden" => Ok(vec![Constraint::Forbidden]),
         "Enum" => {
-            // Compact form (preferred): the allowed values are the Enum node's
-            // `aliases` — one graph_upsert call carries the whole domain, so the
-            // graph stays ~26 nodes/GOST instead of one Literal node per value.
-            let mut values: Vec<String> = cn.aliases.clone();
-            // Legacy form (back-compat): HAS_DOMAIN → Domain → HAS_LITERAL → values.
-            if values.is_empty() {
-                let domain_id = outgoing.get(&cn.id).and_then(|edges| {
-                    edges
-                        .iter()
-                        .find(|(et, _)| et == "HAS_DOMAIN")
-                        .map(|(_, to_id)| to_id.clone())
-                });
-                if let Some(ref did) = domain_id {
-                    values = outgoing
-                        .get(did)
-                        .map(|edges| {
-                            edges
-                                .iter()
-                                .filter(|(et, _)| et == "HAS_LITERAL")
-                                .filter_map(|(_, to_id)| {
-                                    all_nodes.iter().find(|n| n.id == *to_id).map(|n| n.label.clone())
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                }
-            }
-            Ok(vec![Constraint::Enum { values }])
+            Ok(vec![Constraint::Enum {
+                values: cn.aliases.clone(),
+            }])
         }
         "Formula" => {
             let expression = literals.get("HAS_EXPRESSION").cloned().unwrap_or_default();
@@ -384,10 +513,8 @@ mod tests {
 id_prefix = "fld"
 [entities.Literal]
 id_prefix = "lit"
-[entities.Domain]
-id_prefix = "dom"
 [relations.CONSTRAINED_BY]
-from = ["Field", "Domain"]
+from = ["Field"]
 to = ["*"]
 [relations.HAS_MIN]
 from = ["Range"]
@@ -398,15 +525,18 @@ to = ["Literal"]
 [relations.HAS_PATTERN]
 from = ["Regex"]
 to = ["Literal"]
-[relations.HAS_DOMAIN]
-from = ["Enum"]
-to = ["Domain"]
-[relations.HAS_LITERAL]
-from = ["Enum", "Domain"]
-to = ["Literal"]
 [relations.HAS_EXPRESSION]
 from = ["Formula"]
 to = ["Literal"]
+[relations.IF_FIELD]
+from = ["Conditional"]
+to = ["Literal"]
+[relations.IF_VALUE]
+from = ["Conditional"]
+to = ["Literal"]
+[relations.HAS_CONSTRAINT]
+from = ["Conditional"]
+to = ["*"]
 [validation]
 strict = false
 [constraint_types.Range]
@@ -417,6 +547,12 @@ params = ["pattern"]
 params = ["values"]
 [constraint_types.Formula]
 params = ["expression"]
+[constraint_types.Required]
+params = []
+[constraint_types.Forbidden]
+params = []
+[constraint_types.Conditional]
+params = ["condition_field", "condition_value"]
 "#,
         )
         .unwrap()
@@ -453,21 +589,14 @@ params = ["expression"]
     }
 
     #[test]
-    fn load_enum_constraint_via_domain() {
+    fn load_enum_constraint_via_aliases() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
         insert_node(&g, "fld:t", "Field", "Type", "gost.pdf");
-        insert_node(&g, "dom:types", "Domain", "Valid types", "gost.pdf");
-        insert_node(&g, "lit:a", "Literal", "A", "gost.pdf");
-        insert_node(&g, "lit:b", "Literal", "B", "gost.pdf");
-
-        insert_node(&g, "fld:t-enum", "Enum", "Type enum", "gost.pdf");
+        insert_node_aliases(&g, "fld:t-enum", "Enum", "Type enum", &["A", "B"], "gost.pdf");
         insert_edge(&g, "fld:t", "CONSTRAINED_BY", "fld:t-enum", "gost.pdf");
-        insert_edge(&g, "fld:t-enum", "HAS_DOMAIN", "dom:types", "gost.pdf");
-        insert_edge(&g, "dom:types", "HAS_LITERAL", "lit:a", "gost.pdf");
-        insert_edge(&g, "dom:types", "HAS_LITERAL", "lit:b", "gost.pdf");
 
         let problem = make_adapter_problem(&g, &ont, "gost.pdf");
         assert_eq!(problem.fields.len(), 1);
@@ -642,5 +771,63 @@ params = ["expression"]
             &[("mode".to_string(), serde_json::json!("other"))],
         );
         assert!(v_inactive.is_empty(), "condition not met → no violations: {v_inactive:?}");
+    }
+
+    #[test]
+    fn field_has_materialized_constraints_conditional_enum() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        insert_node(&g, "fld:d", "Field", "D", "gost.pdf");
+        insert_node(&g, "cond:41", "Conditional", "D when type=41", "gost.pdf");
+        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "cond:41", "gost.pdf");
+        insert_node(&g, "lit:f", "Literal", "type", "gost.pdf");
+        insert_node(&g, "lit:v", "Literal", "41", "gost.pdf");
+        insert_edge(&g, "cond:41", "IF_FIELD", "lit:f", "gost.pdf");
+        insert_edge(&g, "cond:41", "IF_VALUE", "lit:v", "gost.pdf");
+        insert_node_aliases(&g, "enum:41", "Enum", "D41", &["50", "63"], "gost.pdf");
+        insert_edge(&g, "cond:41", "HAS_CONSTRAINT", "enum:41", "gost.pdf");
+
+        assert!(field_has_materialized_constraints(&g, "fld:d", &ont).unwrap());
+    }
+
+    #[test]
+    fn field_has_materialized_constraints_empty_enum_unbuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        insert_node(&g, "fld:x", "Field", "X", "gost.pdf");
+        insert_node_aliases(&g, "enum:x", "Enum", "X enum", &[], "gost.pdf");
+        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "enum:x", "gost.pdf");
+
+        assert!(!field_has_materialized_constraints(&g, "fld:x", &ont).unwrap());
+    }
+
+    #[test]
+    fn field_reference_overlap_unions_conditional_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = make_ont();
+
+        insert_node(&g, "fld:d", "Field", "D", "gost.pdf");
+        for (suffix, vals) in [("41", &["50", "63"][..]), ("42", &["80", "100"][..])] {
+            let cid = format!("cond:{suffix}");
+            insert_node(&g, &cid, "Conditional", &format!("D type={suffix}"), "gost.pdf");
+            insert_edge(&g, "fld:d", "CONSTRAINED_BY", &cid, "gost.pdf");
+            insert_node(&g, &format!("lit:f:{suffix}"), "Literal", "type", "gost.pdf");
+            insert_node(&g, &format!("lit:v:{suffix}"), "Literal", suffix, "gost.pdf");
+            insert_edge(&g, &cid, "IF_FIELD", &format!("lit:f:{suffix}"), "gost.pdf");
+            insert_edge(&g, &cid, "IF_VALUE", &format!("lit:v:{suffix}"), "gost.pdf");
+            let eid = format!("enum:{suffix}");
+            insert_node_aliases(&g, &eid, "Enum", "D enum", vals, "gost.pdf");
+            insert_edge(&g, &cid, "HAS_CONSTRAINT", &eid, "gost.pdf");
+        }
+
+        let mdm: std::collections::BTreeSet<String> =
+            ["50", "63", "80", "100"].iter().map(|s| s.to_string()).collect();
+        let score = field_reference_overlap(&g, "fld:d", &ont, &mdm).unwrap();
+        assert!((score - 1.0).abs() < 1e-9, "union of branches covers all MDM values: {score}");
     }
 }

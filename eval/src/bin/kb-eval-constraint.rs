@@ -6,7 +6,7 @@ use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use glossa_constraint::solver::{SolveMode, SolveResult};
-use kb_eval::backend::tensorzero::{run_episode, run_episode_gated, EpisodePolicy, TzTurn};
+use kb_eval::backend::tensorzero::{run_episode, EpisodePolicy, TzTurn};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -58,11 +58,6 @@ struct Cli {
     csp_only: bool,
     #[arg(long, default_value_t = 0)]
     limit: usize,
-    /// Enable the SOP-style completion gate: the episode is structured as
-    /// numbered steps and `done` is rejected until every Field has an Enum with
-    /// values and constraint_solve(check) is clean. Off = the plain agentic loop.
-    #[arg(long)]
-    sop: bool,
     /// Directory holding a zeroclaw-format SOP (SOP.toml + SOP.md). When set,
     /// discovery is driven step-by-step through the vendored SOP engine (one
     /// focused episode per step; step 2 loops per checklist parameter) instead of
@@ -212,80 +207,6 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
 
 // ── CSP solver ──
 
-/// SOP-style completion gate (mirrors the zeroclaw engine's `validate_step_output`
-/// + `finish_run`): the graph is "step-complete" only when every Field has a
-/// CONSTRAINED_BY edge to an Enum with values and constraint_solve(check) reports
-/// no issues. Returns `Some(feedback)` naming what is missing, or `None` to accept
-/// `done`. Universal — reads only the agent's own graph, never the reference.
-fn sop_gate_check(dir: &std::path::Path) -> Option<String> {
-    let g = match GraphStore::open(dir) {
-        Ok(g) => g,
-        Err(_) => return Some("the constraint graph could not be opened.".into()),
-    };
-    let nodes = g.all_nodes().unwrap_or_default();
-    let edges = g.all_edges().unwrap_or_default();
-
-    // A Field is "complete" when it has a CONSTRAINED_BY edge to an Enum with values.
-    let field_complete = |f: &Node| -> bool {
-        edges.iter().any(|e| {
-            e.edge_type == "CONSTRAINED_BY"
-                && e.from == f.id
-                && nodes.iter().any(|n| n.id == e.to && n.node_type == "Enum" && !n.aliases.is_empty())
-        })
-    };
-
-    // Step 1: the Checklist node commits to the full parameter set.
-    let checklist: Vec<&String> = nodes.iter()
-        .filter(|n| n.node_type == "Checklist")
-        .flat_map(|n| n.aliases.iter())
-        .collect();
-    if checklist.is_empty() {
-        return Some("Step 1 is unmet: create ONE Checklist node whose aliases list EVERY parameter in the document's table.".into());
-    }
-
-    // Step 2: every checklist parameter must resolve to a complete Field.
-    let uncovered: Vec<&str> = checklist.iter()
-        .filter(|param| {
-            let hit = g.resolve(param).ok().and_then(|ids| {
-                ids.iter().find_map(|id| nodes.iter().find(|n| &n.id == id && n.node_type == "Field"))
-                    .map(|f| field_complete(f))
-            });
-            !hit.unwrap_or(false)
-        })
-        .map(|s| s.as_str())
-        .collect();
-    if !uncovered.is_empty() {
-        return Some(format!(
-            "these checklist parameters still have no Field with a non-empty Enum (Step 2): {}.",
-            uncovered.join(", ")
-        ));
-    }
-
-    // Also reject any half-built Field that isn't on the checklist.
-    let fields: Vec<&Node> = nodes.iter().filter(|n| n.node_type == "Field").collect();
-    let incomplete: Vec<&str> = fields.iter()
-        .filter(|f| !field_complete(f))
-        .map(|f| f.label.as_str())
-        .collect();
-    if !incomplete.is_empty() {
-        return Some(format!(
-            "these Field(s) still have no Enum with allowed values (Step 2): {}.",
-            incomplete.join(", ")
-        ));
-    }
-    let ont = Ontology::load_or_default(dir);
-    if let Ok(problem) = glossa::constraint_adapter::load_problem(&g, &ont, None) {
-        let check = glossa_constraint::solver::solve(&problem, SolveMode::Check, &[]);
-        if !check.issues.is_empty() {
-            let first = check.issues.iter().take(3)
-                .map(|i| format!("{}: {}", i.field, i.message))
-                .collect::<Vec<_>>().join("; ");
-            return Some(format!("constraint_solve(check) still reports issues (Step 3): {first}."));
-        }
-    }
-    None
-}
-
 // ── Agent step execution (shared by the single-episode and SOP-driven paths) ──
 
 /// The tool executor for an agent episode: search/read/grep/glob + the graph and
@@ -343,7 +264,7 @@ fn make_exec(
                         .unwrap_or(src_doc.as_str());
                     let mut out = glossa::tools::graph_stats(&g);
                     out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
                     (out, vec![], vec![])
                 }
             }
@@ -364,7 +285,7 @@ fn make_exec(
                 let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
                 (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc), vec![], vec![])
             }
-            "get_ontology" => (ontology_info(&ont), vec![], vec![]),
+            "get_ontology" => (glossa::graph::ontology_export::export_pretty(&ont), vec![], vec![]),
             "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
             other => (format!("unknown tool: {other}"), vec![], vec![]),
         }
@@ -380,10 +301,11 @@ fn make_exec(
 /// None until step 1 has created the checklist.
 fn coverage(agent_g_dir: &std::path::Path, doc: &str) -> Option<glossa::graph::ops::ChecklistCoverage> {
     let g = GraphStore::open(agent_g_dir).ok()?;
-    glossa::graph::ops::checklist_coverage(&g, doc).ok().flatten()
+    let ont = Ontology::load_or_default(agent_g_dir);
+    glossa::graph::ops::checklist_coverage(&g, doc, &ont).ok().flatten()
 }
 
-/// Parameters still without a constraint — a Field with no Enum of values yet.
+/// Parameters still without a materialized constraint (step-3 remaining).
 /// The observability metric logged beside the agent's own `remaining` report.
 fn pending_params(cov: &Option<glossa::graph::ops::ChecklistCoverage>) -> Vec<String> {
     match cov {
@@ -446,7 +368,7 @@ fn run_sop_conversation(
         "description": "Finish the CURRENT SOP step and receive the next one. Call it once the step's \
             work is done. `output` is a JSON-object string carrying the step's result; for these steps \
             it is {\"remaining\": N} where N is how many parameters graph_stats(doc=…) still lists as \
-            without values (no Field→Enum).",
+            without a materialized constraint (see get_ontology).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -538,9 +460,10 @@ fn run_sop_conversation(
     };
 
     // One continuous episode over the whole SOP (round budget covers all steps).
-    let _ = run_episode(chat, &first_prompt, exec, 250, EpisodePolicy::enrich());
+    let outcome = run_episode(chat, &first_prompt, exec, 250, EpisodePolicy::enrich())?;
     let run = run.into_inner().unwrap();
-    eprintln!("[sop] run {:?} after {} step-transitions", run.status, run.step_results.len());
+    eprintln!("[sop] run {:?} after {} step-transitions (episode done={} rounds={})",
+        run.status, run.step_results.len(), outcome.done, outcome.rounds);
     Ok(run.step_results.len())
 }
 
@@ -563,34 +486,6 @@ fn setup(dir: &std::path::Path, ontology_toml: &str, cols: &[ColInfo], src: &str
 }
 
 // ── Agent graph tools ──
-
-/// The `get_ontology` payload: node types, relation endpoint signatures, and
-/// constraint-type params — each carrying its how-to `description` from the
-/// ontology so the model builds the right shape (e.g. one Enum holding all values
-/// in `aliases`, not one node per value) instead of guessing. The built-in
-/// `MENTIONS` edge is surfaced too, since it is not declared in `[relations]`.
-fn ontology_info(ont: &Ontology) -> String {
-    let mut relations: serde_json::Map<String, Value> = ont.raw_relations().iter()
-        .map(|(name, r)| (name.clone(), json!({"from": r.from, "to": r.to, "description": ont.description(name)})))
-        .collect();
-    relations.insert("MENTIONS".into(), json!({
-        "from": ["any node"], "to": ["a document section written path#n"],
-        "description": ont.description("MENTIONS").unwrap_or(
-            "Cite where a fact was read: from a node to a document section written as path#n, where \
-             path is the document and n is a chunk number taken from a search/read result for it."),
-    }));
-    let constraint_types: serde_json::Map<String, Value> = ont.constraint_types().iter()
-        .map(|(name, ct)| (name.clone(), json!({"params": ct.params, "description": ont.description(name)})))
-        .collect();
-    let node_types: serde_json::Map<String, Value> = ont.entity_types().iter().map(|s| s.as_str())
-        .chain(ont.constraint_types().keys().map(|s| s.as_str()))
-        .map(|n| (n.to_string(), json!(ont.description(n))))
-        .collect();
-    serde_json::to_string(&json!({
-        "node_types": node_types, "relations": relations,
-        "constraint_types": constraint_types, "strict": ont.strict(),
-    })).unwrap_or_default()
-}
 
 /// Funnel through the same shared op as the MCP server (`glossa::graph::ops::graph_upsert`):
 /// label-based nodes (canonical id derived from node_type+label), per-item validation with
@@ -672,15 +567,10 @@ fn norm_value(s: &str) -> String {
 }
 
 /// A reference value is covered by an agent domain by exact membership, or because the
-/// domain holds a regex PATTERN (e.g. "[0-9]+а" for a category) that the value matches.
-/// Both sides are already norm_value'd (canon folds Cyrillic↔Latin), so a pattern matches
-/// a normalised grade regardless of the source alphabet.
+/// domain holds a regex PATTERN that the value matches (canon on both sides).
 fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
     agent_dom.contains(ref_val)
-        || agent_dom.iter().any(|a| {
-            a.chars().any(|c| "[](){}+*?\\^$|".contains(c))
-                && regex::Regex::new(&format!("^(?:{a})$")).is_ok_and(|re| re.is_match(ref_val))
-        })
+        || agent_dom.iter().any(|a| glossa_constraint::enum_alias_matches(a, ref_val))
 }
 
 fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
@@ -893,49 +783,16 @@ fn main() -> Result<()> {
             "You are building the constraint set for a product specified by GOST '{src_doc}'.\n\n\
              === PHASE 1: Build constraint graph ===\n\
              The knowledge base holds these standards: {kb_docs_list}. A parameter's allowed\n\
-             values may live in the main GOST or in a standard it references (e.g. grit, hardness,\n\
-             marking are defined in referenced GOSTs) — use search/read across ALL of them.\n\
-             To get the COMPLETE parameter set, find the product's designation example\n\
-             ('условное обозначение' / 'Пример') — that one string enumerates every parameter in\n\
-             order; enumerating from scattered value tables misses parameters.\n\
-             Call get_ontology first to see the legal node types and relation signatures.\n\
-             For EACH parameter create exactly two nodes: a Field node and an Enum node, linked\n\
-             Field --CONSTRAINED_BY--> Enum. Put ALL of the parameter's allowed values into the\n\
-             Enum node's `aliases` list — do NOT create a separate node per value.\n\
-             A numeric parameter whose table lists specific allowed values (e.g. diameters\n\
-             125, 150, ...) is an Enum of exactly those values, NOT a Range: a Range would admit\n\
-             in-between values the standard forbids.\n\
+             values may live in the main GOST or in a standard it references — use search/read across ALL of them.\n\
+             Call get_ontology first to see node types, relations, and graph-building patterns.\n\
+             For EACH parameter create a Field and link it to its constraint (usually Enum with all values in aliases).\n\
              Batch: one graph_upsert call carries every Field/Enum node and edge at once.\n\n\
              === PHASE 2: Self-check ===\n\
              Call constraint_solve(mode=\"check\") to verify graph consistency.\n\n\
              === DONE ===\n\
-             Call done(note=\"summary\") ONLY when: every parameter from the document is a Field,\n\
-             each Field's allowed values are in its Enum node's aliases (an Enum with empty aliases\n\
-             is a useless constraint), and constraint_solve(mode=\"check\") reports no issues."
+             Call done(note=\"summary\") when every parameter is a Field with values in its Enum aliases\n\
+             and constraint_solve(mode=\"check\") reports no issues."
         );
-        // SOP mode: tell the model completion is gated, so it can't stop early.
-        let prompt = if cli.sop {
-            format!(
-                "{prompt}\n\n\
-                 === SOP ENFORCEMENT ===\n\
-                 This task runs as an SOP with a gated completion:\n\
-                 Step 1 (COMPLETE parameter set): find the product's designation / marking example\n\
-                 in the GOST — search for 'условное обозначение' / 'Пример'. That single designation\n\
-                 string enumerates EVERY parameter of the product in order, and the sentence right\n\
-                 before it names each one. Read that sentence and that string, and take the full\n\
-                 parameter list from them — it is authoritative and complete. Do NOT assemble the\n\
-                 set by scanning value tables (you will miss parameters).\n\
-                 Create ONE Checklist node whose `aliases` are the parameter names you read there.\n\
-                 Step 2: for each checklist parameter create a Field and an Enum\n\
-                 (Field --CONSTRAINED_BY--> Enum) with all allowed values in the Enum's aliases —\n\
-                 the values may be in the main GOST or a referenced standard.\n\
-                 Step 3: constraint_solve(check) must be clean.\n\
-                 `done` is REJECTED — with the list of what is still missing — until every checklist\n\
-                 parameter has a Field with a non-empty Enum and the check passes. Do not stop early."
-            )
-        } else {
-            prompt
-        };
 
         let agent_g_dir_clone = agent_g_dir.clone();
         let src_doc_exec = src_doc.clone();
@@ -962,7 +819,7 @@ fn main() -> Result<()> {
                         .unwrap_or(src_doc_exec.as_str());
                     let mut out = glossa::tools::graph_stats(&g);
                     out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
                     (out, vec![], vec![])
                 }
                 "graph_generalize" => {
@@ -984,7 +841,7 @@ fn main() -> Result<()> {
                     let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
                     (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc_exec), vec![], vec![])
                 }
-                "get_ontology" => (ontology_info(&ont), vec![], vec![]),
+                "get_ontology" => (glossa::graph::ontology_export::export_pretty(&ont), vec![], vec![]),
                 // `done` is a control signal — run_episode intercepts it and never
                 // reaches exec; this arm only guards against policy changes.
                 "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
@@ -996,19 +853,14 @@ fn main() -> Result<()> {
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
         let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
-            // SOP-driven: the vendored engine drives one focused episode per step
-            // (step 2 loops per checklist parameter). The single prompt/chat/exec
-            // built above are unused in this path — the driver builds its own.
-            let steps = run_sop_conversation(&sop_dir, &agent_g_dir, &src_doc,
-                &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()).unwrap_or(0);
-            Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
-                answer: String::new(), episode_id: None, surfaced_titles: vec![],
-                done: true, rounds: steps,
-            })
-        } else if cli.sop {
-            let gate_dir = agent_g_dir.clone();
-            run_episode_gated(chat, &prompt, exec, 50, EpisodePolicy::enrich(),
-                move || sop_gate_check(&gate_dir))
+            match run_sop_conversation(&sop_dir, &agent_g_dir, &src_doc,
+                &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()) {
+                Ok(steps) => Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
+                    answer: String::new(), episode_id: Some(eid.clone()), surfaced_titles: vec![],
+                    done: steps > 0, rounds: steps,
+                }),
+                Err(e) => Err(e),
+            }
         } else {
             run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich())
         };
@@ -1033,33 +885,58 @@ fn main() -> Result<()> {
         kb_eval::tz::post_feedback(cli_gateway, &eid, "agent_graph_edge_count", json!(agent_edges as f64), &tags);
         kb_eval::tz::post_feedback(cli_gateway, &eid, "tools_used", json!(rounds as f64), &tags);
         if let Err(e) = &outcome { println!("EPISODE ERROR: {e}"); }
-        println!("DISCOVERY  done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}");
+        println!("DISCOVERY  episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}");
 
         // ── VALIDATION: sweep EVERY row through the AGENT graph (algorithmic, no LLM) ──
         // The GOST (agent) and MDM (rows) use different names for a parameter, so map
-        // each MDM column to the agent field whose Enum domain matches it, then re-key
+        // each MDM column to the agent field whose constraint domain matches it, then re-key
         // the row before solving.
+        let ont_v = Ontology::load_or_default(&agent_g_dir);
         let agent_nodes_v = agent_g.all_nodes().unwrap_or_default();
         let agent_edges_v = agent_g.all_edges().unwrap_or_default();
-        let agent_field_domains: Vec<(String, BTreeSet<String>)> = agent_nodes_v.iter()
-            .filter(|n| n.node_type == "Field")
-            .filter_map(|f| {
-                let enum_id = agent_edges_v.iter()
-                    .find(|e| e.edge_type == "CONSTRAINED_BY" && e.from == f.id)
-                    .map(|e| e.to.clone())?;
-                let dom: BTreeSet<String> = agent_nodes_v.iter()
-                    .find(|n| n.id == enum_id && n.node_type == "Enum")
-                    .map(|n| n.aliases.iter().map(|s| norm_value(s)).collect())?;
-                Some((f.label.clone(), dom))
-            })
-            .collect();
-        let mdm_to_agent: BTreeMap<String, String> = cols.iter().filter_map(|c| {
+        let mut mdm_to_agent: BTreeMap<String, String> = BTreeMap::new();
+        let mut mapping_parts: Vec<String> = Vec::new();
+        for c in &cols {
             let dom: BTreeSet<String> = c.valid.iter().map(|s| norm_value(s)).collect();
-            if dom.is_empty() { return None; }
-            agent_field_domains.iter()
-                .find(|(_, ad)| dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64 >= 0.5)
-                .map(|(label, _)| (c.name.clone(), label.clone()))
-        }).collect();
+            if dom.is_empty() {
+                continue;
+            }
+            let Some(best) = agent_nodes_v
+                .iter()
+                .filter(|n| n.node_type == "Field")
+                .filter_map(|f| {
+                    let score =
+                        glossa::constraint_adapter::field_reference_overlap(&agent_g, &f.id, &ont_v, &dom)
+                            .ok()?;
+                    Some((f.label.clone(), score))
+                })
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            else {
+                continue;
+            };
+            if best.1 >= 0.5 {
+                mdm_to_agent.insert(c.name.clone(), best.0.clone());
+                mapping_parts.push(format!("{} → «{}» ({:.2})", c.name, best.0, best.1));
+            }
+        }
+        let unmapped: Vec<&str> = cols
+            .iter()
+            .filter(|c| !mdm_to_agent.contains_key(&c.name))
+            .map(|c| c.name.as_str())
+            .collect();
+        println!(
+            "VALIDATION mapping: {}; unmapped: {}",
+            if mapping_parts.is_empty() {
+                "—".into()
+            } else {
+                mapping_parts.join("; ")
+            },
+            if unmapped.is_empty() {
+                "—".into()
+            } else {
+                unmapped.join(", ")
+            }
+        );
         let agent_constrains = agent_edges_v.iter().any(|e| e.edge_type == "CONSTRAINED_BY");
 
         let (mut vpass, mut vtot, mut icatch, mut itot) = (0usize, 0usize, 0usize, 0usize);
@@ -1101,46 +978,5 @@ mod tests {
         assert_eq!(parse_reported_remaining("no report at all"), None);
         assert_eq!(parse_reported_remaining("remaining params: none"), None);
         assert_eq!(parse_reported_remaining(""), None);
-    }
-
-    fn put(g: &GraphStore, id: &str, nt: &str, label: &str, aliases: &[&str]) {
-        g.put_node(&Node {
-            id: id.into(),
-            node_type: nt.into(),
-            label: label.into(),
-            aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            prov: prov("gost.docx"),
-        }).unwrap();
-    }
-    fn edge(g: &GraphStore, from: &str, to: &str) {
-        g.put_edge(&Edge { from: from.into(), to: to.into(), edge_type: "CONSTRAINED_BY".into(), prov: prov("gost.docx") }).unwrap();
-    }
-
-    /// The SOP gate blocks `done` until every checklist parameter has a complete
-    /// Field, then clears — the completeness guarantee against the declared set.
-    #[test]
-    fn sop_gate_enforces_checklist_coverage() {
-        let dir = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(dir.path()).unwrap();
-
-        // No checklist → Step 1 unmet.
-        assert!(sop_gate_check(dir.path()).unwrap().contains("Checklist"));
-
-        // Checklist commits to two parameters; none built yet.
-        put(&g, "chk:1", "Checklist", "parameters", &["высота", "диаметр"]);
-        assert!(sop_gate_check(dir.path()).unwrap().contains("диаметр"));
-
-        // Build "высота" fully; "диаметр" still uncovered.
-        put(&g, "fld:h", "Field", "высота", &[]);
-        put(&g, "enum:h", "Enum", "высота enum", &["1", "2"]);
-        edge(&g, "fld:h", "enum:h");
-        let r = sop_gate_check(dir.path()).unwrap();
-        assert!(r.contains("диаметр") && !r.contains("высота"), "{r}");
-
-        // Build "диаметр" fully → gate clears.
-        put(&g, "fld:d", "Field", "диаметр", &[]);
-        put(&g, "enum:d", "Enum", "диаметр enum", &["10", "20"]);
-        edge(&g, "fld:d", "enum:d");
-        assert!(sop_gate_check(dir.path()).is_none(), "all covered → done allowed");
     }
 }

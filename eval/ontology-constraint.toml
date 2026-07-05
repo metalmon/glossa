@@ -1,66 +1,25 @@
 # Constraint-domain ontology overlay for glossa.
 #
-# Defines the constraint validation types used to model regulatory requirements
-# (GOST, ISO, etc.) as a Constraint Satisfaction Problem (CSP).
-# Core structural types (Document, Section, Term, Topic) and core edges
-# (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN and bypass validation.
+# GOST-regulatory overlay: Field = product parameter, Enum = tabular values,
+# Conditional = piecewise domains. Core structural types (Document, Section, …)
+# and core edges (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN.
 #
-# An agent models a requirement by:
-#   1. Creating a Field node for each constrained parameter.
-#   2. Creating a constraint-type node (Range, Regex, Enum, …).
-#   3. Linking Field → CONSTRAINED_BY → constraint node.
-#   4. Attaching the constraint's parameters:
-#      - Enum  → the allowed values go in the Enum node's `aliases` list (compact:
-#        one node carries the whole domain, no node-per-value explosion).
-#      - Range → HAS_MIN / HAS_MAX edges to two Literal nodes.
-#      - Regex → HAS_PATTERN edge to a Literal node.
-#      - Formula → HAS_EXPRESSION edge to a Literal node.
-#
-# NOTE: a numeric parameter whose standard lists specific allowed values is an
-# Enum of exactly those values, NOT a Range — a Range would admit forbidden
-# in-between values. The legacy Enum shape (HAS_DOMAIN → Domain → HAS_LITERAL)
-# is still accepted by the adapter for back-compat, but the aliases form is
-# preferred and is what the eval's reference graph uses.
-#
-# The constraint_solve MCP tool then translates this subgraph into a CSP Problem
-# and runs validate / infer / check modes.
-#
-# Deploy: copy this to <corpus-root>/.glossa/ontology.toml (e.g.:
-#   cp eval/ontology-constraint.toml ./my-corpus/.glossa/ontology.toml
-# ).
-#
+# Deploy: cp eval/ontology-constraint.toml <corpus>/.glossa/ontology.toml
 # Requires: glossa built with --features constraint.
 
-# ── GOST 7805-70 bolt example ──
-# Model hex bolt parameters as fields with constraints:
-#   Field "thread_diameter" (мм) → Enum {2, 2.5, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 27, 30, 36}
-#   Field "pitch" (мм)          → Enum {0.4, 0.45, 0.5, 0.7, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4}
-#   Field "wrench_size" (мм)    → Enum (17 values, paired with d per GOST table)
-#   Field "length" (мм)          → Enum {8, 10, 12, 14, 16, 18, 20, … 200} (46 values)
-#   Field "tolerance"            → Enum {6e, 6g, 6h, 8g}
-#   Field "strength_class"       → Enum {3.6, 4.6, 4.8, 5.6, 5.8, 6.6, 6.8, 8.8, 9.8, 10.9, 12.9}
-#   Formula(d, S):               S = d × 1.7 (approx wrench = 1.7× thread diameter)
-#
-# Graph structure for one bolt specification:
-#   fld:diam     ──CONSTRAINED_BY──► enum:diam_vals
-#   fld:diam     ──CONSTRAINED_BY──► formula:diam_S
-#   enum:diam_vals ──HAS_DOMAIN──► dom:diam_set
-#   dom:diam_set   ──HAS_LITERAL──► lit:2, lit:2.5, …, lit:36
-#   formula:diam_S ──HAS_EXPRESSION──► lit:"S = d * 1.7"
+[meta]
+domain = "gost-regulatory"
+description = "Constraint graph for product parameters from GOST/regulatory documents."
+note = "Parameter edges (IF_FIELD, IF_VALUE, HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION) always target Literal nodes — the label carries the scalar. Never wire them to Field."
 
-# ── Entities (the constraint domain's nouns) ──
-[entities.Field]       # A parameter whose value is constrained
+# ── Entities ──
+[entities.Field]
 id_prefix = "fld"
 description = "A parameter of the product — the thing being constrained. One Field per parameter; its label is the parameter's name as the document writes it, human-readable and in the document's own language (this label is what a later table export shows). Its allowed values live in a constraint node the Field links to with CONSTRAINED_BY."
 
-[entities.Literal]     # A concrete value (number, string, regex pattern)
+[entities.Literal]
 id_prefix = "lit"
-
-[entities.Domain]      # A named set of allowed literal values (for Enum)
-id_prefix = "dom"
-
-[entities.Checklist]   # optional: a node whose `aliases` list the parameters.
-id_prefix = "chk"      # The parameter set is derived from Field nodes; a Checklist is not required.
+description = "A scalar carrier for constraint parameters: a number, string, regex pattern, or expression. Linked from Range/Regex/Formula/Conditional nodes via HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION, IF_FIELD, or IF_VALUE — not used for Enum values (those go in the Enum node's aliases)."
 
 # ── Relations ──
 [relations.CONSTRAINED_BY]
@@ -71,45 +30,42 @@ description = "Links a Field to the node holding its constraint — usually an E
 [relations.HAS_MIN]
 from = ["Range"]
 to   = ["Literal"]
+description = "Lower bound of a Range constraint: Range ──HAS_MIN──► Literal(min value)."
 
 [relations.HAS_MAX]
 from = ["Range"]
 to   = ["Literal"]
+description = "Upper bound of a Range constraint: Range ──HAS_MAX──► Literal(max value)."
 
 [relations.HAS_PATTERN]
 from = ["Regex"]
 to   = ["Literal"]
-
-[relations.HAS_DOMAIN]
-from = ["Enum"]
-to   = ["Domain"]
-
-[relations.HAS_LITERAL]
-from = ["Enum", "Domain"]
-to   = ["Literal"]
+description = "The regex pattern for a Regex constraint: Regex ──HAS_PATTERN──► Literal(pattern)."
 
 [relations.HAS_EXPRESSION]
 from = ["Formula"]
 to   = ["Literal"]
+description = "The expression for a Formula constraint: Formula ──HAS_EXPRESSION──► Literal(expression)."
 
-# Conditional branches (future: a Condition node type)
 [relations.IF_FIELD]
 from = ["Conditional"]
 to   = ["Literal"]
+description = "The trigger field for a Conditional: Conditional ──IF_FIELD──► Literal(field name)."
 
 [relations.IF_VALUE]
 from = ["Conditional"]
 to   = ["Literal"]
+description = "The trigger value for a Conditional: Conditional ──IF_VALUE──► Literal(trigger value)."
 
 [relations.HAS_CONSTRAINT]
 from = ["Conditional"]
 to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula"]
+description = "The inner constraint that applies when the Conditional's IF_FIELD/IF_VALUE match: Conditional ──HAS_CONSTRAINT──► Enum (or Range/Regex/…)."
 
-# Strict: graph_upsert rejects undeclared node/edge types.
 [validation]
 strict = true
 
-# ── Constraint type definitions (consumed by constraint_solve MCP tool) ──
+# ── Constraint types (consumed by constraint_solve) ──
 [constraint_types.Range]
 params = ["min", "max"]
 description = "A continuous numeric interval. Two Literal nodes linked HAS_MIN and HAS_MAX. Use ONLY for a true range; a table listing specific values is an Enum, not a Range."
@@ -120,17 +76,47 @@ description = "A string pattern. One Literal (the regex) linked HAS_PATTERN."
 
 [constraint_types.Enum]
 params = ["values"]
-description = "A parameter's set of allowed values. One Enum node carrying every value in its `aliases`, linked from the Field by CONSTRAINED_BY. Its label names the same parameter as the Field, written coherently in the parameter's own language (it reads alongside the Field in a table export) — the values themselves stay in `aliases`, not in the label."
+description = "A parameter's set of allowed values. One Enum node carrying every value in its `aliases`, linked from the Field by CONSTRAINED_BY. Its label names the same parameter as the Field, written coherently in the parameter's own language — the values themselves stay in `aliases`, not in the label."
 
 [constraint_types.Formula]
 params = ["expression"]
-description = "A computed relationship. One Literal (the expression) linked HAS_EXPRESSION."
+description = "A computed relationship between fields. One Literal (the expression) linked HAS_EXPRESSION."
 
 [constraint_types.Required]
 params = []
+description = "The Field must be present in any assignment (non-null value required)."
 
 [constraint_types.Forbidden]
 params = []
+description = "The Field must be absent or null in any assignment."
 
 [constraint_types.Conditional]
-params = ["condition_field", "condition_value"]
+params = [
+  "IF_FIELD → Literal (trigger field name as text)",
+  "IF_VALUE → Literal (trigger value as text)",
+  "HAS_CONSTRAINT → inner Enum/Range/…",
+]
+description = "Piecewise constraint when another parameter's value selects the domain. Graph: several Conditional nodes on the same Field, one per trigger value. Each Conditional ──IF_FIELD──► Literal (trigger field NAME as text), IF_VALUE ──► Literal (trigger VALUE), HAS_CONSTRAINT ──► inner Enum or Range. IF_FIELD/IF_VALUE never point at Field nodes — only Literal. Do not merge branches into one Enum."
+
+[patterns.independent_enum]
+description = "Parameter with a fixed table of values, no cross-field trigger in the source: Field ──CONSTRAINED_BY──► Enum, all values in aliases."
+example = "Field → Enum(aliases=[v1, v2, …])"
+
+[patterns.conditional_enum]
+description = "Parameter domain depends on another parameter. Field A ──CONSTRAINED_BY──► several Conditional nodes; each branch: create Literal nodes for the trigger (IF_FIELD→Literal field name, IF_VALUE→Literal value), then HAS_CONSTRAINT→Enum(aliases=[…]) or Range."
+example = "Field_A → Conditional(IF_FIELD→Literal(\"B\"), IF_VALUE→Literal(\"41\"), HAS_CONSTRAINT→Enum set1)"
+
+[patterns.conditional_range]
+description = "Regulatory bound per trigger value: Field ──CONSTRAINED_BY──► Conditional(IF trigger → Range min..max on the scale)."
+example = "Field_ZI → Conditional(IF bond=B → Range 25..49), Conditional(IF bond=R → Range 23..45)"
+
+[patterns.formula_cross_field]
+description = "A field computed from others: Field ──CONSTRAINED_BY──► Formula ──HAS_EXPRESSION──► Literal(expression)."
+example = "Field_S → Formula(expression='S = d * k')"
+
+[patterns.combined_constraints]
+description = "Multiple CONSTRAINED_BY edges on one Field — domains intersect in infer mode (e.g. Range AND Enum on the same parameter)."
+example = "Field → Range + Enum(aliases=[…])"
+
+[patterns.provenance]
+description = "Record where values were read: Field ──MENTIONS──► section path#n (built-in edge, not declared here). Provenance is separate from ownership (source_path on nodes)."
