@@ -65,13 +65,14 @@ cannot summon a document that was never loaded. A parameter is resolved when its
 values are as complete as its source allows: the whole table where that source is
 loaded, the in-document value where it is not.
 
-## Reading a value table out of a large block
-A document may arrive as one big block of text. Reading the whole thing pulls a lot
-into the middle of your context, where attention is weakest — so a table sitting in
-the middle is easy to under-read. Instead, go straight to what you need: `grep` for
-the parameter's name or one of its values and ask for a few lines of context around
-each hit (grep's context option), so you pull just that table's window rather than
-the whole block. That focused window is where you read the whole column from.
+## Reading a value table out of a single-chunk standard
+A whole standard often arrives as a SINGLE chunk, so `read`-ing it hands you the
+entire document at once — far too much to pull into the middle of your context, where
+attention is weakest, and a table sitting in that middle is easy to under-read. So
+prefer `grep`: search for the parameter's name or one of its values, and grep hands
+back a window of the lines around each hit — just that table — instead of the whole
+standard. That focused window is where you read the whole column from; reach for a
+full `read` only when you genuinely need the entire chunk.
 
 ## Getting the values right
 Put every value you find into the node's `aliases` in the same call — it is easy to
