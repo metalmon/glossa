@@ -7,6 +7,7 @@ use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, Edg
 use crate::graph::ontology::Ontology;
 use crate::graph::store::{GraphStore, normalize_label, Edge, Node};
 use crate::index::store::DocIndex;
+use serde_json::Value;
 
 // ── label-based input types ───────────────────────────────────────────────────
 
@@ -30,7 +31,75 @@ pub struct UpsertEdge {
     pub source_path: String,
 }
 
-/// Derive the canonical node id from ontology prefix, type, and label.
+/// JSON item is an edge misplaced in `nodes[]` (has from/edge_type/to, no node_type).
+fn upsert_item_looks_like_edge(v: &Value) -> bool {
+    v.is_object()
+        && v.get("node_type").is_none()
+        && v.get("edge_type").and_then(|x| x.as_str()).is_some()
+        && v.get("from").and_then(|x| x.as_str()).is_some()
+        && v.get("to").and_then(|x| x.as_str()).is_some()
+}
+
+/// Parse a `graph_upsert` tool payload tolerantly: edge-shaped objects in `nodes[]`
+/// are moved to `edges[]` (and node-shaped objects in `edges[]` to `nodes[]`).
+pub fn parse_upsert_payload(v: &Value) -> (Vec<UpsertNode>, Vec<UpsertEdge>, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    if let Some(arr) = v.get("nodes").and_then(|a| a.as_array()) {
+        for (i, item) in arr.iter().enumerate() {
+            if upsert_item_looks_like_edge(item) {
+                match serde_json::from_value::<UpsertEdge>(item.clone()) {
+                    Ok(e) => {
+                        notes.push(format!(
+                            "nodes[{i}] is an edge (from/edge_type/to) — moved to edges[]; edges belong in edges[] only"
+                        ));
+                        edges.push(e);
+                    }
+                    Err(e) => notes.push(format!("nodes[{i}] dropped (edge-shaped but invalid): {e}")),
+                }
+            } else {
+                match serde_json::from_value::<UpsertNode>(item.clone()) {
+                    Ok(n) => nodes.push(n),
+                    Err(e) => notes.push(format!("nodes[{i}] dropped: {e}")),
+                }
+            }
+        }
+    }
+
+    if let Some(arr) = v.get("edges").and_then(|a| a.as_array()) {
+        for (i, item) in arr.iter().enumerate() {
+            if item.get("node_type").is_some() && !upsert_item_looks_like_edge(item) {
+                match serde_json::from_value::<UpsertNode>(item.clone()) {
+                    Ok(n) => {
+                        notes.push(format!("edges[{i}] is a node — moved to nodes[]"));
+                        nodes.push(n);
+                    }
+                    Err(e) => notes.push(format!("edges[{i}] dropped: {e}")),
+                }
+            } else {
+                match serde_json::from_value::<UpsertEdge>(item.clone()) {
+                    Ok(e) => edges.push(e),
+                    Err(e) => notes.push(format!("edges[{i}] dropped: {e}")),
+                }
+            }
+        }
+    }
+
+    if nodes.is_empty() && edges.is_empty() {
+        if upsert_item_looks_like_edge(v) {
+            if let Ok(e) = serde_json::from_value(v.clone()) {
+                edges.push(e);
+            }
+        } else if let Ok(n) = serde_json::from_value(v.clone()) {
+            nodes.push(n);
+        }
+    }
+
+    (nodes, edges, notes)
+}
+
 /// The label is normalised (lowercase, collapsed whitespace) and spaces replaced with "-".
 pub fn id_for(ont: &Ontology, node_type: &str, label: &str) -> String {
     let slug = normalize_label(label).replace(' ', "-");
@@ -369,7 +438,12 @@ pub fn graph_upsert(
         };
         let from_ep = qualify(&ue.from);
         let to_ep = qualify(&ue.to);
-        let (from_types, to_types) = ont.endpoint_types(&ue.edge_type);
+        let (mut from_types, to_types) = ont.endpoint_types(&ue.edge_type);
+        // MENTIONS is a built-in edge (no TOML row), so endpoint_types is empty — still
+        // prefer the Field when it shares a label with its Enum constraint node.
+        if ue.edge_type == "MENTIONS" && from_types.is_empty() {
+            from_types = vec!["Field".to_string()];
+        }
 
         // resolve from endpoint
         match resolve_section_ref(idx, &from_ep) {
@@ -494,7 +568,7 @@ pub fn graph_upsert(
         let mut hint_dump = Vec::new();
         if !existing.is_empty() {
             hint_dump.push(
-                "Similar existing nodes (match by label in edges, do not put ids in label):".into(),
+                "Similar existing nodes (use label OR node id in edge from/to):".into(),
             );
             for line in existing {
                 hint_dump.push(format!("- {line}"));
@@ -1247,8 +1321,85 @@ strict = true
         assert_eq!(resolved, Some("gost.pdf#4".to_string()));
     }
 
-    /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a
     /// MENTIONS target that resolves to a real section is NOT a node in the agent graph.
+    #[test]
+    fn parse_upsert_moves_edge_shaped_object_from_nodes() {
+        let v: Value = serde_json::from_str(
+            r#"{
+            "nodes": [
+                {"node_type":"Enum","label":"Тип","source_path":"gost.pdf","aliases":["41","42"]},
+                {"edge_type":"CONSTRAINED_BY","from":"fld:тип","to":"Тип","source_path":"gost.pdf"}
+            ],
+            "edges": [
+                {"edge_type":"MENTIONS","from":"fld:тип","to":"gost.pdf#1","source_path":"gost.pdf"}
+            ]
+        }"#,
+        )
+        .unwrap();
+        let (nodes, edges, notes) = parse_upsert_payload(&v);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(edges.len(), 2);
+        assert!(notes.iter().any(|n| n.contains("moved to edges")));
+    }
+
+    #[test]
+    fn mentions_from_label_shared_with_enum_targets_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(
+            r#"
+[entities.Field]
+id_prefix = "fld"
+[entities.Enum]
+id_prefix = "enum"
+[relations.CONSTRAINED_BY]
+from = ["Field"]
+to = ["Enum"]
+"#,
+        )
+        .unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "gost.pdf".into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "values table".into(),
+        }])
+        .unwrap();
+        assert!(
+            !graph_upsert(
+                &idx,
+                &g,
+                &ont,
+                vec![unode("Field", "Тип", "gost.pdf")],
+                vec![],
+                1,
+            )
+            .rejected
+        );
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Enum", "Тип", "gost.pdf")],
+            vec![uedge("Тип", "MENTIONS", "#1", "gost.pdf")],
+            2,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        let fld = id_for(&ont, "Field", "Тип");
+        assert!(
+            g.outgoing(&fld)
+                .unwrap()
+                .iter()
+                .any(|e| e.edge_type == "MENTIONS" && e.to == "gost.pdf#1"),
+            "MENTIONS must attach to the Field, not the Enum: {:?}",
+            g.outgoing(&fld).unwrap()
+        );
+        let c = checklist_coverage(&g, "gost.pdf", &ont).unwrap().unwrap();
+        assert!(!c.unsourced.contains(&"Тип".to_string()), "Field Тип should be sourced");
+    }
+
+    /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a
     /// The edge must still land — a bare "#1" is qualified by the edge's source_path, and
     /// a resolved section ref is exempt from the node-existence check. A single-chunk
     /// heading-less doc has no location, so its location falls back to the ordinal and

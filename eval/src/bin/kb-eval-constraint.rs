@@ -561,30 +561,10 @@ fn setup(dir: &std::path::Path, ontology_toml: &str, cols: &[ColInfo], src: &str
 /// label-based nodes (canonical id derived from node_type+label), per-item validation with
 /// actionable feedback instead of silently dropping malformed items.
 fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Value) -> String {
-    fn parse_items<T: serde::de::DeserializeOwned>(args: &Value, key: &str, errs: &mut Vec<String>) -> Vec<T> {
-        args.get(key).and_then(|v| v.as_array()).map(|arr| {
-            arr.iter().enumerate().filter_map(|(i, item)| {
-                match serde_json::from_value::<T>(item.clone()) {
-                    Ok(v) => Some(v),
-                    Err(e) => { errs.push(format!("{key}[{i}] dropped: {e}")); None }
-                }
-            }).collect()
-        }).unwrap_or_default()
-    }
-
-    let mut errs: Vec<String> = Vec::new();
-    let mut nodes: Vec<glossa::graph::ops::UpsertNode> = parse_items(args, "nodes", &mut errs);
-    let edges: Vec<glossa::graph::ops::UpsertEdge> = parse_items(args, "edges", &mut errs);
-    // The model sometimes sends ONE node as a flat object instead of {"nodes":[…]}
-    // (same tolerance graph_update already has for its flat form). Without this the
-    // call wrote nothing and the model misread the outcome as "this node_type is
-    // invalid", derailing the whole episode.
-    if nodes.is_empty() && edges.is_empty() {
-        if let Ok(n) = serde_json::from_value::<glossa::graph::ops::UpsertNode>(args.clone()) {
-            nodes.push(n);
-        } else if errs.is_empty() {
-            errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
-        }
+    let (nodes, edges, notes) = glossa::graph::ops::parse_upsert_payload(args);
+    let mut errs = notes;
+    if nodes.is_empty() && edges.is_empty() && errs.is_empty() {
+        errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
     }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);

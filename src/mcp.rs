@@ -374,12 +374,25 @@ struct GrepArgs {
     multiline: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, JsonSchema)]
 struct GraphUpsertArgs {
     #[serde(default)]
     nodes: Vec<crate::graph::ops::UpsertNode>,
     #[serde(default)]
     edges: Vec<crate::graph::ops::UpsertEdge>,
+    #[serde(skip, default)]
+    parse_notes: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for GraphUpsertArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let (nodes, edges, parse_notes) = crate::graph::ops::parse_upsert_payload(&v);
+        Ok(Self { nodes, edges, parse_notes })
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -575,7 +588,12 @@ impl GlossaServer {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let out = crate::graph::ops::graph_upsert(&idx, &g, &ont, a.nodes, a.edges, now);
-        Ok(CallToolResult::success(vec![Content::text(out.message)]))
+        let message = if a.parse_notes.is_empty() {
+            out.message
+        } else {
+            format!("{}\n{}", a.parse_notes.join("\n"), out.message)
+        };
+        Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
     #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
@@ -698,6 +716,16 @@ mod tests {
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].label, "a");
         assert!(a.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_upsert_args_move_edge_from_nodes() {
+        let json = r#"{"nodes":[{"node_type":"Enum","label":"T","source_path":"a.md","aliases":["1"]},{"from":"fld:t","edge_type":"CONSTRAINED_BY","to":"T","source_path":"a.md"}],"edges":[]}"#;
+        let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(a.nodes.len(), 1);
+        assert_eq!(a.edges.len(), 1);
+        assert_eq!(a.edges[0].edge_type, "CONSTRAINED_BY");
+        assert!(!a.parse_notes.is_empty());
     }
 
     #[test]
