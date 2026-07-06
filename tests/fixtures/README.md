@@ -5,6 +5,7 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
 
 - `sample.docx` — minimal valid OOXML (Content_Types + rels + a two-paragraph `word/document.xml`).
 - `sample.pdf` — minimal text PDF (PDF 1.4, Helvetica, one `Tj` text object).
+- `three-page-blank-middle.pdf` — three pages; page 2 is physically blank (tests blank-page indexing).
 
 Do **not** replace these with real business/client documents — this repository is public.
 To add fixtures for other formats (xlsx/pptx/doc/xls/ppt), create equally neutral synthetic

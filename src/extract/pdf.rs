@@ -41,19 +41,18 @@ impl Extractor for PdfExtractor {
                 ..Default::default()
             };
             if let Ok(pages) = doc.extract_text_with_options(opts) {
-                let mut out = Vec::new();
-                for (i, page) in pages.iter().enumerate() {
-                    if page.text.trim().is_empty() {
-                        continue;
+                if !pages.is_empty() {
+                    let mut out = Vec::new();
+                    for (i, page) in pages.iter().enumerate() {
+                        out.push(Chunk {
+                            doc_path: path_buf.clone(),
+                            location: format!("p.{}", i + 1),
+                            file_type: "pdf".into(),
+                            text: page.text.clone(),
+                        });
                     }
-                    out.push(Chunk {
-                        doc_path: path_buf.clone(),
-                        location: format!("p.{}", i + 1),
-                        file_type: "pdf".into(),
-                        text: page.text.clone(),
-                    });
-                }
-                if !out.is_empty() {
+                    let page_count = doc.page_count().unwrap_or(pages.len() as u32);
+                    pad_pdf_page_stubs(&mut out, &path_buf, page_count);
                     return out;
                 }
             }
@@ -70,9 +69,6 @@ impl Extractor for PdfExtractor {
                     let mut out = Vec::new();
                     for (page, els) in by_page {
                         let md = exporter.export(&els);
-                        if md.trim().is_empty() {
-                            continue;
-                        }
                         out.push(Chunk {
                             doc_path: path_buf.clone(),
                             location: format!("p.{}", page_label(page)),
@@ -80,6 +76,8 @@ impl Extractor for PdfExtractor {
                             text: md,
                         });
                     }
+                    let page_count = doc.page_count().unwrap_or(0);
+                    pad_pdf_page_stubs(&mut out, &path_buf, page_count);
                     if !out.is_empty() {
                         return out;
                     }
@@ -117,9 +115,88 @@ fn page_label(page: u32) -> u32 {
     page + 1
 }
 
+/// Ensure every physical page `1..=page_count` has a chunk (blank pages get empty body).
+fn pad_pdf_page_stubs(out: &mut Vec<Chunk>, doc_path: &Path, page_count: u32) {
+    if page_count == 0 {
+        return;
+    }
+    let have: std::collections::HashSet<String> = out.iter().map(|c| c.location.clone()).collect();
+    for p in 1..=page_count {
+        let loc = format!("p.{p}");
+        if !have.contains(&loc) {
+            out.push(Chunk {
+                doc_path: doc_path.to_path_buf(),
+                location: loc,
+                file_type: "pdf".into(),
+                text: String::new(),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        let ord = |loc: &str| loc.strip_prefix("p.").and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+        ord(&a.location).cmp(&ord(&b.location))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pad_pdf_page_stubs_fills_gaps() {
+        let path = PathBuf::from("d.pdf");
+        let mut out = vec![
+            Chunk { doc_path: path.clone(), location: "p.1".into(), file_type: "pdf".into(), text: "a".into() },
+            Chunk { doc_path: path.clone(), location: "p.3".into(), file_type: "pdf".into(), text: "c".into() },
+        ];
+        pad_pdf_page_stubs(&mut out, &path, 3);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].location, "p.2");
+        assert!(out[1].text.is_empty());
+    }
+
+    #[test]
+    fn indexes_blank_pdf_page_as_empty_chunk() {
+        let bytes = include_bytes!("../../tests/fixtures/three-page-blank-middle.pdf");
+        let chunks = PdfExtractor.extract(Path::new("three-page-blank-middle.pdf"), bytes).unwrap();
+        assert_eq!(chunks.len(), 3, "expected one chunk per physical page, got: {chunks:?}");
+        assert_eq!(chunks[0].location, "p.1");
+        assert_eq!(chunks[1].location, "p.2");
+        assert!(chunks[1].text.trim().is_empty(), "blank middle page must be indexed with empty body");
+        assert_eq!(chunks[2].location, "p.3");
+        assert!(chunks[0].text.contains("page one"));
+        assert!(chunks[2].text.contains("page three"));
+    }
+
+    /// Regression: real GOST PDFs have physically blank separator pages (p.4).
+    #[test]
+    fn gost_57978_extract_includes_blank_page_four() {
+        let path = std::path::Path::new("kb-gost/gost_r_57978-2017.pdf");
+        if !path.exists() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let chunks = PdfExtractor.extract(path, &bytes).unwrap();
+        assert_eq!(chunks.len(), 21, "expected 21 physical pages, got {}: {:?}", chunks.len(), chunks.iter().map(|c| &c.location).collect::<Vec<_>>());
+        let p4 = chunks.iter().find(|c| c.location == "p.4").expect("missing p.4 chunk");
+        assert!(p4.text.trim().is_empty(), "p.4 must be empty, got {:?}", p4.text);
+    }
+
+    #[test]
+    fn gost_57978_reindex_puts_page_four_in_index() {
+        use crate::index::store::{index_dir, DocIndex};
+        let kb = std::path::Path::new("kb-gost");
+        let pdf = kb.join("gost_r_57978-2017.pdf");
+        if !pdf.exists() {
+            return;
+        }
+        index_dir(kb, true).unwrap();
+        let idx = DocIndex::open_or_create(kb).unwrap();
+        let hit = idx.read_chunk_by_ord("gost_r_57978-2017.pdf", 4).unwrap();
+        assert!(hit.is_some(), "ord #4 must exist in index after reindex");
+        assert!(hit.unwrap().body.trim().is_empty());
+    }
 
     #[test]
     fn unparseable_pdf_is_indexed_by_filename_not_dropped() {

@@ -46,7 +46,7 @@ pub fn path_matches_fs(matcher: &GlobMatcher, path: &Path) -> bool {
 }
 
 /// List the DISTINCT document paths whose path matches `pattern`, each with its highest chunk
-/// number (≈ page/section count, the `n`-range for `read(path, n)`). Sorted by path.
+/// number (for PDFs: last page number; every page 1..N is addressable after indexing). Sorted by path.
 pub fn glob_docs(idx: &DocIndex, pattern: &str) -> anyhow::Result<Vec<(String, u64)>> {
     let matcher = compile_glob(pattern)?;
     let mut by_path: BTreeMap<String, u64> = BTreeMap::new();

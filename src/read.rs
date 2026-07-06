@@ -88,6 +88,18 @@ mod tests {
         let out = read_region(&p, None).unwrap();
         assert!(out.contains("name,age") && out.contains("bob,5"));
     }
+
+    #[test]
+    fn exact_empty_pdf_page_does_not_fallback_to_whole_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("three-page-blank-middle.pdf");
+        std::fs::write(&p, include_bytes!("../tests/fixtures/three-page-blank-middle.pdf")).unwrap();
+        let whole = read_region(&p, None).unwrap();
+        let p2 = read_region(&p, Some("p.2")).unwrap();
+        assert!(whole.contains("page one") && whole.contains("page three"), "whole: {whole}");
+        assert!(!p2.contains("page one") && !p2.contains("page three"), "p.2 must not fall back: {p2:?}");
+        assert!(p2.trim().is_empty(), "blank page body: {p2:?}");
+    }
 }
 
 // ── Task 3: extract_images ────────────────────────────────────────────────────
