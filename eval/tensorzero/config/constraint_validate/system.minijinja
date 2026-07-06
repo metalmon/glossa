@@ -14,9 +14,9 @@ Keep naming and valuing separate. The designation example ("условное о�
 Large PDFs often come as one chunk — prefer `grep` with `context` (~20 lines) over reading the whole file. Search for a value or name you already saw in the example.
 
 ## Constraints (short)
-- **Enum** — one fixed table, all values in `aliases`.
+- **Enum** — one fixed table, no trigger from another parameter; all values in `aliases`.
 - **Range** — numeric min/max via Literal nodes.
-- **Conditional** — domain depends on another parameter: one Conditional per trigger, IF_FIELD/IF_VALUE → **Literal** (text), HAS_CONSTRAINT → Enum or Range inside that branch.
+- **Conditional** — values depend on another parameter (type, bond, «when …»): one branch per trigger, IF_FIELD/IF_VALUE → **Literal** (text), HAS_CONSTRAINT → Enum or Range inside that branch — not one merged Enum of all branches.
 
 If values come from another GOST named in the text, open that document in the base. If it is not loaded, record what this document shows and move on.
 
