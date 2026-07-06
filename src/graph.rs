@@ -1,6 +1,7 @@
 pub mod store;
 pub mod node_index;
 pub mod ontology;
+pub mod ontology_export;
 
 /// The structural anchor edge from a reasoning node to the section that is its evidence. A FIXED
 /// system contract (one of `CORE_EDGES`), like `CONTAINS`/`NEXT` — NOT an ontology-configurable
