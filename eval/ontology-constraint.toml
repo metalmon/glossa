@@ -10,7 +10,7 @@
 [meta]
 domain = "gost-regulatory"
 description = "Constraint graph for product parameters from GOST/regulatory documents."
-note = "Parameter edges (IF_FIELD, IF_VALUE, HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION) always target Literal nodes — the label carries the scalar. Never wire them to Field."
+note = "IF_FIELD, IF_VALUE, HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION target Literal nodes (label = the scalar text), not Field."
 
 # ── Entities ──
 [entities.Field]
@@ -68,7 +68,7 @@ strict = true
 # ── Constraint types (consumed by constraint_solve) ──
 [constraint_types.Range]
 params = ["min", "max"]
-description = "A continuous numeric interval. Two Literal nodes linked HAS_MIN and HAS_MAX. Use ONLY for a true range; a table listing specific values is an Enum, not a Range."
+description = "A continuous numeric interval. Literal nodes for min and max via HAS_MIN / HAS_MAX. Fixed lists of values are Enum, not Range."
 
 [constraint_types.Regex]
 params = ["pattern"]
@@ -84,11 +84,11 @@ description = "A computed relationship between fields. One Literal (the expressi
 
 [constraint_types.Required]
 params = []
-description = "The Field must be present in any assignment (non-null value required)."
+description = "The field is required in every assignment."
 
 [constraint_types.Forbidden]
 params = []
-description = "The Field must be absent or null in any assignment."
+description = "The field is absent or null in every assignment."
 
 [constraint_types.Conditional]
 params = [
@@ -96,7 +96,7 @@ params = [
   "IF_VALUE → Literal (trigger value as text)",
   "HAS_CONSTRAINT → inner Enum/Range/…",
 ]
-description = "Piecewise constraint when another parameter's value selects the domain. Graph: several Conditional nodes on the same Field, one per trigger value. Each Conditional ──IF_FIELD──► Literal (trigger field NAME as text), IF_VALUE ──► Literal (trigger VALUE), HAS_CONSTRAINT ──► inner Enum or Range. IF_FIELD/IF_VALUE never point at Field nodes — only Literal. Do not merge branches into one Enum."
+description = "Piecewise domain: several Conditional nodes on one Field, one per trigger. Each branch: IF_FIELD → Literal(field name), IF_VALUE → Literal(value), HAS_CONSTRAINT → Enum or Range. Use Literal for IF edges, not Field. Separate branches, not one merged Enum."
 
 [patterns.independent_enum]
 description = "Parameter with a fixed table of values, no cross-field trigger in the source: Field ──CONSTRAINED_BY──► Enum, all values in aliases."
