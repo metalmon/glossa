@@ -4,6 +4,7 @@
 #       native inference:  POST /inference
 #       feedback:          POST /feedback
 #       OpenAI-compatible: POST /openai/v1/chat/completions
+#       MCP (observability): GET/POST http://localhost:3000/mcp  (gateway >= 2026.4.0)
 #   - clickhouse  -> http://localhost:8123   (observability / optimization store)
 #
 # The gateway proxies to LM Studio (Qwen3.5-4B) running on the HOST at :1234
@@ -30,7 +31,7 @@ services:
       retries: 30
 
   gateway:
-    image: tensorzero/gateway
+    image: tensorzero/gateway:2026.4.0
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -52,7 +53,7 @@ services:
 
   # Web admin / observability UI -> http://localhost:4000
   ui:
-    image: tensorzero/ui
+    image: tensorzero/ui:2026.4.0
     depends_on:
       clickhouse:
         condition: service_healthy

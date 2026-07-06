@@ -261,11 +261,11 @@ extra_body = [
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
 [tools.constraint_solve]
-description = "CSP solver for GOST constraint graphs. Three modes: validate (check field values against constraints), infer (infer each field's valid domain), check (internal consistency of the constraint graph)."
+description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels."
 parameters = "tools/constraint_solve.json"
 
 [tools.get_ontology]
-description = "Return the knowledge-base ontology as JSON: entities, relations, constraint types, and node prefixes. Use this to discover what graph nodes/edges are valid and what constraint types the CSP solver supports."
+description = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert."
 parameters = "tools/get_ontology.json"
 
 [tools.glob]
@@ -332,15 +332,6 @@ parameters = "tools/search.json"
 description = "Signal that the reasoning graph for this case is complete — the chain is written with a MENTIONS anchor, or `glossary` showed it already exists. Calling `done` ends the episode. Give a one-line `note`."
 parameters = "tools/done.json"
 # <<< GENERATED TOOLS
-
-# ── Constraint tools ──
-[tools.get_ontology]
-description = "Return the full constraint ontology: entity types, relation types, constraint types, prefixes, and the strict validation flag."
-parameters = "tools/get_ontology.json"
-
-[tools.constraint_solve]
-description = "Run the CSP constraint solver. Modes: validate (check field assignments), infer (show valid domains for each field), check (consistency of the constraint graph). Returns structured violation/domain/issue data."
-parameters = "tools/constraint_solve.json"
 
 # ── Constraint validation function: agent builds graph from GOST then validates ──
 # Tools = all glossa tools so the agent can search/read the GOST document,

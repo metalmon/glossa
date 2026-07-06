@@ -22,8 +22,36 @@ Or from repo root: `just up`, `just health`.
 
 | Service | URL |
 |---------|-----|
-| Gateway | `http://localhost:3000` — `POST /inference`, `POST /feedback` |
+| Gateway | `http://localhost:3000` — `POST /inference`, `POST /feedback`, **`/mcp`** (official MCP) |
+| UI | `http://localhost:4000` — episode / inference browser |
 | ClickHouse | `http://localhost:8123` (user `chuser`, db `tensorzero`) |
+
+Gateway and UI images are pinned to **`2026.4.0+`** (`/mcp` requires that release).
+
+## Cursor MCP (official, built into gateway)
+
+The gateway exposes observability tools at **`http://localhost:3000/mcp`** (Streamable HTTP). No third-party npm package.
+
+1. Stack up: `just up` (or `docker compose up -d --wait` in `eval/tensorzero`).
+2. Copy MCP config into Cursor:
+   - **Project:** `.cursor/mcp.json` (see `eval/tensorzero/cursor-mcp.example.json`)
+   - **Global:** `%USERPROFILE%\.cursor\mcp.json` on Windows
+3. Cursor → Settings → MCP → **Reload**, or restart Cursor.
+4. Requires gateway **≥ 2026.4.0** — verify: `curl -s -o NUL -w "%{http_code}" http://localhost:3000/mcp` should not be `404`.
+
+Example (same as `cursor-mcp.example.json`):
+
+```json
+{
+  "mcpServers": {
+    "tensorzero": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+After `docker compose pull && docker compose up -d`, the agent can query TZ inference history / metrics via MCP instead of raw ClickHouse SQL.
 
 ## TZ functions (config/)
 

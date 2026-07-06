@@ -9,6 +9,7 @@ bin     := "target/release"
 kb_bin       := if os() == "windows" { "./" + bin + "/kb.exe" } else { "./" + bin + "/kb" }
 kb_train_bin := if os() == "windows" { "./" + bin + "/kb-train.exe" } else { "./" + bin + "/kb-train" }
 kb_eval_bin  := if os() == "windows" { "./" + bin + "/kb-eval.exe" } else { "./" + bin + "/kb-eval" }
+kb_dump_episode_bin := if os() == "windows" { "./" + bin + "/kb-dump-episode.exe" } else { "./" + bin + "/kb-dump-episode" }
 
 work    := "kb-test"                              # corpus root: index + reasoning graph live here
 train   := "kb-val/derived/synthetic-train.json"  # solved cases the enricher reverse-traces
@@ -56,6 +57,11 @@ gw-logs:
 tools: build-kb
     {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir {{tzcfg}}
     @echo "regenerated — run 'just gw-restart' to load the new schemas"
+
+# TZ gateway runs from e:/glossa (docker compose cwd); sync generated tool schemas there.
+tools-glossa: build-kb
+    {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir e:/glossa/eval/tensorzero/config
+    @echo "regenerated e:/glossa/eval/tensorzero/config — run 'just gw-restart' from e:/glossa/eval/tensorzero"
 
 # ── enrich → export-tz → GEPA (against {{work}}) ───────────────────────────
 enrich limit="0": build-train
@@ -166,6 +172,20 @@ constraint-reset:
     @just ch "ALTER TABLE tensorzero.FloatMetricFeedback DELETE WHERE metric_name IN ('field_coverage', 'constraint_coverage', 'literal_coverage', 'tools_used', 'agent_graph_node_count', 'agent_graph_edge_count')"
     @just ch "ALTER TABLE tensorzero.BooleanMetricFeedback DELETE WHERE metric_name IN ('csp_agreement', 'llm_correct')"
     @echo "constraint-reset: mutations queued — wait ~5s then: just constraint-metrics"
+
+# Readable transcript of a constraint_validate episode (ClickHouse → text file).
+# Examples: just constraint-dump run=deploy-35b
+#           just constraint-dump episode=019f343a-7c0c-7b33-ad14-75bf26c50cc0
+constraint-dump episode="" run="" latest="false" out="eval/results/episode-dump.txt": build-dump-episode
+    {{preface}}args=''; \
+    [[ -n "{{episode}}" ]] && args="$args --episode-id {{episode}}"; \
+    [[ -n "{{run}}" ]] && args="$args --run {{run}}"; \
+    [[ "{{latest}}" == "true" ]] && args="$args --latest"; \
+    {{kb_dump_episode_bin}} $args --out {{out}}; \
+    echo "wrote {{out}}"
+
+build-dump-episode force="":
+    {{preface}}b='{{kb_dump_episode_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-dump-episode: already built"; else cargo build {{release}} -p kb-eval --bin kb-dump-episode --locked; fi
 
 # ── inspect ─────────────────────────────────────────────────────────────────
 graph-stats: build-kb

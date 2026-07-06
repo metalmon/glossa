@@ -23,6 +23,10 @@ path = "src/bin/kb-eval-constraint.rs"
 name = "convert-xlsx"
 path = "src/bin/convert-xlsx.rs"
 
+[[bin]]
+name = "kb-dump-episode"
+path = "src/bin/kb-dump-episode.rs"
+
 [dependencies]
 glossa = { path = "..", features = ["constraint"] }
 glossa-constraint = { path = "../constraint" }
