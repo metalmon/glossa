@@ -329,6 +329,34 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
+/// Eval harness cap: step-2 loops once per parameter (~10) plus a small margin.
+/// Production zeroclaw keeps `DriverConfig::default().max_step_visits` (256).
+const SOP_EVAL_MAX_STEP_VISITS: u32 = 15;
+/// Abort when the agent burns this many LLM turns on one SOP step without calling
+/// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
+const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 50;
+
+/// Step 2 advanced 3+ times reporting the same positive `remaining` — no progress.
+fn step2_advance_stuck(results: &[kb_eval::sop::types::SopStepResult]) -> Option<usize> {
+    let reps: Vec<Option<usize>> = results
+        .iter()
+        .filter(|r| r.step_number == 2)
+        .map(|r| parse_reported_remaining(&r.output))
+        .collect();
+    if reps.len() < 3 {
+        return None;
+    }
+    let last = reps[reps.len() - 1]?;
+    if last == 0 {
+        return None;
+    }
+    if reps[reps.len() - 3..].iter().all(|r| *r == Some(last)) {
+        Some(last)
+    } else {
+        None
+    }
+}
+
 /// SOP-driven discovery, run exactly as it will run under zeroclaw: ONE
 /// continuous agent conversation. The agent does a step's work with the tools,
 /// then calls `sop_advance(status, output)` to finish it and receive the next
@@ -341,6 +369,9 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
 /// hints, or compute the gate. It only routes the agent's report through the
 /// vendored engine and surfaces the next step. Graph truth is logged next to the
 /// agent's report purely as an observability signal (a gap is a quality metric).
+///
+/// Eval-only guardrails (not in prod zeroclaw): per-step LLM round cap, progress
+/// logging, step-2 stuck detection (3× same `remaining`), and a lower visit limit.
 #[allow(clippy::too_many_arguments)]
 fn run_sop_conversation(
     sop_dir: &std::path::Path,
@@ -351,7 +382,7 @@ fn run_sop_conversation(
     tags: &Value,
     timeout: Duration,
     variant: Option<&str>,
-) -> Result<usize> {
+) -> Result<(usize, usize, bool)> {
     use kb_eval::sop;
     use sop::route::{resolve_next, NextStep, RouteCtx};
     use sop::types::{SopRunStatus, SopStep, SopStepResult, SopStepStatus};
@@ -359,7 +390,10 @@ fn run_sop_conversation(
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     let n_steps = sop_def.steps.len();
     eprintln!("[sop] loaded '{}' ({} steps, continuous conversation) from {}", sop_def.name, n_steps, sop_dir.display());
-    let max_visits = sop::driver::DriverConfig::default().max_step_visits;
+    let max_visits = SOP_EVAL_MAX_STEP_VISITS;
+
+    let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let llm_rounds_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Dynamic tool injected via additional_tools — the same `sop_advance` the
     // zeroclaw runtime provides, so the SOP.md is portable as-is.
@@ -408,13 +442,21 @@ fn run_sop_conversation(
     let first_prompt = format!("{guide}\n\n{}", step_ctx(&sop_def.steps[0]));
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
-    let run = std::sync::Mutex::new(sop::driver::minimal_run(&sop_def));
+    let run = std::sync::Arc::new(std::sync::Mutex::new(sop::driver::minimal_run(&sop_def)));
     let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
+    let agent_g_log = agent_g_dir.to_path_buf();
+    let src_log = src_doc.to_string();
+    let llm_rounds_step_exec = std::sync::Arc::clone(&llm_rounds_step);
 
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+    let exec = {
+        let run = std::sync::Arc::clone(&run);
+        let sop_def = sop_def.clone();
+        let agent_g_dir = agent_g_dir.to_path_buf();
+        move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name != "sop_advance" {
             return normal_exec(name, args);
         }
+        llm_rounds_step_exec.store(0, std::sync::atomic::Ordering::Relaxed);
         let output = args.get("output").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
         let status = match args.get("status").and_then(|v| v.as_str()) {
             Some("failed") => SopStepStatus::Failed,
@@ -428,8 +470,16 @@ fn run_sop_conversation(
             started_at: String::new(), completed_at: None,
         });
         let reported = parse_reported_remaining(&output).map(|n| n.to_string()).unwrap_or_else(|| "?".into());
-        let truth = pending_params(&coverage(agent_g_dir, src_doc)).len();
+        let truth = pending_params(&coverage(&agent_g_dir, src_doc)).len();
         eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining (graph: {truth} pending)");
+        if let Some(stuck_at) = step2_advance_stuck(&run.step_results) {
+            eprintln!("  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step 3");
+            run.current_step = 3;
+            let msg = sop_def.steps.iter().find(|s| s.number == 3)
+                .map(step_ctx)
+                .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
+            return (msg, vec![], vec![]);
+        }
         // Route on the agent's payload — identical engine to zeroclaw.
         let run_data = sop::rundata::RunData::from_step_results(&run.step_results);
         let next = {
@@ -450,10 +500,28 @@ fn run_sop_conversation(
             NextStep::Fail(r) => { run.status = SopRunStatus::Failed; format!("SOP failed: {r}. Call `done` to finish.") }
         };
         (msg, vec![], vec![])
-    };
+    }};
 
     let eid = kb_eval::tz::backdated_episode_id(30);
+    let run_log = std::sync::Arc::clone(&run);
+    let llm_rounds_step_chat = std::sync::Arc::clone(&llm_rounds_step);
+    let llm_rounds_total_chat = std::sync::Arc::clone(&llm_rounds_total);
     let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
+        let since_advance = llm_rounds_step_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let total = llm_rounds_total_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if total % 10 == 0 {
+            let step = run_log.lock().unwrap().current_step;
+            let pending = pending_params(&coverage(&agent_g_log, &src_log)).len();
+            eprintln!(
+                "  [sop] LLM round {total} step {step} ({since_advance} since sop_advance, graph {pending} pending)"
+            );
+        }
+        if since_advance > SOP_MAX_LLM_ROUNDS_PER_STEP {
+            let step = run_log.lock().unwrap().current_step;
+            anyhow::bail!(
+                "SOP step {step} exceeded {SOP_MAX_LLM_ROUNDS_PER_STEP} LLM rounds without sop_advance — aborting (partial graph kept for validation)"
+            );
+        }
         let e = ep.unwrap_or(&eid);
         let turn = kb_eval::tz::infer(gateway, "constraint_validate", e, messages, tags, timeout, variant, None, Some(&tools))?;
         Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
@@ -461,10 +529,12 @@ fn run_sop_conversation(
 
     // One continuous episode over the whole SOP (round budget covers all steps).
     let outcome = run_episode(chat, &first_prompt, exec, 250, EpisodePolicy::enrich())?;
-    let run = run.into_inner().unwrap();
-    eprintln!("[sop] run {:?} after {} step-transitions (episode done={} rounds={})",
-        run.status, run.step_results.len(), outcome.done, outcome.rounds);
-    Ok(run.step_results.len())
+    let run = run.lock().unwrap();
+    eprintln!(
+        "[sop] run {:?} after {} step-transitions (episode done={} llm_rounds={})",
+        run.status, run.step_results.len(), outcome.done, outcome.rounds
+    );
+    Ok((run.step_results.len(), outcome.rounds, outcome.done))
 }
 
 fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)]) -> SolveResult {
@@ -855,11 +925,14 @@ fn main() -> Result<()> {
         let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
             match run_sop_conversation(&sop_dir, &agent_g_dir, &src_doc,
                 &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()) {
-                Ok(steps) => Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
+                Ok((_steps, llm_rounds, ep_done)) => Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
                     answer: String::new(), episode_id: Some(eid.clone()), surfaced_titles: vec![],
-                    done: steps > 0, rounds: steps,
+                    done: ep_done, rounds: llm_rounds,
                 }),
-                Err(e) => Err(e),
+                Err(e) => {
+                    eprintln!("[sop] aborted: {e:#}");
+                    Err(e)
+                }
             }
         } else {
             run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich())
@@ -972,6 +1045,22 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step2_advance_stuck_detects_flat_remaining() {
+        use kb_eval::sop::types::{SopStepResult, SopStepStatus};
+        let mk = |n: usize| SopStepResult {
+            step_number: 2,
+            status: SopStepStatus::Completed,
+            output: format!(r#"{{"remaining": {n}}}"#),
+            started_at: String::new(),
+            completed_at: None,
+        };
+        assert_eq!(step2_advance_stuck(&[mk(7), mk(7)]), None);
+        assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(7)]), Some(7));
+        assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(6)]), None);
+        assert_eq!(step2_advance_stuck(&[mk(0), mk(0), mk(0)]), None);
+    }
 
     #[test]
     fn parse_reported_remaining_contract() {
