@@ -100,6 +100,32 @@ pub fn canon_scalar(s: &str) -> String {
     normalize_dashes(&folded)
 }
 
+/// True when an Enum alias carries regex metacharacters and should be compiled,
+/// not compared as a literal token.
+pub fn is_enum_regex_alias(alias: &str) -> bool {
+    alias.chars().any(|c| "[](){}+*?\\^$|".contains(c))
+}
+
+/// Whether a marking satisfies an Enum alias written as a regex pattern.
+/// Both sides are canon-scalar'd before matching so a weak pattern like `\d+[A]`
+/// accepts Cyrillic А in the marking — the same rule as eval `domain_covers`.
+pub fn enum_alias_matches(alias: &str, marking: &str) -> bool {
+    if !is_enum_regex_alias(alias) {
+        return false;
+    }
+    let marking = canon_scalar(marking);
+    let pattern = canon_scalar(alias);
+    regex_lite::Regex::new(&format!("^(?:{pattern})$"))
+        .is_ok_and(|re| re.is_match(&marking))
+}
+
+/// Whether a marking satisfies a standalone Regex constraint pattern.
+pub fn regex_constraint_matches(pattern: &str, marking: &str) -> bool {
+    let marking = canon_scalar(marking);
+    let pattern = canon_scalar(pattern);
+    regex_lite::Regex::new(&pattern).is_ok_and(|re| re.is_match(&marking))
+}
+
 /// Value equality tolerant of the String/Number split and of decimal notation:
 /// the graph stores literals as strings (possibly comma-decimals) while
 /// assignments may carry JSON numbers ("41" ≡ 41, "1,0" ≡ 1).
@@ -190,11 +216,8 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                 }
                 Constraint::Regex { pattern } => {
                     if let Some(val) = assign_map.get(fc.name.as_str()) {
-                        let s = match val {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => format!("{val}"),
-                        };
-                        if regex_lite::Regex::new(pattern).is_ok_and(|re| !re.is_match(&s)) {
+                        let s = scalar_str(val);
+                        if !regex_constraint_matches(pattern, &s) {
                             violations.push(Violation {
                                 field: fc.name.clone(),
                                 constraint: "Regex".into(),
@@ -220,17 +243,10 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                         let in_range = target.parse::<f64>().ok().is_some_and(|n| {
                             values.iter().any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
                         });
-                        // Pattern membership: an allowed value written as a regex (e.g.
-                        // "[0-9]+А" = any grade of category А, where the GOST constrains by
-                        // family, not an enumerated list) matches a specific marking ("14А").
-                        // A value is a pattern only when it carries regex metacharacters, so
-                        // plain literals stay literal; match the RAW marking so the pattern
-                        // keeps its meaning (canon_scalar would mangle the regex).
-                        let matches_pattern = values.iter().any(|v| {
-                            v.chars().any(|c| "[](){}+*?\\^$|".contains(c))
-                                && regex_lite::Regex::new(&format!("^(?:{v})$"))
-                                    .is_ok_and(|re| re.is_match(&s))
-                        });
+                        // Pattern membership: regex alias in the Enum set (e.g. `\d+[A]`
+                        // for any electrocorundum grade). Canon on both sides so Cyrillic
+                        // А in a marking matches Latin A in the pattern.
+                        let matches_pattern = values.iter().any(|v| enum_alias_matches(v, &s));
                         if !exact && !in_range && !matches_pattern {
                             violations.push(Violation {
                                 field: fc.name.clone(),
@@ -854,6 +870,17 @@ mod tests {
             assert!(validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(), "{ok} should pass");
         }
         for bad in ["14Х", "А14", "99"] {
+            assert!(!validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(), "{bad} should fail");
+        }
+    }
+
+    #[test]
+    fn validate_enum_matches_backslash_d_pattern() {
+        let problem = make_problem(vec![("m", vec![make_enum(&[r"\d+[A]", r"\d+[C]", "Z"])])]);
+        for ok in ["14A", "14А", "12A", "53C", "63С", "Z"] {
+            assert!(validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(), "{ok} should pass");
+        }
+        for bad in ["A", "14", "A14", "14X"] {
             assert!(!validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(), "{bad} should fail");
         }
     }
