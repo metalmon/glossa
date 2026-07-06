@@ -27,6 +27,8 @@ eval/tensorzero/.env
 # Local debug logs and scratch (never commit)
 *.log
 episode_*.txt
+episode-*.txt
+eval-dump/
 g.json
 run-chain.sh
 _test_strip.sh
