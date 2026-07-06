@@ -8,7 +8,7 @@ Work through the SOP step by step: use the tools, then `sop_advance` with `{"rem
 1. **List parameters** — bare `Field` nodes only (label + source_path, no values yet).
 2. **Fill each parameter** — find where values live, add `MENTIONS` (provenance) and a constraint (`Enum`, `Range`, or `Conditional` per ontology).
 
-Keep naming and valuing separate. The designation example ("условное обозначение" / "Пример") shows which parameters exist and in what order; full value lists live in tables elsewhere.
+Keep naming and valuing separate. The sentence before the designation example lists parameters in order; the example shows one value each — use the **sentence** for Field labels (D, t, H as separate Fields, not «Размеры»).
 
 ## Finding text
 Large PDFs often come as one chunk — prefer `grep` with `context` (~20 lines) over reading the whole file. Search for a value or name you already saw in the example.
