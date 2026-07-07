@@ -104,22 +104,41 @@ systemctl daemon-reload && systemctl enable --now glossa-base1-editor
 ### Windows — native service (SCM)
 
 The binary integrates with the Service Control Manager (`--windows-service`, set in the binPath; not
-for manual use). Create one service per (base, profile, port) with `sc.exe` (elevated):
+for manual use). Create one service per (base, profile, port). Prefer the install script or
+`New-Service` in PowerShell (elevated) — `sc.exe create` is easy to mis-quote from PowerShell and
+can leave the service **Disabled** (error 1058 on start).
 
+```powershell
+$ServiceName = "glossa-base1-editor"
+$KbExe = "C:\kb\kb.exe"
+$CorpusPath = "C:\kb\base1"
+$BinaryPathName = "`"$KbExe`" mcp `"$CorpusPath`" --profile editor --transport streamable-http --bind 127.0.0.1:8801 --allowed-host gw.internal --windows-service --service-name $ServiceName"
+
+New-Service -Name $ServiceName -BinaryPathName $BinaryPathName `
+  -DisplayName $ServiceName -Description "glossa MCP (base1, editor)" -StartupType Automatic
+Start-Service $ServiceName
+# ...
+Stop-Service $ServiceName    # SCM Stop → graceful shutdown
+sc.exe delete $ServiceName
 ```
-sc.exe create glossa-base1-editor binPath= "C:\kb\kb.exe mcp C:\kb\base1 --profile editor --transport streamable-http --bind 127.0.0.1:8801 --allowed-host gw.internal --windows-service --service-name glossa-base1-editor" start= auto
+
+Or use `deploy/windows/install-service.ps1` (downloads the release binary and registers the service).
+
+`cmd.exe` alternative (note escaped inner quotes):
+
+```cmd
+sc.exe create glossa-base1-editor binPath= "\"C:\kb\kb.exe\" mcp \"C:\kb\base1\" --profile editor --transport streamable-http --bind 127.0.0.1:8801 --allowed-host gw.internal --windows-service --service-name glossa-base1-editor" start= auto
 sc.exe description glossa-base1-editor "glossa MCP (base1, editor)"
 sc.exe start glossa-base1-editor
-:: ...
-sc.exe stop glossa-base1-editor    :: SCM Stop → graceful shutdown
-sc.exe delete glossa-base1-editor
 ```
 
 Notes:
-- The space after `binPath=` / `start=` is required by `sc.exe`.
+- Do **not** run `kb mcp ... --windows-service` from an interactive console — only the SCM should launch that flag.
 - Pass `--service-name` matching the SCM service name (install scripts set this automatically).
+- Set `--allowed-host` to the host clients use in the `Host` header (e.g. `127.0.0.1` when binding loopback by IP).
 - Set the service log-on account and grant it read access to the corpus + read/write to `.glossa`.
 - Run readers as separate services on their own ports (`glossa-base1-reader-8802`, …).
+- Chain commands in PowerShell with `;`, not `&&` (Windows PowerShell 5.x does not support `&&`).
 
 ## Production
 
