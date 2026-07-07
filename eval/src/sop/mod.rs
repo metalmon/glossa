@@ -11,6 +11,7 @@
 pub mod condition;
 pub mod driver;
 pub mod parse;
+pub mod prompt;
 pub mod route;
 pub mod rundata;
 pub mod schema;

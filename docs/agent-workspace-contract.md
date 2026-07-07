@@ -17,7 +17,7 @@ Corpus (indexed, read-only) and **notebook** (agent notes under `.glossa/notes/`
 | Edit / delete | `sed`, `del` | `path` from `ls` | editor, full |
 
 - **`doc`**: indexed path from grep/read; trailing `#n` is stripped server-side.
-- **`file`**: e.g. `parameters.md`, `limits.csp`.
+- **`file`**: e.g. `workbook.md` (research dossier), `limits.csp`.
 - **`path`**: full notebook path from `ls`, e.g. `gost_r_57978-2017.pdf/limits.csp`.
 
 `.csp` files are limit tables (tab-separated rows, first line = column headers). `note`/`sed` validate them on write: the reply echoes parsed columns and row count, and may add brief observations about grid shape (long headers, sentence-like cells); a malformed table (empty header cell, ragged row) is rejected without writing. Any other extension is a free-form note.
@@ -30,7 +30,7 @@ Write operations (`note`, `sed`, `del`) are serialized across MCP editor process
 
 `kb-eval-constraint` uses a temp copy of `.glossa` (or `--keep-agent-dir`). Corpus reads use `--kb`; notes write to the agent copy. Default `--tables-only` scores table coverage vs `kb-val-gost`; use `--full-pipeline` for compile + CSP.
 
-On each run, any prior `agent_g_dir/.glossa` is wiped before seeding from the KB. After the episode, notebook files export to `eval/results/<run>/agent/` when `--tag run=…` is set (or `--export-notes` / `--export-notes-dir`). Temp workspaces are removed explicitly on exit; Ctrl+C removes the temp dir when not using `--keep-agent-dir`.
+On each run, any prior `agent_g_dir/.glossa` is wiped before seeding from the KB. After the episode, notebook files export to `eval/results/<run>/notes/` when `--tag run=…` is set (or `--export-notes` / `--export-notes-dir`). Temp workspaces are removed explicitly on exit; Ctrl+C removes the temp dir when not using `--keep-agent-dir`.
 
 ## Cargo feature
 

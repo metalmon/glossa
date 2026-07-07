@@ -464,6 +464,15 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
+/// Eval-only: returns the document path pinned by `--doc` / CLI (not in prod MCP).
+fn exec_get_task(doc: &str) -> String {
+    json!({ "doc": doc }).to_string()
+}
+
+fn default_eval_sop_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints")
+}
+
 /// The tool executor for an agent episode. Index AND graph open the SAME store
 /// (`agent_g_dir`, a per-run copy of the indexed KB) — as in prod and the glossa
 /// kb-train eval — so the document's Section nodes are present and a MENTIONS edge
@@ -479,6 +488,7 @@ fn make_exec(
         let g = GraphStore::open(&agent_g_dir).unwrap();
         let ont = Ontology::load_or_default(&agent_g_dir);
         match name {
+            "get_task" => (exec_get_task(&src_doc), vec![], vec![]),
             "search" | "read" | "grep" | "glob" | "glossary" | "neighbors" | "resolve" => {
                 kb_eval::backend::glossa_tools::exec(
                     name,
@@ -589,9 +599,10 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// Eval harness cap: step-2 loops once per parameter (~10) plus a small margin.
+/// Eval harness cap: step 1 may loop while workbook gaps remain; step 2 loops
+/// once per parameter (~10) plus a small margin.
 /// Production zeroclaw keeps `DriverConfig::default().max_step_visits` (256).
-const SOP_EVAL_MAX_STEP_VISITS: u32 = 15;
+const SOP_EVAL_MAX_STEP_VISITS: u32 = 20;
 /// Abort when the agent burns this many LLM turns on one SOP step without calling
 /// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
 const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 50;
@@ -645,7 +656,7 @@ fn run_sop_conversation(
 ) -> Result<(usize, usize, bool)> {
     use kb_eval::sop;
     use sop::route::{resolve_next, NextStep, RouteCtx};
-    use sop::types::{SopRunStatus, SopStep, SopStepResult, SopStepStatus};
+    use sop::types::{SopRunStatus, SopStepResult, SopStepStatus};
     let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     let n_steps = sop_def.steps.len();
@@ -657,61 +668,20 @@ fn run_sop_conversation(
     );
     let max_visits = SOP_EVAL_MAX_STEP_VISITS;
 
+    let get_task_tool = sop::prompt::load_get_task_tool(sop_dir)?;
+    let sop_advance_tool = sop::prompt::load_sop_advance_tool(sop_dir)?;
+    let eval_tools = [get_task_tool, sop_advance_tool];
+
     let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let llm_rounds_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // Dynamic tool injected via additional_tools — the same `sop_advance` the
-    // zeroclaw runtime provides, so the SOP.md is portable as-is.
-    let tools = [json!({
-        "name": "sop_advance",
-        "description": "Finish the CURRENT SOP step and receive the next one. Call it once the step's \
-            work is done. `output` is a JSON-object string carrying the step's result; for these steps \
-            it is {\"remaining\": N} where N is how many parameters from your own working list are \
-            not yet a column header in any .csp table.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "description": "completed | failed"},
-                "output": {"type": "string", "description": "JSON result string, e.g. {\"remaining\": 3}"}
-            },
-            "required": ["status", "output"]
-        }
-    })];
-
-    let step_ctx = |step: &SopStep| -> String {
-        let tools_line = if step.suggested_tools.is_empty() {
-            String::new()
-        } else {
-            format!("\nTools: {}.", step.suggested_tools.join(", "))
-        };
-        format!(
-            "── SOP step {} of {}: {} ──\n{}{}\n\n\
-             When this step is done, call `sop_advance` with status=\"completed\" and \
-             output=\"{{\\\"remaining\\\": N}}\".",
-            step.number, n_steps, step.title, step.body, tools_line
-        )
-    };
-
-    // The SOP.md preamble (everything before "## Steps") is the behavioural guide
-    // — mental model, vocabulary, illustrative example. The step parser ignores
-    // it, so surface it here as the run's opening context. SOP.md stays the
-    // single source; under zeroclaw the same preamble is the SOP's guide.
-    let guide = std::fs::read_to_string(sop_dir.join("SOP.md"))
-        .ok()
-        .and_then(|md| md.split("## Steps").next().map(|s| s.trim().to_string()))
-        .unwrap_or_default();
-    // We name only the document to work from — NOT the rest of the knowledge
-    // base. In production a corpus may hold one standard or many; the agent finds
-    // any standard THIS document references by searching, the same as it will
-    // there. Handing it the file list would be a hint it won't get in prod.
-    // The preamble (which document to work from, and that referenced standards are the
-    // agent's to find) now lives in SOP.md with a `{src_doc}` placeholder, so all prompt
-    // text is in files and editable without a rebuild.
-    let guide = guide.replace("{src_doc}", src_doc);
-    let first_prompt = format!("{guide}\n\n{}", step_ctx(&sop_def.steps[0]));
-
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Arc::new(std::sync::Mutex::new(sop::driver::minimal_run(&sop_def)));
+    let first_prompt = {
+        let run = run.lock().unwrap();
+        sop::prompt::format_step_context(&sop_def, &run, &sop_def.steps[0])
+    };
+
     let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
     let llm_rounds_step_exec = std::sync::Arc::clone(&llm_rounds_step);
 
@@ -753,7 +723,7 @@ fn run_sop_conversation(
                     .steps
                     .iter()
                     .find(|s| s.number == 3)
-                    .map(step_ctx)
+                    .map(|s| sop::prompt::format_sop_advance_reply(&sop_def, &run, s))
                     .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
                 return (msg, vec![], vec![]);
             }
@@ -773,7 +743,7 @@ fn run_sop_conversation(
                 NextStep::Step(n) | NextStep::Wait(n) => {
                     run.current_step = n;
                     match sop_def.steps.iter().find(|s| s.number == n) {
-                        Some(s) => step_ctx(s),
+                        Some(s) => sop::prompt::format_sop_advance_reply(&sop_def, &run, s),
                         None => {
                             run.status = SopRunStatus::Completed;
                             "SOP complete. Call `done` to finish.".into()
@@ -784,7 +754,7 @@ fn run_sop_conversation(
                     .steps
                     .iter()
                     .find(|s| s.number == cur)
-                    .map(step_ctx)
+                    .map(|s| sop::prompt::format_sop_advance_reply(&sop_def, &run, s))
                     .unwrap_or_else(|| "SOP complete. Call `done`.".into()),
                 NextStep::Complete => {
                     run.status = SopRunStatus::Completed;
@@ -827,7 +797,7 @@ fn run_sop_conversation(
             timeout,
             variant,
             None,
-            Some(&tools),
+            Some(&eval_tools),
         )?;
         Ok(TzTurn {
             content: turn.content,
@@ -1295,7 +1265,7 @@ fn main() -> Result<()> {
         // ── DISCOVERY (once): the agent builds the constraint graph; every row is
         //    then validated against it below. Runs on the first non-csp_only case,
         //    then breaks — the graph does not depend on the row.
-        eprintln!("[discovery] building the constraint graph from the GOST...");
+        eprintln!("[discovery] building the constraint graph...");
         let eid = kb_eval::tz::backdated_episode_id(30);
         let eid_chat = eid.clone();
         let url = cli.gateway.clone();
@@ -1303,6 +1273,11 @@ fn main() -> Result<()> {
         let tz_tags = tags.clone();
         let ref_json_clone = ref_graph_json.clone();
         let tim = timeout;
+
+        let eval_sop_dir = default_eval_sop_dir();
+        let get_task_tool =
+            kb_eval::sop::prompt::load_get_task_tool(&eval_sop_dir).context("load get_task.json")?;
+        let eval_tools = [get_task_tool.clone()];
 
         let variant_chat = cli.variant.clone();
         let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
@@ -1316,7 +1291,7 @@ fn main() -> Result<()> {
                 tim,
                 variant_chat.as_deref(),
                 None,
-                None,
+                Some(&eval_tools),
             )?;
             Ok(TzTurn {
                 content: turn.content,
@@ -1351,17 +1326,9 @@ fn main() -> Result<()> {
         std::fs::write(&ont_path, &ontology_toml).unwrap();
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
-        let prompt = format!(
-            "You are materializing limit tables for a product specified by GOST '{src_doc}'.\n\n\
-             The knowledge base holds: {kb_docs_list}. Values may live in the main GOST or a referenced standard.\n\n\
-             === PHASE A: limit tables ===\n\
-             1. note(doc, file=\"parameters.md\", content=…) — your working notes: the parameter list and anything else you need (free format).\n\
-             2. note(doc, file=\"….csp\", content=…) — tab-separated rows (tab between columns); column headers = parameter names.\n\
-             Use grep/read to find tables; use note(doc, file, content) for parameters.md and .csp tables.\n\
-             Then ls/cat/sed/del with paths from ls.\n\n\
-             === DONE ===\n\
-             Call done when every parameter has a column in a .csp table with rows from the source."
-        );
+        let eval_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let prompt = std::fs::read_to_string(eval_dir.join("prompts/constraint-phase-a.md"))
+            .context("read eval/prompts/constraint-phase-a.md")?;
 
         let agent_g_dir_clone = agent_g_dir.clone();
         let src_doc_exec = src_doc.clone();
@@ -1377,6 +1344,7 @@ fn main() -> Result<()> {
             let ont = Ontology::load_or_default(&agent_g_dir_clone);
 
             match name {
+                "get_task" => (exec_get_task(&src_doc_exec), vec![], vec![]),
                 "search" | "read" | "grep" | "glob" | "glossary" | "neighbors" | "resolve" => {
                     kb_eval::backend::glossa_tools::exec(
                         name,
@@ -1581,7 +1549,7 @@ fn main() -> Result<()> {
             let ont = Ontology::load_or_default(&agent_g_dir);
             let tables_path = glossa::notebook::notes_root(&agent_g_dir)
                 .join(glossa::notebook::mirror_dir_for_doc(&src_doc));
-            // The mirror also holds parameters.md and free-form notes — only
+            // The mirror also holds workbook.md and free-form notes — only
             // compile when the agent actually wrote at least one .csp table.
             if glossa::tables::count_csp_files(&agent_g_dir, &src_doc) > 0 {
                 eprintln!("[tables-to-graph] compiling {} …", tables_path.display());

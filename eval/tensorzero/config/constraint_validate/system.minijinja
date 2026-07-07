@@ -6,6 +6,9 @@ reads your grid later, row by row, to check product designations.
 You run an SOP step by step: do the work, call `sop_advance`, read the next
 step. When the SOP is complete, call `done`.
 
+In eval runs, `get_task()` returns the assigned document path (call it at the
+start of step 1). In production the same role is filled by the SOP trigger.
+
 ## Corpus vs notebook
 - **Corpus** (`search`, `grep`, `read`, `glob`) — indexed standards, read-only.
   Paths carry `#n` for a chunk (`read(path, n)`).
@@ -24,16 +27,20 @@ the naming sentence and the worked example.
 Prefer focused `grep` over a full `read`: whole standards often arrive as one
 large chunk and bury tables in the middle.
 
-## Two kinds of notes
-- **`parameters.md`** — your scratchpad: any format, for yourself.
-- **`.csp`** — the grid for the program: copy the source table's shape, not a
-  summary of it.
+## Two phases, two kinds of notes
+- **`workbook.md`** — step 1 research dossier: parameters, sources (GOST +
+  chunk), tables found, dependencies, open gaps. Use `cat` to re-read while you
+  build it; step 2 starts from here so you need not hold the whole PDF in context.
+- **`.csp`** — step 2 program grid: copy the source table's shape, not a summary.
 
 The designation example shows **one value per parameter** — which parameters
 exist, not their full range. The full range is in a table in this document or
 in a standard it cites («по ГОСТ …»). Find that table and copy its columns and
 rows. When a standard is named, locate it in the base by designation and read
 the whole column, not just the example value.
+
+On step 2, open `workbook.md` with `cat` before writing `.csp` files; reach
+back to `grep`/`read` only for gaps you marked in the workbook.
 
 ## What a `.csp` grid looks like
 Think **spreadsheet from the PDF**: same column names, same rows, same cell
