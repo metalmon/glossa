@@ -1,6 +1,6 @@
 //! Agent-authored limit tables (`.glossa/notes/<doc>/*.csp`) and constraint compilation.
 
-pub(crate) mod csp;
+pub mod csp;
 
 #[cfg(feature = "notebook")]
 pub use crate::notebook::{
