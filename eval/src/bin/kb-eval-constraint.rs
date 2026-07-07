@@ -6,7 +6,7 @@ use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use glossa_constraint::solver::{SolveMode, SolveResult};
-use kb_eval::backend::tensorzero::{run_episode, EpisodePolicy, TzTurn};
+use kb_eval::backend::tensorzero::{run_episode, EpisodeOutcome, EpisodePolicy, TzTurn};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -607,6 +607,16 @@ const SOP_EVAL_MAX_STEP_VISITS: u32 = 20;
 /// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
 const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 50;
 
+/// TensorZero may assign a different episode id on the first `/inference` response than
+/// the client-generated UUID we send; `run_episode` tracks the gateway's id.
+fn episode_id_for_report(fallback: &str, outcome: Option<&EpisodeOutcome>) -> String {
+    outcome
+        .and_then(|o| o.episode_id.as_deref())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
 /// Step 2 advanced 3+ times reporting the same positive `remaining` — no progress.
 fn step2_advance_stuck(results: &[kb_eval::sop::types::SopStepResult]) -> Option<usize> {
     let reps: Vec<Option<usize>> = results
@@ -653,7 +663,7 @@ fn run_sop_conversation(
     tags: &Value,
     timeout: Duration,
     variant: Option<&str>,
-) -> Result<(usize, usize, bool)> {
+) -> Result<EpisodeOutcome> {
     use kb_eval::sop;
     use sop::route::{resolve_next, NextStep, RouteCtx};
     use sop::types::{SopRunStatus, SopStepResult, SopStepStatus};
@@ -822,7 +832,7 @@ fn run_sop_conversation(
         outcome.done,
         outcome.rounds
     );
-    Ok((run.step_results.len(), outcome.rounds, outcome.done))
+    Ok(outcome)
 }
 
 fn solve_csp(
@@ -1447,7 +1457,7 @@ fn main() -> Result<()> {
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
         let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
-            match run_sop_conversation(
+            run_sop_conversation(
                 &sop_dir,
                 &agent_g_dir,
                 &src_doc,
@@ -1456,21 +1466,11 @@ fn main() -> Result<()> {
                 &tags,
                 timeout,
                 cli.variant.as_deref(),
-            ) {
-                Ok((_steps, llm_rounds, ep_done)) => {
-                    Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
-                        answer: String::new(),
-                        episode_id: Some(eid.clone()),
-                        surfaced_titles: vec![],
-                        done: ep_done,
-                        rounds: llm_rounds,
-                    })
-                }
-                Err(e) => {
-                    eprintln!("[sop] aborted: {e:#}");
-                    Err(e)
-                }
-            }
+            )
+            .map_err(|e| {
+                eprintln!("[sop] aborted: {e:#}");
+                e
+            })
         } else {
             // Dedup temporarily OFF (see the SOP path) — notebook writes don't
             // invalidate cached reads yet.
@@ -1490,6 +1490,7 @@ fn main() -> Result<()> {
         let agent_g = GraphStore::open(&agent_g_dir).unwrap();
         let was_done = outcome.as_ref().map(|o| o.done).unwrap_or(false);
         let rounds = outcome.as_ref().map(|o| o.rounds).unwrap_or(0);
+        let reported_eid = episode_id_for_report(&eid, outcome.as_ref().ok());
         let cli_gateway = &cli.gateway;
 
         if tables_only {
@@ -1498,28 +1499,28 @@ fn main() -> Result<()> {
             let frac = |n: usize, d: usize| if d == 0 { 1.0 } else { n as f64 / d as f64 };
             kb_eval::tz::post_feedback(
                 cli_gateway,
-                &eid,
+                &reported_eid,
                 "ref_param_coverage",
                 json!(frac(pc, pt)),
                 &tags,
             );
             kb_eval::tz::post_feedback(
                 cli_gateway,
-                &eid,
+                &reported_eid,
                 "ref_value_coverage",
                 json!(frac(vc, vt)),
                 &tags,
             );
             kb_eval::tz::post_feedback(
                 cli_gateway,
-                &eid,
+                &reported_eid,
                 "table_csp_count",
                 json!(csp_count as f64),
                 &tags,
             );
             kb_eval::tz::post_feedback(
                 cli_gateway,
-                &eid,
+                &reported_eid,
                 "tools_used",
                 json!(rounds as f64),
                 &tags,
@@ -1529,7 +1530,7 @@ fn main() -> Result<()> {
             }
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
             println!(
-                "TABLES episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
+                "TABLES episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
                 agent_g_dir.display()
             );
             drop(agent_g);
@@ -1584,41 +1585,41 @@ fn main() -> Result<()> {
             .unwrap_or(0);
 
         // ── DISCOVERY coverage feedback (one build) ──
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "field_coverage", json!(field_cov), &tags);
+        kb_eval::tz::post_feedback(cli_gateway, &reported_eid, "field_coverage", json!(field_cov), &tags);
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "constraint_coverage",
             json!(constraint_cov),
             &tags,
         );
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "literal_coverage",
             json!(literal_cov),
             &tags,
         );
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "agent_graph_node_count",
             json!(agent_nodes as f64),
             &tags,
         );
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "agent_graph_edge_count",
             json!(agent_edges as f64),
             &tags,
         );
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "tools_used", json!(rounds as f64), &tags);
+        kb_eval::tz::post_feedback(cli_gateway, &reported_eid, "tools_used", json!(rounds as f64), &tags);
         if let Err(e) = &outcome {
             println!("EPISODE ERROR: {e}");
         }
         println!(
-            "DISCOVERY  episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}",
+            "DISCOVERY  episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}",
             agent_g_dir.display()
         );
 
@@ -1724,21 +1725,21 @@ fn main() -> Result<()> {
         };
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "validation_accuracy",
             json!(val_acc),
             &tags,
         );
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "valid_pass_rate",
             json!(valid_pass_rate),
             &tags,
         );
         kb_eval::tz::post_feedback(
             cli_gateway,
-            &eid,
+            &reported_eid,
             "invalid_catch_rate",
             json!(invalid_catch_rate),
             &tags,
@@ -1778,6 +1779,23 @@ mod tests {
         assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(7)]), Some(7));
         assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(6)]), None);
         assert_eq!(step2_advance_stuck(&[mk(0), mk(0), mk(0)]), None);
+    }
+
+    #[test]
+    fn episode_id_for_report_prefers_gateway_id() {
+        let fallback = "019f3e27-c4e8-79a4-b4e1-479b31901782";
+        let outcome = kb_eval::backend::tensorzero::EpisodeOutcome {
+            answer: String::new(),
+            episode_id: Some("019f3e27-c60d-7b4f-a135-74871c652565".into()),
+            surfaced_titles: vec![],
+            done: true,
+            rounds: 49,
+        };
+        assert_eq!(
+            episode_id_for_report(fallback, Some(&outcome)),
+            "019f3e27-c60d-7b4f-a135-74871c652565"
+        );
+        assert_eq!(episode_id_for_report(fallback, None), fallback);
     }
 
     #[test]
