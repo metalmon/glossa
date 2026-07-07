@@ -4,6 +4,7 @@ docs/superpowers/
 
 # Local debug knowledge base (real data — never commit)
 kb-test/
+kb-test-docs/
 kb-val/
 
 # Local index/manifest caches
