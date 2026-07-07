@@ -20,7 +20,7 @@ Corpus (indexed, read-only) and **notebook** (agent notes under `.glossa/notes/`
 - **`file`**: e.g. `parameters.md`, `limits.csp`.
 - **`path`**: full notebook path from `ls`, e.g. `gost_r_57978-2017.pdf/limits.csp`.
 
-`.csp` files are limit tables (`|`-separated rows, first line = column headers). `note`/`sed` validate them on write: the reply echoes the parsed columns and row count; a malformed table (empty header cell, ragged row) is rejected without writing. Any other extension is a free-form note.
+`.csp` files are limit tables (`|`-separated rows, first line = column headers). `note`/`sed` validate them on write: the reply echoes parsed columns and row count, and may add brief observations about grid shape (long headers, sentence-like cells); a malformed table (empty header cell, ragged row) is rejected without writing. Any other extension is a free-form note.
 
 Storage: `<corpus>/.glossa/notes/<document>/…` where `<document>` is the full indexed path (with extension). Living under `.glossa` keeps notes out of the corpus indexer's walk — the agent can never index its own notes as documents.
 
