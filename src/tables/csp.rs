@@ -155,6 +155,62 @@ fn dedupe_rows(rel: &mut CspTable) {
     rel.rows.retain(|row| seen.insert(row.clone()));
 }
 
+/// Remove duplicate data rows; returns how many were dropped (later copies).
+pub fn dedupe_csp_rows(table: &mut CspTable) -> usize {
+    let before = table.rows.len();
+    dedupe_rows(table);
+    before - table.rows.len()
+}
+
+pub struct CspAppendStats {
+    pub added: usize,
+    pub dup_ignored: usize,
+}
+
+/// Append parsed data rows from `new_body` onto `old`, skipping duplicates.
+pub fn merge_append_rows(old: &CspTable, new_body: &str) -> anyhow::Result<(CspTable, CspAppendStats)> {
+    let new_rows = if new_body.trim().is_empty() {
+        Vec::new()
+    } else {
+        let synthetic = format!("{}\n{}", old.headers.join("|"), new_body.trim());
+        parse_csp(&synthetic)?.rows
+    };
+    let mut merged = old.clone();
+    let mut known: BTreeSet<Vec<String>> = merged.rows.iter().cloned().collect();
+    let mut seen_in_chunk = BTreeSet::new();
+    let mut added = 0usize;
+    let mut dup_ignored = 0usize;
+    for row in new_rows {
+        if known.contains(&row) {
+            dup_ignored += 1;
+        } else if !seen_in_chunk.insert(row.clone()) {
+            dup_ignored += 1;
+        } else {
+            known.insert(row.clone());
+            merged.rows.push(row);
+            added += 1;
+        }
+    }
+    Ok((
+        merged,
+        CspAppendStats {
+            added,
+            dup_ignored,
+        },
+    ))
+}
+
+/// Serialize a table back to `.csp` text (`|`-separated).
+pub fn format_csp(table: &CspTable) -> String {
+    let mut out = table.headers.join("|");
+    out.push('\n');
+    for row in &table.rows {
+        out.push_str(&row.join("|"));
+        out.push('\n');
+    }
+    out
+}
+
 pub fn column_index(headers: &[String], name: &str) -> Option<usize> {
     let n = normalize_label(name);
     headers.iter().position(|h| normalize_label(h) == n)
@@ -207,5 +263,14 @@ mod tests {
     fn semicolon_in_cell_value_is_preserved() {
         let r = parse_csp("D\n115; 125; 150\n").unwrap();
         assert_eq!(r.rows[0][0], "115; 125; 150");
+    }
+
+    #[test]
+    fn merge_append_skips_duplicate_rows() {
+        let old = parse_csp("h|v\n1|2\n3|4\n").unwrap();
+        let (merged, stats) = merge_append_rows(&old, "1|2\n3|4\n5|6\n").unwrap();
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.dup_ignored, 2);
+        assert_eq!(merged.rows.len(), 3);
     }
 }

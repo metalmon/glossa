@@ -12,10 +12,43 @@ pub use paths::{
 use std::path::Path;
 
 use crate::index::store::DocIndex;
-use crate::tables::csp::{parse_csp, parse_csp_row, CSP_DELIMITER};
+use crate::tables::csp::{dedupe_csp_rows, format_csp, merge_append_rows, parse_csp, parse_csp_row, CSP_DELIMITER};
 
 fn format_csp_columns(headers: &[String]) -> String {
     headers.join(" | ")
+}
+
+fn csp_dup_ignored_suffix(dup_ignored: usize) -> String {
+    if dup_ignored == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({dup_ignored} duplicate row{} ignored)",
+            if dup_ignored == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn csp_dup_removed_suffix(dup_removed: usize) -> String {
+    if dup_removed == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({dup_removed} duplicate row{} removed)",
+            if dup_removed == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn normalize_csp_content(content: &str) -> anyhow::Result<(String, usize)> {
+    let mut table = parse_csp(content)?;
+    for (i, h) in table.headers.iter().enumerate() {
+        if h.is_empty() {
+            anyhow::bail!("empty header cell in column {}", i + 1);
+        }
+    }
+    let dup_removed = dedupe_csp_rows(&mut table);
+    Ok((format_csp(&table), dup_removed))
 }
 
 /// Create, fully replace, or (with `append`) extend a note bound to an indexed document.
@@ -36,27 +69,37 @@ pub fn note(
     match with_notebook_write_lock(root, || write_note(root, idx, doc, file, content, append)) {
         Ok(o) => {
             let mut msg = match (&o.mode, &o.table) {
-                (WriteMode::Appended { added }, Some(t)) => format!(
-                    "Appended {added} row{} to {} — columns: [{}]; now {} data row{}",
+                (WriteMode::Appended { added, dup_ignored }, Some(t)) => format!(
+                    "Appended {added} row{} to {} — columns: [{}]; now {} data row{}{}",
                     if *added == 1 { "" } else { "s" },
                     o.rel_path,
                     format_csp_columns(&t.headers),
                     t.rows,
-                    if t.rows == 1 { "" } else { "s" }
+                    if t.rows == 1 { "" } else { "s" },
+                    csp_dup_ignored_suffix(*dup_ignored)
                 ),
                 (WriteMode::Appended { .. }, None) => {
                     format!("Appended — {} now {} lines", o.rel_path, o.lines)
                 }
-                (_, Some(t)) => format!(
-                    "Noted {} — columns: [{}]; {} data row{}",
-                    o.rel_path,
-                    format_csp_columns(&t.headers),
-                    t.rows,
-                    if t.rows == 1 { "" } else { "s" }
-                ),
+                (_, Some(t)) => {
+                    let dup_removed = match &o.mode {
+                        WriteMode::Created { dup_removed } | WriteMode::Replaced { dup_removed, .. } => {
+                            *dup_removed
+                        }
+                        _ => 0,
+                    };
+                    format!(
+                        "Noted {} — columns: [{}]; {} data row{}{}",
+                        o.rel_path,
+                        format_csp_columns(&t.headers),
+                        t.rows,
+                        if t.rows == 1 { "" } else { "s" },
+                        csp_dup_removed_suffix(dup_removed)
+                    )
+                }
                 (_, None) => format!("Noted {} — {} lines", o.rel_path, o.lines),
             };
-            if let WriteMode::Replaced { prev } = &o.mode {
+            if let WriteMode::Replaced { prev, .. } = &o.mode {
                 msg.push_str(&format!(
                     "; replaced previous version (was {prev}) — pass append=true to add instead"
                 ));
@@ -117,14 +160,18 @@ pub struct TableEcho {
 }
 
 pub enum WriteMode {
-    Created,
+    Created {
+        dup_removed: usize,
+    },
     /// Overwrote an existing file; `prev` describes what was lost ("21 data rows" / "5 lines").
     Replaced {
         prev: String,
+        dup_removed: usize,
     },
-    /// Extended an existing file; `added` counts new data rows (`.csp`) or lines.
+    /// Extended an existing file; `added` counts new unique data rows (`.csp`) or lines.
     Appended {
         added: usize,
+        dup_ignored: usize,
     },
 }
 
@@ -171,24 +218,20 @@ fn write_note(
         (Some(old), true) => {
             if is_csp {
                 let old_rel = parse_csp(old)?;
-                // A repeated header line in the appended chunk is tolerated (models resend
-                // it); anything else is data rows under the existing header.
                 let new_body = match content.lines().next() {
                     Some(first) if split_cells(first) == old_rel.headers => {
                         content.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
                     }
                     _ => content,
                 };
-                let mut full = old.trim_end_matches(['\n', '\r']).to_string();
-                if !new_body.trim().is_empty() {
-                    full.push('\n');
-                    full.push_str(new_body);
-                }
-                let added = parse_csp(&full)?
-                    .rows
-                    .len()
-                    .saturating_sub(old_rel.rows.len());
-                (full, WriteMode::Appended { added })
+                let (merged, stats) = merge_append_rows(&old_rel, new_body)?;
+                (
+                    format_csp(&merged),
+                    WriteMode::Appended {
+                        added: stats.added,
+                        dup_ignored: stats.dup_ignored,
+                    },
+                )
             } else {
                 let mut full = old.clone();
                 if !full.is_empty() && !full.ends_with('\n') {
@@ -196,11 +239,24 @@ fn write_note(
                 }
                 full.push_str(content);
                 let added = content.lines().count();
-                (full, WriteMode::Appended { added })
+                (
+                    full,
+                    WriteMode::Appended {
+                        added,
+                        dup_ignored: 0,
+                    },
+                )
             }
         }
         // append requested but the file does not exist yet → plain create
-        (None, true) | (None, false) => (content.to_string(), WriteMode::Created),
+        (None, true) | (None, false) => {
+            if is_csp {
+                let (full, dup_removed) = normalize_csp_content(content)?;
+                (full, WriteMode::Created { dup_removed })
+            } else {
+                (content.to_string(), WriteMode::Created { dup_removed: 0 })
+            }
+        }
         // overwrite an existing file: allowed, but the echo must say what was lost
         (Some(old), false) => {
             let prev = if is_csp {
@@ -215,7 +271,24 @@ fn write_note(
             } else {
                 format!("{} lines", old.lines().count())
             };
-            (content.to_string(), WriteMode::Replaced { prev })
+            if is_csp {
+                let (full, dup_removed) = normalize_csp_content(content)?;
+                (
+                    full,
+                    WriteMode::Replaced {
+                        prev,
+                        dup_removed,
+                    },
+                )
+            } else {
+                (
+                    content.to_string(),
+                    WriteMode::Replaced {
+                        prev,
+                        dup_removed: 0,
+                    },
+                )
+            }
         }
     };
 
@@ -483,6 +556,35 @@ mod tests {
         let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
         assert_eq!(body.matches("h|v").count(), 1, "single header: {body}");
         assert!(body.contains("7|8"), "{body}");
+    }
+
+    #[test]
+    fn csp_append_ignores_duplicate_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n3|4\n", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "1|2\n3|4\n", true);
+        assert!(msg.contains("Appended 0 rows"), "{msg}");
+        assert!(msg.contains("now 2 data rows"), "{msg}");
+        assert!(msg.contains("2 duplicate rows ignored"), "{msg}");
+        let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
+        assert_eq!(body.matches("1|2").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn csp_replace_dedupes_internal_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "t.csp",
+            "h|v\n1|2\n1|2\n3|4\n",
+            false,
+        );
+        assert!(msg.contains("2 data rows"), "{msg}");
+        assert!(msg.contains("1 duplicate row removed"), "{msg}");
     }
 
     #[test]
