@@ -46,8 +46,13 @@ mod tests {
 
     fn q() -> Question {
         Question {
-            id: "q1".into(), question: "?".into(), answer: "a".into(),
-            paragraphs: vec![Paragraph { title: "Bob Page".into(), sentences: vec!["b1.".into(), "b2.".into()] }],
+            id: "q1".into(),
+            question: "?".into(),
+            answer: "a".into(),
+            paragraphs: vec![Paragraph {
+                title: "Bob Page".into(),
+                sentences: vec!["b1.".into(), "b2.".into()],
+            }],
             supporting_titles: vec!["Bob Page".into()],
         }
     }

@@ -26,7 +26,13 @@ mod tests {
         let mut canned = HashMap::new();
         canned.insert("q1".to_string(), "Bob Page".to_string());
         let b = MockBackend { canned };
-        let q = Question { id: "q1".into(), question: "?".into(), answer: "".into(), paragraphs: vec![], supporting_titles: vec![] };
+        let q = Question {
+            id: "q1".into(),
+            question: "?".into(),
+            answer: "".into(),
+            paragraphs: vec![],
+            supporting_titles: vec![],
+        };
         assert_eq!(b.answer(Path::new("."), &q).unwrap(), "Bob Page");
         assert!(!b.needs_corpus());
     }

@@ -94,6 +94,8 @@ mod tests {
     fn adamic_adar_scores_shared_neighbours() {
         let edges = vec![e("a", "h1"), e("a", "h2"), e("b", "h1"), e("b", "h2")];
         let pairs = adamic_adar_pairs(&edges, 0.1);
-        assert!(pairs.iter().any(|(a, b, s)| a == "a" && b == "b" && *s > 0.0));
+        assert!(pairs
+            .iter()
+            .any(|(a, b, s)| a == "a" && b == "b" && *s > 0.0));
     }
 }

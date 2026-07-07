@@ -1,8 +1,8 @@
-use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
 use crate::model::Chunk;
-use std::path::{Path, PathBuf};
+use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
 use std::fs::File;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Detect the charset of a text file from a prefix (first ~64 KiB). Returns None if the bytes look
 /// binary (a NUL byte, or >10% C0 control bytes other than tab/newline/carriage-return).
@@ -66,7 +66,15 @@ pub struct Windower {
 
 impl Windower {
     pub fn new(path: &Path, file_type: &str) -> Self {
-        Windower { path: path.to_path_buf(), file_type: file_type.to_string(), buf: String::new(), lines: 0, chars: 0, pending: None, emitted: 0 }
+        Windower {
+            path: path.to_path_buf(),
+            file_type: file_type.to_string(),
+            buf: String::new(),
+            lines: 0,
+            chars: 0,
+            pending: None,
+            emitted: 0,
+        }
     }
 
     fn flush_pending(&mut self, sink: &mut dyn FnMut(Chunk)) {
@@ -111,10 +119,20 @@ impl Windower {
         // Now emit the last pending window: location "" if it is the only one, else part.N.
         if let Some(text) = self.pending.take() {
             if self.emitted == 0 {
-                sink(Chunk { doc_path: self.path.clone(), location: String::new(), file_type: self.file_type.clone(), text });
+                sink(Chunk {
+                    doc_path: self.path.clone(),
+                    location: String::new(),
+                    file_type: self.file_type.clone(),
+                    text,
+                });
             } else {
                 self.emitted += 1;
-                sink(Chunk { doc_path: self.path, location: format!("part.{}", self.emitted), file_type: self.file_type, text });
+                sink(Chunk {
+                    doc_path: self.path,
+                    location: format!("part.{}", self.emitted),
+                    file_type: self.file_type,
+                    text,
+                });
             }
         }
     }
@@ -124,12 +142,18 @@ const PREFIX_BYTES: usize = 64 * 1024;
 const READ_BLOCK: usize = 64 * 1024;
 
 /// Stream-decode a text file (any detected encoding) into windowed chunks. Binary files are skipped.
-pub fn stream_text(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) -> anyhow::Result<()> {
+pub fn stream_text(
+    path: &Path,
+    file_type: &str,
+    sink: &mut dyn FnMut(Chunk),
+) -> anyhow::Result<()> {
     let mut file = File::open(path)?;
     let mut prefix = vec![0u8; PREFIX_BYTES];
     let n = read_fill(&mut file, &mut prefix)?;
     prefix.truncate(n);
-    let Some(enc) = detect(&prefix) else { return Ok(()) }; // binary -> skip
+    let Some(enc) = detect(&prefix) else {
+        return Ok(());
+    }; // binary -> skip
 
     let mut decoder = enc.new_decoder();
     let mut win = Windower::new(path, file_type);
@@ -336,11 +360,21 @@ mod stream_tests {
         std::fs::write(&p, &body).unwrap();
         let mut out = Vec::new();
         stream_text(&p, "json", &mut |c| out.push(c)).unwrap();
-        assert!(out.len() >= 4, "long no-newline line must split into bounded chunks, got {}", out.len());
+        assert!(
+            out.len() >= 4,
+            "long no-newline line must split into bounded chunks, got {}",
+            out.len()
+        );
         for c in &out {
-            assert!(c.text.chars().count() <= 4100, "each chunk bounded near MAX_CHARS");
+            assert!(
+                c.text.chars().count() <= 4100,
+                "each chunk bounded near MAX_CHARS"
+            );
         }
-        let total: usize = out.iter().map(|c| c.text.chars().filter(|ch| *ch == 'x').count()).sum();
+        let total: usize = out
+            .iter()
+            .map(|c| c.text.chars().filter(|ch| *ch == 'x').count())
+            .sum();
         assert_eq!(total, 20_000, "all content preserved");
     }
 }

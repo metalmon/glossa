@@ -18,73 +18,77 @@ impl Extractor for PdfExtractor {
         // Any PDF parser can panic on a malformed file; catch it so indexing never aborts.
         let owned = bytes.to_vec();
         let path_buf = path.to_path_buf();
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Vec<Chunk> {
-            // lenient() enables xref recovery — parses damaged-but-valid PDFs that strict mode rejects.
-            let reader = match PdfReader::new_with_options(std::io::Cursor::new(owned), ParseOptions::lenient()) {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
-            };
-            let doc = PdfDocument::new(reader);
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Vec<Chunk> {
+                // lenient() enables xref recovery — parses damaged-but-valid PDFs that strict mode rejects.
+                let reader = match PdfReader::new_with_options(
+                    std::io::Cursor::new(owned),
+                    ParseOptions::lenient(),
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return Vec::new(),
+                };
+                let doc = PdfDocument::new(reader);
 
-            // Layer 1 (primary): plain layout-text reconstruction (preserve_layout rebuilds
-            // spaces+newlines). oxidize-pdf's table PARTITION — the old primary — mis-detects
-            // multi-column RU prose as tables and mangles words ("Выгр у зка", false pipe cells);
-            // the flat layout text is clean for BOTH prose and tables, so it goes first.
-            let opts = ExtractionOptions {
-                preserve_layout: true,
-                space_threshold: 0.3,        // horizontal gap > k·char-width → insert a space
-                newline_threshold: 10.0,     // baseline (y) drop → newline
-                merge_hyphenated: true,
-                reconstruct_paragraphs: true,
-                detect_columns: true,        // RU technical PDFs are often multi-column
-                include_artifacts: false,    // drop headers/footers/watermarks
-                ..Default::default()
-            };
-            if let Ok(pages) = doc.extract_text_with_options(opts) {
-                if !pages.is_empty() {
-                    let mut out = Vec::new();
-                    for (i, page) in pages.iter().enumerate() {
-                        out.push(Chunk {
-                            doc_path: path_buf.clone(),
-                            location: format!("p.{}", i + 1),
-                            file_type: "pdf".into(),
-                            text: page.text.clone(),
-                        });
-                    }
-                    let page_count = doc.page_count().unwrap_or(pages.len() as u32);
-                    pad_pdf_page_stubs(&mut out, &path_buf, page_count);
-                    return out;
-                }
-            }
-
-            // Layer 2 (fallback): structural partition → per-page markdown (GFM tables), used ONLY
-            // when layout-text found nothing — a PDF that exposes structure but no flat text stream.
-            if let Ok(elements) = doc.partition() {
-                if !elements.is_empty() {
-                    let mut by_page: BTreeMap<u32, Vec<Element>> = BTreeMap::new();
-                    for el in elements {
-                        by_page.entry(el.page()).or_default().push(el);
-                    }
-                    let exporter = ElementMarkdownExporter::new(ExportConfig::default());
-                    let mut out = Vec::new();
-                    for (page, els) in by_page {
-                        let md = exporter.export(&els);
-                        out.push(Chunk {
-                            doc_path: path_buf.clone(),
-                            location: format!("p.{}", page_label(page)),
-                            file_type: "pdf".into(),
-                            text: md,
-                        });
-                    }
-                    let page_count = doc.page_count().unwrap_or(0);
-                    pad_pdf_page_stubs(&mut out, &path_buf, page_count);
-                    if !out.is_empty() {
+                // Layer 1 (primary): plain layout-text reconstruction (preserve_layout rebuilds
+                // spaces+newlines). oxidize-pdf's table PARTITION — the old primary — mis-detects
+                // multi-column RU prose as tables and mangles words ("Выгр у зка", false pipe cells);
+                // the flat layout text is clean for BOTH prose and tables, so it goes first.
+                let opts = ExtractionOptions {
+                    preserve_layout: true,
+                    space_threshold: 0.3, // horizontal gap > k·char-width → insert a space
+                    newline_threshold: 10.0, // baseline (y) drop → newline
+                    merge_hyphenated: true,
+                    reconstruct_paragraphs: true,
+                    detect_columns: true, // RU technical PDFs are often multi-column
+                    include_artifacts: false, // drop headers/footers/watermarks
+                    ..Default::default()
+                };
+                if let Ok(pages) = doc.extract_text_with_options(opts) {
+                    if !pages.is_empty() {
+                        let mut out = Vec::new();
+                        for (i, page) in pages.iter().enumerate() {
+                            out.push(Chunk {
+                                doc_path: path_buf.clone(),
+                                location: format!("p.{}", i + 1),
+                                file_type: "pdf".into(),
+                                text: page.text.clone(),
+                            });
+                        }
+                        let page_count = doc.page_count().unwrap_or(pages.len() as u32);
+                        pad_pdf_page_stubs(&mut out, &path_buf, page_count);
                         return out;
                     }
                 }
-            }
-            Vec::new()
-        }));
+
+                // Layer 2 (fallback): structural partition → per-page markdown (GFM tables), used ONLY
+                // when layout-text found nothing — a PDF that exposes structure but no flat text stream.
+                if let Ok(elements) = doc.partition() {
+                    if !elements.is_empty() {
+                        let mut by_page: BTreeMap<u32, Vec<Element>> = BTreeMap::new();
+                        for el in elements {
+                            by_page.entry(el.page()).or_default().push(el);
+                        }
+                        let exporter = ElementMarkdownExporter::new(ExportConfig::default());
+                        let mut out = Vec::new();
+                        for (page, els) in by_page {
+                            let md = exporter.export(&els);
+                            out.push(Chunk {
+                                doc_path: path_buf.clone(),
+                                location: format!("p.{}", page_label(page)),
+                                file_type: "pdf".into(),
+                                text: md,
+                            });
+                        }
+                        let page_count = doc.page_count().unwrap_or(0);
+                        pad_pdf_page_stubs(&mut out, &path_buf, page_count);
+                        if !out.is_empty() {
+                            return out;
+                        }
+                    }
+                }
+                Vec::new()
+            }));
 
         let out = caught.unwrap_or_default();
         if !out.is_empty() {
@@ -133,7 +137,11 @@ fn pad_pdf_page_stubs(out: &mut Vec<Chunk>, doc_path: &Path, page_count: u32) {
         }
     }
     out.sort_by(|a, b| {
-        let ord = |loc: &str| loc.strip_prefix("p.").and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+        let ord = |loc: &str| {
+            loc.strip_prefix("p.")
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
         ord(&a.location).cmp(&ord(&b.location))
     });
 }
@@ -147,8 +155,18 @@ mod tests {
     fn pad_pdf_page_stubs_fills_gaps() {
         let path = PathBuf::from("d.pdf");
         let mut out = vec![
-            Chunk { doc_path: path.clone(), location: "p.1".into(), file_type: "pdf".into(), text: "a".into() },
-            Chunk { doc_path: path.clone(), location: "p.3".into(), file_type: "pdf".into(), text: "c".into() },
+            Chunk {
+                doc_path: path.clone(),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "a".into(),
+            },
+            Chunk {
+                doc_path: path.clone(),
+                location: "p.3".into(),
+                file_type: "pdf".into(),
+                text: "c".into(),
+            },
         ];
         pad_pdf_page_stubs(&mut out, &path, 3);
         assert_eq!(out.len(), 3);
@@ -159,11 +177,20 @@ mod tests {
     #[test]
     fn indexes_blank_pdf_page_as_empty_chunk() {
         let bytes = include_bytes!("../../tests/fixtures/three-page-blank-middle.pdf");
-        let chunks = PdfExtractor.extract(Path::new("three-page-blank-middle.pdf"), bytes).unwrap();
-        assert_eq!(chunks.len(), 3, "expected one chunk per physical page, got: {chunks:?}");
+        let chunks = PdfExtractor
+            .extract(Path::new("three-page-blank-middle.pdf"), bytes)
+            .unwrap();
+        assert_eq!(
+            chunks.len(),
+            3,
+            "expected one chunk per physical page, got: {chunks:?}"
+        );
         assert_eq!(chunks[0].location, "p.1");
         assert_eq!(chunks[1].location, "p.2");
-        assert!(chunks[1].text.trim().is_empty(), "blank middle page must be indexed with empty body");
+        assert!(
+            chunks[1].text.trim().is_empty(),
+            "blank middle page must be indexed with empty body"
+        );
         assert_eq!(chunks[2].location, "p.3");
         assert!(chunks[0].text.contains("page one"));
         assert!(chunks[2].text.contains("page three"));
@@ -178,9 +205,22 @@ mod tests {
         }
         let bytes = std::fs::read(path).unwrap();
         let chunks = PdfExtractor.extract(path, &bytes).unwrap();
-        assert_eq!(chunks.len(), 21, "expected 21 physical pages, got {}: {:?}", chunks.len(), chunks.iter().map(|c| &c.location).collect::<Vec<_>>());
-        let p4 = chunks.iter().find(|c| c.location == "p.4").expect("missing p.4 chunk");
-        assert!(p4.text.trim().is_empty(), "p.4 must be empty, got {:?}", p4.text);
+        assert_eq!(
+            chunks.len(),
+            21,
+            "expected 21 physical pages, got {}: {:?}",
+            chunks.len(),
+            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+        );
+        let p4 = chunks
+            .iter()
+            .find(|c| c.location == "p.4")
+            .expect("missing p.4 chunk");
+        assert!(
+            p4.text.trim().is_empty(),
+            "p.4 must be empty, got {:?}",
+            p4.text
+        );
     }
 
     #[test]
@@ -216,7 +256,9 @@ mod tests {
     #[test]
     fn extracts_text_from_pdf_fixture() {
         let bytes = include_bytes!("../../tests/fixtures/sample.pdf");
-        let chunks = PdfExtractor.extract(Path::new("sample.pdf"), bytes).unwrap();
+        let chunks = PdfExtractor
+            .extract(Path::new("sample.pdf"), bytes)
+            .unwrap();
         assert_eq!(chunks.len(), 1, "single-page fixture → one page chunk");
         assert_eq!(chunks[0].file_type, "pdf");
         assert_eq!(chunks[0].location, "p.1");
@@ -236,9 +278,16 @@ mod tests {
         // mis-detects multi-column prose as tables and mangles the words. p.1 also locks the
         // 1-based `p.N` page mapping the read contract rests on.
         assert_eq!(chunks[0].location, "p.1");
-        let joined = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        let joined = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         for cell in ["Parametr", "Znachenie", "Tsvet", "Siniy"] {
-            assert!(joined.contains(cell), "table cell '{cell}' missing from:\n{joined}");
+            assert!(
+                joined.contains(cell),
+                "table cell '{cell}' missing from:\n{joined}"
+            );
         }
     }
 

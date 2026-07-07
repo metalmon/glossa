@@ -9,7 +9,9 @@ use anyhow::Context;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
 use tantivy::{Index, IndexReader, TantivyDocument, TantivyError, Term};
 
 pub struct NodeIndex {
@@ -45,7 +47,12 @@ impl NodeIndex {
             .tokenizers()
             .register("multilang", multilang_analyzer(default_detector()));
         let reader = index.reader()?;
-        Ok(NodeIndex { index, reader, id, text })
+        Ok(NodeIndex {
+            index,
+            reader,
+            id,
+            text,
+        })
     }
 
     /// Number of indexed nodes (non-deleted). The `GraphStore` compares this to the node-table

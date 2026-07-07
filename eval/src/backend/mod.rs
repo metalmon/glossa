@@ -1,8 +1,8 @@
-pub mod prompt;
-pub mod mock;
 pub mod cli;
-pub mod openai;
 pub mod glossa_tools;
+pub mod mock;
+pub mod openai;
+pub mod prompt;
 pub mod tensorzero;
 
 use crate::dataset::Question;
@@ -39,7 +39,9 @@ pub fn run_with_timeout(
     use std::sync::mpsc;
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("spawn failed: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawn failed: {e}"))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -59,7 +61,9 @@ pub fn run_with_timeout(
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Ok(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default())
+    Ok(rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -68,16 +72,32 @@ mod tests {
 
     #[test]
     fn substitute_replaces_tokens() {
-        let t = vec!["-p".to_string(), "{prompt}".to_string(), "--cfg".to_string(), "{mcp_config}".to_string()];
-        assert_eq!(substitute(&t, "Q?", "/c.json"), vec!["-p", "Q?", "--cfg", "/c.json"]);
+        let t = vec![
+            "-p".to_string(),
+            "{prompt}".to_string(),
+            "--cfg".to_string(),
+            "{mcp_config}".to_string(),
+        ];
+        assert_eq!(
+            substitute(&t, "Q?", "/c.json"),
+            vec!["-p", "Q?", "--cfg", "/c.json"]
+        );
     }
 
     #[test]
     fn run_with_timeout_captures_quick_output() {
         #[cfg(windows)]
-        let c = { let mut c = std::process::Command::new("cmd"); c.args(["/C", "echo hi"]); c };
+        let c = {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "echo hi"]);
+            c
+        };
         #[cfg(not(windows))]
-        let c = { let mut c = std::process::Command::new("sh"); c.args(["-c", "echo hi"]); c };
+        let c = {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "echo hi"]);
+            c
+        };
         let out = run_with_timeout(c, std::time::Duration::from_secs(10)).unwrap();
         assert!(out.contains("hi"));
     }

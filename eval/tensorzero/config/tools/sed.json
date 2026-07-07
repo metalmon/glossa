@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "all": {
+      "default": null,
+      "description": "Replace all occurrences (default: first only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "new": {
+      "description": "Replacement text",
+      "type": "string"
+    },
+    "old": {
+      "description": "Literal substring to find (not regex)",
+      "type": "string"
+    },
+    "path": {
+      "description": "Notebook path from ls (<document>/<file>; document path includes extension)",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "old",
+    "new"
+  ],
+  "type": "object"
+}

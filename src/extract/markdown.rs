@@ -23,7 +23,9 @@ mod tests {
     #[test]
     fn splits_by_headings_with_location_path() {
         let md = "# A\nintro\n## B\nbody b\n# C\nbody c\n";
-        let chunks = MarkdownExtractor.extract(Path::new("d.md"), md.as_bytes()).unwrap();
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].location, "A");
         assert_eq!(chunks[0].text.trim(), "intro");
@@ -35,7 +37,9 @@ mod tests {
     #[test]
     fn hash_without_space_is_not_a_heading() {
         let md = "#nothashtag is body\n";
-        let chunks = MarkdownExtractor.extract(Path::new("d.md"), md.as_bytes()).unwrap();
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].location, "");
         assert!(chunks[0].text.contains("#nothashtag"));
@@ -44,7 +48,9 @@ mod tests {
     #[test]
     fn empty_title_heading_is_body_not_heading() {
         let md = "# A\n## \nbody\n";
-        let chunks = MarkdownExtractor.extract(Path::new("d.md"), md.as_bytes()).unwrap();
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].location, "A");
         assert!(!chunks[0].location.contains(" > "));
@@ -53,7 +59,9 @@ mod tests {
     #[test]
     fn heading_level_jump_keeps_deterministic_path() {
         let md = "# A\n### C\nbody\n";
-        let chunks = MarkdownExtractor.extract(Path::new("d.md"), md.as_bytes()).unwrap();
+        let chunks = MarkdownExtractor
+            .extract(Path::new("d.md"), md.as_bytes())
+            .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].location, "A > C");
     }
@@ -64,9 +72,11 @@ mod tests {
         let mut bytes = vec![b'#', b' '];
         bytes.extend_from_slice(&[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2]); // Привет
         bytes.push(b'\n');
-        let chunks = MarkdownExtractor.extract(Path::new("ru.md"), &bytes).unwrap();
+        let chunks = MarkdownExtractor
+            .extract(Path::new("ru.md"), &bytes)
+            .unwrap();
         assert_eq!(chunks.len(), 0); // header-only file: heading recorded, no body chunk
-        // Now with a body line.
+                                     // Now with a body line.
         let mut b2 = bytes.clone();
         b2.extend_from_slice("body\n".as_bytes());
         let c2 = MarkdownExtractor.extract(Path::new("ru.md"), &b2).unwrap();

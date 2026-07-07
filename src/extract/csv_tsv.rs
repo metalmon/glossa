@@ -37,18 +37,23 @@ pub fn stream(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) -> anyh
         let n = f.read(&mut head)?;
         head.truncate(n);
     }
-    let Some(enc) = detect(&head) else { return Ok(()) };
+    let Some(enc) = detect(&head) else {
+        return Ok(());
+    };
 
-    let mut lines = DecodingLines { inner: BufReader::new(File::open(path)?), enc };
+    let mut lines = DecodingLines {
+        inner: BufReader::new(File::open(path)?),
+        enc,
+    };
     let header = match lines.next_line()? {
         Some(h) => h,
         None => return Ok(()),
     };
 
     let mut buf = String::new();
-    let mut count = 0usize;       // rows in the current chunk
-    let mut data_row = 0usize;    // 1-based index of the last data row read
-    let mut start = 1usize;       // first data row in the current chunk
+    let mut count = 0usize; // rows in the current chunk
+    let mut data_row = 0usize; // 1-based index of the last data row read
+    let mut start = 1usize; // first data row in the current chunk
     let emit = |buf: &mut String, start: usize, end: usize, sink: &mut dyn FnMut(Chunk)| {
         if buf.trim().is_empty() {
             return;

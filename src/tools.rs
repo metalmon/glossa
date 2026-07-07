@@ -29,13 +29,29 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
 }
 
 /// BM25 search (optionally scoped). Returns (model text, hits for the caller's scoring).
-pub fn search(idx: &DocIndex, query: &str, limit: usize, glob: Option<&str>, file_type: Option<&str>, trace: &TraceLog) -> (String, Vec<RankedHit>) {
+pub fn search(
+    idx: &DocIndex,
+    query: &str,
+    limit: usize,
+    glob: Option<&str>,
+    file_type: Option<&str>,
+    trace: &TraceLog,
+) -> (String, Vec<RankedHit>) {
     match idx.search_filtered(query, limit.max(1), glob, file_type) {
         Ok(hits) => {
-            let th: Vec<_> = hits.iter().map(|h| json!({"path": h.path, "location": h.location, "score": h.score})).collect();
+            let th: Vec<_> = hits
+                .iter()
+                .map(|h| json!({"path": h.path, "location": h.location, "score": h.score}))
+                .collect();
             trace.log("search", json!({"query": query}), json!(th));
-            let body = if hits.is_empty() { "(no results)".to_string() }
-                       else { hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n") };
+            let body = if hits.is_empty() {
+                "(no results)".to_string()
+            } else {
+                hits.iter()
+                    .map(|h| h.display_line())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             (body, hits)
         }
         Err(e) => (format!("search error: {e}"), Vec::new()),
@@ -46,9 +62,19 @@ pub fn search(idx: &DocIndex, query: &str, limit: usize, glob: Option<&str>, fil
 pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
     match crate::grep::grep(idx, pattern, opts) {
         Ok(hits) => {
-            trace.log("grep", json!({"pattern": pattern}), json!({"hits": hits.len()}));
-            if hits.is_empty() { "(no matches)".to_string() }
-            else { hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n") }
+            trace.log(
+                "grep",
+                json!({"pattern": pattern}),
+                json!({"hits": hits.len()}),
+            );
+            if hits.is_empty() {
+                "(no matches)".to_string()
+            } else {
+                hits.iter()
+                    .map(|h| h.display_line())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         }
         Err(e) => format!("grep error: {e}"),
     }
@@ -61,7 +87,14 @@ pub struct ReadOut {
 }
 
 /// Collect `(attribution, path, ord)` for every section node `nid` MENTIONS, de-duplicated via `seen`.
-fn gather_mentions(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str, attr: &str, seen: &mut std::collections::HashSet<(String, u64)>, out: &mut Vec<(String, String, u64)>) {
+fn gather_mentions(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    nid: &str,
+    attr: &str,
+    seen: &mut std::collections::HashSet<(String, u64)>,
+    out: &mut Vec<(String, String, u64)>,
+) {
     for e in g.outgoing(nid).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;
@@ -79,20 +112,44 @@ fn gather_mentions(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &st
 /// Omnivorous read of a graph NODE: the node's own line, plus every chunk it AND its 1-hop reasoning
 /// neighbours MENTION — each labelled with where it came from. Reading a Resolution gives its fix
 /// chunk; reading a Symptom also pulls the Cause/Resolution evidence one hop along the chain.
-fn read_node(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: crate::graph::store::Node) -> ReadOut {
+fn read_node(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    node: crate::graph::store::Node,
+) -> ReadOut {
     let mut seen = std::collections::HashSet::new();
     let mut chunks: Vec<(String, String, u64)> = Vec::new();
     gather_mentions(idx, g, &node.id, "MENTIONS", &mut seen, &mut chunks); // the node's own evidence
-    let label_of = |nid: &str| g.get_node(nid).ok().flatten().map(|n| n.label).unwrap_or_else(|| nid.to_string());
+    let label_of = |nid: &str| {
+        g.get_node(nid)
+            .ok()
+            .flatten()
+            .map(|n| n.label)
+            .unwrap_or_else(|| nid.to_string())
+    };
     // 1-hop reasoning neighbours (outgoing →, incoming ←), skipping the MENTIONS-to-section links.
     for e in g.outgoing(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.to.contains('#') {
-            gather_mentions(idx, g, &e.to, &format!("via → {} {}", e.edge_type, label_of(&e.to)), &mut seen, &mut chunks);
+            gather_mentions(
+                idx,
+                g,
+                &e.to,
+                &format!("via → {} {}", e.edge_type, label_of(&e.to)),
+                &mut seen,
+                &mut chunks,
+            );
         }
     }
     for e in g.incoming(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.from.contains('#') {
-            gather_mentions(idx, g, &e.from, &format!("via ← {} {}", e.edge_type, label_of(&e.from)), &mut seen, &mut chunks);
+            gather_mentions(
+                idx,
+                g,
+                &e.from,
+                &format!("via ← {} {}", e.edge_type, label_of(&e.from)),
+                &mut seen,
+                &mut chunks,
+            );
         }
     }
     let mut text = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
@@ -124,7 +181,13 @@ pub fn format_chunk_body(ord: u64, body: &str) -> String {
 /// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
 /// (empty if the source file is absent — body still comes from the index). No truncation. Omnivorous:
 /// if `path` is a graph NODE id, returns that node + its (1-hop) evidence chunks (see `read_node`).
-pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
+pub fn read(
+    idx: &DocIndex,
+    graph: Option<&crate::graph::store::GraphStore>,
+    path: &str,
+    n: u64,
+    trace: &TraceLog,
+) -> ReadOut {
     // Omnivorous: a REASONING node id off a glossary line reads as the node + its evidence. A
     // structural node id IS a document path (e.g. a Document's id is its path), so it falls through
     // to the normal document read below.
@@ -183,21 +246,76 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
     };
     let images = crate::read::extract_images(&idx.doc_file(path), n, 4).unwrap_or_default();
     let body = format_chunk_body(n, &chunk.body);
-    ReadOut { text: format!("{}{}", body, footer), images }
+    ReadOut {
+        text: format!("{}{}", body, footer),
+        images,
+    }
 }
 
 /// List documents by path mask; model text only.
 pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
-            trace.log("glob", json!({"pattern": pattern}), json!({"docs": docs.len()}));
+            trace.log(
+                "glob",
+                json!({"pattern": pattern}),
+                json!({"docs": docs.len()}),
+            );
             if docs.is_empty() {
                 "(no documents match — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text)".to_string()
+            } else {
+                docs.iter()
+                    .map(|(p, n)| format!("{p}  ({n} chunks)"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
-            else { docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n") }
         }
         Err(e) => format!("glob error: {e}"),
     }
+}
+
+/// Notebook: create, replace, or (with `append`) extend a note bound to an indexed document.
+#[cfg(feature = "notebook")]
+pub fn note(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    doc: &str,
+    file: &str,
+    content: &str,
+    append: bool,
+) -> String {
+    crate::notebook::note(root, idx, doc, file, content, append)
+}
+
+#[cfg(feature = "notebook")]
+pub fn cat_note(root: &std::path::Path, idx: &crate::index::store::DocIndex, path: &str) -> String {
+    crate::notebook::cat(root, idx, path)
+}
+
+#[cfg(feature = "notebook")]
+pub fn ls_notes(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    doc: Option<&str>,
+) -> String {
+    crate::notebook::ls(root, idx, doc)
+}
+
+#[cfg(feature = "notebook")]
+pub fn del_note(root: &std::path::Path, idx: &crate::index::store::DocIndex, path: &str) -> String {
+    crate::notebook::del(root, idx, path)
+}
+
+#[cfg(feature = "notebook")]
+pub fn sed_note(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    path: &str,
+    old: &str,
+    new: &str,
+    all: bool,
+) -> String {
+    crate::notebook::sed(root, idx, path, old, new, all)
 }
 
 /// Render a graph node as a `(path, #ord)` reference string.
@@ -222,7 +340,9 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
 /// so output is byte-identical on graphs that haven't been generalized. Format:
 /// `"  · comm 3 · pr 0.142 · deg 5"` — only the parts that are present.
 fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
-    let Ok(Some(m)) = g.node_meta(id) else { return String::new() };
+    let Ok(Some(m)) = g.node_meta(id) else {
+        return String::new();
+    };
     let mut parts = Vec::new();
     if let Some(c) = m.community {
         parts.push(format!("comm {c}"));
@@ -250,7 +370,9 @@ pub struct ChainSpec {
 
 impl ChainSpec {
     pub fn from_ontology(ont: &crate::graph::ontology::Ontology) -> Self {
-        ChainSpec { spine_rels: ont.spine_relations() }
+        ChainSpec {
+            spine_rels: ont.spine_relations(),
+        }
     }
 }
 
@@ -258,7 +380,9 @@ impl Default for ChainSpec {
     /// No spines — `glossary` prints just the node head. Used by callers/tests that don't drive
     /// the reasoning chain.
     fn default() -> Self {
-        ChainSpec { spine_rels: Vec::new() }
+        ChainSpec {
+            spine_rels: Vec::new(),
+        }
     }
 }
 
@@ -312,7 +436,9 @@ fn chain_lines(
         if !seen.insert(e.to.clone()) {
             continue;
         }
-        let Ok(Some(node)) = g.get_node(&e.to) else { continue };
+        let Ok(Some(node)) = g.get_node(&e.to) else {
+            continue;
+        };
         let indent = "    ".repeat(depth + 1);
         out.push(format!(
             "{indent}→ {}  [{}]  {}{}{}",
@@ -332,10 +458,20 @@ fn chain_lines(
 /// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
 /// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `neighbors`.
 /// Empty → `"(no matches)"`.
-pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, spec: &ChainSpec, trace: &TraceLog) -> String {
+pub fn glossary(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    name: &str,
+    spec: &ChainSpec,
+    trace: &TraceLog,
+) -> String {
     match g.resolve(name) {
         Ok(ids) => {
-            trace.log("glossary", json!({ "name": name }), json!({ "ids": ids.len() }));
+            trace.log(
+                "glossary",
+                json!({ "name": name }),
+                json!({ "ids": ids.len() }),
+            );
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
@@ -384,7 +520,14 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
 /// Top community siblings / stats examples per cluster (PageRank-ranked).
 const COMMUNITY_TOP_LIMIT: usize = 8;
 
-pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Option<&str>, path: Option<&str>, n: Option<u64>, trace: &TraceLog) -> String {
+pub fn neighbors(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    node: Option<&str>,
+    path: Option<&str>,
+    n: Option<u64>,
+    trace: &TraceLog,
+) -> String {
     let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
         nid.to_string()
     } else if let (Some(p), Some(nn)) = (path, n) {
@@ -400,12 +543,22 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Opti
     let mut lines = Vec::new();
     for e in g.outgoing(&id).unwrap_or_default() {
         if e.edge_type == "SIMILAR" && seen.insert(e.to.clone()) {
-            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.to), meta_suffix(g, &e.to), read_anchor(idx, g, &e.to)));
+            lines.push(format!(
+                "SIMILAR  {}{}{}",
+                endpoint_ref(idx, g, &e.to),
+                meta_suffix(g, &e.to),
+                read_anchor(idx, g, &e.to)
+            ));
         }
     }
     for e in g.incoming(&id).unwrap_or_default() {
         if e.edge_type == "SIMILAR" && seen.insert(e.from.clone()) {
-            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.from), meta_suffix(g, &e.from), read_anchor(idx, g, &e.from)));
+            lines.push(format!(
+                "SIMILAR  {}{}{}",
+                endpoint_ref(idx, g, &e.from),
+                meta_suffix(g, &e.from),
+                read_anchor(idx, g, &e.from)
+            ));
         }
     }
     let similar_count = lines.len();
@@ -430,10 +583,18 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Opti
         json!({"id": id}),
         json!({"similar": similar_count, "community": lines.len() - similar_count}),
     );
-    if lines.is_empty() { "(no related cases)".to_string() } else { lines.join("\n") }
+    if lines.is_empty() {
+        "(no related cases)".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
-fn stats_example_line(g: &crate::graph::store::GraphStore, id: &str, meta: &crate::graph::store::NodeMeta) -> String {
+fn stats_example_line(
+    g: &crate::graph::store::GraphStore,
+    id: &str,
+    meta: &crate::graph::store::NodeMeta,
+) -> String {
     match g.get_node(id) {
         Ok(Some(n)) => {
             let pr = meta
@@ -462,10 +623,20 @@ pub fn graph_type_counts(g: &crate::graph::store::GraphStore) -> String {
         *edge_types.entry(e.edge_type).or_default() += 1;
     }
     let join = |m: &BTreeMap<String, usize>| {
-        if m.is_empty() { "(none)".to_string() }
-        else { m.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ") }
+        if m.is_empty() {
+            "(none)".to_string()
+        } else {
+            m.iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     };
-    format!("by type — nodes: {} | edges: {}", join(&node_types), join(&edge_types))
+    format!(
+        "by type — nodes: {} | edges: {}",
+        join(&node_types),
+        join(&edge_types)
+    )
 }
 
 /// Universal "everything about one node" view: identity (`id`, `node_type`,
@@ -481,24 +652,40 @@ pub fn node_inspect(g: &crate::graph::store::GraphStore, id: &str) -> String {
         Ok(Some(n)) => n.label,
         _ => "?".to_string(),
     };
-    let aliases = if node.aliases.is_empty() { "—".to_string() } else { node.aliases.join(", ") };
+    let aliases = if node.aliases.is_empty() {
+        "—".to_string()
+    } else {
+        node.aliases.join(", ")
+    };
     let mut out = format!(
         "node {}\ntype: {}\nlabel: {}\naliases: {}",
         node.id, node.node_type, node.label, aliases
     );
     let edges = g.all_edges().unwrap_or_default();
-    let mut outgoing: Vec<String> = edges.iter().filter(|e| e.from == node.id)
+    let mut outgoing: Vec<String> = edges
+        .iter()
+        .filter(|e| e.from == node.id)
         .map(|e| format!("  -{}-> {} ({})", e.edge_type, e.to, label_of(&e.to)))
         .collect();
-    let mut incoming: Vec<String> = edges.iter().filter(|e| e.to == node.id)
+    let mut incoming: Vec<String> = edges
+        .iter()
+        .filter(|e| e.to == node.id)
         .map(|e| format!("  {} ({}) -{}->", e.from, label_of(&e.from), e.edge_type))
         .collect();
     outgoing.sort();
     incoming.sort();
     out.push_str(&format!("\noutgoing ({}):", outgoing.len()));
-    out.push_str(&if outgoing.is_empty() { "\n  —".to_string() } else { format!("\n{}", outgoing.join("\n")) });
+    out.push_str(&if outgoing.is_empty() {
+        "\n  —".to_string()
+    } else {
+        format!("\n{}", outgoing.join("\n"))
+    });
     out.push_str(&format!("\nincoming ({}):", incoming.len()));
-    out.push_str(&if incoming.is_empty() { "\n  —".to_string() } else { format!("\n{}", incoming.join("\n")) });
+    out.push_str(&if incoming.is_empty() {
+        "\n  —".to_string()
+    } else {
+        format!("\n{}", incoming.join("\n"))
+    });
     out
 }
 
@@ -519,7 +706,10 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     out.push_str(&format!("\ncommunities: {}", sizes.len()));
     for (comm, size) in sizes {
         out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
-        for (id, meta) in g.community_top_nodes(comm, COMMUNITY_TOP_LIMIT).unwrap_or_default() {
+        for (id, meta) in g
+            .community_top_nodes(comm, COMMUNITY_TOP_LIMIT)
+            .unwrap_or_default()
+        {
             out.push('\n');
             out.push_str(&stats_example_line(g, &id, &meta));
         }
@@ -541,15 +731,38 @@ pub fn checklist_coverage_report(
 ) -> String {
     match crate::graph::ops::checklist_coverage(g, doc, ont) {
         Ok(Some(c)) => {
-            let fmt = |v: &[String]| if v.is_empty() { "—".to_string() }
-                else { v.iter().map(|p| format!("«{p}»")).collect::<Vec<_>>().join(", ") };
-            let sourced: Vec<String> = c.params.iter().filter(|p| !c.unsourced.contains(*p)).cloned().collect();
-            let valued: Vec<String> = c.params.iter().filter(|p| !c.unbuilt.contains(*p)).cloned().collect();
+            let fmt = |v: &[String]| {
+                if v.is_empty() {
+                    "—".to_string()
+                } else {
+                    v.iter()
+                        .map(|p| format!("«{p}»"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            let sourced: Vec<String> = c
+                .params
+                .iter()
+                .filter(|p| !c.unsourced.contains(*p))
+                .cloned()
+                .collect();
+            let valued: Vec<String> = c
+                .params
+                .iter()
+                .filter(|p| !c.unbuilt.contains(*p))
+                .cloned()
+                .collect();
             format!(
                 "fields({doc}): {total} total | with source: {ns} | with values: {nv}\n\
                  sourced: {}\nto source: {}\nvalued: {}\nto value: {}",
-                fmt(&sourced), fmt(&c.unsourced), fmt(&valued), fmt(&c.unbuilt),
-                total = c.params.len(), ns = sourced.len(), nv = valued.len(),
+                fmt(&sourced),
+                fmt(&c.unsourced),
+                fmt(&valued),
+                fmt(&c.unbuilt),
+                total = c.params.len(),
+                ns = sourced.len(),
+                nv = valued.len(),
             )
         }
         Ok(None) => format!("fields({doc}): no Field for this document yet"),
@@ -568,9 +781,13 @@ mod tests {
     fn idx() -> (tempfile::TempDir, DocIndex) {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("АБАК.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("АБАК.pdf"),
+            location: "p.7".into(),
+            file_type: "pdf".into(),
+            text: "параметр maxTsdr равен 3000".into(),
+        }])
+        .unwrap();
         (d, i)
     }
 
@@ -579,25 +796,63 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "alpha".into() },
-            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.2".into(), file_type: "pdf".into(), text: String::new() },
-            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.3".into(), file_type: "pdf".into(), text: "charlie".into() },
-        ]).unwrap();
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.2".into(),
+                file_type: "pdf".into(),
+                text: String::new(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.3".into(),
+                file_type: "pdf".into(),
+                text: "charlie".into(),
+            },
+        ])
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, None, "d.pdf", 2, &t);
         assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
         assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
-        assert!(out.text.contains("prev #1") && out.text.contains("next #3"), "footer: {}", out.text);
+        assert!(
+            out.text.contains("prev #1") && out.text.contains("next #3"),
+            "footer: {}",
+            out.text
+        );
     }
 
     fn prov() -> Provenance {
-        Provenance { source_path: "d.pdf".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 }
+        Provenance {
+            source_path: "d.pdf".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.8,
+            created_at: 1,
+        }
     }
     fn node(id: &str, ty: &str, label: &str) -> Node {
-        Node { id: id.into(), node_type: ty.into(), label: label.into(), aliases: Vec::new(), prov: prov() }
+        Node {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        }
     }
     fn edge(from: &str, rel: &str, to: &str) -> Edge {
-        Edge { from: from.into(), to: to.into(), edge_type: rel.into(), prov: prov() }
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: rel.into(),
+            prov: prov(),
+        }
     }
     /// A graph with one full causal spine (Symptom→Cause→Resolution) plus two SIMILAR tasks
     /// hanging off the Symptom (the generalization layer).
@@ -624,7 +879,9 @@ mod tests {
         (d, g)
     }
     fn spine_spec() -> ChainSpec {
-        ChainSpec { spine_rels: vec!["CAUSED_BY".into(), "RESOLVED_BY".into()] }
+        ChainSpec {
+            spine_rels: vec!["CAUSED_BY".into(), "RESOLVED_BY".into()],
+        }
     }
 
     #[test]
@@ -634,11 +891,25 @@ mod tests {
         let t = TraceLog::disabled();
         let out = glossary(&i, &g, "Профибус потеря связи", &spine_spec(), &t);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
-        assert!(out.contains("[Symptom]") && out.contains("Профибус потеря связи"), "{out}");
-        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"), "{out}");
-        assert!(out.contains("→ RESOLVED_BY") && out.contains("[Resolution]") && out.contains("Изменить maxTsdr"), "{out}");
+        assert!(
+            out.contains("[Symptom]") && out.contains("Профибус потеря связи"),
+            "{out}"
+        );
+        assert!(
+            out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"),
+            "{out}"
+        );
+        assert!(
+            out.contains("→ RESOLVED_BY")
+                && out.contains("[Resolution]")
+                && out.contains("Изменить maxTsdr"),
+            "{out}"
+        );
         // SIMILAR is no longer part of glossary — it moved to neighbors
-        assert!(!out.contains("SIMILAR"), "glossary must not show SIMILAR: {out}");
+        assert!(
+            !out.contains("SIMILAR"),
+            "glossary must not show SIMILAR: {out}"
+        );
     }
 
     #[test]
@@ -647,10 +918,15 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let empty = ChainSpec { spine_rels: Vec::new() };
+        let empty = ChainSpec {
+            spine_rels: Vec::new(),
+        };
         let out = glossary(&i, &g, "Профибус потеря связи", &empty, &t);
         assert!(out.contains("[Symptom]"), "{out}");
-        assert!(!out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"), "no spines → no chain: {out}");
+        assert!(
+            !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
+            "no spines → no chain: {out}"
+        );
     }
 
     #[test]
@@ -659,9 +935,17 @@ mod tests {
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
-        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей") && out.contains("Программирование АБАК"), "{out}");
+        assert!(
+            out.contains("SIMILAR")
+                && out.contains("Обновление ПО модулей")
+                && out.contains("Программирование АБАК"),
+            "{out}"
+        );
         // it must NOT walk the causal spine — that is glossary's job
-        assert!(!out.contains("CAUSED_BY") && !out.contains("[Resolution]"), "neighbors is generalization only: {out}");
+        assert!(
+            !out.contains("CAUSED_BY") && !out.contains("[Resolution]"),
+            "neighbors is generalization only: {out}"
+        );
     }
 
     const REASONING_ONT: &str = r#"
@@ -719,9 +1003,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:a"), None, None, &t);
-        assert!(out.contains("COMMUNITY"), "expected community siblings: {out}");
-        assert!(out.contains("cau:a") || out.contains("res:a"), "same-component siblings: {out}");
-        assert!(!out.contains("sym:b") && !out.contains("cau:b") && !out.contains("res:b"), "other component excluded: {out}");
+        assert!(
+            out.contains("COMMUNITY"),
+            "expected community siblings: {out}"
+        );
+        assert!(
+            out.contains("cau:a") || out.contains("res:a"),
+            "same-component siblings: {out}"
+        );
+        assert!(
+            !out.contains("sym:b") && !out.contains("cau:b") && !out.contains("res:b"),
+            "other component excluded: {out}"
+        );
         assert!(!out.contains("sym:a  [Symptom]"), "self excluded: {out}");
     }
 
@@ -734,7 +1027,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
-        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей"), "{out}");
+        assert!(
+            out.contains("SIMILAR") && out.contains("Обновление ПО модулей"),
+            "{out}"
+        );
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert!(
             !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование АБАК")),
@@ -748,19 +1044,64 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         g.replace_node_meta(&[
-            ("sym:loss".into(), NodeMeta { community: Some(1), pagerank: Some(0.9), degree: Some(3) }),
-            ("cau:tsdr".into(), NodeMeta { community: Some(1), pagerank: Some(0.2), degree: Some(1) }),
-            ("res:set".into(), NodeMeta { community: Some(1), pagerank: Some(0.7), degree: Some(2) }),
-            ("tsk:upd".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
-            ("tsk:prog".into(), NodeMeta { community: Some(1), pagerank: Some(0.1), degree: Some(1) }),
+            (
+                "sym:loss".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.9),
+                    degree: Some(3),
+                },
+            ),
+            (
+                "cau:tsdr".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.2),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "res:set".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.7),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "tsk:upd".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.5),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "tsk:prog".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.1),
+                    degree: Some(1),
+                },
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
-        assert_eq!(community_lines.len(), 2, "limit excludes SIMILAR dupes, top-2 by pr after SIMILAR taken: {out}");
-        assert!(community_lines[0].contains("res:set"), "highest pr sibling first: {out}");
-        assert!(community_lines[1].contains("cau:tsdr"), "second by pr: {out}");
+        assert_eq!(
+            community_lines.len(),
+            2,
+            "limit excludes SIMILAR dupes, top-2 by pr after SIMILAR taken: {out}"
+        );
+        assert!(
+            community_lines[0].contains("res:set"),
+            "highest pr sibling first: {out}"
+        );
+        assert!(
+            community_lines[1].contains("cau:tsdr"),
+            "second by pr: {out}"
+        );
     }
 
     #[test]
@@ -775,14 +1116,37 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             g.put_node(&n).unwrap();
         }
         g.replace_node_meta(&[
-            ("sym:a".into(), NodeMeta { community: Some(0), pagerank: Some(0.9), degree: Some(2) }),
-            ("sym:b".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
+            (
+                "sym:a".into(),
+                NodeMeta {
+                    community: Some(0),
+                    pagerank: Some(0.9),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "sym:b".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.5),
+                    degree: Some(1),
+                },
+            ),
         ])
         .unwrap();
         let out = graph_stats(&g);
-        assert!(out.contains("nodes: 2") && out.contains("communities: 2"), "{out}");
-        assert!(out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"), "{out}");
-        assert!(out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"), "{out}");
+        assert!(
+            out.contains("nodes: 2") && out.contains("communities: 2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"),
+            "{out}"
+        );
+        assert!(
+            out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -791,7 +1155,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let g = GraphStore::open(gd.path()).unwrap();
         g.put_node(&node("sym:x", "Symptom", "X")).unwrap();
         let out = graph_stats(&g);
-        assert!(out.contains("nodes: 1") && out.contains("communities: (none)"), "{out}");
+        assert!(
+            out.contains("nodes: 1") && out.contains("communities: (none)"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -799,17 +1166,31 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx(); // АБАК.pdf #p.7 = "параметр maxTsdr равен 3000"
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
-        g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000")).unwrap();
-        g.put_edge(&edge("res:fix", "MENTIONS", "АБАК.pdf#p.7")).unwrap();
+        g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000"))
+            .unwrap();
+        g.put_edge(&edge("res:fix", "MENTIONS", "АБАК.pdf#p.7"))
+            .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
         let out = read(&i, Some(&g), "res:fix", 1, &t).text;
-        assert!(out.contains("[Resolution]") && out.contains("Изменить maxTsdr"), "node header: {out}");
-        assert!(out.contains("── MENTIONS · АБАК.pdf #7 ──"), "attributed evidence header: {out}");
-        assert!(out.contains("параметр maxTsdr равен 3000"), "evidence body: {out}");
+        assert!(
+            out.contains("[Resolution]") && out.contains("Изменить maxTsdr"),
+            "node header: {out}"
+        );
+        assert!(
+            out.contains("── MENTIONS · АБАК.pdf #7 ──"),
+            "attributed evidence header: {out}"
+        );
+        assert!(
+            out.contains("параметр maxTsdr равен 3000"),
+            "evidence body: {out}"
+        );
         // a plain doc path still reads the chunk (not treated as a node).
         let doc = read(&i, Some(&g), "АБАК.pdf", 7, &t).text;
-        assert!(doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"), "doc read unchanged: {doc}");
+        assert!(
+            doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
+            "doc read unchanged: {doc}"
+        );
     }
 
     #[test]
@@ -829,20 +1210,33 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let big = "Я".repeat(5000); // > old 4000-char cap
         i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("d.md"), location: "S1".into(), file_type: "md".into(), text: big.clone() },
-            Chunk { doc_path: PathBuf::from("d.md"), location: "S2".into(), file_type: "md".into(), text: "second".into() },
-        ]).unwrap();
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: big.clone(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "second".into(),
+            },
+        ])
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, None, "d.md", 1, &t);
-        assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
+        assert!(out.text.contains(&big), "full body, no cap"); // not truncated
         assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
-        assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
-        // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
-        // #2 = "second") instead of an error the model loops on.
+        assert!(out.text.contains("‹ start of document · next #2 ›")); // unified footer (MCP wording)
+                                                                       // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
+                                                                       // #2 = "second") instead of an error the model loops on.
         let oor = read(&i, None, "d.md", 99, &t).text;
         assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
-        assert!(read(&i, None, "nope.md", 1, &t).text.contains("no document indexed at nope.md"));
+        assert!(read(&i, None, "nope.md", 1, &t)
+            .text
+            .contains("no document indexed at nope.md"));
     }
 
     #[test]
@@ -850,36 +1244,60 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         // Real file name has a double space; the model copies it back with a single space.
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "safety body".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "safety body".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, None, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
-        assert!(out.text.contains("safety body"), "resolved despite collapsed double space: {}", out.text);
+        assert!(
+            out.text.contains("safety body"),
+            "resolved despite collapsed double space: {}",
+            out.text
+        );
         // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
         let out2 = read(&i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
-        assert!(out2.text.contains("safety body"), "resolved despite doubled backslash: {}", out2.text);
+        assert!(
+            out2.text.contains("safety body"),
+            "resolved despite doubled backslash: {}",
+            out2.text
+        );
     }
 
     #[test]
     fn read_tolerates_spurious_leading_prefix() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("БД ДПТК\\doc.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "body text".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("БД ДПТК\\doc.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "body text".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
-        assert!(out.text.contains("body text"), "strip spurious prefix: {}", out.text);
+        assert!(
+            out.text.contains("body text"),
+            "strip spurious prefix: {}",
+            out.text
+        );
     }
 
     #[test]
     fn read_suggests_path_on_total_miss() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("БД ДПТК\\Методика повerки АбакПЛК 2025.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "x".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("БД ДПТК\\Методика повerки АбакПЛК 2025.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
         assert!(out.contains("did you mean"), "hint on miss: {out}");
@@ -897,16 +1315,22 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             label: "Test".into(),
             aliases: vec![],
             prov: prov(),
-        }).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("evidence.md"), location: "S1".into(), file_type: "md".into(), text: "evidence body".into() },
-        ]).unwrap();
+        })
+        .unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("evidence.md"),
+            location: "S1".into(),
+            file_type: "md".into(),
+            text: "evidence body".into(),
+        }])
+        .unwrap();
         g.put_edge(&Edge {
             from: "sym:test".into(),
             to: "evidence.md#S1".into(),
             edge_type: "MENTIONS".into(),
             prov: prov(),
-        }).unwrap();
+        })
+        .unwrap();
         let t = TraceLog::disabled();
         let out = read(&i, Some(&g), "sym:test", 1, &t).text;
         assert!(out.contains("evidence body"), "reasoning node read: {out}");
@@ -917,15 +1341,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let t = TraceLog::disabled();
         assert!(grep(&i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
-        assert_eq!(grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t), "(no matches)");
+        assert_eq!(
+            grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
+            "(no matches)"
+        );
         assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 
     // ── graph tool tests ────────────────────────────────────────────────────
 
-    use crate::graph::store::{GraphStore, Node, Edge, Provenance};
     use crate::graph::ontology::Ontology;
+    use crate::graph::store::{Edge, GraphStore, Node, Provenance};
 
     const GRAPH_ONT: &str = r#"
 [entities.Organization]
@@ -986,8 +1413,14 @@ strict = true
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
         let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
-        assert_eq!(glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t), "(no matches)");
+        assert!(
+            result.contains("org:acme"),
+            "expected node id in result, got: {result}"
+        );
+        assert_eq!(
+            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t),
+            "(no matches)"
+        );
     }
 
     #[test]
@@ -999,15 +1432,24 @@ strict = true
 
         // Before the pass there is no node_meta → output is unannotated (back-compat).
         let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(!before.contains("comm "), "no meta annotation before generalize: {before}");
+        assert!(
+            !before.contains("comm "),
+            "no meta annotation before generalize: {before}"
+        );
 
         // Run the generalization pass → community/centrality land in node_meta.
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
         let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(after.contains("org:acme"), "still shows the node id: {after}");
-        assert!(after.contains("comm "), "glossary surfaces community after generalize: {after}");
+        assert!(
+            after.contains("org:acme"),
+            "still shows the node id: {after}"
+        );
+        assert!(
+            after.contains("comm "),
+            "glossary surfaces community after generalize: {after}"
+        );
     }
 
     #[test]
@@ -1033,8 +1475,10 @@ strict = true
             aliases: vec![],
             prov: prov(),
         };
-        g.put_node(&node("sym:loss", "Symptom", "Потеря связи")).unwrap();
-        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr")).unwrap();
+        g.put_node(&node("sym:loss", "Symptom", "Потеря связи"))
+            .unwrap();
+        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr"))
+            .unwrap();
         g.put_edge(&Edge {
             from: "sym:loss".into(),
             to: "cau:maxtsdr".into(),
@@ -1047,8 +1491,14 @@ strict = true
         // so the agent sees the causal chain without a separate call.
         let out = glossary(&idx, &g, "Потеря связи", &spine_spec(), &t);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
-        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]"), "walks the CAUSED_BY hop: {out}");
-        assert!(out.contains("Малый maxTsdr"), "shows the connected Cause label: {out}");
+        assert!(
+            out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
+            "walks the CAUSED_BY hop: {out}"
+        );
+        assert!(
+            out.contains("Малый maxTsdr"),
+            "shows the connected Cause label: {out}"
+        );
     }
 
     // Structural chunk-navigation tests (NEXT/CHILD/PARENT/PREV/REFERENCES, node_meta on a
@@ -1062,7 +1512,11 @@ strict = true
         use crate::index::store::index_dir;
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("g.md"), b"# Intro\nhello\n## Details\nworld\n").unwrap();
+        std::fs::write(
+            dir.path().join("g.md"),
+            b"# Intro\nhello\n## Details\nworld\n",
+        )
+        .unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
@@ -1073,6 +1527,9 @@ strict = true
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
-        assert_eq!(glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t), "(no matches)");
+        assert_eq!(
+            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t),
+            "(no matches)"
+        );
     }
 }

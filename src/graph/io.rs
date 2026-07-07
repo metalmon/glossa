@@ -16,8 +16,7 @@ pub struct GraphExport {
 pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<GraphExport> {
     let mut all = g.all_nodes()?;
     all.retain(|n| {
-        !STRUCTURAL.contains(&n.node_type.as_str())
-            && type_filter.is_none_or(|t| t == n.node_type)
+        !STRUCTURAL.contains(&n.node_type.as_str()) && type_filter.is_none_or(|t| t == n.node_type)
     });
 
     let mut type_set: BTreeSet<String> = BTreeSet::new();
@@ -56,7 +55,10 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
 
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     edges.sort_by(|a, b| {
-        a.from.cmp(&b.from).then(a.to.cmp(&b.to)).then(a.edge_type.cmp(&b.edge_type))
+        a.from
+            .cmp(&b.from)
+            .then(a.to.cmp(&b.to))
+            .then(a.edge_type.cmp(&b.edge_type))
     });
 
     Ok(GraphExport {
@@ -75,7 +77,9 @@ pub fn from_json(s: &str) -> anyhow::Result<GraphExport> {
 }
 
 fn escape_dot(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
 }
 
 fn type_color(node_type: &str) -> &'static str {
@@ -94,11 +98,7 @@ pub fn to_dot(e: &GraphExport) -> String {
         "digraph kb {\n  rankdir=LR;\n  node [shape=box, style=filled, fontname=\"sans\"];\n",
     );
     for n in &e.nodes {
-        let label = format!(
-            "{}\\n{}",
-            escape_dot(&n.node_type),
-            escape_dot(&n.label)
-        );
+        let label = format!("{}\\n{}", escape_dot(&n.node_type), escape_dot(&n.label));
         let color = type_color(&n.node_type);
         out.push_str(&format!(
             "  \"{}\" [label=\"{}\", fillcolor=\"{}\"];\n",
@@ -138,12 +138,8 @@ pub fn to_graphml(e: &GraphExport) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">\n");
-    out.push_str(
-        "  <key id=\"label\" for=\"node\" attr.name=\"label\" attr.type=\"string\"/>\n",
-    );
-    out.push_str(
-        "  <key id=\"type\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n",
-    );
+    out.push_str("  <key id=\"label\" for=\"node\" attr.name=\"label\" attr.type=\"string\"/>\n");
+    out.push_str("  <key id=\"type\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n");
     out.push_str(
         "  <key id=\"source_path\" for=\"node\" attr.name=\"source_path\" attr.type=\"string\"/>\n",
     );

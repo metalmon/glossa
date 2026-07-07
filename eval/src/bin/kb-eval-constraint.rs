@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use glossa::graph::ontology::Ontology;
 use glossa::graph::agent::NodeUpdate;
+use glossa::graph::ontology::Ontology;
 use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
@@ -19,14 +19,17 @@ use std::time::Duration;
 /// prompt. `--doc` pins the primary to a specific indexed document.
 fn resolve_source_doc(idx: &DocIndex, requested: Option<&str>) -> Result<(String, Vec<String>)> {
     let mut set = BTreeSet::new();
-    idx.iter_chunks(|path, _, _, _| { set.insert(path.to_string()); })?;
+    idx.iter_chunks(|path, _, _, _| {
+        set.insert(path.to_string());
+    })?;
     let docs: Vec<String> = set.into_iter().collect();
     if docs.is_empty() {
         anyhow::bail!("knowledge base has no indexed documents");
     }
     let primary = match requested {
-        Some(doc) => idx.canonical_document_path(doc)
-            .ok_or_else(|| anyhow::anyhow!("--doc {doc:?} is not an indexed document in the knowledge base"))?,
+        Some(doc) => idx.canonical_document_path(doc).ok_or_else(|| {
+            anyhow::anyhow!("--doc {doc:?} is not an indexed document in the knowledge base")
+        })?,
         None => docs[0].clone(),
     };
     Ok((primary, docs))
@@ -60,7 +63,7 @@ struct Cli {
     limit: usize,
     /// Directory holding a zeroclaw-format SOP (SOP.toml + SOP.md). When set,
     /// discovery is driven step-by-step through the vendored SOP engine (one
-    /// focused episode per step; step 2 loops per checklist parameter) instead of
+    /// focused episode per step; step 2 loops per parameter) instead of
     /// one all-at-once episode. Portable: the same directory runs under zeroclaw.
     #[arg(long)]
     sop_dir: Option<PathBuf>,
@@ -70,6 +73,15 @@ struct Cli {
     /// Omit to let the gateway pick (fallback enabled).
     #[arg(long)]
     variant: Option<String>,
+    /// Keep the agent workspace directory after the run (for inspecting notebook files).
+    #[arg(long)]
+    keep_agent_dir: Option<PathBuf>,
+    /// Phase A: table coverage metrics only; skip tables-to-graph and CSP validation.
+    #[arg(long, default_value_t = true)]
+    tables_only: bool,
+    /// Full pipeline: compile tables to graph and run CSP validation (overrides tables-only).
+    #[arg(long)]
+    full_pipeline: bool,
 }
 
 #[derive(Clone)]
@@ -88,7 +100,14 @@ struct Case {
 }
 
 fn prov(src: &str) -> Provenance {
-    Provenance { source_path: src.into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 }
+    Provenance {
+        source_path: src.into(),
+        range: None,
+        file_sig: None,
+        origin: "agent".into(),
+        confidence: 1.0,
+        created_at: 0,
+    }
 }
 
 // ── Load validation tables ──
@@ -104,18 +123,23 @@ fn cell_to_string(v: &Value) -> Option<String> {
     }
 }
 
+type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>);
+
 /// Load the reference tables. The JSON is produced by `convert-xlsx`, which cuts
 /// MDM UID columns and keys every column by its human-readable name — so this is
 /// a plain read: rows are data, columns merge by name across files.
 /// Files whose stem starts with `_` are metadata and skipped.
-fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<BTreeMap<String, String>>)> {
+fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
     let mut col_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut all_rows: Vec<BTreeMap<String, String>> = Vec::new();
 
     for entry in std::fs::read_dir(val_dir)? {
         let path = entry?.path();
-        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if path.extension().map_or(true, |e| e != "json") || stem.starts_with('_') {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if path.extension().is_none_or(|e| e != "json") || stem.starts_with('_') {
             continue;
         }
         let data: Value = serde_json::from_reader(std::fs::File::open(&path)?)?;
@@ -127,22 +151,30 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
                 let row = row.as_object().context("bad row")?;
                 let mut clean = BTreeMap::new();
                 for (name, v) in row {
-                    let Some(val) = cell_to_string(v) else { continue };
+                    let Some(val) = cell_to_string(v) else {
+                        continue;
+                    };
                     clean.insert(name.clone(), val.clone());
                     col_map.entry(name.clone()).or_default().insert(val);
                 }
-                if !clean.is_empty() { all_rows.push(clean); }
+                if !clean.is_empty() {
+                    all_rows.push(clean);
+                }
             }
         }
     }
 
-    let cols: Vec<ColInfo> = col_map.into_iter()
+    let cols: Vec<ColInfo> = col_map
+        .into_iter()
         // A column with a single value is document metadata (product name, the
         // accompanying-document reference, an abrasive flag), not a constrained
         // parameter — a one-value "domain" is nothing to model or measure. Keep only
         // columns whose values actually form a set the agent must reproduce.
         .filter(|(_, vals)| vals.len() >= 2)
-        .map(|(name, vals)| ColInfo { name, valid: vals.into_iter().collect() })
+        .map(|(name, vals)| ColInfo {
+            name,
+            valid: vals.into_iter().collect(),
+        })
         .collect();
     Ok((cols, all_rows))
 }
@@ -154,20 +186,48 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<(Vec<ColInfo>, Vec<
 /// instead of a Literal node per value — the representation the agent targets.
 fn build_reference_graph(g: &GraphStore, cols: &[ColInfo], src: &str) {
     for (ci, col) in cols.iter().enumerate() {
-        if col.valid.len() <= 1 { continue; }
+        if col.valid.len() <= 1 {
+            continue;
+        }
         let fld_id = format!("fld:{ci}");
         let enum_id = format!("enum:{ci}");
-        g.put_node(&Node { id: fld_id.clone(), node_type: "Field".into(), label: col.name.clone(), aliases: vec![], prov: prov(src) }).unwrap();
-        g.put_node(&Node { id: enum_id.clone(), node_type: "Enum".into(), label: format!("{} enum", col.name), aliases: col.valid.clone(), prov: prov(src) }).unwrap();
-        g.put_edge(&Edge { from: fld_id, edge_type: "CONSTRAINED_BY".into(), to: enum_id, prov: prov(src) }).unwrap();
+        g.put_node(&Node {
+            id: fld_id.clone(),
+            node_type: "Field".into(),
+            label: col.name.clone(),
+            aliases: vec![],
+            prov: prov(src),
+        })
+        .unwrap();
+        g.put_node(&Node {
+            id: enum_id.clone(),
+            node_type: "Enum".into(),
+            label: format!("{} enum", col.name),
+            aliases: col.valid.clone(),
+            prov: prov(src),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: fld_id,
+            edge_type: "CONSTRAINED_BY".into(),
+            to: enum_id,
+            prov: prov(src),
+        })
+        .unwrap();
     }
 }
 
 fn export_graph(g: &GraphStore) -> Value {
-    let nodes: Vec<Value> = g.all_nodes().unwrap_or_default().iter()
+    let nodes: Vec<Value> = g
+        .all_nodes()
+        .unwrap_or_default()
+        .iter()
         .map(|n| json!({"id": n.id, "type": n.node_type, "label": n.label, "aliases": n.aliases}))
         .collect();
-    let edges: Vec<Value> = g.all_edges().unwrap_or_default().iter()
+    let edges: Vec<Value> = g
+        .all_edges()
+        .unwrap_or_default()
+        .iter()
         .map(|e| json!({"from": e.from, "edge_type": e.edge_type, "to": e.to}))
         .collect();
     json!({"nodes": nodes, "edges": edges})
@@ -182,23 +242,51 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
     let pick_invalid = |key: &str| -> Option<String> {
         col_by_key.get(key).and_then(|ci| {
             for test in &["INVALID", "999999", "ZZZZZ", "none", "0", "-1"] {
-                if !ci.valid.iter().any(|v| v == test) { return Some(test.to_string()); }
+                if !ci.valid.iter().any(|v| v == test) {
+                    return Some(test.to_string());
+                }
             }
             None
         })
     };
 
     for (ri, row) in rows.iter().enumerate() {
-        if limit > 0 && ri >= limit { break; }
+        if limit > 0 && ri >= limit {
+            break;
+        }
         let name = format!("row{ri}");
-        let assign: Vec<(String, Value)> = row.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
-        cases.push(Case { name: format!("{name}_valid"), mode: SolveMode::Validate, assignments: assign.clone() });
+        let assign: Vec<(String, Value)> = row
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        cases.push(Case {
+            name: format!("{name}_valid"),
+            mode: SolveMode::Validate,
+            assignments: assign.clone(),
+        });
 
-        for k in row.keys().filter(|k| col_by_key.get(k.as_str()).map(|c| c.valid.len() > 1).unwrap_or(false)).take(3) {
+        for k in row
+            .keys()
+            .filter(|k| {
+                col_by_key
+                    .get(k.as_str())
+                    .map(|c| c.valid.len() > 1)
+                    .unwrap_or(false)
+            })
+            .take(3)
+        {
             if let Some(bad) = pick_invalid(k) {
-                let mut bad_assign: Vec<(String, Value)> = row.iter().filter(|(kk, _)| *kk != k).map(|(kk, vv)| (kk.clone(), Value::String(vv.clone()))).collect();
+                let mut bad_assign: Vec<(String, Value)> = row
+                    .iter()
+                    .filter(|(kk, _)| *kk != k)
+                    .map(|(kk, vv)| (kk.clone(), Value::String(vv.clone())))
+                    .collect();
                 bad_assign.push((k.clone(), Value::String(bad)));
-                cases.push(Case { name: format!("{name}_invalid_{k}"), mode: SolveMode::Validate, assignments: bad_assign });
+                cases.push(Case {
+                    name: format!("{name}_invalid_{k}"),
+                    mode: SolveMode::Validate,
+                    assignments: bad_assign,
+                });
             }
         }
     }
@@ -209,10 +297,48 @@ fn generate_cases(cols: &[ColInfo], rows: &[BTreeMap<String, String>], limit: us
 
 // ── Agent step execution (shared by the single-episode and SOP-driven paths) ──
 
-/// The tool executor for an agent episode: search/read/grep/glob + the graph and
-/// constraint tools, all bound to one agent graph dir and KB. A fresh one is made
-/// per episode (the SOP driver runs one episode per step).
-/// Recursively copy a directory (used to seed the agent's store from the indexed KB).
+/// Execute notebook tools against the agent store (notes under `.glossa/notes/`).
+fn exec_notebook(
+    agent_g_dir: &std::path::Path,
+    idx: &DocIndex,
+    name: &str,
+    args: &Value,
+) -> String {
+    match name {
+        "note" => glossa::tools::note(
+            agent_g_dir,
+            idx,
+            args.get("doc").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("file").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        ),
+        "cat" => glossa::tools::cat_note(
+            agent_g_dir,
+            idx,
+            args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+        ),
+        "ls" => glossa::tools::ls_notes(agent_g_dir, idx, args.get("doc").and_then(|v| v.as_str())),
+        "del" => glossa::tools::del_note(
+            agent_g_dir,
+            idx,
+            args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+        ),
+        "sed" => glossa::tools::sed_note(
+            agent_g_dir,
+            idx,
+            args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("old").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("new").and_then(|v| v.as_str()).unwrap_or(""),
+            args.get("all").and_then(|v| v.as_bool()).unwrap_or(false),
+        ),
+        other => format!("unknown notebook tool: {other}"),
+    }
+}
+
+/// The tool executor for an agent episode.
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -243,74 +369,98 @@ fn make_exec(
         let g = GraphStore::open(&agent_g_dir).unwrap();
         let ont = Ontology::load_or_default(&agent_g_dir);
         match name {
-            "search" | "read" | "grep" | "glob" => {
-                kb_eval::backend::glossa_tools::exec(name, args, &idx_kb, Some(&g), &spec_kb, &trace_kb)
+            "search" | "read" | "grep" | "glob" | "glossary" | "neighbors" | "resolve" => {
+                kb_eval::backend::glossa_tools::exec(
+                    name,
+                    args,
+                    &idx_kb,
+                    Some(&g),
+                    &spec_kb,
+                    &trace_kb,
+                )
             }
+            "note" | "cat" | "ls" | "del" | "sed" => (
+                exec_notebook(&agent_g_dir, &idx_kb, name, args),
+                vec![],
+                vec![],
+            ),
+            "index" | "reindex" => (
+                match glossa::index::store::index_dir(&agent_g_dir, name == "reindex") {
+                    Ok(s) => format!(
+                        "indexed: {} added, {} removed, {} unchanged",
+                        s.added, s.removed, s.unchanged
+                    ),
+                    Err(e) => format!("index error: {e}"),
+                },
+                vec![],
+                vec![],
+            ),
             "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
             "graph_stats" => {
-                // Node mode: given a node id, report everything about it (type, label,
-                // aliases, every in/out edge) — the universal "all about this node" view.
+                // Same contract as prod MCP: node mode inspects one node; doc mode adds
+                // the per-Field graph coverage; otherwise the plain summary. No table
+                // overlay here — table progress reaches the agent via note()'s .csp echo
+                // and the sop_advance remaining-count.
                 if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
                     (glossa::tools::node_inspect(&g, node), vec![], vec![])
                 } else {
-                    // Doc mode: generic node/edge type counts, then per-Field SOURCE and
-                    // VALUE coverage so step-2 (`to source`) and step-3 (`to value`) each
-                    // read off their own number. Accept the doc arg under any name it
-                    // reaches for and fall back to the run's document.
-                    let doc = ["doc", "document", "source", "path"].iter()
-                        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
-                        .unwrap_or(src_doc.as_str());
                     let mut out = glossa::tools::graph_stats(&g);
-                    out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
+                    if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
+                        out.push('\n');
+                        out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
+                    }
                     (out, vec![], vec![])
                 }
             }
             "graph_generalize" => {
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                (
+                    glossa::graph::ops::graph_generalize(&g, &ont, now),
+                    vec![],
+                    vec![],
+                )
             }
             "constraint_solve" => {
-                let sm = match args.get("mode").and_then(|v| v.as_str()).unwrap_or("validate") {
+                let sm = match args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("validate")
+                {
                     "infer" => SolveMode::Infer,
                     "check" => SolveMode::Check,
                     _ => SolveMode::Validate,
                 };
-                let assignments: Vec<(String, Value)> = args.get("field_assignments").and_then(|v| v.as_object())
+                let assignments: Vec<(String, Value)> = args
+                    .get("field_assignments")
+                    .and_then(|v| v.as_object())
                     .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
                 let problem = glossa::constraint_adapter::load_problem(&g, &ont, None).unwrap();
                 let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
-                (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc), vec![], vec![])
+                (
+                    glossa::constraint_adapter::format_solve_feedback(
+                        &problem,
+                        &result,
+                        &assignments,
+                        &src_doc,
+                    ),
+                    vec![],
+                    vec![],
+                )
             }
-            "get_ontology" => (glossa::graph::ontology_export::export_pretty(&ont), vec![], vec![]),
+            "get_ontology" => (
+                glossa::graph::ontology_export::export_pretty(&ont),
+                vec![],
+                vec![],
+            ),
             "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
             other => (format!("unknown tool: {other}"), vec![], vec![]),
         }
-    }
-}
-
-/// (first uncovered checklist parameter, count of uncovered) — a checklist param
-/// is "covered" when it resolves to a Field with a non-empty Enum. Drives the SOP
-/// build loop's `$.steps.N.remaining` condition.
-/// The shared coverage op (`glossa::graph::ops::checklist_coverage`), scoped to
-/// `doc`'s checklist + citation set — the SAME numbers `graph_stats(doc=…)`
-/// reports to the agent, so the SOP gate and the model see one truth.
-/// None until step 1 has created the checklist.
-fn coverage(agent_g_dir: &std::path::Path, doc: &str) -> Option<glossa::graph::ops::ChecklistCoverage> {
-    let g = GraphStore::open(agent_g_dir).ok()?;
-    let ont = Ontology::load_or_default(agent_g_dir);
-    glossa::graph::ops::checklist_coverage(&g, doc, &ont).ok().flatten()
-}
-
-/// Parameters still without a materialized constraint (step-3 remaining).
-/// The observability metric logged beside the agent's own `remaining` report.
-fn pending_params(cov: &Option<glossa::graph::ops::ChecklistCoverage>) -> Vec<String> {
-    match cov {
-        Some(c) => c.unbuilt.clone(),
-        None => Vec::new(),
     }
 }
 
@@ -389,7 +539,12 @@ fn run_sop_conversation(
     let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     let n_steps = sop_def.steps.len();
-    eprintln!("[sop] loaded '{}' ({} steps, continuous conversation) from {}", sop_def.name, n_steps, sop_dir.display());
+    eprintln!(
+        "[sop] loaded '{}' ({} steps, continuous conversation) from {}",
+        sop_def.name,
+        n_steps,
+        sop_dir.display()
+    );
     let max_visits = SOP_EVAL_MAX_STEP_VISITS;
 
     let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -401,8 +556,8 @@ fn run_sop_conversation(
         "name": "sop_advance",
         "description": "Finish the CURRENT SOP step and receive the next one. Call it once the step's \
             work is done. `output` is a JSON-object string carrying the step's result; for these steps \
-            it is {\"remaining\": N} where N is how many parameters graph_stats(doc=…) still lists as \
-            without a materialized constraint (see get_ontology).",
+            it is {\"remaining\": N} where N is how many parameters from your own working list are \
+            not yet a column header in any .csp table.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -414,13 +569,17 @@ fn run_sop_conversation(
     })];
 
     let step_ctx = |step: &SopStep| -> String {
-        let tools_line = if step.suggested_tools.is_empty() { String::new() }
-            else { format!("\nTools: {}.", step.suggested_tools.join(", ")) };
+        let tools_line = if step.suggested_tools.is_empty() {
+            String::new()
+        } else {
+            format!("\nTools: {}.", step.suggested_tools.join(", "))
+        };
         format!(
             "── SOP step {} of {}: {} ──\n{}{}\n\n\
              When this step is done, call `sop_advance` with status=\"completed\" and \
              output=\"{{\\\"remaining\\\": N}}\".",
-            step.number, n_steps, step.title, step.body, tools_line)
+            step.number, n_steps, step.title, step.body, tools_line
+        )
     };
 
     // The SOP.md preamble (everything before "## Steps") is the behavioural guide
@@ -438,83 +597,109 @@ fn run_sop_conversation(
     // The preamble (which document to work from, and that referenced standards are the
     // agent's to find) now lives in SOP.md with a `{src_doc}` placeholder, so all prompt
     // text is in files and editable without a rebuild.
-    let guide = guide.replace("{src_doc}", &src_doc.to_string());
+    let guide = guide.replace("{src_doc}", src_doc);
     let first_prompt = format!("{guide}\n\n{}", step_ctx(&sop_def.steps[0]));
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Arc::new(std::sync::Mutex::new(sop::driver::minimal_run(&sop_def)));
     let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
-    let agent_g_log = agent_g_dir.to_path_buf();
-    let src_log = src_doc.to_string();
     let llm_rounds_step_exec = std::sync::Arc::clone(&llm_rounds_step);
 
     let exec = {
         let run = std::sync::Arc::clone(&run);
         let sop_def = sop_def.clone();
-        let agent_g_dir = agent_g_dir.to_path_buf();
         move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-        if name != "sop_advance" {
-            return normal_exec(name, args);
-        }
-        llm_rounds_step_exec.store(0, std::sync::atomic::Ordering::Relaxed);
-        let output = args.get("output").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
-        let status = match args.get("status").and_then(|v| v.as_str()) {
-            Some("failed") => SopStepStatus::Failed,
-            Some("skipped") => SopStepStatus::Skipped,
-            _ => SopStepStatus::Completed,
-        };
-        let mut run = run.lock().unwrap();
-        let cur = run.current_step;
-        run.step_results.push(SopStepResult {
-            step_number: cur, status, output: output.clone(),
-            started_at: String::new(), completed_at: None,
-        });
-        let reported = parse_reported_remaining(&output).map(|n| n.to_string()).unwrap_or_else(|| "?".into());
-        let truth = pending_params(&coverage(&agent_g_dir, src_doc)).len();
-        eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining (graph: {truth} pending)");
-        if let Some(stuck_at) = step2_advance_stuck(&run.step_results) {
-            eprintln!("  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step 3");
-            run.current_step = 3;
-            let msg = sop_def.steps.iter().find(|s| s.number == 3)
-                .map(step_ctx)
-                .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
-            return (msg, vec![], vec![]);
-        }
-        // Route on the agent's payload — identical engine to zeroclaw.
-        let run_data = sop::rundata::RunData::from_step_results(&run.step_results);
-        let next = {
-            let ctx = RouteCtx { sop: &sop_def, run: &run, run_data: &run_data, last_status: status, max_step_visits: max_visits };
-            resolve_next(&ctx)
-        };
-        let msg = match next {
-            NextStep::Step(n) | NextStep::Wait(n) => {
-                run.current_step = n;
-                match sop_def.steps.iter().find(|s| s.number == n) {
-                    Some(s) => step_ctx(s),
-                    None => { run.status = SopRunStatus::Completed; "SOP complete. Call `done` to finish.".into() }
-                }
+            if name != "sop_advance" {
+                return normal_exec(name, args);
             }
-            NextStep::Retry => sop_def.steps.iter().find(|s| s.number == cur)
-                .map(step_ctx).unwrap_or_else(|| "SOP complete. Call `done`.".into()),
-            NextStep::Complete => { run.status = SopRunStatus::Completed; "SOP complete — every step is done. Call `done` to finish.".into() }
-            NextStep::Fail(r) => { run.status = SopRunStatus::Failed; format!("SOP failed: {r}. Call `done` to finish.") }
-        };
-        (msg, vec![], vec![])
-    }};
+            llm_rounds_step_exec.store(0, std::sync::atomic::Ordering::Relaxed);
+            let output = args
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}")
+                .to_string();
+            let status = match args.get("status").and_then(|v| v.as_str()) {
+                Some("failed") => SopStepStatus::Failed,
+                Some("skipped") => SopStepStatus::Skipped,
+                _ => SopStepStatus::Completed,
+            };
+            let mut run = run.lock().unwrap();
+            let cur = run.current_step;
+            run.step_results.push(SopStepResult {
+                step_number: cur,
+                status,
+                output: output.clone(),
+                started_at: String::new(),
+                completed_at: None,
+            });
+            let reported = parse_reported_remaining(&output)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into());
+            eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining");
+            if let Some(stuck_at) = step2_advance_stuck(&run.step_results) {
+                eprintln!("  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step 3");
+                run.current_step = 3;
+                let msg = sop_def
+                    .steps
+                    .iter()
+                    .find(|s| s.number == 3)
+                    .map(step_ctx)
+                    .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
+                return (msg, vec![], vec![]);
+            }
+            // Route on the agent's payload — identical engine to zeroclaw.
+            let run_data = sop::rundata::RunData::from_step_results(&run.step_results);
+            let next = {
+                let ctx = RouteCtx {
+                    sop: &sop_def,
+                    run: &run,
+                    run_data: &run_data,
+                    last_status: status,
+                    max_step_visits: max_visits,
+                };
+                resolve_next(&ctx)
+            };
+            let msg = match next {
+                NextStep::Step(n) | NextStep::Wait(n) => {
+                    run.current_step = n;
+                    match sop_def.steps.iter().find(|s| s.number == n) {
+                        Some(s) => step_ctx(s),
+                        None => {
+                            run.status = SopRunStatus::Completed;
+                            "SOP complete. Call `done` to finish.".into()
+                        }
+                    }
+                }
+                NextStep::Retry => sop_def
+                    .steps
+                    .iter()
+                    .find(|s| s.number == cur)
+                    .map(step_ctx)
+                    .unwrap_or_else(|| "SOP complete. Call `done`.".into()),
+                NextStep::Complete => {
+                    run.status = SopRunStatus::Completed;
+                    "SOP complete — every step is done. Call `done` to finish.".into()
+                }
+                NextStep::Fail(r) => {
+                    run.status = SopRunStatus::Failed;
+                    format!("SOP failed: {r}. Call `done` to finish.")
+                }
+            };
+            (msg, vec![], vec![])
+        }
+    };
 
     let eid = kb_eval::tz::backdated_episode_id(30);
     let run_log = std::sync::Arc::clone(&run);
     let llm_rounds_step_chat = std::sync::Arc::clone(&llm_rounds_step);
     let llm_rounds_total_chat = std::sync::Arc::clone(&llm_rounds_total);
     let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
-        let since_advance = llm_rounds_step_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let since_advance =
+            llm_rounds_step_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let total = llm_rounds_total_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if total % 10 == 0 {
+        if total.is_multiple_of(10) {
             let step = run_log.lock().unwrap().current_step;
-            let pending = pending_params(&coverage(&agent_g_log, &src_log)).len();
-            eprintln!(
-                "  [sop] LLM round {total} step {step} ({since_advance} since sop_advance, graph {pending} pending)"
-            );
+            eprintln!("  [sop] LLM round {total} step {step} ({since_advance} since sop_advance)");
         }
         if since_advance > SOP_MAX_LLM_ROUNDS_PER_STEP {
             let step = run_log.lock().unwrap().current_step;
@@ -523,26 +708,55 @@ fn run_sop_conversation(
             );
         }
         let e = ep.unwrap_or(&eid);
-        let turn = kb_eval::tz::infer(gateway, "constraint_validate", e, messages, tags, timeout, variant, None, Some(&tools))?;
-        Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
+        let turn = kb_eval::tz::infer(
+            gateway,
+            "constraint_validate",
+            e,
+            messages,
+            tags,
+            timeout,
+            variant,
+            None,
+            Some(&tools),
+        )?;
+        Ok(TzTurn {
+            content: turn.content,
+            episode_id: turn.episode_id,
+        })
     };
 
     // One continuous episode over the whole SOP (round budget covers all steps).
-    let outcome = run_episode(chat, &first_prompt, exec, 250, EpisodePolicy::enrich())?;
+    // Dedup is temporarily OFF: it caches notebook-dependent reads (e.g. graph_stats,
+    // cat) with no invalidation on note/sed/del, replaying stale output mid-run.
+    // Re-enable once dedup is notebook-aware.
+    let policy = EpisodePolicy {
+        stop_on_done: true,
+        dedup_readonly: false,
+    };
+    let outcome = run_episode(chat, &first_prompt, exec, 250, policy)?;
     let run = run.lock().unwrap();
     eprintln!(
         "[sop] run {:?} after {} step-transitions (episode done={} llm_rounds={})",
-        run.status, run.step_results.len(), outcome.done, outcome.rounds
+        run.status,
+        run.step_results.len(),
+        outcome.done,
+        outcome.rounds
     );
     Ok((run.step_results.len(), outcome.rounds, outcome.done))
 }
 
-fn solve_csp(dir: &std::path::Path, g: &GraphStore, mode: SolveMode, assignments: &[(String, Value)]) -> SolveResult {
+fn solve_csp(
+    dir: &std::path::Path,
+    g: &GraphStore,
+    mode: SolveMode,
+    assignments: &[(String, Value)],
+) -> SolveResult {
     let ont = Ontology::load_or_default(dir);
     let problem = glossa::constraint_adapter::load_problem(g, &ont, None).unwrap();
     // Re-key onto the graph's Field labels so a paraphrased parameter name still
     // hits its constraint (matches the MCP tool's behaviour).
-    let assignments = glossa::constraint_adapter::resolve_assignment_fields(g, &problem, assignments);
+    let assignments =
+        glossa::constraint_adapter::resolve_assignment_fields(g, &problem, assignments);
     glossa_constraint::solver::solve(&problem, mode, &assignments)
 }
 
@@ -566,7 +780,10 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
     if nodes.is_empty() && edges.is_empty() && errs.is_empty() {
         errs.push("nothing to write — graph_upsert takes {\"nodes\":[{node_type,label,source_path,…}], \"edges\":[{from,edge_type,to,source_path}]}".into());
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);
     if errs.is_empty() {
         out.message
@@ -576,16 +793,29 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
 }
 
 fn exec_graph_delete(idx: &DocIndex, g: &GraphStore, args: &Value) -> String {
-    let nodes: Vec<String> = args.get("nodes").and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+    let nodes: Vec<String> = args
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|n| n.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     glossa::graph::ops::graph_delete(idx, g, nodes, vec![])
 }
 
 fn exec_graph_update(g: &GraphStore, args: &Value) -> String {
-    if let (Some(label), Some(new_label)) = (args.get("label").and_then(|v| v.as_str()), args.get("new_label").and_then(|v| v.as_str())) {
+    if let (Some(label), Some(new_label)) = (
+        args.get("label").and_then(|v| v.as_str()),
+        args.get("new_label").and_then(|v| v.as_str()),
+    ) {
         let new_type = args.get("new_type").and_then(|v| v.as_str());
-        let nodes = vec![NodeUpdate { label: label.to_string(), new_label: Some(new_label.to_string()), new_type: new_type.map(String::from) }];
+        let nodes = vec![NodeUpdate {
+            label: label.to_string(),
+            new_label: Some(new_label.to_string()),
+            new_type: new_type.map(String::from),
+        }];
         glossa::graph::ops::graph_update(g, nodes)
     } else {
         "no valid update params".to_string()
@@ -620,12 +850,20 @@ fn norm_value(s: &str) -> String {
 /// domain holds a regex PATTERN that the value matches (canon on both sides).
 fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
     agent_dom.contains(ref_val)
-        || agent_dom.iter().any(|a| glossa_constraint::enum_alias_matches(a, ref_val))
+        || agent_dom
+            .iter()
+            .any(|a| glossa_constraint::enum_alias_matches(a, ref_val))
 }
 
 fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
-    let ref_nodes = ref_json["nodes"].as_array().map(|a| a.as_slice()).unwrap_or_default();
-    let ref_edges = ref_json["edges"].as_array().map(|a| a.as_slice()).unwrap_or_default();
+    let ref_nodes = ref_json["nodes"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default();
+    let ref_edges = ref_json["edges"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default();
 
     let agent_nodes = agent_g.all_nodes().unwrap_or_default();
     let agent_edges = agent_g.all_edges().unwrap_or_default();
@@ -635,89 +873,189 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     // скорость вращения"), so a name match under-counts. Instead a reference
     // parameter counts as covered when some agent Enum reproduces the majority of
     // its allowed-value set — the domain identifies the parameter, the label doesn't.
-    let ref_id_enum: std::collections::HashMap<&str, BTreeSet<String>> = ref_nodes.iter()
+    let ref_id_enum: std::collections::HashMap<&str, BTreeSet<String>> = ref_nodes
+        .iter()
         .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Enum"))
         .filter_map(|n| {
             let id = n.get("id")?.as_str()?;
-            let vals = n.get("aliases")?.as_array()?.iter().filter_map(|v| v.as_str()).map(norm_value).collect();
+            let vals = n
+                .get("aliases")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(norm_value)
+                .collect();
             Some((id, vals))
         })
         .collect();
     // (reference parameter label, its allowed-value set)
-    let ref_params: Vec<(String, BTreeSet<String>)> = ref_nodes.iter()
+    let ref_params: Vec<(String, BTreeSet<String>)> = ref_nodes
+        .iter()
         .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Field"))
         .filter_map(|f| {
             let fid = f.get("id")?.as_str()?;
             let label = norm_metric(f.get("label")?.as_str()?);
-            let enum_id = ref_edges.iter().find(|e| {
-                e.get("edge_type").and_then(|t| t.as_str()) == Some("CONSTRAINED_BY")
-                    && e.get("from").and_then(|x| x.as_str()) == Some(fid)
-            }).and_then(|e| e.get("to").and_then(|x| x.as_str()))?;
+            let enum_id = ref_edges
+                .iter()
+                .find(|e| {
+                    e.get("edge_type").and_then(|t| t.as_str()) == Some("CONSTRAINED_BY")
+                        && e.get("from").and_then(|x| x.as_str()) == Some(fid)
+                })
+                .and_then(|e| e.get("to").and_then(|x| x.as_str()))?;
             Some((label, ref_id_enum.get(enum_id).cloned().unwrap_or_default()))
         })
         .collect();
-    let agent_domains: Vec<BTreeSet<String>> = agent_nodes.iter()
+    let agent_domains: Vec<BTreeSet<String>> = agent_nodes
+        .iter()
         .filter(|n| n.node_type == "Enum" && !n.aliases.is_empty())
         .map(|n| n.aliases.iter().map(|s| norm_value(s)).collect())
         .collect();
     // covered = some agent Enum holds ≥ half of this parameter's reference values.
     let covered = |dom: &BTreeSet<String>| -> bool {
-        !dom.is_empty() && agent_domains.iter().any(|ad| {
-            dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64 >= 0.5
-        })
+        !dom.is_empty()
+            && agent_domains.iter().any(|ad| {
+                dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64 >= 0.5
+            })
     };
-    let field_cov = if ref_params.is_empty() { 1.0 }
-        else { ref_params.iter().filter(|(_, d)| covered(d)).count() as f64 / ref_params.len() as f64 };
+    let field_cov = if ref_params.is_empty() {
+        1.0
+    } else {
+        ref_params.iter().filter(|(_, d)| covered(d)).count() as f64 / ref_params.len() as f64
+    };
 
     // Value coverage: allowed values are the Enum nodes' aliases (compact form).
     // We also union any legacy Literal-node labels the agent may still emit, so a
     // graph in either representation is scored fairly.
-    let ref_lits: BTreeSet<String> = ref_nodes.iter()
+    let ref_lits: BTreeSet<String> = ref_nodes
+        .iter()
         .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("Enum"))
         .filter_map(|n| n.get("aliases").and_then(|a| a.as_array()))
         .flatten()
         .filter_map(|v| v.as_str())
         .map(norm_value)
         .collect();
-    let agent_lits: BTreeSet<String> = agent_nodes.iter()
+    let agent_lits: BTreeSet<String> = agent_nodes
+        .iter()
         .flat_map(|n| {
-            let enum_vals = if n.node_type == "Enum" { n.aliases.clone() } else { vec![] };
-            let legacy = if n.node_type == "Literal" { vec![n.label.clone()] } else { vec![] };
+            let enum_vals = if n.node_type == "Enum" {
+                n.aliases.clone()
+            } else {
+                vec![]
+            };
+            let legacy = if n.node_type == "Literal" {
+                vec![n.label.clone()]
+            } else {
+                vec![]
+            };
             enum_vals.into_iter().chain(legacy)
         })
         .map(|s| norm_value(&s))
         .collect();
-    let literal_cov = if ref_lits.is_empty() { 1.0 }
-        else { ref_lits.iter().filter(|l| domain_covers(&agent_lits, l)).count() as f64 / ref_lits.len() as f64 };
+    let literal_cov = if ref_lits.is_empty() {
+        1.0
+    } else {
+        ref_lits
+            .iter()
+            .filter(|l| domain_covers(&agent_lits, l))
+            .count() as f64
+            / ref_lits.len() as f64
+    };
 
     if std::env::var_os("KB_TRACE").is_some() {
         use std::collections::BTreeMap;
         let mut hist: BTreeMap<&str, usize> = BTreeMap::new();
-        for n in &agent_nodes { *hist.entry(n.node_type.as_str()).or_default() += 1; }
+        for n in &agent_nodes {
+            *hist.entry(n.node_type.as_str()).or_default() += 1;
+        }
         eprintln!("  [CMP] agent node types: {hist:?}");
         let a_sample: Vec<&String> = agent_lits.iter().take(12).collect();
         let r_sample: Vec<&String> = ref_lits.iter().take(12).collect();
-        eprintln!("  [CMP] agent enum values (norm, {}): {a_sample:?}", agent_lits.len());
-        eprintln!("  [CMP] ref   enum values (norm, {}): {r_sample:?}", ref_lits.len());
-        let missing: Vec<&String> = ref_params.iter()
+        eprintln!(
+            "  [CMP] agent enum values (norm, {}): {a_sample:?}",
+            agent_lits.len()
+        );
+        eprintln!(
+            "  [CMP] ref   enum values (norm, {}): {r_sample:?}",
+            ref_lits.len()
+        );
+        let missing: Vec<&String> = ref_params
+            .iter()
             .filter(|(_, d)| !covered(d))
             .map(|(label, _)| label)
             .collect();
-        eprintln!("  [CMP] missing fields by domain ({}/{}): {missing:?}", missing.len(), ref_params.len());
+        eprintln!(
+            "  [CMP] missing fields by domain ({}/{}): {missing:?}",
+            missing.len(),
+            ref_params.len()
+        );
     }
 
     // Edge coverage: shared edges (edge_type + from_label + to_label)
     // (approximate: count edge type matches)
-    let ref_edge_types: BTreeSet<&str> = ref_edges.iter()
+    let ref_edge_types: BTreeSet<&str> = ref_edges
+        .iter()
         .filter_map(|e| e.get("edge_type").and_then(|t| t.as_str()))
         .collect();
-    let agent_edge_types: BTreeSet<&str> = agent_edges.iter()
-        .map(|e| e.edge_type.as_str())
-        .collect();
-    let constraint_cov = if ref_edge_types.is_empty() { 1.0 }
-        else { ref_edge_types.iter().filter(|t| agent_edge_types.contains(*t)).count() as f64 / ref_edge_types.len() as f64 };
+    let agent_edge_types: BTreeSet<&str> =
+        agent_edges.iter().map(|e| e.edge_type.as_str()).collect();
+    let constraint_cov = if ref_edge_types.is_empty() {
+        1.0
+    } else {
+        ref_edge_types
+            .iter()
+            .filter(|t| agent_edge_types.contains(*t))
+            .count() as f64
+            / ref_edge_types.len() as f64
+    };
 
     (field_cov, constraint_cov, literal_cov)
+}
+
+/// Tables-only comparison, by domain: a reference parameter is identified among
+/// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
+/// as `compare_graphs`' field/literal coverage — synonyms don't matter).
+/// Returns ((params_covered, params_total), (values_covered, values_total)).
+fn compare_tables_by_domain(
+    agent_g_dir: &std::path::Path,
+    src_doc: &str,
+    cols: &[ColInfo],
+) -> ((usize, usize), (usize, usize)) {
+    let col_values = glossa::tables::csp_column_values(agent_g_dir, src_doc).unwrap_or_else(|e| {
+        eprintln!("[tables] csp scan error: {e:#}");
+        Default::default()
+    });
+    let agent_domains: Vec<BTreeSet<String>> = col_values
+        .values()
+        .map(|vals| vals.iter().map(|v| norm_value(v)).collect())
+        .collect();
+    // A parameter is covered when some single .csp column reproduces ≥ half of
+    // its allowed-value set.
+    let params_covered = cols
+        .iter()
+        .filter(|c| {
+            let dom: BTreeSet<String> = c.valid.iter().map(|v| norm_value(v)).collect();
+            !dom.is_empty()
+                && agent_domains.iter().any(|ad| {
+                    dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64
+                        >= 0.5
+                })
+        })
+        .count();
+    // Value coverage: union of reference values vs union of all agent cells.
+    let agent_union: BTreeSet<String> = agent_domains.into_iter().flatten().collect();
+    let ref_union: BTreeSet<String> = cols
+        .iter()
+        .flat_map(|c| c.valid.iter())
+        .map(|v| norm_value(v))
+        .collect();
+    let values_covered = ref_union
+        .iter()
+        .filter(|v| domain_covers(&agent_union, v))
+        .count();
+    (
+        (params_covered, cols.len()),
+        (values_covered, ref_union.len()),
+    )
 }
 
 // ── Main ──
@@ -744,20 +1082,53 @@ fn main() -> Result<()> {
     let kb_docs_list = kb_docs.join(", ");
 
     let (cols, rows) = load_validation_data(&cli.val_dir).context("load validation tables")?;
-    eprintln!("Loaded {}: {} columns, {} valid rows", cli.val_dir.display(), cols.len(), rows.len());
+    eprintln!(
+        "Loaded {}: {} columns, {} valid rows",
+        cli.val_dir.display(),
+        cols.len(),
+        rows.len()
+    );
     for col in &cols {
         eprintln!("  col {}: {} valid values", col.name, col.valid.len());
     }
 
     let cases = generate_cases(&cols, &rows, cli.limit);
-    eprintln!("Test cases: {} ({} valid + {} invalid)", cases.len(),
+    eprintln!(
+        "Test cases: {} ({} valid + {} invalid)",
+        cases.len(),
         cases.iter().filter(|c| c.name.contains("valid")).count(),
-        cases.iter().filter(|c| c.name.contains("invalid")).count());
+        cases.iter().filter(|c| c.name.contains("invalid")).count()
+    );
 
-    println!("constraint-eval  ontology={}  doc={src_doc}", cli.ontology.display());
-    println!("  val_dir={}  cols={}  cases={}  csp_only={}  variant={}",
-        cli.val_dir.display(), cols.len(), cases.len(), cli.csp_only,
-        cli.variant.as_deref().unwrap_or("(gateway default — fallback ON)"));
+    let tables_only = cli.tables_only && !cli.full_pipeline;
+    let ref_value_total: usize = cols
+        .iter()
+        .flat_map(|c| c.valid.iter())
+        .map(|v| norm_value(v))
+        .collect::<BTreeSet<_>>()
+        .len();
+    println!(
+        "TABLES ref  params={}  values={}  ({})",
+        cols.len(),
+        ref_value_total,
+        cli.val_dir.display()
+    );
+
+    println!(
+        "constraint-eval  ontology={}  doc={src_doc}",
+        cli.ontology.display()
+    );
+    println!(
+        "  val_dir={}  cols={}  cases={}  csp_only={}  tables_only={}  variant={}",
+        cli.val_dir.display(),
+        cols.len(),
+        cases.len(),
+        cli.csp_only,
+        tables_only,
+        cli.variant
+            .as_deref()
+            .unwrap_or("(gateway default — fallback ON)")
+    );
     println!();
 
     // Build reference graph once (for CSP-only and for comparison)
@@ -766,7 +1137,9 @@ fn main() -> Result<()> {
     let ref_graph_json = export_graph(&ref_g);
 
     for (i, case) in cases.iter().enumerate() {
-        if cli.limit > 0 && i >= cli.limit { break; }
+        if cli.limit > 0 && i >= cli.limit {
+            break;
+        }
         let mode_label = match case.mode {
             SolveMode::Validate => "validate",
             SolveMode::Infer => "infer",
@@ -785,13 +1158,24 @@ fn main() -> Result<()> {
             let csp_ok = csp.valid == expected_valid;
             let marker = if csp_ok { "✓" } else { "✗" };
 
-            print!("{marker}[{}/{}] {} {}  CSP: valid={} violations={} domains={} issues={} ({}ms)",
-                i + 1, cases.len(), case.name, mode_label,
-                csp.valid, csp.violations.len(),
+            print!(
+                "{marker}[{}/{}] {} {}  CSP: valid={} violations={} domains={} issues={} ({}ms)",
+                i + 1,
+                cases.len(),
+                case.name,
+                mode_label,
+                csp.valid,
+                csp.violations.len(),
                 csp.domains.as_ref().map(|d| d.len()).unwrap_or(0),
-                csp.issues.len(), csp_ms);
+                csp.issues.len(),
+                csp_ms
+            );
             if !csp_ok {
-                let first = csp.violations.first().map(|v| format!(" {}={} ∉ {}", v.field, v.actual, v.expected)).unwrap_or_default();
+                let first = csp
+                    .violations
+                    .first()
+                    .map(|v| format!(" {}={} ∉ {}", v.field, v.actual, v.expected))
+                    .unwrap_or_default();
                 print!("  actual={} expected_valid={csp_ok}{first}", !csp.valid);
             }
             println!();
@@ -813,12 +1197,33 @@ fn main() -> Result<()> {
         let variant_chat = cli.variant.clone();
         let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
             let eid = ep.unwrap_or(&eid_chat);
-            let turn = kb_eval::tz::infer(&url, &fn_name, eid, messages, &tz_tags, tim, variant_chat.as_deref(), None, None)?;
-            Ok(TzTurn { content: turn.content, episode_id: turn.episode_id })
+            let turn = kb_eval::tz::infer(
+                &url,
+                &fn_name,
+                eid,
+                messages,
+                &tz_tags,
+                tim,
+                variant_chat.as_deref(),
+                None,
+                None,
+            )?;
+            Ok(TzTurn {
+                content: turn.content,
+                episode_id: turn.episode_id,
+            })
         };
 
-        let agent_dir = tempfile::tempdir().context("agent tempdir")?;
-        let agent_g_dir = agent_dir.path().to_path_buf();
+        let agent_store = if let Some(ref keep) = cli.keep_agent_dir {
+            std::fs::create_dir_all(keep).context("create keep-agent-dir")?;
+            None
+        } else {
+            Some(tempfile::tempdir().context("agent tempdir")?)
+        };
+        let agent_g_dir = cli
+            .keep_agent_dir
+            .clone()
+            .unwrap_or_else(|| agent_store.as_ref().unwrap().path().to_path_buf());
         let ont_path = agent_g_dir.join(".glossa").join("ontology.toml");
         // Seed the agent's store with a per-run copy of the indexed KB (index + graph,
         // including the Document/Section nodes) so index and graph share ONE store, as
@@ -830,18 +1235,15 @@ fn main() -> Result<()> {
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
         let prompt = format!(
-            "You are building the constraint set for a product specified by GOST '{src_doc}'.\n\n\
-             === PHASE 1: Build constraint graph ===\n\
-             The knowledge base holds these standards: {kb_docs_list}. A parameter's allowed\n\
-             values may live in the main GOST or in a standard it references — use search/read across ALL of them.\n\
-             Call get_ontology first to see node types, relations, and graph-building patterns.\n\
-             For EACH parameter create a Field and link it to its constraint (usually Enum with all values in aliases).\n\
-             Batch: one graph_upsert call carries every Field/Enum node and edge at once.\n\n\
-             === PHASE 2: Self-check ===\n\
-             Call constraint_solve(mode=\"check\") to verify graph consistency.\n\n\
+            "You are materializing limit tables for a product specified by GOST '{src_doc}'.\n\n\
+             The knowledge base holds: {kb_docs_list}. Values may live in the main GOST or a referenced standard.\n\n\
+             === PHASE A: limit tables ===\n\
+             1. note(doc, file=\"parameters.md\", content=…) — your working notes: the parameter list and anything else you need (free format).\n\
+             2. note(doc, file=\"….csp\", content=…) — semicolon CSV; column headers = parameter names.\n\
+             Use grep/read to find tables; use note(doc, file, content) for parameters.md and .csp tables.\n\
+             Then ls/cat/sed/del with paths from ls.\n\n\
              === DONE ===\n\
-             Call done(note=\"summary\") when every parameter is a Field with values in its Enum aliases\n\
-             and constraint_solve(mode=\"check\") reports no issues."
+             Call done when every parameter has a column in a .csp table with rows from the source."
         );
 
         let agent_g_dir_clone = agent_g_dir.clone();
@@ -851,47 +1253,104 @@ fn main() -> Result<()> {
         let spec_kb = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&cli.kb));
         let trace_kb = TraceLog::disabled();
 
-        let exec = move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+        let exec = move |name: &str,
+                         args: &Value|
+              -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
             let g = GraphStore::open(&agent_g_dir_clone).unwrap();
             let ont = Ontology::load_or_default(&agent_g_dir_clone);
 
             match name {
-                "search" | "read" | "grep" | "glob" => {
-                    kb_eval::backend::glossa_tools::exec(name, args, &idx_kb, Some(&g), &spec_kb, &trace_kb)
+                "search" | "read" | "grep" | "glob" | "glossary" | "neighbors" | "resolve" => {
+                    kb_eval::backend::glossa_tools::exec(
+                        name,
+                        args,
+                        &idx_kb,
+                        Some(&g),
+                        &spec_kb,
+                        &trace_kb,
+                    )
                 }
+                "note" | "cat" | "ls" | "del" | "sed" => {
+                    let idx_agent = DocIndex::open_or_create(&agent_g_dir_clone).unwrap();
+                    (
+                        exec_notebook(&agent_g_dir_clone, &idx_agent, name, args),
+                        vec![],
+                        vec![],
+                    )
+                }
+                "index" | "reindex" => (
+                    match glossa::index::store::index_dir(&agent_g_dir_clone, name == "reindex") {
+                        Ok(s) => format!(
+                            "indexed: {} added, {} removed, {} unchanged",
+                            s.added, s.removed, s.unchanged
+                        ),
+                        Err(e) => format!("index error: {e}"),
+                    },
+                    vec![],
+                    vec![],
+                ),
                 "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
                 "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
                 "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
                 "graph_stats" => {
-                    // Always attach per-parameter coverage for the document being built.
-                    let doc = ["doc", "document", "source", "path"].iter()
-                        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
-                        .unwrap_or(src_doc_exec.as_str());
-                    let mut out = glossa::tools::graph_stats(&g);
-                    out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
-                    (out, vec![], vec![])
+                    // Same contract as prod MCP: pure graph statistics (no table overlay).
+                    if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
+                        (glossa::tools::node_inspect(&g, node), vec![], vec![])
+                    } else {
+                        let mut out = glossa::tools::graph_stats(&g);
+                        if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
+                            out.push('\n');
+                            out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
+                        }
+                        (out, vec![], vec![])
+                    }
                 }
                 "graph_generalize" => {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    (glossa::graph::ops::graph_generalize(&g, &ont, now), vec![], vec![])
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    (
+                        glossa::graph::ops::graph_generalize(&g, &ont, now),
+                        vec![],
+                        vec![],
+                    )
                 }
                 "constraint_solve" => {
-                    let sm = match args.get("mode").and_then(|v| v.as_str()).unwrap_or("validate") {
+                    let sm = match args
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("validate")
+                    {
                         "infer" => SolveMode::Infer,
                         "check" => SolveMode::Check,
                         _ => SolveMode::Validate,
                     };
-                    let assignments: Vec<(String, Value)> = args.get("field_assignments").and_then(|v| v.as_object())
+                    let assignments: Vec<(String, Value)> = args
+                        .get("field_assignments")
+                        .and_then(|v| v.as_object())
                         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         .unwrap_or_default();
                     // Same feedback the MCP server gives: empty problems and
                     // unmatched assignment keys are called out, not hidden in JSON.
                     let problem = glossa::constraint_adapter::load_problem(&g, &ont, None).unwrap();
                     let result = glossa_constraint::solver::solve(&problem, sm, &assignments);
-                    (glossa::constraint_adapter::format_solve_feedback(&problem, &result, &assignments, &src_doc_exec), vec![], vec![])
+                    (
+                        glossa::constraint_adapter::format_solve_feedback(
+                            &problem,
+                            &result,
+                            &assignments,
+                            &src_doc_exec,
+                        ),
+                        vec![],
+                        vec![],
+                    )
                 }
-                "get_ontology" => (glossa::graph::ontology_export::export_pretty(&ont), vec![], vec![]),
+                "get_ontology" => (
+                    glossa::graph::ontology_export::export_pretty(&ont),
+                    vec![],
+                    vec![],
+                ),
                 // `done` is a control signal — run_episode intercepts it and never
                 // reaches exec; this arm only guards against policy changes.
                 "done" => (json!({"status": "done"}).to_string(), vec![], vec![]),
@@ -903,42 +1362,172 @@ fn main() -> Result<()> {
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
         let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
-            match run_sop_conversation(&sop_dir, &agent_g_dir, &src_doc,
-                &kb_docs_list, &cli.gateway, &tags, timeout, cli.variant.as_deref()) {
-                Ok((_steps, llm_rounds, ep_done)) => Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
-                    answer: String::new(), episode_id: Some(eid.clone()), surfaced_titles: vec![],
-                    done: ep_done, rounds: llm_rounds,
-                }),
+            match run_sop_conversation(
+                &sop_dir,
+                &agent_g_dir,
+                &src_doc,
+                &kb_docs_list,
+                &cli.gateway,
+                &tags,
+                timeout,
+                cli.variant.as_deref(),
+            ) {
+                Ok((_steps, llm_rounds, ep_done)) => {
+                    Ok(kb_eval::backend::tensorzero::EpisodeOutcome {
+                        answer: String::new(),
+                        episode_id: Some(eid.clone()),
+                        surfaced_titles: vec![],
+                        done: ep_done,
+                        rounds: llm_rounds,
+                    })
+                }
                 Err(e) => {
                     eprintln!("[sop] aborted: {e:#}");
                     Err(e)
                 }
             }
         } else {
-            run_episode(chat, &prompt, exec, 50, EpisodePolicy::enrich())
+            // Dedup temporarily OFF (see the SOP path) — notebook writes don't
+            // invalidate cached reads yet.
+            run_episode(
+                chat,
+                &prompt,
+                exec,
+                50,
+                EpisodePolicy {
+                    stop_on_done: true,
+                    dedup_readonly: false,
+                },
+            )
         };
         let tz_ms = t1.elapsed().as_millis();
 
-        // ── Post-episode: compare agent graph with reference ──
         let agent_g = GraphStore::open(&agent_g_dir).unwrap();
+        let was_done = outcome.as_ref().map(|o| o.done).unwrap_or(false);
+        let rounds = outcome.as_ref().map(|o| o.rounds).unwrap_or(0);
+        let cli_gateway = &cli.gateway;
+
+        if tables_only {
+            let ((pc, pt), (vc, vt)) = compare_tables_by_domain(&agent_g_dir, &src_doc, &cols);
+            let csp_count = glossa::tables::count_csp_files(&agent_g_dir, &src_doc);
+            let frac = |n: usize, d: usize| if d == 0 { 1.0 } else { n as f64 / d as f64 };
+            kb_eval::tz::post_feedback(
+                cli_gateway,
+                &eid,
+                "ref_param_coverage",
+                json!(frac(pc, pt)),
+                &tags,
+            );
+            kb_eval::tz::post_feedback(
+                cli_gateway,
+                &eid,
+                "ref_value_coverage",
+                json!(frac(vc, vt)),
+                &tags,
+            );
+            kb_eval::tz::post_feedback(
+                cli_gateway,
+                &eid,
+                "table_csp_count",
+                json!(csp_count as f64),
+                &tags,
+            );
+            kb_eval::tz::post_feedback(
+                cli_gateway,
+                &eid,
+                "tools_used",
+                json!(rounds as f64),
+                &tags,
+            );
+            if let Err(e) = &outcome {
+                println!("EPISODE ERROR: {e}");
+            }
+            println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
+            println!(
+                "TABLES episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
+                agent_g_dir.display()
+            );
+            break;
+        }
+
+        // ── Compile agent .csp tables → constraint graph (if present) ──
+        {
+            let idx_agent = DocIndex::open_or_create(&agent_g_dir).unwrap();
+            let ont = Ontology::load_or_default(&agent_g_dir);
+            let tables_path = glossa::notebook::notes_root(&agent_g_dir)
+                .join(glossa::notebook::mirror_dir_for_doc(&src_doc));
+            // The mirror also holds parameters.md and free-form notes — only
+            // compile when the agent actually wrote at least one .csp table.
+            if glossa::tables::count_csp_files(&agent_g_dir, &src_doc) > 0 {
+                eprintln!("[tables-to-graph] compiling {} …", tables_path.display());
+                match glossa::tables::tables_to_graph(
+                    &idx_agent,
+                    &agent_g,
+                    &ont,
+                    &src_doc,
+                    &tables_path,
+                ) {
+                    Ok(report) => {
+                        for line in &report.lines {
+                            eprintln!("  {line}");
+                        }
+                    }
+                    Err(e) => eprintln!("[tables-to-graph] failed: {e:#}"),
+                }
+            }
+        }
+
+        // ── Post-episode: compare agent graph with reference ──
         let (field_cov, constraint_cov, literal_cov) = compare_graphs(&agent_g, &ref_json_clone);
         // Exclude the reference map (Standard nodes, DEFINED_IN edges) from the
         // counts — those measure the constraint graph, not the SOP scaffolding.
-        let agent_nodes = agent_g.all_nodes().map(|v| v.iter().filter(|n| n.node_type != "Standard").count()).unwrap_or(0);
-        let agent_edges = agent_g.all_edges().map(|v| v.iter().filter(|e| e.edge_type != "DEFINED_IN").count()).unwrap_or(0);
-        let was_done = outcome.as_ref().map(|o| o.done).unwrap_or(false);
-        let rounds = outcome.as_ref().map(|o| o.rounds).unwrap_or(0);
+        let agent_nodes = agent_g
+            .all_nodes()
+            .map(|v| v.iter().filter(|n| n.node_type != "Standard").count())
+            .unwrap_or(0);
+        let agent_edges = agent_g
+            .all_edges()
+            .map(|v| v.iter().filter(|e| e.edge_type != "DEFINED_IN").count())
+            .unwrap_or(0);
 
         // ── DISCOVERY coverage feedback (one build) ──
-        let cli_gateway = &cli.gateway;
         kb_eval::tz::post_feedback(cli_gateway, &eid, "field_coverage", json!(field_cov), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "constraint_coverage", json!(constraint_cov), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "literal_coverage", json!(literal_cov), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "agent_graph_node_count", json!(agent_nodes as f64), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "agent_graph_edge_count", json!(agent_edges as f64), &tags);
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "constraint_coverage",
+            json!(constraint_cov),
+            &tags,
+        );
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "literal_coverage",
+            json!(literal_cov),
+            &tags,
+        );
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "agent_graph_node_count",
+            json!(agent_nodes as f64),
+            &tags,
+        );
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "agent_graph_edge_count",
+            json!(agent_edges as f64),
+            &tags,
+        );
         kb_eval::tz::post_feedback(cli_gateway, &eid, "tools_used", json!(rounds as f64), &tags);
-        if let Err(e) = &outcome { println!("EPISODE ERROR: {e}"); }
-        println!("DISCOVERY  episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}");
+        if let Err(e) = &outcome {
+            println!("EPISODE ERROR: {e}");
+        }
+        println!(
+            "DISCOVERY  episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}  graph: {agent_nodes} nodes/{agent_edges} edges  cov: f={field_cov:.2} c={constraint_cov:.2} l={literal_cov:.2}",
+            agent_g_dir.display()
+        );
 
         // ── VALIDATION: sweep EVERY row through the AGENT graph (algorithmic, no LLM) ──
         // The GOST (agent) and MDM (rows) use different names for a parameter, so map
@@ -956,9 +1545,9 @@ fn main() -> Result<()> {
                 continue;
             }
             for f in agent_nodes_v.iter().filter(|n| n.node_type == "Field") {
-                let Ok(score) =
-                    glossa::constraint_adapter::field_reference_overlap(&agent_g, &f.id, &ont_v, &dom)
-                else {
+                let Ok(score) = glossa::constraint_adapter::field_reference_overlap(
+                    &agent_g, &f.id, &ont_v, &dom,
+                ) else {
                     continue;
                 };
                 if score >= 0.5 {
@@ -994,25 +1583,73 @@ fn main() -> Result<()> {
                 unmapped.join(", ")
             }
         );
-        let agent_constrains = agent_edges_v.iter().any(|e| e.edge_type == "CONSTRAINED_BY");
+        let agent_constrains = agent_edges_v
+            .iter()
+            .any(|e| e.edge_type == "CONSTRAINED_BY");
 
         let (mut vpass, mut vtot, mut icatch, mut itot) = (0usize, 0usize, 0usize, 0usize);
         for c in &cases {
-            let assign: Vec<(String, Value)> = c.assignments.iter()
-                .map(|(k, v)| (mdm_to_agent.get(k).cloned().unwrap_or_else(|| k.clone()), v.clone()))
+            let assign: Vec<(String, Value)> = c
+                .assignments
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        mdm_to_agent.get(k).cloned().unwrap_or_else(|| k.clone()),
+                        v.clone(),
+                    )
+                })
                 .collect();
             let csp = solve_csp(&agent_g_dir, &agent_g, c.mode, &assign);
             let expected_valid = !c.name.contains("invalid");
             let ok = csp.valid == expected_valid;
-            if expected_valid { vtot += 1; if ok { vpass += 1; } }
-            else { itot += 1; if ok { icatch += 1; } }
+            if expected_valid {
+                vtot += 1;
+                if ok {
+                    vpass += 1;
+                }
+            } else {
+                itot += 1;
+                if ok {
+                    icatch += 1;
+                }
+            }
         }
-        let val_acc = if cases.is_empty() { 0.0 } else { (vpass + icatch) as f64 / cases.len() as f64 };
-        let valid_pass_rate = if vtot == 0 { 0.0 } else { vpass as f64 / vtot as f64 };
-        let invalid_catch_rate = if itot == 0 { 0.0 } else { icatch as f64 / itot as f64 };
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "validation_accuracy", json!(val_acc), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "valid_pass_rate", json!(valid_pass_rate), &tags);
-        kb_eval::tz::post_feedback(cli_gateway, &eid, "invalid_catch_rate", json!(invalid_catch_rate), &tags);
+        let val_acc = if cases.is_empty() {
+            0.0
+        } else {
+            (vpass + icatch) as f64 / cases.len() as f64
+        };
+        let valid_pass_rate = if vtot == 0 {
+            0.0
+        } else {
+            vpass as f64 / vtot as f64
+        };
+        let invalid_catch_rate = if itot == 0 {
+            0.0
+        } else {
+            icatch as f64 / itot as f64
+        };
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "validation_accuracy",
+            json!(val_acc),
+            &tags,
+        );
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "valid_pass_rate",
+            json!(valid_pass_rate),
+            &tags,
+        );
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &eid,
+            "invalid_catch_rate",
+            json!(invalid_catch_rate),
+            &tags,
+        );
         println!("VALIDATION over {} rows (mapped {}/{} params)  acc={val_acc:.3}  valid_pass={vpass}/{vtot}  invalid_catch={icatch}/{itot}{}",
             cases.len(), mdm_to_agent.len(), cols.len(),
             if agent_constrains { "" } else { "  [WARN: agent graph has no constraints]" });
@@ -1044,12 +1681,78 @@ mod tests {
 
     #[test]
     fn parse_reported_remaining_contract() {
-        assert_eq!(parse_reported_remaining(r#"done. {"remaining": 7}"#), Some(7));
+        assert_eq!(
+            parse_reported_remaining(r#"done. {"remaining": 7}"#),
+            Some(7)
+        );
         assert_eq!(parse_reported_remaining("remaining: 0"), Some(0));
         // The LAST report wins — the final self-check overrides earlier narration.
-        assert_eq!(parse_reported_remaining(r#"{"remaining": 9} … after the upsert: {"remaining": 3}"#), Some(3));
+        assert_eq!(
+            parse_reported_remaining(r#"{"remaining": 9} … after the upsert: {"remaining": 3}"#),
+            Some(3)
+        );
         assert_eq!(parse_reported_remaining("no report at all"), None);
         assert_eq!(parse_reported_remaining("remaining params: none"), None);
         assert_eq!(parse_reported_remaining(""), None);
+    }
+
+    #[test]
+    fn tables_domain_compare_matches_by_values_not_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Column named differently from the reference parameter, but its value
+        // set reproduces the reference domain → covered.
+        std::fs::write(
+            mirror.join("t.csp"),
+            "Диаметр круга;Марка\n125;14A\n150;25A\n",
+        )
+        .unwrap();
+        let cols = vec![
+            ColInfo {
+                name: "Наружный диаметр".into(),
+                valid: vec!["125".into(), "150".into()],
+            },
+            ColInfo {
+                name: "Высота".into(),
+                valid: vec!["20".into(), "32".into()],
+            },
+        ];
+        let ((pc, pt), (vc, vt)) = compare_tables_by_domain(dir.path(), doc, &cols);
+        assert_eq!((pc, pt), (1, 2));
+        assert_eq!((vc, vt), (2, 4));
+    }
+
+    #[test]
+    fn tables_domain_compare_regex_alias_covers_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Agent wrote a regex PATTERN instead of enumerating marks — it must
+        // cover concrete reference values like "14A" and "25A".
+        std::fs::write(mirror.join("t.csp"), "Марка\n\\d+A\n").unwrap();
+        let cols = vec![ColInfo {
+            name: "Марка материала".into(),
+            valid: vec!["14A".into(), "25A".into()],
+        }];
+        let ((pc, pt), (vc, vt)) = compare_tables_by_domain(dir.path(), doc, &cols);
+        assert_eq!((pc, pt), (1, 1));
+        assert_eq!((vc, vt), (2, 2));
+    }
+
+    #[test]
+    fn tables_domain_compare_empty_when_no_csp() {
+        let dir = tempfile::tempdir().unwrap();
+        let cols = vec![ColInfo {
+            name: "X".into(),
+            valid: vec!["1".into()],
+        }];
+        let ((pc, _), (vc, _)) = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols);
+        assert_eq!(pc, 0);
+        assert_eq!(vc, 0);
     }
 }

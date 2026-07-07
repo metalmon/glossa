@@ -11,13 +11,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "kb-train", about = "Build & learn: enrich graph, export TZ episodes, GEPA optimize")]
+#[command(
+    name = "kb-train",
+    about = "Build & learn: enrich graph, export TZ episodes, GEPA optimize"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Enrich the reasoning graph from solved training cases.
     Enrich {
@@ -76,7 +80,10 @@ enum Cmd {
         read: PathBuf,
         #[arg(long, default_value = "gepa-out/answer_hotpot.prompt.txt")]
         out: PathBuf,
-        #[arg(long, default_value = "eval/tensorzero/config/answer_hotpot/system.minijinja")]
+        #[arg(
+            long,
+            default_value = "eval/tensorzero/config/answer_hotpot/system.minijinja"
+        )]
         seed: PathBuf,
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
@@ -128,17 +135,36 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Enrich { train, work, limit, tensorzero_endpoint, tensorzero_function } => {
-            kb_eval::enrich::run_enrich(&train, &work, limit, &tensorzero_endpoint, &tensorzero_function)
-        }
-        Cmd::ExportTz { work, out, train, function, run, clickhouse, k } => {
+        Cmd::Enrich {
+            train,
+            work,
+            limit,
+            tensorzero_endpoint,
+            tensorzero_function,
+        } => kb_eval::enrich::run_enrich(
+            &train,
+            &work,
+            limit,
+            &tensorzero_endpoint,
+            &tensorzero_function,
+        ),
+        Cmd::ExportTz {
+            work,
+            out,
+            train,
+            function,
+            run,
+            clickhouse,
+            k,
+        } => {
             let train_files = if train.is_empty() {
                 vec![PathBuf::from("kb-val/derived/synthetic-train.json")]
             } else {
                 train
             };
             kb_eval::export_tz::run_export(kb_eval::export_tz::ExportConfig {
-                clickhouse_url: clickhouse.unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
+                clickhouse_url: clickhouse
+                    .unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
                 function_name: function,
                 run_tag: run,
                 train_files,
@@ -148,9 +174,14 @@ fn main() -> Result<()> {
             })
             .map(|_| ())
         }
-        Cmd::Dump { work, out, k, poll_secs, idle_stop, once } => {
-            run_dump(work, out, k, poll_secs, idle_stop, once)
-        }
+        Cmd::Dump {
+            work,
+            out,
+            k,
+            poll_secs,
+            idle_stop,
+            once,
+        } => run_dump(work, out, k, poll_secs, idle_stop, once),
         Cmd::Optimize {
             search,
             grep,
@@ -227,9 +258,10 @@ fn load_jsonl<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<Vec<T>> 
         if line.trim().is_empty() {
             continue;
         }
-        out.push(serde_json::from_str(&line).with_context(|| {
-            format!("parse {} line {}", path.display(), n + 1)
-        })?);
+        out.push(
+            serde_json::from_str(&line)
+                .with_context(|| format!("parse {} line {}", path.display(), n + 1))?,
+        );
     }
     Ok(out)
 }
@@ -353,7 +385,11 @@ fn run_optimize(
     Ok(())
 }
 
-fn evidence_is_relevant(analyzer: &glossa::index::multilang::TermAnalyzer, label: &str, chunk_text: &str) -> bool {
+fn evidence_is_relevant(
+    analyzer: &glossa::index::multilang::TermAnalyzer,
+    label: &str,
+    chunk_text: &str,
+) -> bool {
     let mut label_terms = HashSet::new();
     {
         let mut s = std::collections::BTreeSet::new();
@@ -365,7 +401,10 @@ fn evidence_is_relevant(analyzer: &glossa::index::multilang::TermAnalyzer, label
     }
     let mut chunk_terms = std::collections::BTreeSet::new();
     analyzer.terms(chunk_text, &mut chunk_terms);
-    let shared = label_terms.iter().filter(|t| chunk_terms.contains(*t)).count();
+    let shared = label_terms
+        .iter()
+        .filter(|t| chunk_terms.contains(*t))
+        .count();
     shared * 2 >= label_terms.len()
 }
 
@@ -381,7 +420,14 @@ fn hits_json(hits: &[RankedHit]) -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u32, once: bool) -> Result<()> {
+fn run_dump(
+    work: PathBuf,
+    out: PathBuf,
+    k: usize,
+    poll_secs: u64,
+    idle_stop: u32,
+    once: bool,
+) -> Result<()> {
     use std::io::Write as _;
 
     eprintln!("note: `dump` is legacy — prefer `export-tz` from ClickHouse episodes");
@@ -405,7 +451,8 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
     );
 
     let mut seen: HashSet<String> = HashSet::new();
-    let (mut nodes_kept, mut search_written, mut select_written, mut recall_hit) = (0u64, 0u64, 0u64, 0u64);
+    let (mut nodes_kept, mut search_written, mut select_written, mut recall_hit) =
+        (0u64, 0u64, 0u64, 0u64);
     let mut idle = 0u32;
 
     loop {
@@ -442,12 +489,21 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
             }
             nodes_kept += 1;
             let gold_locs: Vec<String> = relevant.iter().map(|(p, l)| format!("{p}#{l}")).collect();
-            writeln!(search_f, "{}", json!({"question": node.label, "gold": gold_locs}))?;
+            writeln!(
+                search_f,
+                "{}",
+                json!({"question": node.label, "gold": gold_locs})
+            )?;
             search_written += 1;
-            let hits = idx.search_filtered(&node.label, k, None, None).unwrap_or_default();
+            let hits = idx
+                .search_filtered(&node.label, k, None, None)
+                .unwrap_or_default();
             let gold_set: HashSet<(String, String)> = relevant.into_iter().collect();
-            let gold_ords: Vec<u64> =
-                hits.iter().filter(|h| gold_set.contains(&(h.path.clone(), h.location.clone()))).map(|h| h.ord).collect();
+            let gold_ords: Vec<u64> = hits
+                .iter()
+                .filter(|h| gold_set.contains(&(h.path.clone(), h.location.clone())))
+                .map(|h| h.ord)
+                .collect();
             if !gold_ords.is_empty() {
                 recall_hit += 1;
                 writeln!(

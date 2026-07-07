@@ -39,7 +39,11 @@ pub fn edge_key(from: &str, edge_type: &str, to: &str) -> String {
 
 /// Normalize a label for deduplication: lowercase, trim, collapse runs of whitespace to a single space.
 pub fn normalize_label(s: &str) -> String {
-    s.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    s.trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Derived per-node attributes from the generalization pass (community id + centrality), stored in
@@ -83,8 +87,12 @@ impl GraphStore {
                id TEXT PRIMARY KEY, community INTEGER, pagerank REAL, degree INTEGER);",
         )
         .context("init schema")?;
-        let node_index = crate::graph::node_index::NodeIndex::open_or_create(dir).context("open node index")?;
-        Ok(GraphStore { conn: Mutex::new(conn), node_index })
+        let node_index =
+            crate::graph::node_index::NodeIndex::open_or_create(dir).context("open node index")?;
+        Ok(GraphStore {
+            conn: Mutex::new(conn),
+            node_index,
+        })
     }
 
     // ── private helpers: take &Connection (no Mutex locking) ─────────────────
@@ -102,7 +110,11 @@ impl GraphStore {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?;
         Ok(Node {
             id: row.get(0)?,
@@ -129,7 +141,11 @@ impl GraphStore {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?;
         Ok(Edge {
             from: row.get(0)?,
@@ -388,7 +404,9 @@ impl GraphStore {
                  created_at FROM edges",
             )
             .context("prepare all_edges")?;
-        let rows = stmt.query_map([], Self::row_to_edge).context("query all_edges")?;
+        let rows = stmt
+            .query_map([], Self::row_to_edge)
+            .context("query all_edges")?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -407,8 +425,11 @@ impl GraphStore {
     /// drops the document-structural `auto-*` layer. Returns count removed.
     pub fn delete_edges_by_origin(&self, origin: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
-        c.execute("DELETE FROM edges WHERE origin = ?1", rusqlite::params![origin])
-            .context("delete edges by origin")?;
+        c.execute(
+            "DELETE FROM edges WHERE origin = ?1",
+            rusqlite::params![origin],
+        )
+        .context("delete edges by origin")?;
         Ok(c.changes() as usize)
     }
 
@@ -418,8 +439,11 @@ impl GraphStore {
     /// Returns the number of dup nodes actually merged. Ids equal to `canonical` or absent are skipped.
     pub fn merge_nodes(&self, canonical: &str, dups: &[String]) -> anyhow::Result<usize> {
         use std::collections::HashSet;
-        let dupset: HashSet<&str> =
-            dups.iter().map(|s| s.as_str()).filter(|d| *d != canonical).collect();
+        let dupset: HashSet<&str> = dups
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|d| *d != canonical)
+            .collect();
         if dupset.is_empty() {
             return Ok(0);
         }
@@ -473,7 +497,10 @@ impl GraphStore {
         for dup in &dupset {
             txn.execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![dup])
                 .context("merge: delete dup node")?;
-            let _ = txn.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![dup]);
+            let _ = txn.execute(
+                "DELETE FROM node_meta WHERE id = ?1",
+                rusqlite::params![dup],
+            );
         }
         Self::put_node_c(&txn, &canon)?;
         txn.commit().context("commit merge")?;
@@ -488,11 +515,16 @@ impl GraphStore {
             return Ok(0);
         }
         let c = self.conn.lock().unwrap();
-        let txn = c.unchecked_transaction().context("begin delete_nodes txn")?;
+        let txn = c
+            .unchecked_transaction()
+            .context("begin delete_nodes txn")?;
         let mut removed = 0usize;
         for id in ids {
-            txn.execute("DELETE FROM edges WHERE efrom = ?1 OR eto = ?1", rusqlite::params![id])
-                .context("delete_nodes: incident edges")?;
+            txn.execute(
+                "DELETE FROM edges WHERE efrom = ?1 OR eto = ?1",
+                rusqlite::params![id],
+            )
+            .context("delete_nodes: incident edges")?;
             let _ = txn.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![id]);
             removed += txn
                 .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
@@ -507,7 +539,8 @@ impl GraphStore {
     pub fn replace_node_meta(&self, rows: &[(String, NodeMeta)]) -> anyhow::Result<()> {
         let c = self.conn.lock().unwrap();
         let txn = c.unchecked_transaction().context("begin node_meta txn")?;
-        txn.execute("DELETE FROM node_meta", []).context("clear node_meta")?;
+        txn.execute("DELETE FROM node_meta", [])
+            .context("clear node_meta")?;
         for (id, m) in rows {
             txn.execute(
                 "INSERT OR REPLACE INTO node_meta (id, community, pagerank, degree) \
@@ -592,7 +625,9 @@ impl GraphStore {
             )
             .context("prepare community_sizes")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as usize)))
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as usize))
+            })
             .context("query community_sizes")?;
         let mut out = Vec::new();
         for r in rows {
@@ -680,7 +715,12 @@ impl GraphStore {
     /// Update the `label` and/or `node_type` of the node with the given id in place.
     /// Only fields that are `Some` are updated. Returns rows changed (0 or 1).
     /// If both args are `None`, does nothing and returns 0.
-    pub fn update_node(&self, id: &str, new_label: Option<&str>, new_type: Option<&str>) -> anyhow::Result<usize> {
+    pub fn update_node(
+        &self,
+        id: &str,
+        new_label: Option<&str>,
+        new_type: Option<&str>,
+    ) -> anyhow::Result<usize> {
         if new_label.is_none() && new_type.is_none() {
             return Ok(0);
         }
@@ -713,15 +753,18 @@ impl GraphStore {
     }
 
     /// Return the id of the first node with matching node_type and normalized label.
-    pub fn find_by_label_type(&self, label: &str, node_type: &str) -> anyhow::Result<Option<String>> {
+    pub fn find_by_label_type(
+        &self,
+        label: &str,
+        node_type: &str,
+    ) -> anyhow::Result<Option<String>> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c
             .prepare("SELECT id FROM nodes WHERE label_norm = ?1 AND node_type = ?2 LIMIT 1")
             .context("prepare find_by_label_type")?;
-        match stmt.query_row(
-            rusqlite::params![normalize_label(label), node_type],
-            |r| r.get::<_, String>(0),
-        ) {
+        match stmt.query_row(rusqlite::params![normalize_label(label), node_type], |r| {
+            r.get::<_, String>(0)
+        }) {
             Ok(id) => Ok(Some(id)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
@@ -766,7 +809,8 @@ impl GraphStore {
             if n.prov.source_path.is_empty() {
                 anyhow::bail!("node {:?} has empty provenance", n.id);
             }
-            ont.validate_node(&n.node_type).map_err(|e| anyhow::anyhow!(e))?;
+            ont.validate_node(&n.node_type)
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
         let type_of = |id: &str, batch: &[Node]| -> Option<String> {
             batch
@@ -836,7 +880,9 @@ impl GraphStore {
         // has drifted from the node table (e.g. enrichment added nodes, or it was never built),
         // rebuild it from the labels+aliases here. Done under the connection lock, so concurrent
         // resolves can't race the rebuild.
-        let count: i64 = c.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0)).context("count nodes")?;
+        let count: i64 = c
+            .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
+            .context("count nodes")?;
         if self.node_index.num_docs() as i64 != count {
             let docs: Vec<(String, Vec<String>)> = Self::all_nodes_c(&c)?
                 .into_iter()
@@ -926,11 +972,17 @@ strict = true
         g.upsert(&ont, &[n], &[]).unwrap();
         // exact lookup served by the label_norm index
         assert_eq!(g.resolve("Старое Имя").unwrap(), vec!["org:x".to_string()]);
-        assert_eq!(g.find_by_label("старое имя").unwrap(), Some("org:x".to_string()));
+        assert_eq!(
+            g.find_by_label("старое имя").unwrap(),
+            Some("org:x".to_string())
+        );
 
         // rename → label_norm must follow, otherwise the index goes stale
         g.update_node("org:x", Some("Новое Имя"), None).unwrap();
-        assert_eq!(g.find_by_label("Новое Имя").unwrap(), Some("org:x".to_string()));
+        assert_eq!(
+            g.find_by_label("Новое Имя").unwrap(),
+            Some("org:x".to_string())
+        );
         assert_eq!(g.find_by_label("Старое Имя").unwrap(), None);
         assert_eq!(g.resolve("новое имя").unwrap(), vec!["org:x".to_string()]);
     }
@@ -993,7 +1045,11 @@ strict = true
         let hits = g
             .resolve("проблема периодической потери связи Profibus обмен данными")
             .unwrap();
-        assert_eq!(hits, vec!["sym:loss".to_string()], "long query finds the node via BM25: {hits:?}");
+        assert_eq!(
+            hits,
+            vec!["sym:loss".to_string()],
+            "long query finds the node via BM25: {hits:?}"
+        );
     }
 
     #[test]
@@ -1090,12 +1146,22 @@ mod tests {
             prov: prov(),
         })
         .unwrap();
-        g.replace_node_meta(&[("a".into(), NodeMeta { community: Some(0), pagerank: Some(0.5), degree: Some(1) })])
-            .unwrap();
+        g.replace_node_meta(&[(
+            "a".into(),
+            NodeMeta {
+                community: Some(0),
+                pagerank: Some(0.5),
+                degree: Some(1),
+            },
+        )])
+        .unwrap();
 
         g.delete_node("a").unwrap();
         assert!(g.get_node("a").unwrap().is_none());
-        assert!(g.node_meta("a").unwrap().is_none(), "meta must not survive the node");
+        assert!(
+            g.node_meta("a").unwrap().is_none(),
+            "meta must not survive the node"
+        );
         assert_eq!(g.node_meta_count().unwrap(), 0);
     }
 
@@ -1113,16 +1179,42 @@ mod tests {
         g.put_node(&mk("a")).unwrap();
         g.put_node(&mk("b")).unwrap();
         g.put_node(&mk("c")).unwrap();
-        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "CAUSED_BY".into(), prov: prov() }).unwrap();
-        g.put_edge(&Edge { from: "b".into(), to: "c".into(), edge_type: "RESOLVED_BY".into(), prov: prov() }).unwrap();
-        g.replace_node_meta(&[("a".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(2) })])
-            .unwrap();
+        g.put_edge(&Edge {
+            from: "a".into(),
+            to: "b".into(),
+            edge_type: "CAUSED_BY".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "b".into(),
+            to: "c".into(),
+            edge_type: "RESOLVED_BY".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        g.replace_node_meta(&[(
+            "a".into(),
+            NodeMeta {
+                community: Some(1),
+                pagerank: Some(0.5),
+                degree: Some(2),
+            },
+        )])
+        .unwrap();
 
         let removed = g.delete_nodes(&["a".into()]).unwrap();
         assert_eq!(removed, 1);
         assert!(g.get_node("a").unwrap().is_none(), "node a deleted");
-        assert!(g.get_node("b").unwrap().is_some() && g.get_node("c").unwrap().is_some(), "b, c survive");
-        assert_eq!(g.edge_count().unwrap(), 1, "incident a->b gone, b->c survives");
+        assert!(
+            g.get_node("b").unwrap().is_some() && g.get_node("c").unwrap().is_some(),
+            "b, c survive"
+        );
+        assert_eq!(
+            g.edge_count().unwrap(),
+            1,
+            "incident a->b gone, b->c survives"
+        );
         assert!(g.node_meta("a").unwrap().is_none(), "a's meta gone");
         // empty / missing ids are no-ops
         assert_eq!(g.delete_nodes(&[]).unwrap(), 0);
@@ -1134,11 +1226,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         g.replace_node_meta(&[
-            ("self".into(), NodeMeta { community: Some(3), pagerank: Some(0.9), degree: Some(5) }),
-            ("low".into(), NodeMeta { community: Some(3), pagerank: Some(0.1), degree: Some(1) }),
-            ("mid".into(), NodeMeta { community: Some(3), pagerank: Some(0.5), degree: Some(2) }),
-            ("high".into(), NodeMeta { community: Some(3), pagerank: Some(0.8), degree: Some(4) }),
-            ("other".into(), NodeMeta { community: Some(4), pagerank: Some(1.0), degree: Some(10) }),
+            (
+                "self".into(),
+                NodeMeta {
+                    community: Some(3),
+                    pagerank: Some(0.9),
+                    degree: Some(5),
+                },
+            ),
+            (
+                "low".into(),
+                NodeMeta {
+                    community: Some(3),
+                    pagerank: Some(0.1),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "mid".into(),
+                NodeMeta {
+                    community: Some(3),
+                    pagerank: Some(0.5),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "high".into(),
+                NodeMeta {
+                    community: Some(3),
+                    pagerank: Some(0.8),
+                    degree: Some(4),
+                },
+            ),
+            (
+                "other".into(),
+                NodeMeta {
+                    community: Some(4),
+                    pagerank: Some(1.0),
+                    degree: Some(10),
+                },
+            ),
         ])
         .unwrap();
 
@@ -1155,9 +1282,30 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
         assert_eq!(g.node_meta_count().unwrap(), 0);
         g.replace_node_meta(&[
-            ("a".into(), NodeMeta { community: Some(1), pagerank: Some(0.9), degree: Some(2) }),
-            ("b".into(), NodeMeta { community: Some(1), pagerank: Some(0.1), degree: Some(1) }),
-            ("c".into(), NodeMeta { community: Some(2), pagerank: Some(0.5), degree: Some(3) }),
+            (
+                "a".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.9),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "b".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.1),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "c".into(),
+                NodeMeta {
+                    community: Some(2),
+                    pagerank: Some(0.5),
+                    degree: Some(3),
+                },
+            ),
         ])
         .unwrap();
         assert_eq!(g.node_meta_count().unwrap(), 3);

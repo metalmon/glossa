@@ -5,8 +5,10 @@ use anyhow::Context;
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING};
 use tantivy::schema::Value;
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING,
+};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
@@ -72,9 +74,10 @@ fn register_tokenizers(index: &Index) {
     index
         .tokenizers()
         .register("multilang", multilang_analyzer(default_detector()));
-    let trigram = TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).expect("trigram tokenizer"))
-        .filter(LowerCaser)
-        .build();
+    let trigram =
+        TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).expect("trigram tokenizer"))
+            .filter(LowerCaser)
+            .build();
     index.tokenizers().register("trigram3", trigram);
 }
 
@@ -89,7 +92,11 @@ pub fn abs_root(dir: &Path) -> PathBuf {
     match std::fs::canonicalize(dir) {
         Ok(p) => {
             let s = p.to_string_lossy();
-            PathBuf::from(s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or_else(|| s.into_owned()))
+            PathBuf::from(
+                s.strip_prefix(r"\\?\")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s.into_owned()),
+            )
         }
         Err(_) => dir.to_path_buf(),
     }
@@ -99,7 +106,10 @@ pub fn abs_root(dir: &Path) -> PathBuf {
 /// the index and the graph; `DocIndex::doc_file` turns it back into a real file path. Built once,
 /// at the walk boundary, so the stored key never depends on how the corpus was addressed.
 pub fn rel_key(root: &Path, abs: &Path) -> String {
-    abs.strip_prefix(root).unwrap_or(abs).to_string_lossy().to_string()
+    abs.strip_prefix(root)
+        .unwrap_or(abs)
+        .to_string_lossy()
+        .to_string()
 }
 
 impl DocIndex {
@@ -115,7 +125,12 @@ impl DocIndex {
         register_tokenizers(&index);
         let fields = fields_from_schema(&index.schema())?;
         let reader = index.reader()?;
-        Ok(DocIndex { index, fields, root: abs_root(dir), reader })
+        Ok(DocIndex {
+            index,
+            fields,
+            root: abs_root(dir),
+            reader,
+        })
     }
 
     /// Turn a stored (corpus-relative) doc key back into the real file path under the corpus root.
@@ -140,8 +155,15 @@ impl RankedHit {
     /// non-numeric label (the heading text, or the file type for paged formats whose location is
     /// itself a number) so nothing competes with the read key.
     pub fn display_line(&self) -> String {
-        let label = if self.location.starts_with("p.") { self.file_type.as_str() } else { self.location.as_str() };
-        format!("[#{}] {} · {} · {}", self.ord, self.path, label, self.snippet)
+        let label = if self.location.starts_with("p.") {
+            self.file_type.as_str()
+        } else {
+            self.location.as_str()
+        };
+        format!(
+            "[#{}] {} · {} · {}",
+            self.ord, self.path, label, self.snippet
+        )
     }
 }
 
@@ -165,7 +187,11 @@ impl DocIndex {
             // broken empty path. Fall back to the chunk's ordinal so every section has a
             // real id ("<path>#<ord>") that matches how the agent references it (#n) and
             // resolves the same way in the section node, resolve_section_ref, and read.
-            let location = if c.location.is_empty() { ord.to_string() } else { c.location.clone() };
+            let location = if c.location.is_empty() {
+                ord.to_string()
+            } else {
+                c.location.clone()
+            };
             writer.add_document(doc!(
                 self.fields.body => c.text.clone(),
                 self.fields.body_trigrams => c.text.clone(),
@@ -192,10 +218,16 @@ impl DocIndex {
         for (score, addr) in top {
             let d: TantivyDocument = searcher.doc(addr)?;
             let get = |f: tantivy::schema::Field| -> String {
-                d.get_first(f).and_then(|v| v.as_str()).unwrap_or("").to_string()
+                d.get_first(f)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
             };
             let snippet = snippet_gen.snippet_from_doc(&d).fragment().to_string();
-            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
+            let ord = d
+                .get_first(self.fields.ord)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             hits.push(RankedHit {
                 path: get(self.fields.path),
                 location: get(self.fields.location),
@@ -230,7 +262,11 @@ impl DocIndex {
         let filtered: Vec<RankedHit> = hits
             .into_iter()
             .filter(|h| file_type.is_none_or(|ft| h.file_type == ft))
-            .filter(|h| glob_m.as_ref().is_none_or(|m| crate::glob::path_matches(m, &h.path)))
+            .filter(|h| {
+                glob_m
+                    .as_ref()
+                    .is_none_or(|m| crate::glob::path_matches(m, &h.path))
+            })
             .take(limit)
             .collect();
         Ok(filtered)
@@ -258,7 +294,10 @@ impl DocIndex {
                 )),
             ),
         ];
-        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
         match top.first() {
             Some((_score, addr)) => {
                 let d: TantivyDocument = searcher.doc(*addr)?;
@@ -297,7 +336,9 @@ impl DocIndex {
             let mut found = None;
             let lo = n.saturating_sub(50);
             for k in (lo..n).rev() {
-                if k == 0 { break; }
+                if k == 0 {
+                    break;
+                }
                 if self.ord_body(path, k)?.is_some() {
                     found = Some(k);
                     break;
@@ -323,16 +364,34 @@ impl DocIndex {
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
         let searcher = self.reader.searcher();
         let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_u64(self.fields.ord, n), IndexRecordOption::Basic))),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.path, path),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_u64(self.fields.ord, n),
+                    IndexRecordOption::Basic,
+                )),
+            ),
         ];
-        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
         match top.first() {
             Some((_score, addr)) => {
                 let d: TantivyDocument = searcher.doc(*addr)?;
-                Ok(Some(d.get_first(self.fields.body).and_then(|v| v.as_str()).unwrap_or("").to_string()))
+                Ok(Some(
+                    d.get_first(self.fields.body)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
             }
             None => Ok(None),
         }
@@ -345,16 +404,34 @@ impl DocIndex {
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
         let searcher = self.reader.searcher();
         let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_u64(self.fields.ord, n), IndexRecordOption::Basic))),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.path, path),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_u64(self.fields.ord, n),
+                    IndexRecordOption::Basic,
+                )),
+            ),
         ];
-        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
         match top.first() {
             Some((_score, addr)) => {
                 let d: TantivyDocument = searcher.doc(*addr)?;
-                Ok(Some(d.get_first(self.fields.location).and_then(|v| v.as_str()).unwrap_or("").to_string()))
+                Ok(Some(
+                    d.get_first(self.fields.location)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
             }
             None => Ok(None),
         }
@@ -380,12 +457,25 @@ impl DocIndex {
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
         let searcher = self.reader.searcher();
         let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_text(self.fields.path, path), IndexRecordOption::Basic))),
-            (Occur::Must, Box::new(TermQuery::new(
-                tantivy::Term::from_field_text(self.fields.location, location), IndexRecordOption::Basic))),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.path, path),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.location, location),
+                    IndexRecordOption::Basic,
+                )),
+            ),
         ];
-        let top = searcher.search(&BooleanQuery::new(clauses), &TopDocs::with_limit(1).order_by_score())?;
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
         match top.first() {
             Some((_score, addr)) => {
                 let d: TantivyDocument = searcher.doc(*addr)?;
@@ -475,7 +565,11 @@ impl DocIndex {
                     matches.push(path.to_string());
                 }
             })?;
-            Ok(if matches.len() == 1 { matches.pop() } else { None })
+            Ok(if matches.len() == 1 {
+                matches.pop()
+            } else {
+                None
+            })
         }
         if let Some(p) = match_normalized(self, &norm(input), &norm)? {
             return Ok(Some(p));
@@ -495,7 +589,7 @@ impl DocIndex {
 /// the read/section tools append when printing a chunk, so `doc.docx#3` collapses to
 /// `doc.docx`. Only a `#` immediately followed by a digit counts as an anchor — a `#`
 /// that is part of the real filename (e.g. `C#_notes.md`) is left untouched.
-fn strip_section_anchor(input: &str) -> String {
+pub(crate) fn strip_section_anchor(input: &str) -> String {
     match input.rfind('#') {
         Some(h) if input[h + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
             input[..h].trim_end().to_string()
@@ -508,7 +602,10 @@ fn strip_section_anchor(input: &str) -> String {
 /// (parsed from the `p.N` location), otherwise the 1-based sequence position `seq`.
 pub fn chunk_ord(file_type: &str, location: &str, seq: u64) -> u64 {
     if file_type == "pdf" {
-        if let Some(n) = location.strip_prefix("p.").and_then(|d| d.parse::<u64>().ok()) {
+        if let Some(n) = location
+            .strip_prefix("p.")
+            .and_then(|d| d.parse::<u64>().ok())
+        {
             return n;
         }
     }
@@ -529,7 +626,10 @@ fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Ok(FileSig { mtime_secs, size: md.len() })
+    Ok(FileSig {
+        mtime_secs,
+        size: md.len(),
+    })
 }
 
 impl DocIndex {
@@ -542,8 +642,16 @@ impl DocIndex {
         for addr in docs {
             let d: TantivyDocument = searcher.doc(addr)?;
             let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
-            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
-            f(s(self.fields.path), ord, s(self.fields.file_type), s(self.fields.body));
+            let ord = d
+                .get_first(self.fields.ord)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            f(
+                s(self.fields.path),
+                ord,
+                s(self.fields.file_type),
+                s(self.fields.body),
+            );
         }
         Ok(())
     }
@@ -577,8 +685,16 @@ impl DocIndex {
         for addr in docs {
             let d: TantivyDocument = searcher.doc(addr)?;
             let s = |fld| d.get_first(fld).and_then(|v| v.as_str()).unwrap_or("");
-            let ord = d.get_first(self.fields.ord).and_then(|v| v.as_u64()).unwrap_or(0);
-            f(s(self.fields.path), ord, s(self.fields.file_type), s(self.fields.body));
+            let ord = d
+                .get_first(self.fields.ord)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            f(
+                s(self.fields.path),
+                ord,
+                s(self.fields.file_type),
+                s(self.fields.body),
+            );
         }
         Ok(())
     }
@@ -637,7 +753,11 @@ pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
     let manifest = Manifest::load(dir);
     let delta = scan_delta(dir, &manifest)?;
     if delta.changed.is_empty() && delta.removed.is_empty() {
-        return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
+        return Ok(IndexStats {
+            added: 0,
+            removed: 0,
+            unchanged: delta.next.files.len(),
+        });
     }
     match index_dir(dir, false) {
         Ok(s) => Ok(s),
@@ -648,7 +768,10 @@ pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
 
 /// True if `e` is a tantivy writer-lock contention error (another process is indexing right now).
 fn is_lock_busy(e: &anyhow::Error) -> bool {
-    matches!(e.downcast_ref::<TantivyError>(), Some(TantivyError::LockFailure(_, _)))
+    matches!(
+        e.downcast_ref::<TantivyError>(),
+        Some(TantivyError::LockFailure(_, _))
+    )
 }
 
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
@@ -659,7 +782,11 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
     // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
     // graph.sqlite is PRESERVED — a reindex must not destroy hand/agent-built knowledge.
-    let mut manifest = if force { Manifest::default() } else { Manifest::load(dir) };
+    let mut manifest = if force {
+        Manifest::default()
+    } else {
+        Manifest::load(dir)
+    };
     let schema_migrate = manifest.index_schema_version < INDEX_SCHEMA_VERSION;
     if force {
         let _ = std::fs::remove_dir_all(dir.join(".glossa").join("index"));
@@ -678,7 +805,11 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     if !force {
         let delta = scan_delta(dir, &manifest)?;
         if delta.changed.is_empty() && delta.removed.is_empty() {
-            return Ok(IndexStats { added: 0, removed: 0, unchanged: delta.next.files.len() });
+            return Ok(IndexStats {
+                added: 0,
+                removed: 0,
+                unchanged: delta.next.files.len(),
+            });
         }
     }
 
@@ -758,7 +889,10 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
 
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
-            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, old_path.as_str()));
+            writer.delete_term(tantivy::Term::from_field_text(
+                idx.fields.path,
+                old_path.as_str(),
+            ));
             graph.delete_auto_by_source(old_path)?;
             stats.removed += 1;
         }
@@ -778,7 +912,10 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 // Only link to a real Document node — a file with no extractable chunks is in
                 // `next.files` but never got a node (build_document fires on the first chunk).
                 if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
-                    let sig = next.files.get(src).copied().unwrap_or(FileSig { mtime_secs: 0, size: 0 });
+                    let sig = next.files.get(src).copied().unwrap_or(FileSig {
+                        mtime_secs: 0,
+                        size: 0,
+                    });
                     let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
                 }
             }
@@ -823,7 +960,11 @@ mod incremental_tests {
     fn index_dir_builds_sequential_and_hierarchy_edges() {
         use crate::graph::build::section_id;
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n## C\nbody c\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.md"),
+            b"# A\nintro\n## B\nbody b\n## C\nbody c\n",
+        )
+        .unwrap();
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
         let p = "a.md".to_string(); // canonical key: corpus-root-relative
@@ -832,17 +973,27 @@ mod incremental_tests {
         let ac = section_id(&p, "A > C");
         // sequential: A -> A>B -> A>C reachable from A's section via outgoing edges
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
-        assert!(na.contains(&ab), "A neighbors include next/child A>B: {na:?}");
+        assert!(
+            na.contains(&ab),
+            "A neighbors include next/child A>B: {na:?}"
+        );
         // hierarchy: A>B's parent A is reachable
         let nab = crate::graph::traverse::neighbors(&g, &ab, None, 1).unwrap();
         assert!(nab.contains(&a), "A>B neighbors include parent A: {nab:?}");
-        assert!(nab.contains(&ac), "A>B neighbors include next sibling A>C: {nab:?}");
+        assert!(
+            nab.contains(&ac),
+            "A>B neighbors include next sibling A>C: {nab:?}"
+        );
     }
 
     #[test]
     fn index_dir_builds_cross_document_references() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nsee [the manual](b.md) and [ext](https://x.com)\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.md"),
+            b"# A\nsee [the manual](b.md) and [ext](https://x.com)\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
@@ -850,7 +1001,10 @@ mod incremental_tests {
         let b = "b.md".to_string();
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
         assert!(na.contains(&b), "a.md REFERENCES b.md: {na:?}");
-        assert!(!na.iter().any(|n| n.contains("x.com")), "external URL is not a REFERENCES edge: {na:?}");
+        assert!(
+            !na.iter().any(|n| n.contains("x.com")),
+            "external URL is not a REFERENCES edge: {na:?}"
+        );
     }
 
     #[test]
@@ -863,8 +1017,14 @@ mod incremental_tests {
         std::fs::remove_file(dir.path().join("a.md")).unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        assert!(idx.search("alphaword", 10).unwrap().is_empty(), "removed file purged on force reindex");
-        assert!(!idx.search("bravoword", 10).unwrap().is_empty(), "kept file still indexed");
+        assert!(
+            idx.search("alphaword", 10).unwrap().is_empty(),
+            "removed file purged on force reindex"
+        );
+        assert!(
+            !idx.search("bravoword", 10).unwrap().is_empty(),
+            "kept file still indexed"
+        );
     }
 
     #[test]
@@ -896,7 +1056,10 @@ mod incremental_tests {
         // Reindex rebuilds the auto-* structure but must PRESERVE the agent node.
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        assert!(g.get_node("sym:test").unwrap().is_some(), "agent node survives reindex");
+        assert!(
+            g.get_node("sym:test").unwrap().is_some(),
+            "agent node survives reindex"
+        );
         let autos = g
             .all_nodes()
             .unwrap()
@@ -933,16 +1096,31 @@ mod incremental_tests {
 
         // clean tree → empty delta (the cheap hot-path gate)
         let d0 = scan_delta(dir.path(), &manifest).unwrap();
-        assert!(d0.changed.is_empty() && d0.removed.is_empty(), "clean: {d0:?}");
+        assert!(
+            d0.changed.is_empty() && d0.removed.is_empty(),
+            "clean: {d0:?}"
+        );
 
         // modify a (size differs), add c, remove b
         fs::write(dir.path().join("a.md"), "# A\nalpha changed longer\n").unwrap();
         fs::write(dir.path().join("c.md"), "# C\ncharlie\n").unwrap();
         fs::remove_file(dir.path().join("b.md")).unwrap();
         let d = scan_delta(dir.path(), &manifest).unwrap();
-        assert!(d.changed.iter().any(|p| p.ends_with("a.md")), "a changed: {:?}", d.changed);
-        assert!(d.changed.iter().any(|p| p.ends_with("c.md")), "c added: {:?}", d.changed);
-        assert!(d.removed.iter().any(|p| p.ends_with("b.md")), "b removed: {:?}", d.removed);
+        assert!(
+            d.changed.iter().any(|p| p.ends_with("a.md")),
+            "a changed: {:?}",
+            d.changed
+        );
+        assert!(
+            d.changed.iter().any(|p| p.ends_with("c.md")),
+            "c added: {:?}",
+            d.changed
+        );
+        assert!(
+            d.removed.iter().any(|p| p.ends_with("b.md")),
+            "b removed: {:?}",
+            d.removed
+        );
     }
 
     #[test]
@@ -974,22 +1152,39 @@ mod incremental_tests {
         assert_eq!(s2.removed, 0);
 
         // change on disk → picked up automatically, searchable
-        fs::write(dir.path().join("a.md"), "# T\nдоговоры поставка регламент\n").unwrap();
+        fs::write(
+            dir.path().join("a.md"),
+            "# T\nдоговоры поставка регламент\n",
+        )
+        .unwrap();
         let s3 = ensure_fresh(dir.path()).unwrap();
         assert_eq!(s3.added, 1);
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        assert!(idx.search("регламент", 10).unwrap().iter().any(|h| h.path.ends_with("a.md")));
+        assert!(idx
+            .search("регламент", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("a.md")));
     }
 
     #[test]
     fn index_dir_indexes_loose_images() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("Схемы")).unwrap();
-        std::fs::write(dir.path().join("Схемы").join("profibus.png"), b"\x89PNG\r\n").unwrap();
+        std::fs::write(
+            dir.path().join("Схемы").join("profibus.png"),
+            b"\x89PNG\r\n",
+        )
+        .unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        assert!(idx.search("profibus", 10).unwrap().iter().any(|h| h.path.ends_with("profibus.png")),
-            "loose image is searchable by name");
+        assert!(
+            idx.search("profibus", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path.ends_with("profibus.png")),
+            "loose image is searchable by name"
+        );
     }
 }
 
@@ -1030,16 +1225,20 @@ mod search_tests {
         assert_eq!(chunk_ord("pdf", "p.21", 5), 21);
         assert_eq!(chunk_ord("pdf", "p.350", 1), 350);
         assert_eq!(chunk_ord("md", "Introduction", 3), 3); // non-pdf -> sequence
-        assert_eq!(chunk_ord("pdf", "weird", 7), 7);        // unparseable page -> sequence fallback
+        assert_eq!(chunk_ord("pdf", "weird", 7), 7); // unparseable page -> sequence fallback
     }
 
     #[test]
     fn search_hit_carries_ord() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("d.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
-        ]).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("d.pdf"),
+            location: "p.7".into(),
+            file_type: "pdf".into(),
+            text: "горячая замена цпу".into(),
+        }])
+        .unwrap();
         let hits = idx.search("замена", 10).unwrap();
         assert_eq!(hits[0].ord, 7);
     }
@@ -1054,27 +1253,51 @@ mod search_tests {
             file_type: "pdf".into(),
             text: text.into(),
         };
-        idx.write_chunks(&[page("p.1", "first page body"), page("p.2", "second page body")])
-            .unwrap();
+        idx.write_chunks(&[
+            page("p.1", "first page body"),
+            page("p.2", "second page body"),
+        ])
+        .unwrap();
 
         // Exact path+location returns that chunk's stored body — no file re-parse.
-        assert_eq!(idx.read_chunk("doc.pdf", "p.2").unwrap().as_deref(), Some("second page body"));
+        assert_eq!(
+            idx.read_chunk("doc.pdf", "p.2").unwrap().as_deref(),
+            Some("second page body")
+        );
         // Unknown location -> None, so the caller falls back to reading the file.
         assert_eq!(idx.read_chunk("doc.pdf", "p.99").unwrap(), None);
     }
 
     #[test]
     fn display_line_is_numbered_with_nonnumeric_label() {
-        let pdf = RankedHit { path: "d.pdf".into(), location: "p.350".into(), file_type: "pdf".into(), ord: 350, snippet: "горячая замена".into(), score: 17.7 };
+        let pdf = RankedHit {
+            path: "d.pdf".into(),
+            location: "p.350".into(),
+            file_type: "pdf".into(),
+            ord: 350,
+            snippet: "горячая замена".into(),
+            score: 17.7,
+        };
         let line = pdf.display_line();
         assert!(line.starts_with("[#350] "), "numbered key: {line}");
         assert!(line.contains("pdf"), "non-numeric label for pdf: {line}");
         assert!(!line.contains("p.350"), "no competing page number: {line}");
 
-        let md = RankedHit { path: "d.md".into(), location: "Введение".into(), file_type: "md".into(), ord: 2, snippet: "текст".into(), score: 3.0 };
+        let md = RankedHit {
+            path: "d.md".into(),
+            location: "Введение".into(),
+            file_type: "md".into(),
+            ord: 2,
+            snippet: "текст".into(),
+            score: 3.0,
+        };
         assert!(md.display_line().starts_with("[#2] "));
         assert!(md.display_line().contains("Введение"));
-        assert!(!md.display_line().contains("· md ·"), "file_type must not leak as label in non-paged line: {}", md.display_line());
+        assert!(
+            !md.display_line().contains("· md ·"),
+            "file_type must not leak as label in non-paged line: {}",
+            md.display_line()
+        );
     }
 
     #[test]
@@ -1082,9 +1305,13 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let sec = |loc: &str, t: &str| Chunk {
-            doc_path: PathBuf::from("d.md"), location: loc.into(), file_type: "md".into(), text: t.into(),
+            doc_path: PathBuf::from("d.md"),
+            location: loc.into(),
+            file_type: "md".into(),
+            text: t.into(),
         };
-        idx.write_chunks(&[sec("A", "alpha"), sec("B", "bravo"), sec("C", "charlie")]).unwrap();
+        idx.write_chunks(&[sec("A", "alpha"), sec("B", "bravo"), sec("C", "charlie")])
+            .unwrap();
 
         let mid = idx.read_chunk_by_ord("d.md", 2).unwrap().unwrap();
         assert_eq!(mid.body, "bravo");
@@ -1107,9 +1334,12 @@ mod search_tests {
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         assert_eq!(
-            idx.resolve_path("kb-manual\\БД ДПТК\\doc.pdf").unwrap().as_deref(),
+            idx.resolve_path("kb-manual\\БД ДПТК\\doc.pdf")
+                .unwrap()
+                .as_deref(),
             Some("БД ДПТК\\doc.pdf")
         );
     }
@@ -1123,18 +1353,39 @@ mod search_tests {
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
-        }]).unwrap();
-        assert_eq!(idx.canonical_document_path("real.pdf").as_deref(), Some("real.pdf"));
-        assert_eq!(idx.canonical_document_path("kb-manual\\real.pdf").as_deref(), Some("real.pdf"));
+        }])
+        .unwrap();
+        assert_eq!(
+            idx.canonical_document_path("real.pdf").as_deref(),
+            Some("real.pdf")
+        );
+        assert_eq!(
+            idx.canonical_document_path("kb-manual\\real.pdf")
+                .as_deref(),
+            Some("real.pdf")
+        );
         assert!(idx.canonical_document_path("missing.pdf").is_none());
         // Section-anchored paths from read/section tool output (`path #ord · label`)
         // reach graph_upsert as `real.pdf#1`; strip the trailing `#<ord>` anchor so a
         // genuinely indexed document still resolves (the model copies the anchored path
         // exactly as the tool prints it). Hallucination guard is preserved below.
-        assert_eq!(idx.canonical_document_path("real.pdf#1").as_deref(), Some("real.pdf"));
-        assert_eq!(idx.canonical_document_path("real.pdf#12").as_deref(), Some("real.pdf"));
-        assert_eq!(idx.canonical_document_path("kb-manual\\real.pdf#3").as_deref(), Some("real.pdf"));
-        assert_eq!(idx.canonical_document_path("real.pdf  #3").as_deref(), Some("real.pdf"));
+        assert_eq!(
+            idx.canonical_document_path("real.pdf#1").as_deref(),
+            Some("real.pdf")
+        );
+        assert_eq!(
+            idx.canonical_document_path("real.pdf#12").as_deref(),
+            Some("real.pdf")
+        );
+        assert_eq!(
+            idx.canonical_document_path("kb-manual\\real.pdf#3")
+                .as_deref(),
+            Some("real.pdf")
+        );
+        assert_eq!(
+            idx.canonical_document_path("real.pdf  #3").as_deref(),
+            Some("real.pdf")
+        );
         // Stripping the anchor does not resolve a document that is not indexed.
         assert!(idx.canonical_document_path("missing.pdf#2").is_none());
     }
@@ -1144,24 +1395,46 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("a.md"), location: "S1".into(), file_type: "md".into(), text: "alpha".into() },
-            Chunk { doc_path: PathBuf::from("a.md"), location: "S2".into(), file_type: "md".into(), text: "beta".into() },
-        ]).unwrap();
+            Chunk {
+                doc_path: PathBuf::from("a.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("a.md"),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "beta".into(),
+            },
+        ])
+        .unwrap();
         let mut seen: Vec<(u64, String)> = Vec::new();
-        idx.iter_chunks(|_path, ord, _ft, body| seen.push((ord, body.to_string()))).unwrap();
+        idx.iter_chunks(|_path, ord, _ft, body| seen.push((ord, body.to_string())))
+            .unwrap();
         seen.sort();
-        assert_eq!(seen, vec![(1, "alpha".to_string()), (2, "beta".to_string())]);
+        assert_eq!(
+            seen,
+            vec![(1, "alpha".to_string()), (2, "beta".to_string())]
+        );
     }
 
     #[test]
     fn location_ord_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(dir.path()).unwrap();
-        i.write_chunks(&[
-            crate::model::Chunk { doc_path: "d.md".into(), location: "A > B".into(), file_type: "md".into(), text: "x".into() },
-        ]).unwrap();
+        i.write_chunks(&[crate::model::Chunk {
+            doc_path: "d.md".into(),
+            location: "A > B".into(),
+            file_type: "md".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
         let n = i.ord_for_location("d.md", "A > B").unwrap().unwrap();
-        assert_eq!(i.location_for_ord("d.md", n).unwrap().as_deref(), Some("A > B"));
+        assert_eq!(
+            i.location_for_ord("d.md", n).unwrap().as_deref(),
+            Some("A > B")
+        );
         assert_eq!(i.ord_for_location("d.md", "missing").unwrap(), None);
     }
 
@@ -1170,15 +1443,33 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("a/АБАК.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
-            Chunk { doc_path: PathBuf::from("b/Other.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
-            Chunk { doc_path: PathBuf::from("c/Notes.md"),  location: "S1".into(),  file_type: "md".into(),  text: "горячая замена цпу".into() },
-        ]).unwrap();
+            Chunk {
+                doc_path: PathBuf::from("a/АБАК.pdf"),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "горячая замена цпу".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("b/Other.pdf"),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "горячая замена цпу".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("c/Notes.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "горячая замена цпу".into(),
+            },
+        ])
+        .unwrap();
 
         let all = idx.search_filtered("замена", 10, None, None).unwrap();
         assert_eq!(all.len(), 3);
         // glob scopes to the matching path only
-        let abak = idx.search_filtered("замена", 10, Some("*АБАК*"), None).unwrap();
+        let abak = idx
+            .search_filtered("замена", 10, Some("*АБАК*"), None)
+            .unwrap();
         assert_eq!(abak.len(), 1);
         assert!(abak[0].path.contains("АБАК"));
         // file_type scopes to md only
@@ -1186,10 +1477,16 @@ mod search_tests {
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
         // recursive glob on nested paths
-        idx.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("nested\\inner.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "горячая замена цпу".into() },
-        ]).unwrap();
-        let rec = idx.search_filtered("замена", 10, Some("**/*.pdf"), None).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("nested\\inner.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "горячая замена цпу".into(),
+        }])
+        .unwrap();
+        let rec = idx
+            .search_filtered("замена", 10, Some("**/*.pdf"), None)
+            .unwrap();
         assert!(rec.len() >= 2);
         assert!(rec.iter().any(|h| h.path.contains("inner.pdf")));
     }
@@ -1199,15 +1496,25 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         // Write first version of d.md
-        idx.write_chunks(&[chunk("d.md", "original content alpha")]).unwrap();
+        idx.write_chunks(&[chunk("d.md", "original content alpha")])
+            .unwrap();
         // Overwrite with a different chunk for the same path
-        idx.write_chunks(&[chunk("d.md", "updated content beta")]).unwrap();
+        idx.write_chunks(&[chunk("d.md", "updated content beta")])
+            .unwrap();
         // Search should find the new content and NOT return duplicates
         let hits = idx.search("content", 10).unwrap();
         let d_hits: Vec<_> = hits.iter().filter(|h| h.path == "d.md").collect();
-        assert_eq!(d_hits.len(), 1, "expected exactly one hit for d.md, got {}", d_hits.len());
-        assert!(d_hits[0].snippet.contains("beta") || d_hits[0].snippet.contains("updated"),
-            "expected updated content, got: {}", d_hits[0].snippet);
+        assert_eq!(
+            d_hits.len(),
+            1,
+            "expected exactly one hit for d.md, got {}",
+            d_hits.len()
+        );
+        assert!(
+            d_hits[0].snippet.contains("beta") || d_hits[0].snippet.contains("updated"),
+            "expected updated content, got: {}",
+            d_hits[0].snippet
+        );
     }
 }
 
@@ -1254,7 +1561,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# Hi\nhello world\n").unwrap();
         let mut old = Manifest::default();
-        old.files.insert("a.md".into(), FileSig { mtime_secs: 1, size: 10 });
+        old.files.insert(
+            "a.md".into(),
+            FileSig {
+                mtime_secs: 1,
+                size: 10,
+            },
+        );
         old.index_schema_version = 1;
         old.save(dir.path()).unwrap();
         index_dir(dir.path(), false).unwrap();

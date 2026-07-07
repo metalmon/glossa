@@ -3,9 +3,11 @@
 //! Both the MCP server (`src/mcp.rs`) and the kb-eval enricher (`eval/src/enrich.rs`)
 //! funnel through these functions so validation and resolution behaviour is identical.
 
-use crate::graph::agent::{apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate};
+use crate::graph::agent::{
+    apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate,
+};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{GraphStore, normalize_label, Edge, Node};
+use crate::graph::store::{normalize_label, Edge, GraphStore, Node};
 use crate::index::store::DocIndex;
 use serde_json::Value;
 
@@ -57,7 +59,9 @@ pub fn parse_upsert_payload(v: &Value) -> (Vec<UpsertNode>, Vec<UpsertEdge>, Vec
                         ));
                         edges.push(e);
                     }
-                    Err(e) => notes.push(format!("nodes[{i}] dropped (edge-shaped but invalid): {e}")),
+                    Err(e) => {
+                        notes.push(format!("nodes[{i}] dropped (edge-shaped but invalid): {e}"))
+                    }
                 }
             } else {
                 match serde_json::from_value::<UpsertNode>(item.clone()) {
@@ -173,9 +177,14 @@ fn resolve_endpoint_label(
     g: &GraphStore,
     ont: &Ontology,
     label_to_id: &std::collections::HashMap<String, String>,
+    label_type_to_id: &std::collections::HashMap<(String, String), String>,
+    batch_ids: &std::collections::HashSet<String>,
     label: &str,
     prefer_types: &[String],
 ) -> Option<String> {
+    if batch_ids.contains(label) {
+        return Some(label.to_string());
+    }
     if g.get_node(label).ok().flatten().is_some() {
         return Some(label.to_string());
     }
@@ -183,6 +192,12 @@ fn resolve_endpoint_label(
     // an Enum) and a Field and its Enum share this label, pick the existing node of the
     // wanted type so the two do not collide onto one node (the Enum->Enum rejection).
     if !prefer_types.is_empty() {
+        let norm = normalize_label(label);
+        for t in prefer_types {
+            if let Some(id) = label_type_to_id.get(&(norm.clone(), t.clone())) {
+                return Some(id.clone());
+            }
+        }
         if let Ok(ids) = g.ids_by_label_norm(label) {
             for id in ids {
                 if let Ok(Some(n)) = g.get_node(&id) {
@@ -199,8 +214,13 @@ fn resolve_endpoint_label(
     if let Some((first, rest)) = label.split_once(char::is_whitespace) {
         let rest = rest.trim();
         let is_type = !rest.is_empty()
-            && (ont.entity_types().iter().any(|t| t.eq_ignore_ascii_case(first))
-                || ["Document", "Section", "Term", "Topic"].iter().any(|t| t.eq_ignore_ascii_case(first)));
+            && (ont
+                .entity_types()
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(first))
+                || ["Document", "Section", "Term", "Topic"]
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(first)));
         if is_type {
             if let Some(id) = label_to_id.get(&normalize_label(rest)) {
                 return Some(id.clone());
@@ -288,7 +308,8 @@ pub fn format_upsert_response(out: &UpsertOutcome) -> String {
         }
         if out.dropped.iter().any(|e| e.contains("not allowed")) {
             parts.push(
-                "Hint: call get_ontology — relations.<edge_type> lists allowed from/to node types.".into(),
+                "Hint: call get_ontology — relations.<edge_type> lists allowed from/to node types."
+                    .into(),
             );
         }
     }
@@ -349,14 +370,16 @@ pub fn graph_upsert(
         }
     }
 
-    // (2) label_to_id: ONLY the input (batch) nodes — they win over existing graph nodes.
+    // (2) label_to_id: input (batch) nodes — type-aware map for endpoint disambiguation.
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut label_type_to_id: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
     for (nd, _) in &valid_nodes {
-        label_to_id.insert(
-            normalize_label(&nd.label),
-            id_for(ont, &nd.node_type, &nd.label),
-        );
+        let norm = normalize_label(&nd.label);
+        let id = id_for(ont, &nd.node_type, &nd.label);
+        label_type_to_id.insert((norm.clone(), nd.node_type.clone()), id.clone());
+        label_to_id.insert(norm, id);
     }
 
     // (3) build NodeSpec list (valid nodes only)
@@ -369,7 +392,11 @@ pub fn graph_upsert(
             // silently wipe an Enum's values — a common small-model self-correction
             // that otherwise blanked the domain.
             let aliases = if nd.aliases.is_empty() {
-                g.get_node(&id).ok().flatten().map(|n| n.aliases).unwrap_or_default()
+                g.get_node(&id)
+                    .ok()
+                    .flatten()
+                    .map(|n| n.aliases)
+                    .unwrap_or_default()
             } else {
                 nd.aliases.clone()
             };
@@ -396,7 +423,11 @@ pub fn graph_upsert(
 
         // missing endpoint — the most common malformed edge (e.g. MENTIONS with no `to`).
         if ue.from.trim().is_empty() || ue.to.trim().is_empty() {
-            let which = if ue.from.trim().is_empty() { "from" } else { "to" };
+            let which = if ue.from.trim().is_empty() {
+                "from"
+            } else {
+                "to"
+            };
             errs.push(format!(
                 "edge -{oet}-> dropped: missing `{which}` — an edge needs BOTH a `from` and a `to` (a node label, or a section `<path>#<n>` for a MENTIONS target)"
             ));
@@ -446,50 +477,74 @@ pub fn graph_upsert(
         }
 
         // resolve from endpoint
-        match resolve_section_ref(idx, &from_ep) {
-            Err(m) => {
-                errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
-                edge_ok = false;
-            }
-            Ok(Some(v)) => {
-                // numeric section ref resolved to section id
-                from_resolved = Some(v);
-                from_is_section = true;
-            }
-            Ok(None) => {
-                // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &from_ep, &from_types) {
-                    Some(id) => from_resolved = Some(id),
-                    None => {
-                        errs.push(format!(
+        if batch_ids.contains(&from_ep) {
+            from_resolved = Some(from_ep.clone());
+        } else {
+            match resolve_section_ref(idx, &from_ep) {
+                Err(m) => {
+                    errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
+                    edge_ok = false;
+                }
+                Ok(Some(v)) => {
+                    // numeric section ref resolved to section id
+                    from_resolved = Some(v);
+                    from_is_section = true;
+                }
+                Ok(None) => {
+                    // treat as node label (exact, then fuzzy morphology fallback)
+                    match resolve_endpoint_label(
+                        g,
+                        ont,
+                        &label_to_id,
+                        &label_type_to_id,
+                        &batch_ids,
+                        &from_ep,
+                        &from_types,
+                    ) {
+                        Some(id) => from_resolved = Some(id),
+                        None => {
+                            errs.push(format!(
                             "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" matches no node — add a node with that label"
                         ));
-                        edge_ok = false;
+                            edge_ok = false;
+                        }
                     }
                 }
             }
         }
 
         // resolve to endpoint
-        match resolve_section_ref(idx, &to_ep) {
-            Err(m) => {
-                errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
-                edge_ok = false;
-            }
-            Ok(Some(v)) => {
-                // numeric section ref resolved to section id
-                to_resolved = Some(v);
-                to_is_section = true;
-            }
-            Ok(None) => {
-                // treat as node label (exact, then fuzzy morphology fallback)
-                match resolve_endpoint_label(g, ont, &label_to_id, &to_ep, &to_types) {
-                    Some(id) => to_resolved = Some(id),
-                    None => {
-                        errs.push(format!(
+        if batch_ids.contains(&to_ep) {
+            to_resolved = Some(to_ep.clone());
+        } else {
+            match resolve_section_ref(idx, &to_ep) {
+                Err(m) => {
+                    errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
+                    edge_ok = false;
+                }
+                Ok(Some(v)) => {
+                    // numeric section ref resolved to section id
+                    to_resolved = Some(v);
+                    to_is_section = true;
+                }
+                Ok(None) => {
+                    // treat as node label (exact, then fuzzy morphology fallback)
+                    match resolve_endpoint_label(
+                        g,
+                        ont,
+                        &label_to_id,
+                        &label_type_to_id,
+                        &batch_ids,
+                        &to_ep,
+                        &to_types,
+                    ) {
+                        Some(id) => to_resolved = Some(id),
+                        None => {
+                            errs.push(format!(
                             "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" matches no node — add a node with that label"
                         ));
-                        edge_ok = false;
+                            edge_ok = false;
+                        }
                     }
                 }
             }
@@ -509,8 +564,7 @@ pub fn graph_upsert(
                 if is_section {
                     continue;
                 }
-                let exists =
-                    batch_ids.contains(&id) || g.get_node(&id).ok().flatten().is_some();
+                let exists = batch_ids.contains(&id) || g.get_node(&id).ok().flatten().is_some();
                 if !exists {
                     errs.push(format!(
                         "edge {of} -{oet}-> {ot} dropped: {role} endpoint '{id}' is not a known node — add it to nodes[] before referencing it"
@@ -545,8 +599,15 @@ pub fn graph_upsert(
                 "node {} [{}] {} — {} value(s): [{}]",
                 // Quote each value: many are decimals written with a comma ("22,23"),
                 // so a bare comma-join reads ambiguously (is "22,23" one value or two?).
-                nd.id, nd.node_type, nd.label, nd.aliases.len(),
-                nd.aliases.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ")
+                nd.id,
+                nd.node_type,
+                nd.label,
+                nd.aliases.len(),
+                nd.aliases
+                    .iter()
+                    .map(|a| format!("\"{a}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
@@ -567,9 +628,7 @@ pub fn graph_upsert(
             .collect();
         let mut hint_dump = Vec::new();
         if !existing.is_empty() {
-            hint_dump.push(
-                "Similar existing nodes (use label OR node id in edge from/to):".into(),
-            );
+            hint_dump.push("Similar existing nodes (use label OR node id in edge from/to):".into());
             for line in existing {
                 hint_dump.push(format!("- {line}"));
             }
@@ -629,14 +688,32 @@ pub fn graph_upsert(
 /// Section node id (symmetry with `graph_upsert`). On resolution error the original string
 /// is kept so a bad anchor simply doesn't match — deletion is best-effort.
 /// Returns a human-readable result string.
-pub fn graph_delete(idx: &DocIndex, g: &GraphStore, node_labels: Vec<String>, edges: Vec<EdgeRef>) -> String {
-    let edges: Vec<EdgeRef> = edges.into_iter().map(|e| {
-        let from_orig = e.from;
-        let to_orig = e.to;
-        let from = resolve_section_ref(idx, &from_orig).ok().flatten().unwrap_or(from_orig);
-        let to = resolve_section_ref(idx, &to_orig).ok().flatten().unwrap_or(to_orig);
-        EdgeRef { from, edge_type: e.edge_type, to }
-    }).collect();
+pub fn graph_delete(
+    idx: &DocIndex,
+    g: &GraphStore,
+    node_labels: Vec<String>,
+    edges: Vec<EdgeRef>,
+) -> String {
+    let edges: Vec<EdgeRef> = edges
+        .into_iter()
+        .map(|e| {
+            let from_orig = e.from;
+            let to_orig = e.to;
+            let from = resolve_section_ref(idx, &from_orig)
+                .ok()
+                .flatten()
+                .unwrap_or(from_orig);
+            let to = resolve_section_ref(idx, &to_orig)
+                .ok()
+                .flatten()
+                .unwrap_or(to_orig);
+            EdgeRef {
+                from,
+                edge_type: e.edge_type,
+                to,
+            }
+        })
+        .collect();
     match apply_delete(g, node_labels, edges) {
         Ok((n, notes)) => {
             let mut m = format!("deleted {n} graph entries");
@@ -667,7 +744,11 @@ pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
         Ok((n, notes)) => {
             let mut m = format!("updated {n} nodes");
             if !notes.is_empty() {
-                m.push_str(&format!("\n{} skipped:\n- {}", notes.len(), notes.join("\n- ")));
+                m.push_str(&format!(
+                    "\n{} skipped:\n- {}",
+                    notes.len(),
+                    notes.join("\n- ")
+                ));
             }
             m
         }
@@ -685,7 +766,11 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
         Ok(r) => format!(
             "generalized: prune_candidates={} inferred_edges={} similar_edges={} \
              communities={} merge_candidates={}",
-            r.prune_candidates, r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+            r.prune_candidates,
+            r.inferred_edges,
+            r.similar_edges,
+            r.communities,
+            r.merge_candidates
         ),
         Err(e) => format!("graph_generalize error: {e}"),
     }
@@ -720,7 +805,10 @@ pub fn checklist_coverage(
     // The parameter set: every Field the document owns (source_path == doc).
     let mut params: Vec<String> = Vec::new();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for f in nodes.iter().filter(|n| n.node_type == "Field" && n.prov.source_path == doc) {
+    for f in nodes
+        .iter()
+        .filter(|n| n.node_type == "Field" && n.prov.source_path == doc)
+    {
         if seen.insert(normalize_label(&f.label)) {
             params.push(f.label.clone());
         }
@@ -746,9 +834,11 @@ pub fn checklist_coverage(
         } else {
             field_has_values(g, ont, &owned, &nodes, &edges)
         };
-        let sourced = owned
-            .iter()
-            .any(|n| edges.iter().any(|e| e.edge_type == "MENTIONS" && e.from == n.id));
+        let sourced = owned.iter().any(|n| {
+            edges
+                .iter()
+                .any(|e| e.edge_type == "MENTIONS" && e.from == n.id)
+        });
         if !built {
             unbuilt.push(p.clone());
         }
@@ -756,7 +846,11 @@ pub fn checklist_coverage(
             unsourced.push(p.clone());
         }
     }
-    Ok(Some(ChecklistCoverage { params, unbuilt, unsourced }))
+    Ok(Some(ChecklistCoverage {
+        params,
+        unbuilt,
+        unsourced,
+    }))
 }
 
 fn field_has_values(
@@ -802,7 +896,14 @@ mod tests {
             node_type: nt.into(),
             label: label.into(),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            prov: Provenance { source_path: src.into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 },
+            prov: Provenance {
+                source_path: src.into(),
+                range: None,
+                file_sig: None,
+                origin: "agent".into(),
+                confidence: 1.0,
+                created_at: 0,
+            },
         })
         .unwrap();
     }
@@ -811,7 +912,14 @@ mod tests {
             from: from.into(),
             to: to.into(),
             edge_type: et.into(),
-            prov: Provenance { source_path: "a.docx".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 },
+            prov: Provenance {
+                source_path: "a.docx".into(),
+                range: None,
+                file_sig: None,
+                origin: "agent".into(),
+                confidence: 1.0,
+                created_at: 0,
+            },
         })
         .unwrap();
     }
@@ -836,7 +944,14 @@ params = ["values"]
         // Document A owns two parameters (Field.source_path == a.docx).
         // высота: Field + Enum with values → built. зернистость: Field, no Enum → unbuilt.
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
-        cov_node(&g, "enum:vys-a", "Enum", "высота enum", &["10", "20"], "a.docx");
+        cov_node(
+            &g,
+            "enum:vys-a",
+            "Enum",
+            "высота enum",
+            &["10", "20"],
+            "a.docx",
+        );
         cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
         // высота's source is located (MENTIONS a section); зернистость has neither
         // source nor values.
@@ -849,10 +964,15 @@ params = ["values"]
         cov_node(&g, "enum:dia-b", "Enum", "диаметр enum", &["1"], "b.docx");
         cov_edge(&g, "fld:dia-b", "CONSTRAINED_BY", "enum:dia-b");
 
-        let c = checklist_coverage(&g, "a.docx", &ont).unwrap().expect("A owns params");
+        let c = checklist_coverage(&g, "a.docx", &ont)
+            .unwrap()
+            .expect("A owns params");
         let mut params = c.params.clone();
         params.sort();
-        assert_eq!(params, vec!["высота".to_string(), "зернистость".to_string()]);
+        assert_eq!(
+            params,
+            vec!["высота".to_string(), "зернистость".to_string()]
+        );
         assert_eq!(c.unbuilt, vec!["зернистость".to_string()]);
         // высота is sourced (MENTIONS); зернистость still needs a source.
         assert_eq!(c.unsourced, vec!["зернистость".to_string()]);
@@ -891,7 +1011,11 @@ params = ["condition_field", "condition_value"]
 
         let c = checklist_coverage(&g, src, &ont).unwrap().expect("owns D");
         assert_eq!(c.params, vec!["D".to_string()]);
-        assert!(c.unbuilt.is_empty(), "Conditional→Enum counts as built: {:?}", c.unbuilt);
+        assert!(
+            c.unbuilt.is_empty(),
+            "Conditional→Enum counts as built: {:?}",
+            c.unbuilt
+        );
     }
 
     const DEDUP_ONT: &str = r#"
@@ -950,13 +1074,22 @@ strict = true
             unode("Symptom", "Потеря связи", "case1.docx"),
             unode("Resolution", "Перезагрузка модуля", "case1.docx"),
         ];
-        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
+        let edges = vec![uedge(
+            "Потеря связи",
+            "RESOLVED_BY",
+            "Перезагрузка модуля",
+            "case1.docx",
+        )];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         assert!(!out.rejected, "should not be rejected: {}", out.message);
         assert_eq!(out.nodes, 2);
         assert_eq!(out.edges, 1);
-        assert!(format_upsert_response(&out).contains("upserted 2 nodes, 1 edges"), "{}", out.message);
+        assert!(
+            format_upsert_response(&out).contains("upserted 2 nodes, 1 edges"),
+            "{}",
+            out.message
+        );
         assert!(out.message.contains("Written:"), "{}", out.message);
     }
 
@@ -974,8 +1107,12 @@ strict = true
             unode("Symptom", "Потеря связи", "case1.docx"),
             unode("Resolution", "Перезагрузка модуля", "case1.docx"),
         ];
-        let edges =
-            vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
+        let edges = vec![uedge(
+            "Потеря связи",
+            "RESOLVED_BY",
+            "Перезагрузка модуля",
+            "case1.docx",
+        )];
         graph_upsert(&idx, &g, &ont, nodes, edges, 1);
 
         // Rename the Symptom node.
@@ -1000,7 +1137,8 @@ strict = true
         let res_id = id_for(&ont, "Resolution", "Перезагрузка модуля");
         let out = g.outgoing(&id).unwrap();
         assert!(
-            out.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
+            out.iter()
+                .any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
             "RESOLVED_BY edge lost after rename"
         );
     }
@@ -1016,8 +1154,12 @@ strict = true
 
         // Only the Symptom node — Resolution label is missing from batch and graph.
         let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
-        let edges =
-            vec![uedge("Потеря связи", "RESOLVED_BY", "Перезагрузка модуля", "case1.docx")];
+        let edges = vec![uedge(
+            "Потеря связи",
+            "RESOLVED_BY",
+            "Перезагрузка модуля",
+            "case1.docx",
+        )];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         // Partial apply: the valid Symptom IS written; only the edge to an unknown node is dropped.
@@ -1044,7 +1186,12 @@ strict = true
             unode("Symptom", "Потеря связи", "case1.docx"),
             unode("Resolution", "Перезапуск", "case1.docx"),
         ];
-        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Перезапуск", "case1.docx")];
+        let edges = vec![uedge(
+            "Потеря связи",
+            "RESOLVED_BY",
+            "Перезапуск",
+            "case1.docx",
+        )];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         assert!(!out.rejected, "should not be rejected: {}", out.message);
@@ -1056,7 +1203,9 @@ strict = true
         let res_id = id_for(&ont, "Resolution", "Перезапуск");
         let outgoing = g.outgoing(&sym_id).unwrap();
         assert!(
-            outgoing.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
+            outgoing
+                .iter()
+                .any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id),
             "RESOLVED_BY edge not found from {sym_id} to {res_id}: {outgoing:?}"
         );
     }
@@ -1077,17 +1226,38 @@ strict = true
             unode("Resolution", "Перезапуск", "case1.docx"),
         ];
         // Both endpoints written type-prefixed, the way the model actually does it.
-        let edges = vec![uedge("Symptom Потеря связи", "RESOLVED_BY", "Resolution Перезапуск", "case1.docx")];
+        let edges = vec![uedge(
+            "Symptom Потеря связи",
+            "RESOLVED_BY",
+            "Resolution Перезапуск",
+            "case1.docx",
+        )];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
-        assert_eq!(out.edges, 1, "type-prefixed endpoints should resolve: {}", out.message);
+        assert_eq!(
+            out.edges, 1,
+            "type-prefixed endpoints should resolve: {}",
+            out.message
+        );
         let sym_id = id_for(&ont, "Symptom", "Потеря связи");
         let res_id = id_for(&ont, "Resolution", "Перезапуск");
-        assert!(g.outgoing(&sym_id).unwrap().iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id));
+        assert!(g
+            .outgoing(&sym_id)
+            .unwrap()
+            .iter()
+            .any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id));
 
         // An ordinary multi-word label whose first word is NOT a type is untouched:
         // "Потеря связи" itself still resolves as before (no mangling).
-        let ok = resolve_endpoint_label(&g, &ont, &Default::default(), "Потеря связи", &[]);
+        let ok = resolve_endpoint_label(
+            &g,
+            &ont,
+            &Default::default(),
+            &Default::default(),
+            &std::collections::HashSet::new(),
+            "Потеря связи",
+            &[],
+        );
         assert_eq!(ok, Some(sym_id));
     }
 
@@ -1101,7 +1271,12 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
-        let edges = vec![uedge("Потеря связи", "RESOLVED_BY", "Неизвестный узел", "case1.docx")];
+        let edges = vec![uedge(
+            "Потеря связи",
+            "RESOLVED_BY",
+            "Неизвестный узел",
+            "case1.docx",
+        )];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         // Partial apply: the Symptom IS written; the edge to an undefined label is dropped (named).
@@ -1151,8 +1326,14 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let msg = graph_update(&g, vec![]);
         assert!(msg.contains("updated 0 nodes"), "{msg}");
-        assert!(msg.contains("no update received"), "must explain the empty case: {msg}");
-        assert!(msg.contains("\"nodes\""), "must show the expected shape: {msg}");
+        assert!(
+            msg.contains("no update received"),
+            "must explain the empty case: {msg}"
+        );
+        assert!(
+            msg.contains("\"nodes\""),
+            "must show the expected shape: {msg}"
+        );
     }
 
     /// Clear feedback: delete/update report references that matched nothing instead of a silent
@@ -1164,14 +1345,28 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         write_doc(&idx, "case1.docx");
-        let _ = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Потеря связи", "case1.docx")], vec![], 1);
+        let _ = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![],
+            1,
+        );
 
         let del = graph_delete(&idx, &g, vec!["Несуществующий".into()], vec![]);
-        assert!(del.contains("matched nothing"), "delete names the unmatched ref: {del}");
+        assert!(
+            del.contains("matched nothing"),
+            "delete names the unmatched ref: {del}"
+        );
 
         let upd = graph_update(
             &g,
-            vec![NodeUpdate { label: "Несуществующий".into(), new_label: Some("X".into()), new_type: None }],
+            vec![NodeUpdate {
+                label: "Несуществующий".into(),
+                new_label: Some("X".into()),
+                new_type: None,
+            }],
         );
         assert!(
             upd.contains("skipped") && upd.contains("matched nothing"),
@@ -1190,24 +1385,46 @@ strict = true
         write_doc(&idx, "c.docx");
 
         let out1 = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![
                 unode("Symptom", "Потеря связи Profibus", "c.docx"),
-                unode("Resolution", "Изменение параметра maxTsdr и перезапуск службы", "c.docx"),
+                unode(
+                    "Resolution",
+                    "Изменение параметра maxTsdr и перезапуск службы",
+                    "c.docx",
+                ),
             ],
-            vec![uedge("Потеря связи Profibus", "RESOLVED_BY", "Изменение параметра maxTsdr и перезапуск службы", "c.docx")],
+            vec![uedge(
+                "Потеря связи Profibus",
+                "RESOLVED_BY",
+                "Изменение параметра maxTsdr и перезапуск службы",
+                "c.docx",
+            )],
             1,
         );
         assert!(!out1.rejected, "{}", out1.message);
 
         // Later edge references the Resolution by a TRUNCATED label.
         let out2 = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![],
-            vec![uedge("Потеря связи Profibus", "RESOLVED_BY", "Изменение параметра maxTsdr", "c.docx")],
+            vec![uedge(
+                "Потеря связи Profibus",
+                "RESOLVED_BY",
+                "Изменение параметра maxTsdr",
+                "c.docx",
+            )],
             2,
         );
-        assert!(!out2.rejected, "truncated label must resolve fuzzily: {}", out2.message);
+        assert!(
+            !out2.rejected,
+            "truncated label must resolve fuzzily: {}",
+            out2.message
+        );
     }
 
     /// Fix 1 — node with a source_path not in the index is rejected; a real path is accepted.
@@ -1223,12 +1440,18 @@ strict = true
 
         // Node with a hallucinated path — must be rejected.
         let out = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![unode("Symptom", "Потеря связи", "case_support_001")],
             vec![],
             1,
         );
-        assert!(out.rejected, "hallucinated source_path must be rejected: {}", out.message);
+        assert!(
+            out.rejected,
+            "hallucinated source_path must be rejected: {}",
+            out.message
+        );
         assert!(
             out.message.contains("is not a document"),
             "message should say 'is not a document': {}",
@@ -1237,12 +1460,22 @@ strict = true
 
         // Same node but with the real indexed path — must be accepted.
         let out_real = graph_upsert(
-            &idx, &g, &ont,
-            vec![unode("Symptom", "Потеря связи", "kb-test\\Доп.данные\\real.pdf")],
+            &idx,
+            &g,
+            &ont,
+            vec![unode(
+                "Symptom",
+                "Потеря связи",
+                "kb-test\\Доп.данные\\real.pdf",
+            )],
             vec![],
             2,
         );
-        assert!(!out_real.rejected, "real source_path must be accepted: {}", out_real.message);
+        assert!(
+            !out_real.rejected,
+            "real source_path must be accepted: {}",
+            out_real.message
+        );
     }
 
     #[test]
@@ -1254,12 +1487,22 @@ strict = true
         write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
 
         let out = graph_upsert(
-            &idx, &g, &ont,
-            vec![unode("Symptom", "Потеря связи", "kb-manual\\kb-test\\Доп.данные\\real.pdf")],
+            &idx,
+            &g,
+            &ont,
+            vec![unode(
+                "Symptom",
+                "Потеря связи",
+                "kb-manual\\kb-test\\Доп.данные\\real.pdf",
+            )],
             vec![],
             1,
         );
-        assert!(!out.rejected, "prefixed source_path must resolve: {}", out.message);
+        assert!(
+            !out.rejected,
+            "prefixed source_path must resolve: {}",
+            out.message
+        );
         let sym_id = id_for(&ont, "Symptom", "Потеря связи");
         let node = g.get_node(&sym_id).unwrap().unwrap();
         assert_eq!(node.prov.source_path, "kb-test\\Доп.данные\\real.pdf");
@@ -1274,14 +1517,24 @@ strict = true
         write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
 
         let out = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![unode("Symptom", "Потеря связи", "wrong\\real.pdf")],
             vec![],
             1,
         );
         assert!(out.rejected, "bad path must reject: {}", out.message);
-        assert!(out.message.contains("did you mean"), "upsert hint: {}", out.message);
-        assert!(out.message.contains("real.pdf"), "upsert suggests real path: {}", out.message);
+        assert!(
+            out.message.contains("did you mean"),
+            "upsert hint: {}",
+            out.message
+        );
+        assert!(
+            out.message.contains("real.pdf"),
+            "upsert suggests real path: {}",
+            out.message
+        );
     }
 
     #[test]
@@ -1293,7 +1546,8 @@ strict = true
             location: "Introduction".into(),
             file_type: "md".into(),
             text: "section content".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         // A numeric ref keeps its ordinal (`#1`), not the chunk's heading location.
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
         assert_eq!(resolved, Some("docs\\real.md#1".to_string()));
@@ -1316,7 +1570,8 @@ strict = true
                 file_type: "pdf".into(),
                 text: String::new(),
             },
-        ]).unwrap();
+        ])
+        .unwrap();
         let resolved = resolve_section_ref(&idx, "gost.pdf#4").unwrap();
         assert_eq!(resolved, Some("gost.pdf#4".to_string()));
     }
@@ -1396,7 +1651,10 @@ to = ["Enum"]
             g.outgoing(&fld).unwrap()
         );
         let c = checklist_coverage(&g, "gost.pdf", &ont).unwrap().unwrap();
-        assert!(!c.unsourced.contains(&"Тип".to_string()), "Field Тип should be sourced");
+        assert!(
+            !c.unsourced.contains(&"Тип".to_string()),
+            "Field Тип should be sourced"
+        );
     }
 
     /// Eval scenario: the corpus index and the agent's graph are SEPARATE stores, so a
@@ -1415,10 +1673,13 @@ to = ["Enum"]
             location: String::new(),
             file_type: "docx".into(),
             text: "table of allowed values".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         // Bare "#1" target (no path) — the model's short form.
         let out = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![unode("Symptom", "Тип", "gost.docx")],
             vec![uedge("Тип", "MENTIONS", "#1", "gost.docx")],
             1,
@@ -1427,9 +1688,14 @@ to = ["Enum"]
         let from_id = id_for(&ont, "Symptom", "Тип");
         let outgoing = g.outgoing(&from_id).unwrap();
         assert!(
-            outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#1"),
+            outgoing
+                .iter()
+                .any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#1"),
             "MENTIONS edge to a section ref must land; got: {:?}",
-            outgoing.iter().map(|e| (e.edge_type.clone(), e.to.clone())).collect::<Vec<_>>()
+            outgoing
+                .iter()
+                .map(|e| (e.edge_type.clone(), e.to.clone()))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1446,15 +1712,30 @@ to = ["Enum"]
             location: "Intro".into(),
             file_type: "md".into(),
             text: "content".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         let mut n = unode("Symptom", "Тип", "d.md");
         n.aliases = vec!["41".into(), "42".into()];
         assert!(!graph_upsert(&idx, &g, &ont, vec![n], vec![], 1).rejected);
         // Re-send the same node with no aliases (e.g. re-anchoring a dropped edge).
-        assert!(!graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Тип", "d.md")], vec![], 2).rejected);
-        let node = g.get_node(&id_for(&ont, "Symptom", "Тип")).unwrap().unwrap();
+        assert!(
+            !graph_upsert(
+                &idx,
+                &g,
+                &ont,
+                vec![unode("Symptom", "Тип", "d.md")],
+                vec![],
+                2
+            )
+            .rejected
+        );
+        let node = g
+            .get_node(&id_for(&ont, "Symptom", "Тип"))
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            node.aliases, vec!["41".to_string(), "42".to_string()],
+            node.aliases,
+            vec!["41".to_string(), "42".to_string()],
             "aliases must survive a no-alias re-upsert"
         );
     }
@@ -1478,7 +1759,9 @@ to = ["Enum"]
 
         // Upsert two reasoning nodes + RESOLVED_BY edge.
         let out = graph_upsert(
-            &idx, &g, &ont,
+            &idx,
+            &g,
+            &ont,
             vec![
                 unode("Symptom", "Test Symptom", "real.md"),
                 unode("Resolution", "Test Fix", "real.md"),
@@ -1490,7 +1773,8 @@ to = ["Enum"]
 
         // Delete by label-based endpoints — basic case.
         let msg = graph_delete(
-            &idx, &g,
+            &idx,
+            &g,
             vec![],
             vec![EdgeRef {
                 from: "Test Symptom".into(),
@@ -1510,7 +1794,8 @@ to = ["Enum"]
         // Section ref resolution: `real.md#1` resolves to `real.md#Introduction`.
         // There is no edge with that endpoint, so 0 entries deleted — but must NOT panic/error.
         let msg2 = graph_delete(
-            &idx, &g,
+            &idx,
+            &g,
             vec![],
             vec![EdgeRef {
                 from: "Test Symptom".into(),
@@ -1518,11 +1803,15 @@ to = ["Enum"]
                 to: "real.md#1".into(),
             }],
         );
-        assert!(!msg2.contains("error"), "section ref resolution must not produce error: {msg2}");
+        assert!(
+            !msg2.contains("error"),
+            "section ref resolution must not produce error: {msg2}"
+        );
 
         // Non-existent chunk ref: resolve_section_ref errors, original kept, no panic.
         let msg3 = graph_delete(
-            &idx, &g,
+            &idx,
+            &g,
             vec![],
             vec![EdgeRef {
                 from: "Test Symptom".into(),
@@ -1530,7 +1819,10 @@ to = ["Enum"]
                 to: "real.md#999".into(),
             }],
         );
-        assert!(!msg3.contains("error"), "non-existent chunk ref must not produce error: {msg3}");
+        assert!(
+            !msg3.contains("error"),
+            "non-existent chunk ref must not produce error: {msg3}"
+        );
     }
 
     /// Agent copied sym: into label — sanitize prevents sym:sym: double prefix.
@@ -1570,8 +1862,14 @@ strict = true
 "#;
         let ont = Ontology::parse(ONT).unwrap();
         // prefix "enum:" is 5 bytes; byte 5 falls inside 'п' (bytes 4..6) of "Тип_Enum"
-        assert_eq!(sanitize_label_for_upsert(&ont, "EnumType", "Тип_Enum"), "Тип_Enum");
-        assert_eq!(sanitize_label_for_upsert(&ont, "EnumType", "enum: Тип_Enum"), "Тип_Enum");
+        assert_eq!(
+            sanitize_label_for_upsert(&ont, "EnumType", "Тип_Enum"),
+            "Тип_Enum"
+        );
+        assert_eq!(
+            sanitize_label_for_upsert(&ont, "EnumType", "enum: Тип_Enum"),
+            "Тип_Enum"
+        );
     }
 
     /// Edge endpoint may reference an existing node by id.
@@ -1662,7 +1960,11 @@ strict = true
             1,
         );
         assert!(out.rejected, "{}", out.message);
-        assert!(out.message.contains("REJECTED — nothing written"), "{}", out.message);
+        assert!(
+            out.message.contains("REJECTED — nothing written"),
+            "{}",
+            out.message
+        );
         assert!(out.message.contains("is not a document"), "{}", out.message);
     }
 
@@ -1692,8 +1994,14 @@ strict = true
         );
         assert!(out.rejected, "{}", out.message);
         assert!(
-            out.message.contains("match by label in edges"),
+            out.message
+                .contains("Similar existing nodes (use label OR node id in edge from/to)"),
             "hint wording: {}",
+            out.message
+        );
+        assert!(
+            out.message.contains("sym:existing-symptom"),
+            "hint should list existing node: {}",
             out.message
         );
     }

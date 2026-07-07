@@ -34,7 +34,13 @@ pub fn build_prompt(q: &Question) -> String {
 /// Extract the answer after the last `ANSWER:` marker; if absent, the trimmed whole output.
 pub fn parse_answer(model_output: &str) -> String {
     if let Some(idx) = model_output.rfind("ANSWER:") {
-        model_output[idx + "ANSWER:".len()..].trim().lines().next().unwrap_or("").trim().to_string()
+        model_output[idx + "ANSWER:".len()..]
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
     } else {
         model_output.trim().to_string()
     }
@@ -46,7 +52,13 @@ mod tests {
     use crate::dataset::Question;
 
     fn q() -> Question {
-        Question { id: "x".into(), question: "Who?".into(), answer: "".into(), paragraphs: vec![], supporting_titles: vec![] }
+        Question {
+            id: "x".into(),
+            question: "Who?".into(),
+            answer: "".into(),
+            paragraphs: vec![],
+            supporting_titles: vec![],
+        }
     }
 
     #[test]

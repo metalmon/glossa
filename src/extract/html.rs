@@ -11,7 +11,11 @@ fn decode_entities(s: &str) -> String {
         out.push_str(&rest[..amp]);
         let after = &rest[amp..];
         // Look for a ';' within the next few chars (entities are short).
-        let semi = after.char_indices().take(12).find(|(_, c)| *c == ';').map(|(i, _)| i);
+        let semi = after
+            .char_indices()
+            .take(12)
+            .find(|(_, c)| *c == ';')
+            .map(|(i, _)| i);
         match semi {
             Some(semi) => {
                 let entity = &after[..=semi];
@@ -97,7 +101,9 @@ pub fn strip_html(input: &str) -> String {
 /// Read an HTML file, strip it, and window the text into chunks.
 pub fn stream(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) -> anyhow::Result<()> {
     let bytes = std::fs::read(path)?;
-    let Some(text) = decode_all(&bytes) else { return Ok(()) };
+    let Some(text) = decode_all(&bytes) else {
+        return Ok(());
+    };
     let stripped = strip_html(&text);
     let mut win = Windower::new(path, file_type);
     for line in stripped.lines() {

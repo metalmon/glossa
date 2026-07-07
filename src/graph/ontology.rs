@@ -92,6 +92,75 @@ struct RawMeta {
     note: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawCompileHint {
+    #[serde(default)]
+    strategy: Option<String>,
+    #[serde(default)]
+    prefer_triggers: Vec<String>,
+}
+
+/// `[tables]` overlay — CSV import and constraint-compiler settings (domain-agnostic).
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawTables {
+    #[serde(default)]
+    delimiter: Option<String>,
+    #[serde(default)]
+    skip_columns: Vec<String>,
+    #[serde(default)]
+    parameter_columns: Vec<String>,
+    #[serde(default)]
+    compile_hints: BTreeMap<String, RawCompileHint>,
+    #[serde(default)]
+    on_unsupported: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompileHint {
+    pub strategy: Option<String>,
+    pub prefer_triggers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnUnsupported {
+    #[default]
+    Error,
+    Skip,
+    Warn,
+}
+
+impl OnUnsupported {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "error" => Some(Self::Error),
+            "skip" => Some(Self::Skip),
+            "warn" => Some(Self::Warn),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TablesConfig {
+    pub delimiter: String,
+    pub skip_columns: Vec<String>,
+    pub parameter_columns: Vec<String>,
+    pub compile_hints: BTreeMap<String, CompileHint>,
+    pub on_unsupported: OnUnsupported,
+}
+
+impl Default for TablesConfig {
+    fn default() -> Self {
+        Self {
+            delimiter: ";".into(),
+            skip_columns: vec![],
+            parameter_columns: vec![],
+            compile_hints: BTreeMap::new(),
+            on_unsupported: OnUnsupported::Error,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Pattern {
     pub description: String,
@@ -122,6 +191,8 @@ struct RawOntology {
     constraint_types: BTreeMap<String, RawConstraintType>,
     #[serde(default)]
     patterns: BTreeMap<String, RawPattern>,
+    #[serde(default)]
+    tables: RawTables,
 }
 
 #[derive(Debug, Default)]
@@ -135,13 +206,16 @@ pub struct Ontology {
     reasoning: RawReasoning,
     constraint_types: BTreeMap<String, ConstraintType>,
     patterns: BTreeMap<String, Pattern>,
+    tables: TablesConfig,
     /// How-to notes keyed by entity / relation / constraint-type name, surfaced by
     /// `get_ontology`. Optional per type; empty when the ontology declares none.
     descriptions: BTreeMap<String, String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
-    v.get("id_prefix").and_then(|p| p.as_str()).map(str::to_string)
+    v.get("id_prefix")
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
 }
 
 impl Ontology {
@@ -184,6 +258,37 @@ impl Ontology {
                 ))
             })
             .collect();
+        let mut tables = TablesConfig::default();
+        if let Some(d) = raw.tables.delimiter.filter(|d| !d.is_empty()) {
+            tables.delimiter = d;
+        }
+        if !raw.tables.skip_columns.is_empty() {
+            tables.skip_columns = raw.tables.skip_columns;
+        }
+        tables.parameter_columns = raw.tables.parameter_columns;
+        tables.compile_hints = raw
+            .tables
+            .compile_hints
+            .into_iter()
+            .map(|(k, h)| {
+                (
+                    k,
+                    CompileHint {
+                        strategy: h.strategy,
+                        prefer_triggers: h.prefer_triggers,
+                    },
+                )
+            })
+            .collect();
+        if let Some(mode) = raw
+            .tables
+            .on_unsupported
+            .as_deref()
+            .and_then(OnUnsupported::parse)
+        {
+            tables.on_unsupported = mode;
+        }
+
         Ok(Ontology {
             meta: Meta {
                 domain: raw.meta.domain.filter(|d| !d.is_empty()),
@@ -195,10 +300,13 @@ impl Ontology {
             relations: raw.relations,
             strict: raw.validation.strict,
             reasoning: raw.reasoning,
-            constraint_types: raw.constraint_types.into_iter().map(|(k, v)| {
-                (k, ConstraintType { params: v.params })
-            }).collect(),
+            constraint_types: raw
+                .constraint_types
+                .into_iter()
+                .map(|(k, v)| (k, ConstraintType { params: v.params }))
+                .collect(),
             patterns,
+            tables,
             descriptions,
         })
     }
@@ -217,6 +325,10 @@ impl Ontology {
         &self.patterns
     }
 
+    pub fn tables(&self) -> &TablesConfig {
+        &self.tables
+    }
+
     /// Prefix used when deriving a node id for `node_type` (`id_for` / label sanitize).
     pub fn id_abbrev(&self, node_type: &str) -> String {
         self.id_prefixes
@@ -233,7 +345,10 @@ impl Ontology {
             .spines
             .iter()
             .filter(|s| !s.anchor.is_empty() && !s.relations.is_empty())
-            .map(|s| Spine { anchor: s.anchor.clone(), relations: s.relations.clone() })
+            .map(|s| Spine {
+                anchor: s.anchor.clone(),
+                relations: s.relations.clone(),
+            })
             .collect()
     }
 
@@ -339,7 +454,12 @@ impl Ontology {
         }
     }
 
-    pub fn validate_edge(&self, edge_type: &str, from_type: &str, to_type: &str) -> Result<(), String> {
+    pub fn validate_edge(
+        &self,
+        edge_type: &str,
+        from_type: &str,
+        to_type: &str,
+    ) -> Result<(), String> {
         if CORE_EDGES.contains(&edge_type) {
             return Ok(());
         }
@@ -495,10 +615,16 @@ structural = ["Document", "Section"]
         let spines = o.spines();
         assert_eq!(spines.len(), 2);
         assert_eq!(spines[0].anchor, "Symptom");
-        assert_eq!(spines[0].relations, vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        assert_eq!(
+            spines[0].relations,
+            vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]
+        );
         assert_eq!(spines[1].anchor, "Task");
         assert_eq!(spines[1].relations, vec!["RESOLVED_BY".to_string()]);
-        assert_eq!(o.structural(), vec!["Document".to_string(), "Section".to_string()]);
+        assert_eq!(
+            o.structural(),
+            vec!["Document".to_string(), "Section".to_string()]
+        );
     }
 
     #[test]
@@ -507,7 +633,11 @@ structural = ["Document", "Section"]
         let o = Ontology::parse(REASONING_TOML).unwrap();
         assert_eq!(
             o.closure_rules(),
-            vec![("CAUSED_BY".into(), "RESOLVED_BY".into(), "RESOLVED_BY".into())]
+            vec![(
+                "CAUSED_BY".into(),
+                "RESOLVED_BY".into(),
+                "RESOLVED_BY".into()
+            )]
         );
     }
 
@@ -527,7 +657,10 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         let types = o.spine_types();
         assert_eq!(
             types,
-            ["Symptom", "Cause", "Resolution"].into_iter().map(String::from).collect()
+            ["Symptom", "Cause", "Resolution"]
+                .into_iter()
+                .map(String::from)
+                .collect()
         );
         // no spine → no types
         assert!(Ontology::parse(TOML).unwrap().spine_types().is_empty());
@@ -537,7 +670,10 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
     fn spine_relations_deduped_in_order() {
         // union across both spines, first-seen order, RESOLVED_BY not repeated
         let o = Ontology::parse(REASONING_TOML).unwrap();
-        assert_eq!(o.spine_relations(), vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]);
+        assert_eq!(
+            o.spine_relations(),
+            vec!["CAUSED_BY".to_string(), "RESOLVED_BY".to_string()]
+        );
         // no spine → no relations
         assert!(Ontology::parse(TOML).unwrap().spine_relations().is_empty());
     }
@@ -579,8 +715,11 @@ props = []
         assert!(o.validate_node("Anything").is_ok());
         // present file → parsed (strict)
         std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
-        std::fs::write(dir.path().join(".glossa/ontology.toml"),
-            "[entities.Person]\nprops=[]\n[validation]\nstrict=true\n").unwrap();
+        std::fs::write(
+            dir.path().join(".glossa/ontology.toml"),
+            "[entities.Person]\nprops=[]\n[validation]\nstrict=true\n",
+        )
+        .unwrap();
         let o2 = Ontology::load_or_default(dir.path());
         assert!(o2.validate_node("Person").is_ok());
         assert!(o2.validate_node("Alien").is_err());

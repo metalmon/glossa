@@ -1,19 +1,23 @@
-pub mod glob;
-pub mod grep;
-pub mod mcp;
-pub mod tools;
-pub mod model;
-pub mod root;
-pub mod extract;
-pub mod graph;
-pub mod index;
-pub mod query;
-pub mod search;
-pub mod walk;
-pub mod read;
-pub mod trace;
 pub mod cli_fmt;
+pub mod extract;
+pub mod glob;
+pub mod graph;
+pub mod grep;
+pub mod index;
+pub mod mcp;
+pub mod model;
+pub mod query;
+pub mod read;
+pub mod root;
+pub mod search;
+pub mod tables;
+pub mod tools;
+pub mod trace;
 pub mod tz_export;
+pub mod walk;
+
+#[cfg(feature = "notebook")]
+pub mod notebook;
 
 #[cfg(feature = "constraint")]
 pub mod constraint_adapter;

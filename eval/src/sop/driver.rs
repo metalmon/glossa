@@ -7,9 +7,9 @@
 //! conditions in the SOP.md drive loops and branches exactly as they would under
 //! the production engine.
 
+use crate::sop::route::guard::step_visit_count;
 use crate::sop::route::{resolve_next, NextStep, RouteCtx};
 use crate::sop::rundata::RunData;
-use crate::sop::route::guard::step_visit_count;
 use crate::sop::types::{
     Sop, SopEvent, SopRun, SopRunStatus, SopStep, SopStepResult, SopStepStatus, SopTriggerSource,
 };
@@ -24,10 +24,16 @@ pub struct StepOutcome {
 
 impl StepOutcome {
     pub fn completed(output: impl Into<String>) -> Self {
-        Self { status: SopStepStatus::Completed, output: output.into() }
+        Self {
+            status: SopStepStatus::Completed,
+            output: output.into(),
+        }
     }
     pub fn failed(output: impl Into<String>) -> Self {
-        Self { status: SopStepStatus::Failed, output: output.into() }
+        Self {
+            status: SopStepStatus::Failed,
+            output: output.into(),
+        }
     }
 }
 
@@ -38,7 +44,9 @@ pub struct DriverConfig {
 }
 impl Default for DriverConfig {
     fn default() -> Self {
-        Self { max_step_visits: 256 }
+        Self {
+            max_step_visits: 256,
+        }
     }
 }
 
@@ -83,7 +91,12 @@ where
     let mut steps_run = 0usize;
 
     loop {
-        let Some(step) = sop.steps.iter().find(|s| s.number == run.current_step).cloned() else {
+        let Some(step) = sop
+            .steps
+            .iter()
+            .find(|s| s.number == run.current_step)
+            .cloned()
+        else {
             run.status = SopRunStatus::Completed;
             break;
         };

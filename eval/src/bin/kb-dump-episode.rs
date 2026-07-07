@@ -114,15 +114,18 @@ fn resolve_episode_id(cfg: &DumpConfig) -> Result<String> {
     };
     let body = ch_query(&cfg.clickhouse_url, &sql)?.trim().to_string();
     if body.is_empty() {
-        anyhow::bail!("no episode found (function={}, run={:?})", cfg.function_name, cfg.run_tag);
+        anyhow::bail!(
+            "no episode found (function={}, run={:?})",
+            cfg.function_name,
+            cfg.run_tag
+        );
     }
     Ok(body)
 }
 
 fn parse_messages(input_json: &str) -> Result<Vec<Value>> {
     let v: Value = serde_json::from_str(input_json).context("parse inference input JSON")?;
-    Ok(v
-        .get("messages")
+    Ok(v.get("messages")
         .and_then(|m| m.as_array())
         .cloned()
         .unwrap_or_default())
@@ -145,7 +148,11 @@ fn parse_output_blocks(output_json: &str) -> Result<Vec<Value>> {
 }
 
 fn block_text(block: &Value) -> String {
-    block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()
+    block
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn fmt_args(args: &Value) -> String {
@@ -254,7 +261,8 @@ fn format_turn(
     messages: &[Value],
     truncate: usize,
 ) -> Result<String> {
-    const SEP: &str = "================================================================================\n";
+    const SEP: &str =
+        "================================================================================\n";
     let mut out = format!(
         "\n{SEP}TURN {turn}/{total}  inference={}  variant={}\n{SEP}",
         row.id, row.variant_name
@@ -293,7 +301,14 @@ fn format_episode(rows: &[ChInferenceRow], truncate: usize) -> Result<String> {
     let mut prev_len = 0usize;
     for (i, row) in rows.iter().enumerate() {
         let messages = parse_messages(&row.input)?;
-        out.push_str(&format_turn(i + 1, rows.len(), row, prev_len, &messages, truncate)?);
+        out.push_str(&format_turn(
+            i + 1,
+            rows.len(),
+            row,
+            prev_len,
+            &messages,
+            truncate,
+        )?);
         prev_len = messages.len();
     }
     Ok(out)
@@ -319,8 +334,8 @@ fn run_dump(cfg: DumpConfig) -> Result<String> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        let mut f = std::fs::File::create(path)
-            .with_context(|| format!("create {}", path.display()))?;
+        let mut f =
+            std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
         f.write_all(text.as_bytes())
             .with_context(|| format!("write {}", path.display()))?;
         eprintln!(

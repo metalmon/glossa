@@ -6,21 +6,21 @@
 //! - **glob**: TZ `functions.glob` → model emits `glob(pattern)` → gold document path listed?
 //! - **read**: TZ `functions.read` → after prefilled search/grep hits, model emits `read(path,n)` → matches gold?
 
-use anyhow::{Context, Result};
 pub use crate::export_tz::SearchExample;
 use crate::export_tz::{GlobExample, GrepExample, ReadExample, ReadPick};
+use anyhow::{Context, Result};
 use glossa::grep::GrepOpts;
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::HashSet;
-use std::fmt;
-use std::str::FromStr;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 /// Knobs for one optimization run.
@@ -77,7 +77,9 @@ impl FromStr for CandidateSelection {
         match s.to_ascii_lowercase().replace('-', "_").as_str() {
             "pareto" => Ok(Self::Pareto),
             "current_best" | "currentbest" | "best" => Ok(Self::CurrentBest),
-            other => anyhow::bail!("unknown candidate_selection {other:?} (use pareto or current_best)"),
+            other => {
+                anyhow::bail!("unknown candidate_selection {other:?} (use pareto or current_best)")
+            }
         }
     }
 }
@@ -158,7 +160,11 @@ fn tool_calls(content: &[Value]) -> Vec<(String, Value)> {
         .iter()
         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_call"))
         .map(|b| {
-            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let name = b
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
             (name, tool_call_args(b))
         })
         .collect()
@@ -174,10 +180,7 @@ fn read_pick_from_args(args: &Value) -> Option<ReadPick> {
         });
     }
     // Model sometimes swaps path and n (TZ schema rejects; raw_arguments may still carry this).
-    if let (Some(n), Some(path)) = (
-        parse_n(path_v),
-        n_v.as_str().filter(|p| !p.is_empty()),
-    ) {
+    if let (Some(n), Some(path)) = (parse_n(path_v), n_v.as_str().filter(|p| !p.is_empty())) {
         return Some(ReadPick {
             path: path.to_string(),
             n,
@@ -190,7 +193,11 @@ fn first_search_call(content: &[Value]) -> Option<String> {
     tool_calls(content)
         .into_iter()
         .find(|(n, _)| n == "search")
-        .and_then(|(_, args)| args.get("query").and_then(|q| q.as_str()).map(str::to_string))
+        .and_then(|(_, args)| {
+            args.get("query")
+                .and_then(|q| q.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn first_read_call(content: &[Value]) -> Option<ReadPick> {
@@ -204,14 +211,22 @@ fn first_grep_call(content: &[Value]) -> Option<String> {
     tool_calls(content)
         .into_iter()
         .find(|(n, _)| n == "grep")
-        .and_then(|(_, args)| args.get("pattern").and_then(|p| p.as_str()).map(str::to_string))
+        .and_then(|(_, args)| {
+            args.get("pattern")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn first_glob_call(content: &[Value]) -> Option<String> {
     tool_calls(content)
         .into_iter()
         .find(|(n, _)| n == "glob")
-        .and_then(|(_, args)| args.get("pattern").and_then(|p| p.as_str()).map(str::to_string))
+        .and_then(|(_, args)| {
+            args.get("pattern")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn render_hits(hits: &[Value]) -> String {
@@ -236,7 +251,8 @@ fn render_hits(hits: &[Value]) -> String {
 }
 
 fn search_top_k(idx: &DocIndex, query: &str, k: usize) -> Vec<glossa::index::store::RankedHit> {
-    idx.search_filtered(query, k, None, None).unwrap_or_default()
+    idx.search_filtered(query, k, None, None)
+        .unwrap_or_default()
 }
 
 fn grep_top_k(idx: &DocIndex, pattern: &str, k: usize) -> Vec<glossa::grep::GrepHit> {
@@ -263,7 +279,10 @@ fn render_grep_hits(hits: &[glossa::grep::GrepHit]) -> String {
 }
 
 fn render_ranked_hits(hits: &[glossa::index::store::RankedHit]) -> String {
-    hits.iter().map(glossa::index::store::RankedHit::display_line).collect::<Vec<_>>().join("\n")
+    hits.iter()
+        .map(glossa::index::store::RankedHit::display_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn search_hit_hits(hits: &[glossa::index::store::RankedHit], gold: &[(String, String)]) -> bool {
@@ -277,7 +296,11 @@ fn search_hit_hits(hits: &[glossa::index::store::RankedHit], gold: &[(String, St
     false
 }
 
-fn grep_hit_hits(hits: &[glossa::grep::GrepHit], gold: &[(String, String)], idx: &DocIndex) -> bool {
+fn grep_hit_hits(
+    hits: &[glossa::grep::GrepHit],
+    gold: &[(String, String)],
+    idx: &DocIndex,
+) -> bool {
     for h in hits {
         for (gp, gl) in gold {
             if normalize_path(&h.path) != normalize_path(gp) {
@@ -412,7 +435,12 @@ struct GlobOutcome {
     listing: String,
 }
 
-fn score_search_one(cfg: &GepaConfig, prompt: &str, ex: &SearchExample, idx: &DocIndex) -> SearchOutcome {
+fn score_search_one(
+    cfg: &GepaConfig,
+    prompt: &str,
+    ex: &SearchExample,
+    idx: &DocIndex,
+) -> SearchOutcome {
     let messages = [user_question_msg(&ex.question)];
     let turn = match infer_prompt(cfg, &cfg.search_function, prompt, &messages) {
         Ok(t) => t,
@@ -535,14 +563,30 @@ fn score_quad(
     globs: &[GlobExample],
     reads: &[ReadExample],
     idx: &DocIndex,
-) -> (Vec<SearchOutcome>, Vec<GrepOutcome>, Vec<GlobOutcome>, Vec<ReadOutcome>) {
-    let s_scores = searches.iter().map(|ex| score_search_one(cfg, prompt, ex, idx)).collect();
-    let g_scores = greps.iter().map(|ex| score_grep_one(cfg, prompt, ex, idx)).collect();
-    let l_scores = globs.iter().map(|ex| score_glob_one(cfg, prompt, ex, idx)).collect();
-    let r_scores = reads.iter().map(|ex| score_read_one(cfg, prompt, ex, idx)).collect();
+) -> (
+    Vec<SearchOutcome>,
+    Vec<GrepOutcome>,
+    Vec<GlobOutcome>,
+    Vec<ReadOutcome>,
+) {
+    let s_scores = searches
+        .iter()
+        .map(|ex| score_search_one(cfg, prompt, ex, idx))
+        .collect();
+    let g_scores = greps
+        .iter()
+        .map(|ex| score_grep_one(cfg, prompt, ex, idx))
+        .collect();
+    let l_scores = globs
+        .iter()
+        .map(|ex| score_glob_one(cfg, prompt, ex, idx))
+        .collect();
+    let r_scores = reads
+        .iter()
+        .map(|ex| score_read_one(cfg, prompt, ex, idx))
+        .collect();
     (s_scores, g_scores, l_scores, r_scores)
 }
-
 
 fn search_acc(scores: &[SearchOutcome]) -> f64 {
     if scores.is_empty() {
@@ -593,7 +637,18 @@ fn acc(scores: &[bool]) -> f64 {
     scores.iter().filter(|b| **b).count() as f64 / scores.len() as f64
 }
 
-fn weighted_quad_acc(s: f64, g: f64, l: f64, r: f64, ws: f64, wg: f64, wl: f64, wr: f64, if_zero: f64) -> f64 {
+#[allow(clippy::too_many_arguments)]
+fn weighted_quad_acc(
+    s: f64,
+    g: f64,
+    l: f64,
+    r: f64,
+    ws: f64,
+    wg: f64,
+    wl: f64,
+    wr: f64,
+    if_zero: f64,
+) -> f64 {
     let w = ws + wg + wl + wr;
     if w <= 0.0 {
         return if_zero;
@@ -601,6 +656,7 @@ fn weighted_quad_acc(s: f64, g: f64, l: f64, r: f64, ws: f64, wg: f64, wl: f64, 
     (ws * s + wg * g + wl * l + wr * r) / w
 }
 
+#[allow(clippy::too_many_arguments)]
 fn combined_acc_from_pools(
     have_s: bool,
     have_g: bool,
@@ -705,7 +761,13 @@ fn failure_budget_equal(minibatch: usize, have: [bool; 4]) -> [usize; 4] {
     let mut out = [0usize; 4];
     for (i, h) in have.iter().enumerate() {
         if *h {
-            out[i] = base + if extra > 0 { extra -= 1; 1 } else { 0 };
+            out[i] = base
+                + if extra > 0 {
+                    extra -= 1;
+                    1
+                } else {
+                    0
+                };
         }
     }
     out
@@ -874,8 +936,7 @@ fn score_minibatch_traces(
     mb: &Minibatch,
     idx: &DocIndex,
 ) -> (Vec<MinibatchTrace>, f64, f64, f64, f64, f64) {
-    let (s_out, g_out, l_out, r_out) =
-        score_quad(cfg, prompt, &mb.s, &mb.g, &mb.l, &mb.r, idx);
+    let (s_out, g_out, l_out, r_out) = score_quad(cfg, prompt, &mb.s, &mb.g, &mb.l, &mb.r, idx);
     let ps = search_acc(&s_out);
     let pg = grep_acc(&g_out);
     let pl = glob_acc(&l_out);
@@ -948,6 +1009,7 @@ fn combined_from_outcomes(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn child_beats_parent_on_minibatch(
     parent_s: &[SearchOutcome],
     parent_g: &[GrepOutcome],
@@ -1130,9 +1192,8 @@ fn build_reflect_instruction(ctx: &ReflectContext, cfg: &GepaConfig) -> String {
 }
 
 fn output_likely_truncated(_text: &str, finish_reason: Option<&str>) -> bool {
-    finish_reason.is_some_and(|r| {
-        r.eq_ignore_ascii_case("length") || r.eq_ignore_ascii_case("max_tokens")
-    })
+    finish_reason
+        .is_some_and(|r| r.eq_ignore_ascii_case("length") || r.eq_ignore_ascii_case("max_tokens"))
 }
 
 fn reflect(cfg: &GepaConfig, ctx: &ReflectContext) -> Result<String> {
@@ -1275,9 +1336,31 @@ fn format_model_read(model_read: Option<&ReadPick>, resolved: Option<&str>) -> S
     }
 }
 
-fn dominates(a_q: &[bool], a_g: &[bool], a_l: &[bool], a_r: &[bool], b_q: &[bool], b_g: &[bool], b_l: &[bool], b_r: &[bool]) -> bool {
-    let a: Vec<bool> = a_q.iter().chain(a_g).chain(a_l).chain(a_r).copied().collect();
-    let b: Vec<bool> = b_q.iter().chain(b_g).chain(b_l).chain(b_r).copied().collect();
+#[allow(clippy::too_many_arguments)]
+fn dominates(
+    a_q: &[bool],
+    a_g: &[bool],
+    a_l: &[bool],
+    a_r: &[bool],
+    b_q: &[bool],
+    b_g: &[bool],
+    b_l: &[bool],
+    b_r: &[bool],
+) -> bool {
+    let a: Vec<bool> = a_q
+        .iter()
+        .chain(a_g)
+        .chain(a_l)
+        .chain(a_r)
+        .copied()
+        .collect();
+    let b: Vec<bool> = b_q
+        .iter()
+        .chain(b_g)
+        .chain(b_l)
+        .chain(b_r)
+        .copied()
+        .collect();
     let mut strictly = false;
     for (x, y) in a.iter().zip(&b) {
         if !x && *y {
@@ -1371,14 +1454,7 @@ fn pareto_frontier_win_counts(pool: &[Candidate]) -> (Vec<usize>, Vec<usize>) {
                 let a = &pool[j];
                 let b = &pool[i];
                 if dominates(
-                    &a.s_val,
-                    &a.g_val,
-                    &a.l_val,
-                    &a.r_val,
-                    &b.s_val,
-                    &b.g_val,
-                    &b.l_val,
-                    &b.r_val,
+                    &a.s_val, &a.g_val, &a.l_val, &a.r_val, &b.s_val, &b.g_val, &b.l_val, &b.r_val,
                 ) {
                     dominated.insert(i);
                     break;
@@ -1386,7 +1462,10 @@ fn pareto_frontier_win_counts(pool: &[Candidate]) -> (Vec<usize>, Vec<usize>) {
             }
         }
     }
-    let mut frontier_idxs: Vec<usize> = c_vec.into_iter().filter(|k| !dominated.contains(k)).collect();
+    let mut frontier_idxs: Vec<usize> = c_vec
+        .into_iter()
+        .filter(|k| !dominated.contains(k))
+        .collect();
     if frontier_idxs.is_empty() {
         frontier_idxs = frontier(pool);
     }
@@ -1436,11 +1515,7 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
 }
 
 fn feedback_tags(cfg: &GepaConfig, stage: &str) -> Value {
-    let mut m = cfg
-        .tags
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let mut m = cfg.tags.as_object().cloned().unwrap_or_default();
     m.insert("stage".into(), stage.into());
     if let Some(n) = stage.strip_prefix("iter_") {
         m.insert("iter".into(), n.into());
@@ -1448,6 +1523,7 @@ fn feedback_tags(cfg: &GepaConfig, stage: &str) -> Value {
     Value::Object(m)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn post_gepa_metrics(
     gw: &str,
     episode_id: &str,
@@ -1459,11 +1535,41 @@ fn post_gepa_metrics(
     combined: f64,
     tags: &Value,
 ) {
-    crate::tz::post_feedback(gw, episode_id, &format!("{prefix}_search"), json!(search_acc), tags);
-    crate::tz::post_feedback(gw, episode_id, &format!("{prefix}_grep"), json!(grep_acc), tags);
-    crate::tz::post_feedback(gw, episode_id, &format!("{prefix}_glob"), json!(glob_acc), tags);
-    crate::tz::post_feedback(gw, episode_id, &format!("{prefix}_read"), json!(read_acc), tags);
-    crate::tz::post_feedback(gw, episode_id, &format!("{prefix}_combined"), json!(combined), tags);
+    crate::tz::post_feedback(
+        gw,
+        episode_id,
+        &format!("{prefix}_search"),
+        json!(search_acc),
+        tags,
+    );
+    crate::tz::post_feedback(
+        gw,
+        episode_id,
+        &format!("{prefix}_grep"),
+        json!(grep_acc),
+        tags,
+    );
+    crate::tz::post_feedback(
+        gw,
+        episode_id,
+        &format!("{prefix}_glob"),
+        json!(glob_acc),
+        tags,
+    );
+    crate::tz::post_feedback(
+        gw,
+        episode_id,
+        &format!("{prefix}_read"),
+        json!(read_acc),
+        tags,
+    );
+    crate::tz::post_feedback(
+        gw,
+        episode_id,
+        &format!("{prefix}_combined"),
+        json!(combined),
+        tags,
+    );
 }
 
 fn post_baseline_feedback(
@@ -1488,6 +1594,7 @@ fn post_baseline_feedback(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn post_iter_feedback(
     cfg: &GepaConfig,
     iter: usize,
@@ -1523,12 +1630,7 @@ fn post_iter_feedback(
     );
 }
 
-fn post_final_feedback(
-    cfg: &GepaConfig,
-    result: &GepaRunResult,
-    n_train: usize,
-    n_val: usize,
-) {
+fn post_final_feedback(cfg: &GepaConfig, result: &GepaRunResult, n_train: usize, n_val: usize) {
     let ep = &result.episode_id;
     let tags = feedback_tags(cfg, "final");
     post_gepa_metrics(
@@ -1542,7 +1644,13 @@ fn post_final_feedback(
         result.best_acc,
         &tags,
     );
-    crate::tz::post_feedback(&cfg.gateway, ep, "gepa_combined_acc", json!(result.best_acc), &tags);
+    crate::tz::post_feedback(
+        &cfg.gateway,
+        ep,
+        "gepa_combined_acc",
+        json!(result.best_acc),
+        &tags,
+    );
     crate::tz::post_feedback(
         &cfg.gateway,
         ep,
@@ -1592,7 +1700,11 @@ fn candidate_combined(c: &Candidate, cfg: &GepaConfig) -> f64 {
 fn best_pool_combined(pool: &[Candidate], cfg: &GepaConfig) -> (f64, f64, f64, f64, f64) {
     let best = pool
         .iter()
-        .max_by(|a, b| candidate_combined(a, &cfg).partial_cmp(&candidate_combined(b, &cfg)).unwrap())
+        .max_by(|a, b| {
+            candidate_combined(a, cfg)
+                .partial_cmp(&candidate_combined(b, cfg))
+                .unwrap()
+        })
         .expect("non-empty pool");
     (
         acc(&best.s_val),
@@ -1606,7 +1718,12 @@ fn best_pool_combined(pool: &[Candidate], cfg: &GepaConfig) -> (f64, f64, f64, f
 #[cfg(test)]
 fn outcomes_from_traces(
     traces: &[MinibatchTrace],
-) -> (Vec<SearchOutcome>, Vec<GrepOutcome>, Vec<GlobOutcome>, Vec<ReadOutcome>) {
+) -> (
+    Vec<SearchOutcome>,
+    Vec<GrepOutcome>,
+    Vec<GlobOutcome>,
+    Vec<ReadOutcome>,
+) {
     let mut s = Vec::new();
     let mut g = Vec::new();
     let mut l = Vec::new();
@@ -1682,7 +1799,8 @@ fn split_by_episode<T: Clone>(
     } else {
         ((episodes.len() as f64 * val_frac).round() as usize).clamp(1, episodes.len() - 1)
     };
-    let val_eps: std::collections::HashSet<String> = episodes.into_iter().rev().take(n_val).collect();
+    let val_eps: std::collections::HashSet<String> =
+        episodes.into_iter().rev().take(n_val).collect();
     let mut train = Vec::new();
     let mut val = Vec::new();
     for item in items {
@@ -1773,7 +1891,14 @@ pub fn run(
         "baseline val: search={:.3} grep={:.3} glob={:.3} read={:.3} combined={:.3}",
         base_s_acc, base_g_acc, base_l_acc, base_r_acc, baseline_acc,
     );
-    post_baseline_feedback(&cfg, base_s_acc, base_g_acc, base_l_acc, base_r_acc, baseline_acc);
+    post_baseline_feedback(
+        &cfg,
+        base_s_acc,
+        base_g_acc,
+        base_l_acc,
+        base_r_acc,
+        baseline_acc,
+    );
     {
         let tags = feedback_tags(&cfg, "start");
         let n_train = train_s.len() + train_g.len() + train_l.len() + train_r.len();
@@ -1845,7 +1970,8 @@ pub fn run(
         let mut parent_mb_scores = None;
         for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
             let batch = sample_minibatch(&cfg, &train_s, &train_g, &train_l, &train_r, &mut rng);
-            let (t, ps, pg, pl, pr, pc) = score_minibatch_traces(&cfg, &parent_prompt, &batch, &idx);
+            let (t, ps, pg, pl, pr, pc) =
+                score_minibatch_traces(&cfg, &parent_prompt, &batch, &idx);
             let n_fail = t.iter().filter(|x| !x.ok()).count();
             if n_fail > 0 {
                 mb = Some(batch);
@@ -1911,13 +2037,8 @@ pub fn run(
 
         let (child_s_out, child_g_out, child_l_out, child_r_out) =
             score_quad(&cfg, &child_prompt, &mb.s, &mb.g, &mb.l, &mb.r, &idx);
-        let child_mb_c = combined_from_outcomes(
-            &child_s_out,
-            &child_g_out,
-            &child_l_out,
-            &child_r_out,
-            &cfg,
-        );
+        let child_mb_c =
+            combined_from_outcomes(&child_s_out, &child_g_out, &child_l_out, &child_r_out, &cfg);
         if child_mb_c <= parent_mb_c {
             println!(
                 "[iter {it}] child_mb {child_mb_c:.3} <= parent_mb {parent_mb_c:.3} — discarded (minibatch_regressed)"
@@ -1945,13 +2066,8 @@ pub fn run(
         );
         let (child_s_bools, child_g_bools, child_l_bools, child_r_bools) =
             outcomes_to_bools(&child_p_s, &child_p_g, &child_p_l, &child_p_r);
-        let child_pareto_c = combined_from_outcomes(
-            &child_p_s,
-            &child_p_g,
-            &child_p_l,
-            &child_p_r,
-            &cfg,
-        );
+        let child_pareto_c =
+            combined_from_outcomes(&child_p_s, &child_p_g, &child_p_l, &child_p_r, &cfg);
 
         println!(
             "[iter {it}] parent_idx={parent_idx} parent_mb={parent_mb_c:.3} -> child_mb={child_mb_c:.3} — accepted (pareto_combined={child_pareto_c:.3}, pool_size={})",
@@ -1976,8 +2092,7 @@ pub fn run(
     let mut best_l_acc = 0.0;
     let mut best_r_acc = 0.0;
     for c in &pool {
-        let (s, g, l, r) =
-            score_quad(&cfg, &c.prompt, &val_s, &val_g, &val_l, &val_r, &idx);
+        let (s, g, l, r) = score_quad(&cfg, &c.prompt, &val_s, &val_g, &val_l, &val_r, &idx);
         let combined = combined_from_outcomes(&s, &g, &l, &r, &cfg);
         if combined > best_acc {
             best_acc = combined;
@@ -2248,10 +2363,26 @@ mod tests {
         let cfg = test_cfg();
         let empty_g = Vec::<GrepOutcome>::new();
         let empty_l = Vec::<GlobOutcome>::new();
-        let parent_s = vec![SearchOutcome { ok: false, model_search: None, top_k: String::new() }];
-        let parent_r = vec![ReadOutcome { ok: false, model_read: None, resolved: None }];
-        let child_s = vec![SearchOutcome { ok: true, model_search: None, top_k: String::new() }];
-        let child_r = vec![ReadOutcome { ok: false, model_read: None, resolved: None }];
+        let parent_s = vec![SearchOutcome {
+            ok: false,
+            model_search: None,
+            top_k: String::new(),
+        }];
+        let parent_r = vec![ReadOutcome {
+            ok: false,
+            model_read: None,
+            resolved: None,
+        }];
+        let child_s = vec![SearchOutcome {
+            ok: true,
+            model_search: None,
+            top_k: String::new(),
+        }];
+        let child_r = vec![ReadOutcome {
+            ok: false,
+            model_read: None,
+            resolved: None,
+        }];
         assert!(child_beats_parent_on_minibatch(
             &parent_s, &empty_g, &empty_l, &parent_r, &child_s, &empty_g, &empty_l, &child_r, &cfg
         ));
@@ -2263,8 +2394,16 @@ mod tests {
     #[test]
     fn combined_acc_four_way() {
         let cfg = test_cfg();
-        assert!((combined_acc_from_pools(true, true, true, true, 1.0, 0.0, 0.0, 0.0, &cfg) - 0.25).abs() < 1e-9);
-        assert!((combined_acc_from_pools(true, false, false, true, 1.0, 0.0, 0.0, 1.0, &cfg) - 1.0).abs() < 1e-9);
+        assert!(
+            (combined_acc_from_pools(true, true, true, true, 1.0, 0.0, 0.0, 0.0, &cfg) - 0.25)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (combined_acc_from_pools(true, false, false, true, 1.0, 0.0, 0.0, 1.0, &cfg) - 1.0)
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -2418,10 +2557,22 @@ mod tests {
 
     #[test]
     fn failure_budget_equal_splits_minibatch() {
-        assert_eq!(failure_budget_equal(10, [true, false, false, true]), [5, 0, 0, 5]);
-        assert_eq!(failure_budget_equal(9, [true, false, false, true]), [5, 0, 0, 4]);
-        assert_eq!(failure_budget_equal(4, [true, false, false, false]), [4, 0, 0, 0]);
-        assert_eq!(failure_budget_equal(4, [false, false, false, true]), [0, 0, 0, 4]);
+        assert_eq!(
+            failure_budget_equal(10, [true, false, false, true]),
+            [5, 0, 0, 5]
+        );
+        assert_eq!(
+            failure_budget_equal(9, [true, false, false, true]),
+            [5, 0, 0, 4]
+        );
+        assert_eq!(
+            failure_budget_equal(4, [true, false, false, false]),
+            [4, 0, 0, 0]
+        );
+        assert_eq!(
+            failure_budget_equal(4, [false, false, false, true]),
+            [0, 0, 0, 4]
+        );
         assert_eq!(failure_budget_legacy(4, true, true), (2, 2));
     }
 

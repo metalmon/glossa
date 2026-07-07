@@ -1,6 +1,14 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+type ToolExecResult = (
+    String,
+    String,
+    String,
+    Vec<String>,
+    Vec<glossa::read::DocImage>,
+);
+
 /// Per-turn wall-clock profiling, silent unless `KB_PROF` is set. Used to separate inference vs
 /// tool latency (e.g. it surfaced that proxied inference dominated, then large-PDF `read`).
 macro_rules! prof {
@@ -38,9 +46,16 @@ pub struct EpisodePolicy {
 
 impl EpisodePolicy {
     /// Answer mode: a text-only turn ends the episode; no dedup (keeps eval ≡ prod for answering).
-    pub fn answer() -> Self { Self::default() }
+    pub fn answer() -> Self {
+        Self::default()
+    }
     /// Enrich mode: an explicit `done` ends the episode; read-only calls are de-duplicated.
-    pub fn enrich() -> Self { Self { stop_on_done: true, dedup_readonly: true } }
+    pub fn enrich() -> Self {
+        Self {
+            stop_on_done: true,
+            dedup_readonly: true,
+        }
+    }
 }
 
 /// What a tool call reads or changes — drives dedup invalidation. An identical call is "stale" (must
@@ -61,11 +76,15 @@ fn tool_kind(name: &str) -> ToolKind {
         // are control signals: always executed, never deduped (an identical
         // `{"remaining": 0}` on two different steps is two real transitions).
         "done" | "sop_advance" => ToolKind::Control,
-        "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => ToolKind::GraphMutate,
+        "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => {
+            ToolKind::GraphMutate
+        }
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
         // constraint_solve reads the graph: an identical call MUST re-run after any
         // graph mutation, else the model sees a stale verdict and fights the "cache".
-        "glossary" | "neighbors" | "resolve" | "graph_stats" | "constraint_solve" => ToolKind::GraphRead,
+        "glossary" | "neighbors" | "resolve" | "graph_stats" | "constraint_solve" => {
+            ToolKind::GraphRead
+        }
         _ => ToolKind::Corpus,
     }
 }
@@ -129,8 +148,14 @@ where
             for (ti, b) in turn.content.iter().enumerate() {
                 let typ = b.get("type").and_then(|t| t.as_str()).unwrap_or("?");
                 let detail = match typ {
-                    "tool_call" => format!(" name={}", b.get("name").and_then(|n| n.as_str()).unwrap_or("?")),
-                    "text" => format!(" text={:.80}", b.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+                    "tool_call" => format!(
+                        " name={}",
+                        b.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                    ),
+                    "text" => format!(
+                        " text={:.80}",
+                        b.get("text").and_then(|t| t.as_str()).unwrap_or("")
+                    ),
                     _ => String::new(),
                 };
                 eprintln!("  [TZ] block[{ti}] type={typ}{detail}");
@@ -152,11 +177,19 @@ where
                 .collect::<Vec<_>>()
                 .join("");
             if !policy.stop_on_done {
-                return Ok(EpisodeOutcome { answer, episode_id, surfaced_titles, done: false, rounds });
+                return Ok(EpisodeOutcome {
+                    answer,
+                    episode_id,
+                    surfaced_titles,
+                    done: false,
+                    rounds,
+                });
             }
             // Narrate-then-stop: the model described its next action but emitted no tool call. Don't
             // end the episode — record what it said and nudge it to act or to signal completion.
-            messages.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }));
+            messages.push(
+                json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }),
+            );
             messages.push(json!({ "role": "user", "content": [{ "type": "text", "text":
                 "You ended a turn without calling a tool. If the reasoning graph for this case is complete (or already present), call `done`. Otherwise issue the tool call you described." }] }));
             continue;
@@ -164,7 +197,10 @@ where
 
         // Explicit completion signal (enrich): the model called `done`.
         if policy.stop_on_done {
-            if let Some(done) = tool_calls.iter().find(|c| c.get("name").and_then(|n| n.as_str()) == Some("done")) {
+            if let Some(done) = tool_calls
+                .iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("done"))
+            {
                 let note = done
                     .get("arguments")
                     .and_then(|a| a.get("note"))
@@ -179,7 +215,13 @@ where
                         format!("Not finished — {reject} Continue; call `done` only once that is resolved.") }] }));
                     continue;
                 }
-                return Ok(EpisodeOutcome { answer: note, episode_id, surfaced_titles, done: true, rounds });
+                return Ok(EpisodeOutcome {
+                    answer: note,
+                    episode_id,
+                    surfaced_titles,
+                    done: true,
+                    rounds,
+                });
             }
         }
 
@@ -193,8 +235,16 @@ where
         let calls: Vec<(String, String, Value)> = tool_calls
             .iter()
             .map(|call| {
-                let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = call
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = call
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let args = call
                     .get("arguments")
                     .filter(|v| !v.is_null())
@@ -249,23 +299,22 @@ where
         }
 
         // Execute the to-run calls concurrently; substitute a hint for deduped ones. Order kept.
-        let results: Vec<(String, String, String, Vec<String>, Vec<glossa::read::DocImage>)> =
-            std::thread::scope(|s| {
-                let handles: Vec<Option<_>> = calls
-                    .iter()
-                    .zip(&run_flags)
-                    .map(|((id, name, args), &run)| {
-                        if run {
-                            Some(s.spawn(|| {
-                                let (result, titles, images) = exec(name, args);
-                                (id.clone(), name.clone(), result, titles, images)
-                            }))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                handles
+        let results: Vec<ToolExecResult> = std::thread::scope(|s| {
+            let handles: Vec<Option<_>> = calls
+                .iter()
+                .zip(&run_flags)
+                .map(|((id, name, args), &run)| {
+                    if run {
+                        Some(s.spawn(|| {
+                            let (result, titles, images) = exec(name, args);
+                            (id.clone(), name.clone(), result, titles, images)
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            handles
                     .into_iter()
                     .zip(calls.iter())
                     .map(|(h, (id, name, _args))| match h {
@@ -281,7 +330,7 @@ where
                         ),
                     })
                     .collect()
-            });
+        });
 
         // Push one tool_result user message per call (in original call order),
         // followed by any image blocks. Result MUST be a string.
@@ -300,7 +349,13 @@ where
         }
     }
     // Out of rounds: best-effort empty answer (the report still scores it).
-    Ok(EpisodeOutcome { answer: String::new(), episode_id, surfaced_titles, done: false, rounds })
+    Ok(EpisodeOutcome {
+        answer: String::new(),
+        episode_id,
+        surfaced_titles,
+        done: false,
+        rounds,
+    })
 }
 
 /// Build a user message carrying the read's images as TZ image content blocks (vision input),
@@ -310,7 +365,8 @@ fn image_user_message(images: &[glossa::read::DocImage]) -> Option<Value> {
         return None;
     }
     use base64::Engine as _;
-    let mut content = vec![json!({"type": "text", "text": "(images from the chunk you just read)"})];
+    let mut content =
+        vec![json!({"type": "text", "text": "(images from the chunk you just read)"})];
     for img in images {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
         content.push(json!({"type": "image", "mime_type": img.mime, "data": b64}));
@@ -354,11 +410,7 @@ impl AgentBackend for TensorZeroBackend {
         let url = format!("{}/inference", crate::tz::gateway_base(&self.endpoint));
         let function = self.function.clone();
         let timeout = self.timeout;
-        let mut tag_map = self
-            .tags
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut tag_map = self.tags.as_object().cloned().unwrap_or_default();
         tag_map.insert("case_id".to_string(), json!(q.id));
         let tags = Value::Object(tag_map);
         // Client-generated episode_id, back-dated 30s so its UUIDv7 timestamp is always in the PAST
@@ -389,7 +441,9 @@ impl AgentBackend for TensorZeroBackend {
                         };
                         attempt += 1;
                         if retryable && attempt <= 3 {
-                            std::thread::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)));
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                500 * u64::from(attempt),
+                            ));
                             continue;
                         }
                         return Err(anyhow!("tensorzero /inference failed: {e}"));
@@ -401,10 +455,25 @@ impl AgentBackend for TensorZeroBackend {
             if let Some(err) = v.get("error") {
                 bail!("tensorzero error: {err}");
             }
-            let episode_id = v.get("episode_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let content = v.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-            prof!("[prof] infer {}ms  ctx_msgs={}", t0.elapsed().as_millis(), messages.len());
-            Ok(TzTurn { content, episode_id })
+            let episode_id = v
+                .get("episode_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let content = v
+                .get("content")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+            prof!(
+                "[prof] infer {}ms  ctx_msgs={}",
+                t0.elapsed().as_millis(),
+                messages.len()
+            );
+            Ok(TzTurn {
+                content,
+                episode_id,
+            })
         };
 
         let trace = TraceLog::to_dir(work);
@@ -414,10 +483,13 @@ impl AgentBackend for TensorZeroBackend {
         let graph = glossa::graph::store::GraphStore::open(work).ok();
         // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/neighbors render
         // the reasoning chain identically to the MCP surface.
-        let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(work));
+        let spec = glossa::tools::ChainSpec::from_ontology(
+            &glossa::graph::ontology::Ontology::load_or_default(work),
+        );
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
-            let r = crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
+            let r =
+                crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
             prof!("[prof] tool {name} {}ms", t.elapsed().as_millis());
             r
         };
@@ -444,10 +516,26 @@ impl AgentBackend for TensorZeroBackend {
             self.feedback(&eid, "em", json!(em));
             self.feedback(&eid, "f1", json!(f1));
             self.feedback(&eid, "retrieved", json!(retrieved));
-            self.feedback(&eid, "recall_at_5", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 5)));
-            self.feedback(&eid, "recall_at_10", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 10)));
-            self.feedback(&eid, "recall_at_20", json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 20)));
-            self.feedback(&eid, "mrr", json!(crate::score::mrr(&ranked, &q.supporting_titles)));
+            self.feedback(
+                &eid,
+                "recall_at_5",
+                json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 5)),
+            );
+            self.feedback(
+                &eid,
+                "recall_at_10",
+                json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 10)),
+            );
+            self.feedback(
+                &eid,
+                "recall_at_20",
+                json!(crate::score::recall_at_k(&ranked, &q.supporting_titles, 20)),
+            );
+            self.feedback(
+                &eid,
+                "mrr",
+                json!(crate::score::mrr(&ranked, &q.supporting_titles)),
+            );
             let tj = std::time::Instant::now();
             let j = self.judge_score(&q.question, &q.answer, &pred);
             prof!("[prof] judge {}ms", tj.elapsed().as_millis());
@@ -487,11 +575,17 @@ impl TensorZeroBackend {
         );
         let body = json!({ "model": self.judge_model, "temperature": 0.0,
             "messages": [{ "role": "user", "content": prompt }] });
-        let mut req = ureq::post(&url).timeout(self.timeout).set("Content-Type", "application/json");
+        let mut req = ureq::post(&url)
+            .timeout(self.timeout)
+            .set("Content-Type", "application/json");
         if let Some(k) = &self.judge_api_key {
             req = req.set("Authorization", &format!("Bearer {k}"));
         }
-        let text = req.send_string(&serde_json::to_string(&body).ok()?).ok()?.into_string().ok()?;
+        let text = req
+            .send_string(&serde_json::to_string(&body).ok()?)
+            .ok()?
+            .into_string()
+            .ok()?;
         let v: Value = serde_json::from_str(&text).ok()?;
         let content = v["choices"][0]["message"]["content"].as_str()?;
         parse_first_float(content).map(|f| f.clamp(0.0, 1.0))
@@ -517,8 +611,12 @@ fn retrieved_any(surfaced: &[String], gold: &[String]) -> bool {
     if gold.is_empty() {
         return true;
     }
-    let surf: Vec<String> = surfaced.iter().map(|s| crate::score::normalize(s)).collect();
-    gold.iter().any(|g| surf.contains(&crate::score::normalize(g)))
+    let surf: Vec<String> = surfaced
+        .iter()
+        .map(|s| crate::score::normalize(s))
+        .collect();
+    gold.iter()
+        .any(|g| surf.contains(&crate::score::normalize(g)))
 }
 
 #[cfg(test)]
@@ -535,7 +633,10 @@ mod retrieved_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert!(secs <= now && secs + 120 >= now, "timestamp must be a few seconds in the PAST");
+        assert!(
+            secs <= now && secs + 120 >= now,
+            "timestamp must be a few seconds in the PAST"
+        );
     }
 
     #[test]
@@ -555,10 +656,13 @@ mod retrieved_tests {
 
     #[test]
     fn retrieved_any_semantics() {
-        assert!(retrieved_any(&["The Beatles".into()], &["the beatles".into()])); // normalized match
-        assert!(!retrieved_any(&["X".into()], &["Y".into()]));                     // surfaced, but no match
-        assert!(!retrieved_any(&[], &["anything".into()]));                        // NO search -> not retrieved
-        assert!(retrieved_any(&["whatever".into()], &[]));                         // empty gold -> trivially true
+        assert!(retrieved_any(
+            &["The Beatles".into()],
+            &["the beatles".into()]
+        )); // normalized match
+        assert!(!retrieved_any(&["X".into()], &["Y".into()])); // surfaced, but no match
+        assert!(!retrieved_any(&[], &["anything".into()])); // NO search -> not retrieved
+        assert!(retrieved_any(&["whatever".into()], &[])); // empty gold -> trivially true
     }
 }
 
@@ -575,7 +679,9 @@ mod tests {
             *r += 1;
             if *r == 1 {
                 Ok(TzTurn {
-                    content: vec![json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": { "query": "corliss" } })],
+                    content: vec![
+                        json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": { "query": "corliss" } }),
+                    ],
                     episode_id: "ep1".into(),
                 })
             } else {
@@ -588,9 +694,11 @@ mod tests {
         let exec = |name: &str, args: &Value| {
             assert_eq!(name, "search");
             assert_eq!(args["query"], "corliss");
-            ("Meet_Corliss_Archer.md:Meet Corliss Archer: …  [9.0]".to_string(),
-             vec!["Meet Corliss Archer".to_string()],
-             Vec::new())
+            (
+                "Meet_Corliss_Archer.md:Meet Corliss Archer: …  [9.0]".to_string(),
+                vec!["Meet Corliss Archer".to_string()],
+                Vec::new(),
+            )
         };
         let out = run_episode(chat, "Question: ...", exec, 8, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: Chief of Protocol");
@@ -600,10 +708,12 @@ mod tests {
 
     #[test]
     fn episode_returns_direct_answer() {
-        let chat = |_: &[Value], _: Option<&str>| Ok(TzTurn {
-            content: vec![json!({ "type": "text", "text": "ANSWER: yes" })],
-            episode_id: "e".into(),
-        });
+        let chat = |_: &[Value], _: Option<&str>| {
+            Ok(TzTurn {
+                content: vec![json!({ "type": "text", "text": "ANSWER: yes" })],
+                episode_id: "e".into(),
+            })
+        };
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: yes");
@@ -611,26 +721,36 @@ mod tests {
 
     #[test]
     fn empty_episode_id_is_treated_as_none() {
-        let chat = |_: &[Value], _: Option<&str>| Ok(TzTurn {
-            content: vec![json!({ "type": "text", "text": "ANSWER: x" })],
-            episode_id: "".into(),
-        });
+        let chat = |_: &[Value], _: Option<&str>| {
+            Ok(TzTurn {
+                content: vec![json!({ "type": "text", "text": "ANSWER: x" })],
+                episode_id: "".into(),
+            })
+        };
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
-        assert_eq!(out.episode_id, None, "an empty episode_id must not become Some(\"\")");
+        assert_eq!(
+            out.episode_id, None,
+            "an empty episode_id must not become Some(\"\")"
+        );
     }
 
     #[test]
     fn image_user_message_uses_working_tz_shape() {
-        let imgs = vec![glossa::read::DocImage { mime: "image/png".into(), bytes: vec![1, 2, 3] }];
+        let imgs = vec![glossa::read::DocImage {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+        }];
         let m = image_user_message(&imgs).unwrap();
         assert_eq!(m["role"], "user");
         let blocks = m["content"].as_array().unwrap();
         // exactly one image block, in the shape Task 1's spike proved works:
-        assert!(blocks.iter().any(|b| b["type"] == "image"
-            && b["mime_type"].is_string()
-            && b["data"].is_string()),
-            "image block must use Format A: {{type:image, mime_type, data}}");
+        assert!(
+            blocks.iter().any(|b| b["type"] == "image"
+                && b["mime_type"].is_string()
+                && b["data"].is_string()),
+            "image block must use Format A: {{type:image, mime_type, data}}"
+        );
         assert!(image_user_message(&[]).is_none());
     }
 
@@ -668,7 +788,11 @@ mod tests {
         let names_clone = Arc::clone(&called_names);
         let exec = move |name: &str, _args: &Value| {
             names_clone.lock().unwrap().push(name.to_string());
-            ("result".to_string(), vec![format!("title-{name}")], Vec::new())
+            (
+                "result".to_string(),
+                vec![format!("title-{name}")],
+                Vec::new(),
+            )
         };
 
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
@@ -682,7 +806,10 @@ mod tests {
         // surfaced_titles collected from both calls.
         let mut titles = out.surfaced_titles.clone();
         titles.sort();
-        assert_eq!(titles, vec!["title-read".to_string(), "title-search".to_string()]);
+        assert_eq!(
+            titles,
+            vec!["title-read".to_string(), "title-search".to_string()]
+        );
 
         // Message structure after round 1:
         //   [0] user question
@@ -690,14 +817,32 @@ mod tests {
         //   [2] user { tool_result c1 }
         //   [3] user { tool_result c2 }
         let msgs = captured_msgs.borrow();
-        assert_eq!(msgs.len(), 4, "expected [user_q, assistant, tool_result_c1, tool_result_c2]");
+        assert_eq!(
+            msgs.len(),
+            4,
+            "expected [user_q, assistant, tool_result_c1, tool_result_c2]"
+        );
 
         let asst = &msgs[1];
         assert_eq!(asst["role"], "assistant");
         let blocks = asst["content"].as_array().expect("content must be array");
-        assert_eq!(blocks.len(), 2, "ONE assistant message must contain BOTH tool_call blocks");
-        assert!(blocks.iter().any(|b| b["type"] == "tool_call" && b["id"] == "c1"), "c1 block missing");
-        assert!(blocks.iter().any(|b| b["type"] == "tool_call" && b["id"] == "c2"), "c2 block missing");
+        assert_eq!(
+            blocks.len(),
+            2,
+            "ONE assistant message must contain BOTH tool_call blocks"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b["type"] == "tool_call" && b["id"] == "c1"),
+            "c1 block missing"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b["type"] == "tool_call" && b["id"] == "c2"),
+            "c2 block missing"
+        );
 
         // Two separate tool_result messages in call order.
         assert_eq!(msgs[2]["role"], "user");
@@ -751,16 +896,26 @@ mod tests {
 
     #[test]
     fn enrich_stops_on_done_and_never_executes_it() {
-        let chat = |_: &[Value], _: Option<&str>| Ok(TzTurn {
-            content: vec![json!({ "type": "tool_call", "id": "d1", "name": "done", "arguments": { "note": "chain written" } })],
-            episode_id: "e".into(),
-        });
+        let chat = |_: &[Value], _: Option<&str>| {
+            Ok(TzTurn {
+                content: vec![
+                    json!({ "type": "tool_call", "id": "d1", "name": "done", "arguments": { "note": "chain written" } }),
+                ],
+                episode_id: "e".into(),
+            })
+        };
         let exec = |name: &str, _: &Value| {
-            assert_ne!(name, "done", "`done` is a control signal — it must be intercepted, never executed");
+            assert_ne!(
+                name, "done",
+                "`done` is a control signal — it must be intercepted, never executed"
+            );
             (String::new(), Vec::new(), Vec::new())
         };
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::enrich()).unwrap();
-        assert_eq!(out.answer, "chain written", "done's note becomes the outcome");
+        assert_eq!(
+            out.answer, "chain written",
+            "done's note becomes the outcome"
+        );
     }
 
     #[test]
@@ -775,26 +930,44 @@ mod tests {
             *r += 1;
             match *r {
                 1 | 2 => Ok(TzTurn {
-                    content: vec![json!({ "type": "tool_call", "id": "c", "name": "read", "arguments": { "path": "a.md", "n": 1 } })],
+                    content: vec![
+                        json!({ "type": "tool_call", "id": "c", "name": "read", "arguments": { "path": "a.md", "n": 1 } }),
+                    ],
                     episode_id: "e".into(),
                 }),
                 _ => {
                     *last.borrow_mut() = msgs.to_vec();
-                    Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} })], episode_id: "e".into() })
+                    Ok(TzTurn {
+                        content: vec![
+                            json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
+                        ],
+                        episode_id: "e".into(),
+                    })
                 }
             }
         };
         let reads = Arc::new(Mutex::new(0usize));
         let rc = Arc::clone(&reads);
         let exec = move |name: &str, _: &Value| {
-            if name == "read" { *rc.lock().unwrap() += 1; }
+            if name == "read" {
+                *rc.lock().unwrap() += 1;
+            }
             ("page text".to_string(), Vec::new(), Vec::new())
         };
         run_episode(chat, "q", exec, 8, EpisodePolicy::enrich()).unwrap();
-        assert_eq!(*reads.lock().unwrap(), 1, "an identical read must execute only once");
+        assert_eq!(
+            *reads.lock().unwrap(),
+            1,
+            "an identical read must execute only once"
+        );
         // the 2nd identical read fed back the dedup hint, not a fresh execution.
         let msgs = last.borrow();
-        let hinted = msgs.iter().any(|m| m["content"][0]["result"].as_str().map(|s| s.contains("(skipped)")).unwrap_or(false));
+        let hinted = msgs.iter().any(|m| {
+            m["content"][0]["result"]
+                .as_str()
+                .map(|s| s.contains("(skipped)"))
+                .unwrap_or(false)
+        });
         assert!(hinted, "the deduped call must return the (skipped) hint");
     }
 
@@ -805,15 +978,30 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let round = RefCell::new(0usize);
         // generalize, generalize(dup), upsert(changes graph), generalize(now fresh again), done.
-        let script = ["graph_generalize", "graph_generalize", "graph_upsert", "graph_generalize"];
+        let script = [
+            "graph_generalize",
+            "graph_generalize",
+            "graph_upsert",
+            "graph_generalize",
+        ];
         let chat = |_: &[Value], _: Option<&str>| {
             let mut r = round.borrow_mut();
             let i = *r;
             *r += 1;
             if i < script.len() {
-                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": format!("c{i}"), "name": script[i], "arguments": {} })], episode_id: "e".into() })
+                Ok(TzTurn {
+                    content: vec![
+                        json!({ "type": "tool_call", "id": format!("c{i}"), "name": script[i], "arguments": {} }),
+                    ],
+                    episode_id: "e".into(),
+                })
             } else {
-                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} })], episode_id: "e".into() })
+                Ok(TzTurn {
+                    content: vec![
+                        json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
+                    ],
+                    episode_id: "e".into(),
+                })
             }
         };
         let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -824,7 +1012,11 @@ mod tests {
         };
         run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
         let c = counts.lock().unwrap();
-        assert_eq!(c.get("graph_generalize").copied().unwrap_or(0), 2, "2nd generalize deduped; 3rd re-runs because the upsert changed the graph");
+        assert_eq!(
+            c.get("graph_generalize").copied().unwrap_or(0),
+            2,
+            "2nd generalize deduped; 3rd re-runs because the upsert changed the graph"
+        );
         assert_eq!(c.get("graph_upsert").copied().unwrap_or(0), 1);
     }
 
@@ -840,11 +1032,18 @@ mod tests {
             let i = *r;
             *r += 1;
             let block = match i {
-                0 | 1 | 3 => json!({ "type": "tool_call", "id": format!("c{i}"), "name": "glossary", "arguments": { "concept": "насос" } }),
-                2 => json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} }),
+                0 | 1 | 3 => {
+                    json!({ "type": "tool_call", "id": format!("c{i}"), "name": "glossary", "arguments": { "concept": "насос" } })
+                }
+                2 => {
+                    json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} })
+                }
                 _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
             };
-            Ok(TzTurn { content: vec![block], episode_id: "e".into() })
+            Ok(TzTurn {
+                content: vec![block],
+                episode_id: "e".into(),
+            })
         };
         let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         let cc = Arc::clone(&counts);
@@ -854,7 +1053,11 @@ mod tests {
         };
         run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
         let c = counts.lock().unwrap();
-        assert_eq!(c.get("glossary").copied().unwrap_or(0), 2, "repeat glossary deduped, but re-runs after the upsert (graph changed)");
+        assert_eq!(
+            c.get("glossary").copied().unwrap_or(0),
+            2,
+            "repeat glossary deduped, but re-runs after the upsert (graph changed)"
+        );
         assert_eq!(c.get("graph_upsert").copied().unwrap_or(0), 1);
     }
 
@@ -872,11 +1075,18 @@ mod tests {
             let i = *r;
             *r += 1;
             let block = match i {
-                0 | 1 | 3 => json!({ "type": "tool_call", "id": format!("c{i}"), "name": "constraint_solve", "arguments": { "mode": "check" } }),
-                2 => json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} }),
+                0 | 1 | 3 => {
+                    json!({ "type": "tool_call", "id": format!("c{i}"), "name": "constraint_solve", "arguments": { "mode": "check" } })
+                }
+                2 => {
+                    json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} })
+                }
                 _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
             };
-            Ok(TzTurn { content: vec![block], episode_id: "e".into() })
+            Ok(TzTurn {
+                content: vec![block],
+                episode_id: "e".into(),
+            })
         };
         let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         let cc = Arc::clone(&counts);
@@ -886,7 +1096,11 @@ mod tests {
         };
         run_episode(chat, "q", exec, 10, EpisodePolicy::enrich()).unwrap();
         let c = counts.lock().unwrap();
-        assert_eq!(c.get("constraint_solve").copied().unwrap_or(0), 2, "repeat solve deduped, but re-runs after the upsert (graph changed)");
+        assert_eq!(
+            c.get("constraint_solve").copied().unwrap_or(0),
+            2,
+            "repeat solve deduped, but re-runs after the upsert (graph changed)"
+        );
     }
 
     /// The SOP-style completion gate rejects `done` until it is satisfied: the model
@@ -896,7 +1110,9 @@ mod tests {
         use std::cell::RefCell;
         let chat = |_: &[Value], _: Option<&str>| {
             Ok(TzTurn {
-                content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } })],
+                content: vec![
+                    json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } }),
+                ],
                 episode_id: "e".into(),
             })
         };
@@ -905,11 +1121,18 @@ mod tests {
         let gate = || -> Option<String> {
             let mut n = gate_calls.borrow_mut();
             *n += 1;
-            if *n < 3 { Some(format!("still missing item {n}.")) } else { None }
+            if *n < 3 {
+                Some(format!("still missing item {n}."))
+            } else {
+                None
+            }
         };
         let out = run_episode_gated(chat, "q", exec, 10, EpisodePolicy::enrich(), gate).unwrap();
         assert!(out.done, "episode must end via done once the gate passes");
-        assert_eq!(out.rounds, 3, "done accepted only on the 3rd round; first two rejected");
+        assert_eq!(
+            out.rounds, 3,
+            "done accepted only on the 3rd round; first two rejected"
+        );
         assert_eq!(*gate_calls.borrow(), 3, "gate consulted each done attempt");
     }
 
@@ -923,19 +1146,37 @@ mod tests {
             *r += 1;
             if *r == 1 {
                 // narrate-then-stop: prose, no tool call.
-                Ok(TzTurn { content: vec![json!({ "type": "text", "text": "Let me read the chunk first." })], episode_id: "e".into() })
+                Ok(TzTurn {
+                    content: vec![
+                        json!({ "type": "text", "text": "Let me read the chunk first." }),
+                    ],
+                    episode_id: "e".into(),
+                })
             } else {
                 *last.borrow_mut() = msgs.to_vec();
-                Ok(TzTurn { content: vec![json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } })], episode_id: "e".into() })
+                Ok(TzTurn {
+                    content: vec![
+                        json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": { "note": "ok" } }),
+                    ],
+                    episode_id: "e".into(),
+                })
             }
         };
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::enrich()).unwrap();
         assert_eq!(out.answer, "ok");
-        assert!(*round.borrow() >= 2, "a text-only turn must NOT end an enrich episode");
+        assert!(
+            *round.borrow() >= 2,
+            "a text-only turn must NOT end an enrich episode"
+        );
         let msgs = last.borrow();
-        let nudged = msgs.iter().any(|m| m["role"] == "user"
-            && m["content"][0]["text"].as_str().map(|s| s.contains("without calling a tool")).unwrap_or(false));
+        let nudged = msgs.iter().any(|m| {
+            m["role"] == "user"
+                && m["content"][0]["text"]
+                    .as_str()
+                    .map(|s| s.contains("without calling a tool"))
+                    .unwrap_or(false)
+        });
         assert!(nudged, "a nudge must follow a text-only enrich turn");
     }
 }

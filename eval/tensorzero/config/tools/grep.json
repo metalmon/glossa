@@ -105,6 +105,14 @@
         "null"
       ]
     },
+    "path": {
+      "default": null,
+      "description": "Search only this document — the same path `glob`/`read`/`search` show (a trailing `#chunk` is ignored). Omit to search the whole base.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "pattern": {
       "description": "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window.",
       "type": "string"

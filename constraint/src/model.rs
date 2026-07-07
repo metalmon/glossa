@@ -3,12 +3,21 @@ use serde::{Deserialize, Serialize};
 /// A single constraint on a field.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Constraint {
-    Range { min: f64, max: f64 },
-    Regex { pattern: String },
+    Range {
+        min: f64,
+        max: f64,
+    },
+    Regex {
+        pattern: String,
+    },
     Required,
     Forbidden,
-    Enum { values: Vec<String> },
-    Formula { expression: String },
+    Enum {
+        values: Vec<String>,
+    },
+    Formula {
+        expression: String,
+    },
     Conditional {
         condition_field: String,
         condition_value: serde_json::Value,
@@ -48,9 +57,7 @@ pub enum Domain {
 impl Domain {
     pub fn contains_string(&self, v: &str) -> bool {
         match self {
-            Domain::Interval { min, max } => {
-                v.parse::<f64>().is_ok_and(|n| n >= *min && n <= *max)
-            }
+            Domain::Interval { min, max } => v.parse::<f64>().is_ok_and(|n| n >= *min && n <= *max),
             Domain::Set { values } => values.iter().any(|x| x == v),
             Domain::Any => true,
             Domain::Empty => false,
@@ -100,7 +107,10 @@ mod tests {
 
     #[test]
     fn domain_interval_contains_number() {
-        let d = Domain::Interval { min: 0.0, max: 999.0 };
+        let d = Domain::Interval {
+            min: 0.0,
+            max: 999.0,
+        };
         assert!(d.contains_string("500"));
         assert!(!d.contains_string("-1"));
         assert!(!d.contains_string("1000"));
@@ -108,7 +118,9 @@ mod tests {
 
     #[test]
     fn domain_set_contains_string() {
-        let d = Domain::Set { values: vec!["A".into(), "B".into(), "C".into()] };
+        let d = Domain::Set {
+            values: vec!["A".into(), "B".into(), "C".into()],
+        };
         assert!(d.contains_string("A"));
         assert!(d.contains_string("B"));
         assert!(!d.contains_string("D"));
@@ -128,7 +140,9 @@ mod tests {
 
     #[test]
     fn domain_regex_matches() {
-        let d = Domain::Regex { pattern: r"^RU-\d{6}$".into() };
+        let d = Domain::Regex {
+            pattern: r"^RU-\d{6}$".into(),
+        };
         assert!(d.contains_string("RU-123456"));
         assert!(!d.contains_string("RU-12345"));
         assert!(!d.contains_string("R2-123456"));
@@ -136,7 +150,10 @@ mod tests {
 
     #[test]
     fn constraint_serialization_roundtrip() {
-        let c = Constraint::Range { min: 0.0, max: 999.0 };
+        let c = Constraint::Range {
+            min: 0.0,
+            max: 999.0,
+        };
         let json = serde_json::to_string(&c).unwrap();
         let back: Constraint = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);

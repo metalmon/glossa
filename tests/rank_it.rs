@@ -5,7 +5,11 @@ use std::fs;
 #[test]
 fn index_then_ranked_search_finds_russian_inflection() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("a.md"), "# T\nПодписаны договоры на поставку\n").unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# T\nПодписаны договоры на поставку\n",
+    )
+    .unwrap();
 
     // Build the index.
     Command::cargo_bin("kb")

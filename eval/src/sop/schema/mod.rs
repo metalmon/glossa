@@ -4,7 +4,7 @@ mod types;
 use serde_json::Value;
 
 pub use types::SchemaError;
-use types::{SchemaNode, value_kind};
+use types::{value_kind, SchemaNode};
 
 /// Validate a JSON value against ZeroClaw's minimal SOP schema subset.
 ///

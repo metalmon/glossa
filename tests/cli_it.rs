@@ -21,10 +21,16 @@ fn kb_search_word_flag_excludes_substring() {
     fs::write(dir.path().join("a.md"), b"# H\ncategory only\n").unwrap();
 
     let mut cmd = Command::cargo_bin("kb").unwrap();
-    cmd.args(["search", "--scan", "cat", "-w", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicates::str::is_empty());
+    cmd.args([
+        "search",
+        "--scan",
+        "cat",
+        "-w",
+        dir.path().to_str().unwrap(),
+    ])
+    .assert()
+    .success()
+    .stdout(predicates::str::is_empty());
 }
 
 #[test]
@@ -33,7 +39,8 @@ fn search_then_read_by_number() {
     fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
 
     // pretty search numbers the hit
-    Command::cargo_bin("kb").unwrap()
+    Command::cargo_bin("kb")
+        .unwrap()
         .current_dir(dir.path())
         .args(["search", "--scan", "hello", "--format", "pretty"])
         .assert()
@@ -41,7 +48,8 @@ fn search_then_read_by_number() {
         .stdout(contains("#1").and(contains("note.md")));
 
     // read by number resolves the recorded hit and prints its text
-    Command::cargo_bin("kb").unwrap()
+    Command::cargo_bin("kb")
+        .unwrap()
         .current_dir(dir.path())
         .args(["read", "1"])
         .assert()
@@ -54,13 +62,25 @@ fn zero_hit_search_preserves_last_search() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
     // first search records a hit
-    Command::cargo_bin("kb").unwrap().current_dir(dir.path())
-        .args(["search", "--scan", "hello"]).assert().success();
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "--scan", "hello"])
+        .assert()
+        .success();
     // a search with no matches must NOT clobber the recorded hit
-    Command::cargo_bin("kb").unwrap().current_dir(dir.path())
-        .args(["search", "--scan", "zzznomatchxyz"]).assert().success();
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "--scan", "zzznomatchxyz"])
+        .assert()
+        .success();
     // read 1 still resolves the earlier hit
-    Command::cargo_bin("kb").unwrap().current_dir(dir.path())
-        .args(["read", "1"]).assert().success()
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["read", "1"])
+        .assert()
+        .success()
         .stdout(predicates::str::contains("hello world here"));
 }

@@ -116,10 +116,16 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     // Report-only unless opts.prune_incomplete; empty spine → no-op. Deleting here means the
     // merge/closure/meta passes below see the cleaned graph (they reload from `g`).
     {
-        let id_types: Vec<(String, String)> =
-            g.all_nodes()?.into_iter().map(|n| (n.id, n.node_type)).collect();
-        let edges: Vec<Triple> =
-            g.all_edges()?.into_iter().map(|e| (e.from, e.edge_type, e.to)).collect();
+        let id_types: Vec<(String, String)> = g
+            .all_nodes()?
+            .into_iter()
+            .map(|n| (n.id, n.node_type))
+            .collect();
+        let edges: Vec<Triple> = g
+            .all_edges()?
+            .into_iter()
+            .map(|e| (e.from, e.edge_type, e.to))
+            .collect();
         let structural: HashSet<String> = opts.structural.iter().cloned().collect();
         let doomed = hygiene::incomplete_nodes(
             &id_types,
@@ -138,8 +144,10 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     // Computed first (before deriving edges) on the original graph; applied only if requested.
     {
         let nodes = g.all_nodes()?;
-        let type_of: HashMap<String, String> =
-            nodes.iter().map(|n| (n.id.clone(), n.node_type.clone())).collect();
+        let type_of: HashMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.node_type.clone()))
+            .collect();
         let reasoning = |id: &str| {
             type_of
                 .get(id)
@@ -164,9 +172,11 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
             .filter(|n| reasoning(&n.id))
             .map(|n| (n.id.clone(), n.label.clone()))
             .collect();
-        for (a, b, _s) in
-            similarity::label_bm25(&reasoning_labels, opts.merge_bm25_min_ratio, opts.bm25_top_k)?
-        {
+        for (a, b, _s) in similarity::label_bm25(
+            &reasoning_labels,
+            opts.merge_bm25_min_ratio,
+            opts.bm25_top_k,
+        )? {
             if type_of.get(&a) == type_of.get(&b) {
                 pairs.push((a, b));
             }
@@ -204,10 +214,18 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     g.delete_edges_by_origin(DERIVED_ORIGIN)?;
 
     // (#8) transitive closure → inferred edges (rules from the ontology's [reasoning].closure)
-    let rules: Vec<closure::Rule> =
-        opts.closure_rules.iter().map(|(a, b, r)| closure::Rule::new(a, b, r)).collect();
+    let rules: Vec<closure::Rule> = opts
+        .closure_rules
+        .iter()
+        .map(|(a, b, r)| closure::Rule::new(a, b, r))
+        .collect();
     for (f, t, to) in closure::transitive_closure(&edges, &rules) {
-        g.put_edge(&Edge { from: f, edge_type: t, to, prov: derived_prov(opts.now, 1.0) })?;
+        g.put_edge(&Edge {
+            from: f,
+            edge_type: t,
+            to,
+            prov: derived_prov(opts.now, 1.0),
+        })?;
         report.inferred_edges += 1;
     }
 
@@ -252,10 +270,16 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     // Scoping to non-structural nodes + the edges among them keeps the meta about reasoning; the
     // shared-evidence relationship survives as the SIMILAR edges, which are reasoning↔reasoning.
     let structural: HashSet<String> = opts.structural.iter().cloned().collect();
-    let type_of: HashMap<&str, &str> =
-        nodes.iter().map(|n| (n.id.as_str(), n.node_type.as_str())).collect();
+    let type_of: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.node_type.as_str()))
+        .collect();
     let is_reasoning = |id: &str| type_of.get(id).is_some_and(|t| !structural.contains(*t));
-    let r_ids: Vec<String> = node_ids.iter().filter(|id| is_reasoning(id)).cloned().collect();
+    let r_ids: Vec<String> = node_ids
+        .iter()
+        .filter(|id| is_reasoning(id))
+        .cloned()
+        .collect();
     let r_edges: Vec<Triple> = g
         .all_edges()?
         .into_iter()
@@ -278,7 +302,11 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
             )
         })
         .collect();
-    report.communities = comm.values().copied().collect::<std::collections::BTreeSet<_>>().len();
+    report.communities = comm
+        .values()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     g.replace_node_meta(&meta)?;
 
     Ok(report)
@@ -349,10 +377,21 @@ strict = false
         }
     }
     fn node(id: &str, ty: &str, label: &str) -> Node {
-        Node { id: id.into(), node_type: ty.into(), label: label.into(), aliases: vec![], prov: prov() }
+        Node {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: vec![],
+            prov: prov(),
+        }
     }
     fn edge(f: &str, t: &str, to: &str) -> Edge {
-        Edge { from: f.into(), edge_type: t.into(), to: to.into(), prov: prov() }
+        Edge {
+            from: f.into(),
+            edge_type: t.into(),
+            to: to.into(),
+            prov: prov(),
+        }
     }
 
     #[test]
@@ -379,13 +418,20 @@ strict = false
 
         // closure rule now comes from the ontology's [reasoning].closure, not a hardcode
         let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
-        assert_eq!(rep.inferred_edges, 1, "closure should infer S RESOLVED_BY R");
-        assert!(rep.merge_candidates >= 1, "S and S2 share a chunk → merge candidate");
+        assert_eq!(
+            rep.inferred_edges, 1,
+            "closure should infer S RESOLVED_BY R"
+        );
+        assert!(
+            rep.merge_candidates >= 1,
+            "S and S2 share a chunk → merge candidate"
+        );
         assert_eq!(rep.merged_nodes, 0, "merge must NOT apply by default");
 
         // inferred edge present with the derived origin
         let out = g.outgoing("sym:s").unwrap();
-        assert!(out.iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"
+        assert!(out.iter().any(|e| e.edge_type == "RESOLVED_BY"
+            && e.to == "res:r"
             && e.prov.origin == "auto-generalized"));
         // node_meta populated (community id at least for the connected nodes)
         assert!(g.node_meta("sym:s").unwrap().is_some());
@@ -412,9 +458,16 @@ strict = false
         g.upsert(&ont, &nodes, &edges).unwrap();
 
         let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
-        assert_eq!(rep.inferred_edges, 0, "no [reasoning].closure → no inferred edges");
+        assert_eq!(
+            rep.inferred_edges, 0,
+            "no [reasoning].closure → no inferred edges"
+        );
         // the direct S->R shortcut must NOT have been created
-        assert!(!g.outgoing("sym:s").unwrap().iter().any(|e| e.edge_type == "RESOLVED_BY"));
+        assert!(!g
+            .outgoing("sym:s")
+            .unwrap()
+            .iter()
+            .any(|e| e.edge_type == "RESOLVED_BY"));
     }
 
     #[test]
@@ -424,14 +477,23 @@ strict = false
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
-        let nodes = vec![node("sym:s", "Symptom", "S"), node("res:r", "Resolution", "R")];
+        let nodes = vec![
+            node("sym:s", "Symptom", "S"),
+            node("res:r", "Resolution", "R"),
+        ];
         let edges = vec![edge("sym:s", "RESOLVED_BY", "res:r")];
         g.upsert(&ont, &nodes, &edges).unwrap();
 
         let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
-        assert_eq!(rep.prune_candidates, 2, "sym:s and res:r are both degenerate");
+        assert_eq!(
+            rep.prune_candidates, 2,
+            "sym:s and res:r are both degenerate"
+        );
         assert_eq!(rep.pruned_nodes, 0, "report-only by default");
-        assert!(g.get_node("sym:s").unwrap().is_some(), "nothing deleted without the flag");
+        assert!(
+            g.get_node("sym:s").unwrap().is_some(),
+            "nothing deleted without the flag"
+        );
         assert!(g.get_node("res:r").unwrap().is_some());
     }
 
@@ -479,7 +541,11 @@ strict = false
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![
             node("sym:s", "Symptom", "Потеря связи"),
-            node("sym:s2", "Symptom", "Потеря связи периодическая повторяющаяся"),
+            node(
+                "sym:s2",
+                "Symptom",
+                "Потеря связи периодическая повторяющаяся",
+            ),
             node("res:r", "Resolution", "Поднять maxTsdr"),
             node("sec:1", "Section", "doc#1"),
         ];
@@ -499,6 +565,10 @@ strict = false
         let canon = g.get_node("sym:s").unwrap().unwrap();
         assert!(canon.aliases.iter().any(|a| a.contains("повторяющаяся")));
         // the dup's RESOLVED_BY edge now hangs off the canonical
-        assert!(g.outgoing("sym:s").unwrap().iter().any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"));
+        assert!(g
+            .outgoing("sym:s")
+            .unwrap()
+            .iter()
+            .any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"));
     }
 }

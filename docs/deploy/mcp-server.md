@@ -29,7 +29,7 @@ kb.exe mcp C:\kb\base1 --profile reader --transport streamable-http --bind 127.0
 - **Constraint:** instances sharing one `.glossa` must be on the **same host** (the writer lock is a
   local file lock; unreliable over SMB/NFS). For another host, give it its own index copy.
 - **Multiple editors** are fine — the heavy generalize pass is serialized across them by
-  `.glossa/generalize.lock`.
+  `.glossa/generalize.lock`. Notebook writes are serialized by `.glossa/notebook.lock`.
 
 ### Two (or more) bases
 

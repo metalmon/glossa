@@ -214,13 +214,22 @@ mod tests {
             a.terms(s, &mut buf);
             let expected: std::collections::BTreeSet<String> =
                 analyze_terms(s).into_iter().collect();
-            assert_eq!(buf, expected, "TermAnalyzer must match analyze_terms for {s:?}");
+            assert_eq!(
+                buf, expected,
+                "TermAnalyzer must match analyze_terms for {s:?}"
+            );
         };
 
         for s in [
-            "договоры договоров договорам", "running RUNS runner",
-            "Периодическая потеря связи Modbus", "maxTsdr=3000, версия 5.7.2",
-            "p.7 (стр.)", "ёлка ЁЖ-1", "ßİ²—", "   ", "",
+            "договоры договоров договорам",
+            "running RUNS runner",
+            "Периодическая потеря связи Modbus",
+            "maxTsdr=3000, версия 5.7.2",
+            "p.7 (стр.)",
+            "ёлка ЁЖ-1",
+            "ßİ²—",
+            "   ",
+            "",
         ] {
             check(s);
         }

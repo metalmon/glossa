@@ -33,7 +33,14 @@ fn insert_node(g: &GraphStore, id: &str, node_type: &str, label: &str, src: &str
     .unwrap();
 }
 
-fn insert_node_aliases(g: &GraphStore, id: &str, node_type: &str, label: &str, aliases: &[&str], src: &str) {
+fn insert_node_aliases(
+    g: &GraphStore,
+    id: &str,
+    node_type: &str,
+    label: &str,
+    aliases: &[&str],
+    src: &str,
+) {
     g.put_node(&Node {
         id: id.into(),
         node_type: node_type.into(),
@@ -66,7 +73,14 @@ fn build_gost_graph(g: &GraphStore) {
     insert_edge(g, "rng:diam", "HAS_MAX", "lit:dmax", GOST_SRC);
 
     insert_node(g, "fld:type", "Field", "Тип", GOST_SRC);
-    insert_node_aliases(g, "enum:type", "Enum", "Тип enum", &["A", "B", "C"], GOST_SRC);
+    insert_node_aliases(
+        g,
+        "enum:type",
+        "Enum",
+        "Тип enum",
+        &["A", "B", "C"],
+        GOST_SRC,
+    );
     insert_edge(g, "fld:type", "CONSTRAINED_BY", "enum:type", GOST_SRC);
 
     insert_node(g, "fld:code", "Field", "Код", GOST_SRC);
@@ -113,7 +127,10 @@ fn validate_passes_valid_assignments() {
     build_gost_graph(&g);
 
     let result = solve(
-        dir.path(), &g, GOST_SRC, "validate",
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
         vec![
             ("Диаметр", serde_json::json!(150.0)),
             ("Тип", serde_json::json!("A")),
@@ -123,7 +140,10 @@ fn validate_passes_valid_assignments() {
     );
 
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(true, |v| v.is_empty()), "expected no violations, got: {violations:?}");
+    assert!(
+        violations.is_none_or(|v| v.is_empty()),
+        "expected no violations, got: {violations:?}"
+    );
 }
 
 #[test]
@@ -132,13 +152,24 @@ fn validate_rejects_out_of_range() {
     let g = setup_corpus(dir.path());
     build_gost_graph(&g);
 
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("Диаметр", serde_json::json!(999.0))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("Диаметр", serde_json::json!(999.0))],
+    );
 
     let violations = result["violations"].as_array().unwrap();
-    assert!(!violations.is_empty(), "expected violations for out-of-range value");
+    assert!(
+        !violations.is_empty(),
+        "expected violations for out-of-range value"
+    );
     let msg = serde_json::to_string(&result).unwrap();
-    assert!(msg.contains("Диаметр"), "violation should mention field name: {msg}");
+    assert!(
+        msg.contains("Диаметр"),
+        "violation should mention field name: {msg}"
+    );
 }
 
 #[test]
@@ -147,11 +178,19 @@ fn validate_rejects_invalid_enum() {
     let g = setup_corpus(dir.path());
     build_gost_graph(&g);
 
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("Тип", serde_json::json!("X"))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("Тип", serde_json::json!("X"))],
+    );
 
     let violations = result["violations"].as_array().unwrap();
-    assert!(!violations.is_empty(), "expected violations for invalid enum value");
+    assert!(
+        !violations.is_empty(),
+        "expected violations for invalid enum value"
+    );
 }
 
 #[test]
@@ -160,11 +199,19 @@ fn validate_rejects_bad_regex() {
     let g = setup_corpus(dir.path());
     build_gost_graph(&g);
 
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("Код", serde_json::json!("bad"))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("Код", serde_json::json!("bad"))],
+    );
 
     let violations = result["violations"].as_array().unwrap();
-    assert!(!violations.is_empty(), "expected violations for regex mismatch");
+    assert!(
+        !violations.is_empty(),
+        "expected violations for regex mismatch"
+    );
 }
 
 #[test]
@@ -206,7 +253,10 @@ fn check_reports_consistency() {
     let result = solve(dir.path(), &g, GOST_SRC, "check", vec![]);
 
     let issues = result.get("issues").and_then(|v| v.as_array());
-    assert!(issues.map_or(true, |v| v.is_empty()), "expected no issues for valid graph: {issues:?}");
+    assert!(
+        issues.is_none_or(|v| v.is_empty()),
+        "expected no issues for valid graph: {issues:?}"
+    );
 }
 
 #[test]
@@ -229,10 +279,21 @@ fn validate_single_field() {
     let g = setup_corpus(dir.path());
     build_gost_graph(&g);
 
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("Диаметр", serde_json::json!(50.0)), ("Защита", serde_json::json!("есть"))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![
+            ("Диаметр", serde_json::json!(50.0)),
+            ("Защита", serde_json::json!("есть")),
+        ],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(true, |v| v.is_empty()), "50 ∈ [10,200] should pass: {violations:?}");
+    assert!(
+        violations.is_none_or(|v| v.is_empty()),
+        "50 ∈ [10,200] should pass: {violations:?}"
+    );
 }
 
 #[test]
@@ -241,8 +302,13 @@ fn validate_missing_required_field() {
     let g = setup_corpus(dir.path());
     build_gost_graph(&g);
 
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("Диаметр", serde_json::json!(50.0))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("Диаметр", serde_json::json!(50.0))],
+    );
     let violations = result["violations"].as_array().unwrap();
     assert!(!violations.is_empty(), "Защита is Required but missing");
 }
@@ -266,31 +332,55 @@ fn gost_7805_bolt_range_and_enum() {
         "enum:diam_vals",
         "Enum",
         "диаметр enum",
-        &["2", "2.5", "3", "4", "5", "6", "8", "10", "12", "14", "16", "18", "20", "24", "27", "30", "36"],
+        &[
+            "2", "2.5", "3", "4", "5", "6", "8", "10", "12", "14", "16", "18", "20", "24", "27",
+            "30", "36",
+        ],
         GOST_SRC,
     );
     insert_edge(&g, "fld:diam", "CONSTRAINED_BY", "enum:diam_vals", GOST_SRC);
 
     // Valid in-range: d=12
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("d_диаметр", serde_json::json!(12.0))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("d_диаметр", serde_json::json!(12.0))],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(true, |v| v.is_empty()),
-        "d=12 should be valid, got: {violations:?}");
+    assert!(
+        violations.is_none_or(|v| v.is_empty()),
+        "d=12 should be valid, got: {violations:?}"
+    );
 
     // Out of range: d=999
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("d_диаметр", serde_json::json!(999.0))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("d_диаметр", serde_json::json!(999.0))],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(false, |v| !v.is_empty()),
-        "d=999 should violate Range");
+    assert!(
+        violations.is_some_and(|v| !v.is_empty()),
+        "d=999 should violate Range"
+    );
 
     // Not in enum: d=7 (valid range but not a standard bolt diameter)
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("d_диаметр", serde_json::json!(7.0))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("d_диаметр", serde_json::json!(7.0))],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(false, |v| !v.is_empty()),
-        "d=7 is not a standard bolt diameter");
+    assert!(
+        violations.is_some_and(|v| !v.is_empty()),
+        "d=7 is not a standard bolt diameter"
+    );
 }
 
 #[test]
@@ -299,22 +389,43 @@ fn gost_7805_tolerance_enum() {
     let g = setup_corpus(dir.path());
 
     insert_node(&g, "fld:tol", "Field", "допуск", GOST_SRC);
-    insert_node_aliases(&g, "enum:tol", "Enum", "допуск enum", &["6e", "6g", "6h", "8g"], GOST_SRC);
+    insert_node_aliases(
+        &g,
+        "enum:tol",
+        "Enum",
+        "допуск enum",
+        &["6e", "6g", "6h", "8g"],
+        GOST_SRC,
+    );
     insert_edge(&g, "fld:tol", "CONSTRAINED_BY", "enum:tol", GOST_SRC);
 
     // Valid tolerance
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("допуск", serde_json::json!("6g"))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("допуск", serde_json::json!("6g"))],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(true, |v| v.is_empty()),
-        "6g is a valid tolerance");
+    assert!(
+        violations.is_none_or(|v| v.is_empty()),
+        "6g is a valid tolerance"
+    );
 
     // Invalid tolerance
-    let result = solve(dir.path(), &g, GOST_SRC, "validate",
-        vec![("допуск", serde_json::json!("7h"))]);
+    let result = solve(
+        dir.path(),
+        &g,
+        GOST_SRC,
+        "validate",
+        vec![("допуск", serde_json::json!("7h"))],
+    );
     let violations = result.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(false, |v| !v.is_empty()),
-        "7h is not a standard tolerance");
+    assert!(
+        violations.is_some_and(|v| !v.is_empty()),
+        "7h is not a standard tolerance"
+    );
 }
 
 #[test]
@@ -333,27 +444,48 @@ fn ontology_file_is_parsable() {
 
     let ok: Vec<String> = vec!["Field".into(), "Literal".into()];
     for name in &ok {
-        assert!(ont.entity_types().contains(name.as_str()), "missing entity {name}");
-        assert!(ont.description(name).is_some(), "missing description for entity {name}");
+        assert!(
+            ont.entity_types().contains(name.as_str()),
+            "missing entity {name}"
+        );
+        assert!(
+            ont.description(name).is_some(),
+            "missing description for entity {name}"
+        );
     }
 
     let rels = ont.raw_relations();
     for key in [
-        "CONSTRAINED_BY", "HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_EXPRESSION",
-        "IF_FIELD", "IF_VALUE", "HAS_CONSTRAINT",
+        "CONSTRAINED_BY",
+        "HAS_MIN",
+        "HAS_MAX",
+        "HAS_PATTERN",
+        "HAS_EXPRESSION",
+        "IF_FIELD",
+        "IF_VALUE",
+        "HAS_CONSTRAINT",
     ] {
         assert!(rels.contains_key(key), "missing relation {key}");
-        assert!(ont.description(key).is_some(), "missing description for relation {key}");
+        assert!(
+            ont.description(key).is_some(),
+            "missing description for relation {key}"
+        );
     }
 
-    for (name, _) in ont.constraint_types() {
-        assert!(ont.description(name).is_some(), "missing description for constraint {name}");
+    for name in ont.constraint_types().keys() {
+        assert!(
+            ont.description(name).is_some(),
+            "missing description for constraint {name}"
+        );
     }
 
     assert!(!ont.patterns().is_empty(), "patterns should be declared");
     let export = glossa::graph::ontology_export::export_json(&ont);
     for p in export["patterns"].as_array().unwrap() {
-        assert!(p.get("example").is_none(), "patterns must not export example");
+        assert!(
+            p.get("example").is_none(),
+            "patterns must not export example"
+        );
     }
 
     assert!(ont.strict(), "constraint ontology should be strict");
@@ -398,7 +530,11 @@ fn agent_style_upsert_builds_enum_constraint() {
             unode("Field", "Наружный диаметр", vec![]),
             unode("Enum", "Наружный диаметр enum", vec!["125", "150"]),
         ],
-        vec![uedge("Наружный диаметр", "CONSTRAINED_BY", "Наружный диаметр enum")],
+        vec![uedge(
+            "Наружный диаметр",
+            "CONSTRAINED_BY",
+            "Наружный диаметр enum",
+        )],
         1,
     );
     assert!(!out.rejected, "{}", out.message);
@@ -408,25 +544,64 @@ fn agent_style_upsert_builds_enum_constraint() {
 
 fn build_conditional_grit_graph(g: &GraphStore) {
     insert_node(g, "fld:grit_type", "Field", "тип_зернистости", GOST_SRC);
-    insert_node_aliases(g, "enum:grit_type", "Enum", "тип_зернистости enum", &["F", "M"], GOST_SRC);
-    insert_edge(g, "fld:grit_type", "CONSTRAINED_BY", "enum:grit_type", GOST_SRC);
+    insert_node_aliases(
+        g,
+        "enum:grit_type",
+        "Enum",
+        "тип_зернистости enum",
+        &["F", "M"],
+        GOST_SRC,
+    );
+    insert_edge(
+        g,
+        "fld:grit_type",
+        "CONSTRAINED_BY",
+        "enum:grit_type",
+        GOST_SRC,
+    );
 
     insert_node(g, "fld:grit", "Field", "зернистость", GOST_SRC);
 
-    insert_node(g, "cond:grit_f", "Conditional", "зернистость when F", GOST_SRC);
+    insert_node(
+        g,
+        "cond:grit_f",
+        "Conditional",
+        "зернистость when F",
+        GOST_SRC,
+    );
     insert_node(g, "lit:field", "Literal", "тип_зернистости", GOST_SRC);
     insert_node(g, "lit:val_f", "Literal", "F", GOST_SRC);
     insert_edge(g, "cond:grit_f", "IF_FIELD", "lit:field", GOST_SRC);
     insert_edge(g, "cond:grit_f", "IF_VALUE", "lit:val_f", GOST_SRC);
-    insert_node_aliases(g, "enum:grit_f", "Enum", "зернистость F", &["F16", "F24", "F36"], GOST_SRC);
+    insert_node_aliases(
+        g,
+        "enum:grit_f",
+        "Enum",
+        "зернистость F",
+        &["F16", "F24", "F36"],
+        GOST_SRC,
+    );
     insert_edge(g, "cond:grit_f", "HAS_CONSTRAINT", "enum:grit_f", GOST_SRC);
     insert_edge(g, "fld:grit", "CONSTRAINED_BY", "cond:grit_f", GOST_SRC);
 
-    insert_node(g, "cond:grit_m", "Conditional", "зернистость when M", GOST_SRC);
+    insert_node(
+        g,
+        "cond:grit_m",
+        "Conditional",
+        "зернистость when M",
+        GOST_SRC,
+    );
     insert_node(g, "lit:val_m", "Literal", "M", GOST_SRC);
     insert_edge(g, "cond:grit_m", "IF_FIELD", "lit:field", GOST_SRC);
     insert_edge(g, "cond:grit_m", "IF_VALUE", "lit:val_m", GOST_SRC);
-    insert_node_aliases(g, "enum:grit_m", "Enum", "зернистость M", &["M40", "M60", "M80"], GOST_SRC);
+    insert_node_aliases(
+        g,
+        "enum:grit_m",
+        "Enum",
+        "зернистость M",
+        &["M40", "M60", "M80"],
+        GOST_SRC,
+    );
     insert_edge(g, "cond:grit_m", "HAS_CONSTRAINT", "enum:grit_m", GOST_SRC);
     insert_edge(g, "fld:grit", "CONSTRAINED_BY", "cond:grit_m", GOST_SRC);
 }
@@ -448,7 +623,10 @@ fn conditional_enum_switches_domain() {
         ],
     );
     let violations = ok.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(true, |v| v.is_empty()), "F + F24 should pass: {violations:?}");
+    assert!(
+        violations.is_none_or(|v| v.is_empty()),
+        "F + F24 should pass: {violations:?}"
+    );
 
     let bad = solve(
         dir.path(),
@@ -461,7 +639,10 @@ fn conditional_enum_switches_domain() {
         ],
     );
     let violations = bad.get("violations").and_then(|v| v.as_array());
-    assert!(violations.map_or(false, |v| !v.is_empty()), "F + M60 should violate");
+    assert!(
+        violations.is_some_and(|v| !v.is_empty()),
+        "F + M60 should violate"
+    );
 
     let infer = solve(
         dir.path(),
@@ -489,8 +670,16 @@ fn conditional_enum_adapter_roundtrip() {
 
     let problem = glossa::constraint_adapter::load_problem(&g, &ont, Some(GOST_SRC)).unwrap();
     assert_eq!(problem.fields.len(), 2);
-    let grit = problem.fields.iter().find(|f| f.name == "зернистость").unwrap();
-    assert_eq!(grit.constraints.len(), 2, "two Conditional branches on one Field");
+    let grit = problem
+        .fields
+        .iter()
+        .find(|f| f.name == "зернистость")
+        .unwrap();
+    assert_eq!(
+        grit.constraints.len(),
+        2,
+        "two Conditional branches on one Field"
+    );
 
     let result = glossa_constraint::solver::solve(
         &problem,
@@ -500,7 +689,11 @@ fn conditional_enum_adapter_roundtrip() {
             ("зернистость".into(), serde_json::json!("M60")),
         ],
     );
-    assert!(result.valid, "M + M60 should validate: {:?}", result.violations);
+    assert!(
+        result.valid,
+        "M + M60 should validate: {:?}",
+        result.violations
+    );
     let bad = glossa_constraint::solver::solve(
         &problem,
         glossa_constraint::SolveMode::Validate,

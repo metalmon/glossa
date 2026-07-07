@@ -38,7 +38,10 @@ fn stat_sig(path: &str) -> Option<FileSig> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    Some(FileSig { mtime_secs, size: md.len() })
+    Some(FileSig {
+        mtime_secs,
+        size: md.len(),
+    })
 }
 
 /// Result of applying an agent upsert batch (after dedup by label+type).
@@ -83,7 +86,10 @@ pub fn apply_upsert(
             if earlier.node_type == n.node_type
                 && normalize_label(&earlier.label) == normalize_label(&n.label)
             {
-                canon = canonical.get(&earlier.id).cloned().unwrap_or_else(|| earlier.id.clone());
+                canon = canonical
+                    .get(&earlier.id)
+                    .cloned()
+                    .unwrap_or_else(|| earlier.id.clone());
                 break 'batch;
             }
         }
@@ -131,7 +137,12 @@ pub fn apply_upsert(
             let from = canonical.get(&e.from).cloned().unwrap_or(e.from);
             let to = canonical.get(&e.to).cloned().unwrap_or(e.to);
             let p = prov(&e.source_path, e.range.clone(), e.confidence);
-            Edge { from, to, edge_type: e.edge_type, prov: p }
+            Edge {
+                from,
+                to,
+                edge_type: e.edge_type,
+                prov: p,
+            }
         })
         .collect();
 
@@ -162,8 +173,7 @@ fn resolve_node_ref(g: &GraphStore, reference: &str) -> anyhow::Result<Vec<Strin
         return Ok(vec![reference.to_string()]);
     }
     let norm = normalize_label(reference);
-    Ok(g
-        .all_nodes()?
+    Ok(g.all_nodes()?
         .into_iter()
         .filter(|n| normalize_label(&n.label) == norm)
         .map(|n| n.id)
@@ -179,7 +189,9 @@ fn did_you_mean(g: &GraphStore, reference: &str) -> String {
     let mut labels: Vec<String> = Vec::new();
     for id in g.resolve(reference).unwrap_or_default() {
         if let Ok(Some(node)) = g.get_node(&id) {
-            if crate::graph::store::normalize_label(&node.label) != norm && !labels.contains(&node.label) {
+            if crate::graph::store::normalize_label(&node.label) != norm
+                && !labels.contains(&node.label)
+            {
                 labels.push(node.label);
             }
         }
@@ -206,7 +218,10 @@ pub fn apply_delete(
     for reference in &node_refs {
         let ids = resolve_node_ref(g, reference)?;
         if ids.is_empty() {
-            notes.push(format!("node \"{reference}\" matched nothing{}", did_you_mean(g, reference)));
+            notes.push(format!(
+                "node \"{reference}\" matched nothing{}",
+                did_you_mean(g, reference)
+            ));
         }
         for id in ids {
             total += g.delete_node(&id)?;
@@ -247,7 +262,10 @@ pub struct NodeUpdate {
 
 /// Rename and/or retype nodes in place, identified by id (as used in `graph_upsert`) or current
 /// label. Skips references that resolve to nothing. Returns the total number of rows updated.
-pub fn apply_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> anyhow::Result<(usize, Vec<String>)> {
+pub fn apply_update(
+    g: &GraphStore,
+    nodes: Vec<NodeUpdate>,
+) -> anyhow::Result<(usize, Vec<String>)> {
     let mut total = 0;
     let mut notes: Vec<String> = Vec::new();
     for u in nodes {
@@ -294,11 +312,26 @@ strict = true
 "#;
 
     fn node(id: &str, ty: &str, label: &str, src: &str) -> NodeSpec {
-        NodeSpec { id: id.into(), node_type: ty.into(), label: label.into(), aliases: vec![], source_path: src.into(), range: None, confidence: None }
+        NodeSpec {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: vec![],
+            source_path: src.into(),
+            range: None,
+            confidence: None,
+        }
     }
 
     fn edge_spec(from: &str, to: &str, edge_type: &str, src: &str) -> EdgeSpec {
-        EdgeSpec { from: from.into(), to: to.into(), edge_type: edge_type.into(), source_path: src.into(), range: None, confidence: None }
+        EdgeSpec {
+            from: from.into(),
+            to: to.into(),
+            edge_type: edge_type.into(),
+            source_path: src.into(),
+            range: None,
+            confidence: None,
+        }
     }
 
     #[test]
@@ -308,11 +341,20 @@ strict = true
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![
             node("org:acme", "Organization", "Acme", "contract.docx"),
-            node("contract.docx", "Document", "contract.docx", "contract.docx"),
+            node(
+                "contract.docx",
+                "Document",
+                "contract.docx",
+                "contract.docx",
+            ),
         ];
         let edges = vec![EdgeSpec {
-            from: "org:acme".into(), to: "contract.docx".into(), edge_type: "PARTY_TO".into(),
-            source_path: "contract.docx".into(), range: None, confidence: Some(0.9),
+            from: "org:acme".into(),
+            to: "contract.docx".into(),
+            edge_type: "PARTY_TO".into(),
+            source_path: "contract.docx".into(),
+            range: None,
+            confidence: Some(0.9),
         }];
         let r = apply_upsert(&g, &ont, nodes, edges, 123).unwrap();
         assert_eq!((r.nodes_written, r.edges_written), (2, 1));
@@ -340,18 +382,48 @@ strict = true
 
         // First upsert: a Symptom + Resolution + RESOLVED_BY
         let nodes1 = vec![
-            node("sym:fibas-loss-1", "Symptom", "Профибас потеря связи", "case1.docx"),
-            node("res:restart-1", "Resolution", "Перезагрузка модуля", "case1.docx"),
+            node(
+                "sym:fibas-loss-1",
+                "Symptom",
+                "Профибас потеря связи",
+                "case1.docx",
+            ),
+            node(
+                "res:restart-1",
+                "Resolution",
+                "Перезагрузка модуля",
+                "case1.docx",
+            ),
         ];
-        let edges1 = vec![edge_spec("sym:fibas-loss-1", "res:restart-1", "RESOLVED_BY", "case1.docx")];
+        let edges1 = vec![edge_spec(
+            "sym:fibas-loss-1",
+            "res:restart-1",
+            "RESOLVED_BY",
+            "case1.docx",
+        )];
         apply_upsert(&g, &ont, nodes1, edges1, 1).unwrap();
 
         // Second upsert: DIFFERENT id but SAME label (different case + extra space) → dedup
         let nodes2 = vec![
-            node("sym:fibas-loss-2", "Symptom", "профибас  потеря связи", "case2.docx"),
-            node("res:check-cable-2", "Resolution", "Проверка кабеля", "case2.docx"),
+            node(
+                "sym:fibas-loss-2",
+                "Symptom",
+                "профибас  потеря связи",
+                "case2.docx",
+            ),
+            node(
+                "res:check-cable-2",
+                "Resolution",
+                "Проверка кабеля",
+                "case2.docx",
+            ),
         ];
-        let edges2 = vec![edge_spec("sym:fibas-loss-2", "res:check-cable-2", "RESOLVED_BY", "case2.docx")];
+        let edges2 = vec![edge_spec(
+            "sym:fibas-loss-2",
+            "res:check-cable-2",
+            "RESOLVED_BY",
+            "case2.docx",
+        )];
         apply_upsert(&g, &ont, nodes2, edges2, 2).unwrap();
 
         // Only 1 Symptom node (deduped — first id wins)
@@ -363,9 +435,18 @@ strict = true
 
         // The second RESOLVED_BY edge must have been rewritten to originate from the first Symptom's id
         let out = g.outgoing(symptom_id).unwrap();
-        assert_eq!(out.len(), 2, "expected 2 outgoing edges from the deduplicated Symptom");
-        let has_check_cable = out.iter().any(|e| e.to == "res:check-cable-2" && e.edge_type == "RESOLVED_BY");
-        assert!(has_check_cable, "second RESOLVED_BY edge should point from first symptom id to res:check-cable-2");
+        assert_eq!(
+            out.len(),
+            2,
+            "expected 2 outgoing edges from the deduplicated Symptom"
+        );
+        let has_check_cable = out
+            .iter()
+            .any(|e| e.to == "res:check-cable-2" && e.edge_type == "RESOLVED_BY");
+        assert!(
+            has_check_cable,
+            "second RESOLVED_BY edge should point from first symptom id to res:check-cable-2"
+        );
     }
 
     #[test]
@@ -379,7 +460,12 @@ strict = true
             node("sym:test", "Symptom", "Тестовый симптом", "test.docx"),
             node("res:test", "Resolution", "Тестовое решение", "test.docx"),
         ];
-        let edges = vec![edge_spec("sym:test", "res:test", "RESOLVED_BY", "test.docx")];
+        let edges = vec![edge_spec(
+            "sym:test",
+            "res:test",
+            "RESOLVED_BY",
+            "test.docx",
+        )];
         apply_upsert(&g, &ont, nodes, edges, 1).unwrap();
 
         assert_eq!(g.node_count().unwrap(), 2);
@@ -390,11 +476,17 @@ strict = true
 
         // Symptom node is gone
         let all = g.all_nodes().unwrap();
-        assert!(all.iter().all(|n| n.node_type != "Symptom"), "Symptom node should be deleted");
+        assert!(
+            all.iter().all(|n| n.node_type != "Symptom"),
+            "Symptom node should be deleted"
+        );
 
         // Its RESOLVED_BY edge is also gone
         let out = g.outgoing("sym:test").unwrap();
-        assert!(out.is_empty(), "Edges attached to deleted Symptom should be removed");
+        assert!(
+            out.is_empty(),
+            "Edges attached to deleted Symptom should be removed"
+        );
     }
 
     #[test]
@@ -414,8 +506,14 @@ strict = true
         .unwrap();
 
         let (removed, _) = apply_delete(&g, vec!["sym:test".into()], vec![]).unwrap();
-        assert!(removed > 0, "delete-by-id must remove the node (the bug returned 0)");
-        assert!(g.get_node("sym:test").unwrap().is_none(), "node deleted by id");
+        assert!(
+            removed > 0,
+            "delete-by-id must remove the node (the bug returned 0)"
+        );
+        assert!(
+            g.get_node("sym:test").unwrap().is_none(),
+            "node deleted by id"
+        );
     }
 
     #[test]
@@ -426,13 +524,34 @@ strict = true
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        apply_upsert(&g, &ont, vec![node("sym:t", "Symptom", "Тестовый симптом насоса", "t.docx")], vec![], 1).unwrap();
+        apply_upsert(
+            &g,
+            &ont,
+            vec![node(
+                "sym:t",
+                "Symptom",
+                "Тестовый симптом насоса",
+                "t.docx",
+            )],
+            vec![],
+            1,
+        )
+        .unwrap();
 
-        let (removed, notes) = apply_delete(&g, vec!["Тестовые симптомы насоса".into()], vec![]).unwrap();
+        let (removed, notes) =
+            apply_delete(&g, vec!["Тестовые симптомы насоса".into()], vec![]).unwrap();
         assert_eq!(removed, 0, "an inflected variant must not match exactly");
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("matched nothing"), "note: {}", notes[0]);
-        assert!(notes[0].contains("did you mean"), "a no-match must suggest a fix: {}", notes[0]);
-        assert!(notes[0].contains("Тестовый симптом насоса"), "must name the close existing label: {}", notes[0]);
+        assert!(
+            notes[0].contains("did you mean"),
+            "a no-match must suggest a fix: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("Тестовый симптом насоса"),
+            "must name the close existing label: {}",
+            notes[0]
+        );
     }
 }

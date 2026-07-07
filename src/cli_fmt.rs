@@ -14,11 +14,21 @@ fn paint(code: &str, s: &str) -> String {
         s.to_string()
     }
 }
-pub fn dim(s: &str) -> String { paint("2", s) }
-pub fn cyan(s: &str) -> String { paint("36", s) }
-pub fn bold(s: &str) -> String { paint("1", s) }
-pub fn magenta(s: &str) -> String { paint("35", s) }
-pub fn green(s: &str) -> String { paint("32", s) }
+pub fn dim(s: &str) -> String {
+    paint("2", s)
+}
+pub fn cyan(s: &str) -> String {
+    paint("36", s)
+}
+pub fn bold(s: &str) -> String {
+    paint("1", s)
+}
+pub fn magenta(s: &str) -> String {
+    paint("35", s)
+}
+pub fn green(s: &str) -> String {
+    paint("32", s)
+}
 
 /// Suffix for a no-match hint: ` — did you mean: "a", "b"?` or "" when empty.
 pub fn format_did_you_mean(candidates: &[String]) -> String {
@@ -27,7 +37,11 @@ pub fn format_did_you_mean(candidates: &[String]) -> String {
     } else {
         format!(
             " — did you mean: {}?",
-            candidates.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", ")
+            candidates
+                .iter()
+                .map(|l| format!("\"{l}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -99,8 +113,8 @@ pub fn stdout_is_tty() -> bool {
 
 /// One search hit prepared for the pretty (log-line) view.
 pub struct DisplayHit {
-    pub file: String,      // path shown to the human (relative to root if possible)
-    pub location: String,  // "p.142" | heading | "(no-text)"
+    pub file: String,     // path shown to the human (relative to root if possible)
+    pub location: String, // "p.142" | heading | "(no-text)"
     pub snippet: String,
     pub score: Option<f32>, // Some for --rank
 }
@@ -252,19 +266,29 @@ mod tests {
 
     fn prov() -> Provenance {
         Provenance {
-            source_path: "a.md".into(), range: Some("Intro".into()), file_sig: None,
-            origin: "auto-structural".into(), confidence: 1.0, created_at: 0,
+            source_path: "a.md".into(),
+            range: Some("Intro".into()),
+            file_sig: None,
+            origin: "auto-structural".into(),
+            confidence: 1.0,
+            created_at: 0,
         }
     }
 
     #[test]
     fn render_node_shows_fields_and_edges() {
         let n = Node {
-            id: "a.md".into(), node_type: "Document".into(), label: "a.md".into(),
-            aliases: vec!["alpha".into()], prov: prov(),
+            id: "a.md".into(),
+            node_type: "Document".into(),
+            label: "a.md".into(),
+            aliases: vec!["alpha".into()],
+            prov: prov(),
         };
         let edges = vec![Edge {
-            from: "a.md".into(), to: "a.md#Intro".into(), edge_type: "CONTAINS".into(), prov: prov(),
+            from: "a.md".into(),
+            to: "a.md#Intro".into(),
+            edge_type: "CONTAINS".into(),
+            prov: prov(),
         }];
         let s = render_node(&n, &edges);
         assert!(s.contains("node: a.md"));
@@ -277,8 +301,11 @@ mod tests {
     #[test]
     fn render_node_handles_no_edges() {
         let n = Node {
-            id: "x".into(), node_type: "Term".into(), label: "x".into(),
-            aliases: vec![], prov: prov(),
+            id: "x".into(),
+            node_type: "Term".into(),
+            label: "x".into(),
+            aliases: vec![],
+            prov: prov(),
         };
         assert!(render_node(&n, &[]).contains("edges: none"));
     }
@@ -286,20 +313,39 @@ mod tests {
     #[test]
     fn render_path_found_and_missing() {
         let p = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(render_path(Some(&p), "a", "c", 6), "path (2 hops): a → b → c");
-        assert_eq!(render_path(None, "a", "z", 6), "no path from a to z within depth 6");
+        assert_eq!(
+            render_path(Some(&p), "a", "c", 6),
+            "path (2 hops): a → b → c"
+        );
+        assert_eq!(
+            render_path(None, "a", "z", 6),
+            "no path from a to z within depth 6"
+        );
     }
 
     #[test]
     fn render_search_pretty_two_line_score_first() {
         let hits = vec![
-            DisplayHit { file: "a.md".into(), location: "p.1".into(), snippet: " hello ".into(), score: None },
-            DisplayHit { file: "deep\\longname.pdf".into(), location: "Sec".into(), snippet: "world".into(), score: Some(1.234) },
+            DisplayHit {
+                file: "a.md".into(),
+                location: "p.1".into(),
+                snippet: " hello ".into(),
+                score: None,
+            },
+            DisplayHit {
+                file: "deep\\longname.pdf".into(),
+                location: "Sec".into(),
+                snippet: "world".into(),
+                score: Some(1.234),
+            },
         ];
         let s = render_search_pretty(&hits, false, "hello");
         // Line 1: number, then (for ranked) score BEFORE the path.
         assert!(s.contains("#1  a.md"));
-        assert!(s.contains("#2  1.234  deep\\longname.pdf"), "score precedes the path");
+        assert!(
+            s.contains("#2  1.234  deep\\longname.pdf"),
+            "score precedes the path"
+        );
         // Line 2: location leads the indented snippet line (page can't orphan off a long path).
         assert!(s.contains("\n    p.1  hello\n"));
         assert!(s.contains("2 results · kb read <#> to open"));
@@ -311,15 +357,28 @@ mod tests {
     #[test]
     fn render_search_pretty_reverse_puts_best_last() {
         let hits = vec![
-            DisplayHit { file: "best.md".into(), location: "p.1".into(), snippet: "a".into(), score: Some(9.0) },
-            DisplayHit { file: "worst.md".into(), location: "p.2".into(), snippet: "b".into(), score: Some(1.0) },
+            DisplayHit {
+                file: "best.md".into(),
+                location: "p.1".into(),
+                snippet: "a".into(),
+                score: Some(9.0),
+            },
+            DisplayHit {
+                file: "worst.md".into(),
+                location: "p.2".into(),
+                snippet: "b".into(),
+                score: Some(1.0),
+            },
         ];
         let s = render_search_pretty(&hits, true, "");
         // Footer at the top; worst (#2) above best (#1), so #1 is nearest the prompt.
         let f = s.find("2 results").unwrap();
         let p1 = s.find("#1").unwrap();
         let p2 = s.find("#2").unwrap();
-        assert!(f < p2 && p2 < p1, "footer top, then #2 (worst), then #1 (best) last");
+        assert!(
+            f < p2 && p2 < p1,
+            "footer top, then #2 (worst), then #1 (best) last"
+        );
         // #1 still labels the most relevant hit (best.md).
         assert!(s.contains("#1  9.000  best.md"));
     }
@@ -336,7 +395,10 @@ mod tests {
 
     #[test]
     fn query_terms_keeps_words_of_len_2_plus() {
-        assert_eq!(query_terms("АБАК ПЛК"), vec!["АБАК".to_string(), "ПЛК".to_string()]);
+        assert_eq!(
+            query_terms("АБАК ПЛК"),
+            vec!["АБАК".to_string(), "ПЛК".to_string()]
+        );
         assert!(query_terms("a .").is_empty());
     }
 
@@ -349,7 +411,10 @@ mod tests {
     fn nth_record_is_1based_and_bounded() {
         let tsv = "a.md\tp.1\nb.pdf\t(no-text)\n";
         assert_eq!(nth_record(tsv, 1), Some(("a.md".into(), "p.1".into())));
-        assert_eq!(nth_record(tsv, 2), Some(("b.pdf".into(), "(no-text)".into())));
+        assert_eq!(
+            nth_record(tsv, 2),
+            Some(("b.pdf".into(), "(no-text)".into()))
+        );
         assert_eq!(nth_record(tsv, 3), None);
         assert_eq!(nth_record(tsv, 0), None);
     }

@@ -51,8 +51,18 @@ pub fn scalar_str(v: &serde_json::Value) -> String {
 /// Cyrillic letter (a real word) is left as-is.
 fn fold_homoglyph(c: char) -> char {
     match c {
-        'а' => 'a', 'в' => 'b', 'е' => 'e', 'к' => 'k', 'м' => 'm', 'н' => 'h',
-        'о' => 'o', 'р' => 'p', 'с' => 'c', 'т' => 't', 'у' => 'y', 'х' => 'x',
+        'а' => 'a',
+        'в' => 'b',
+        'е' => 'e',
+        'к' => 'k',
+        'м' => 'm',
+        'н' => 'h',
+        'о' => 'o',
+        'р' => 'p',
+        'с' => 'c',
+        'т' => 't',
+        'у' => 'y',
+        'х' => 'x',
         other => other,
     }
 }
@@ -63,10 +73,20 @@ fn fold_homoglyph(c: char) -> char {
 fn normalize_dashes(s: &str) -> String {
     let unified: String = s
         .chars()
-        .map(|c| if matches!(c, '—' | '–' | '−' | '‐' | '-') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, '—' | '–' | '−' | '‐' | '-') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     if unified.contains('-') {
-        unified.split('-').map(str::trim).collect::<Vec<_>>().join("-")
+        unified
+            .split('-')
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("-")
     } else {
         unified
     }
@@ -115,8 +135,7 @@ pub fn enum_alias_matches(alias: &str, marking: &str) -> bool {
     }
     let marking = canon_scalar(marking);
     let pattern = canon_scalar(alias);
-    regex_lite::Regex::new(&format!("^(?:{pattern})$"))
-        .is_ok_and(|re| re.is_match(&marking))
+    regex_lite::Regex::new(&format!("^(?:{pattern})$")).is_ok_and(|re| re.is_match(&marking))
 }
 
 /// Whether a marking satisfies a standalone Regex constraint pattern.
@@ -142,11 +161,13 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
     for fc in &problem.fields {
         for c in &fc.constraints {
             let applicable = match c {
-                Constraint::Conditional { condition_field, condition_value, .. } => {
-                    assign_map
-                        .get(condition_field.as_str())
-                        .is_some_and(|v| values_eq(v, condition_value))
-                }
+                Constraint::Conditional {
+                    condition_field,
+                    condition_value,
+                    ..
+                } => assign_map
+                    .get(condition_field.as_str())
+                    .is_some_and(|v| values_eq(v, condition_value)),
                 _ => true,
             };
             if !applicable {
@@ -241,7 +262,9 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                         // Range containment: a numeric marking falls inside an allowed
                         // range LABEL — "42" is valid against the allowed value "41-43".
                         let in_range = target.parse::<f64>().ok().is_some_and(|n| {
-                            values.iter().any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
+                            values
+                                .iter()
+                                .any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
                         });
                         // Pattern membership: regex alias in the Enum set (e.g. `\d+[A]`
                         // for any electrocorundum grade). Canon on both sides so Cyrillic
@@ -281,10 +304,7 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                                 violations.push(Violation {
                                     field: fc.name.clone(),
                                     constraint: "Formula".into(),
-                                    message: format!(
-                                        "formula '{}' evaluated to false",
-                                        expression
-                                    ),
+                                    message: format!("formula '{}' evaluated to false", expression),
                                     expected: "true".into(),
                                     actual: "false".into(),
                                 });
@@ -315,7 +335,10 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
 ///   is assigned and matches (unassigned/mismatching conditions contribute nothing);
 /// - a `Formula` of the form `<field> = <expr>` pins the field to the computed
 ///   value once every variable on the right-hand side is assigned.
-pub fn infer_domains(problem: &Problem, assignment: &[(String, serde_json::Value)]) -> Vec<FieldDomain> {
+pub fn infer_domains(
+    problem: &Problem,
+    assignment: &[(String, serde_json::Value)],
+) -> Vec<FieldDomain> {
     let assign_map: std::collections::HashMap<&str, &serde_json::Value> =
         assignment.iter().map(|(k, v)| (k.as_str(), v)).collect();
     let mut vars: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -339,7 +362,11 @@ pub fn infer_domains(problem: &Problem, assignment: &[(String, serde_json::Value
                 .constraints
                 .iter()
                 .filter_map(|c| match c {
-                    Constraint::Conditional { condition_field, condition_value, inner } => assign_map
+                    Constraint::Conditional {
+                        condition_field,
+                        condition_value,
+                        inner,
+                    } => assign_map
                         .get(condition_field.as_str())
                         .is_some_and(|v| values_eq(v, condition_value))
                         .then(|| inner.as_ref()),
@@ -353,7 +380,12 @@ pub fn infer_domains(problem: &Problem, assignment: &[(String, serde_json::Value
             for c in &effective {
                 if let Constraint::Formula { expression } = c {
                     if let Some(v) = formula_pinned_value(&fc.name, expression, &vars) {
-                        domain = intersect_domain(domain, Domain::Set { values: vec![fmt_num(v)] });
+                        domain = intersect_domain(
+                            domain,
+                            Domain::Set {
+                                values: vec![fmt_num(v)],
+                            },
+                        );
                     }
                 }
             }
@@ -381,7 +413,9 @@ fn formula_pinned_value(
         if b == b'=' {
             let prev = i.checked_sub(1).map(|p| bytes[p]);
             let next = bytes.get(i + 1);
-            if matches!(prev, Some(b'<') | Some(b'>') | Some(b'!') | Some(b'=')) || next == Some(&b'=') {
+            if matches!(prev, Some(b'<') | Some(b'>') | Some(b'!') | Some(b'='))
+                || next == Some(&b'=')
+            {
                 continue; // part of ==, <=, >=, !=
             }
             if eq_pos.is_some() {
@@ -410,7 +444,10 @@ fn intersect_domains(constraints: &[&Constraint]) -> Domain {
     for c in constraints {
         match c {
             Constraint::Range { min, max } => {
-                domains.push(Domain::Interval { min: *min, max: *max });
+                domains.push(Domain::Interval {
+                    min: *min,
+                    max: *max,
+                });
             }
             Constraint::Regex { pattern } => {
                 domains.push(Domain::Regex {
@@ -452,7 +489,16 @@ fn intersect_domain(a: Domain, b: Domain) -> Domain {
         (Any, _) => b,
         (_, Any) => a,
         (Empty, _) | (_, Empty) => Empty,
-        (Interval { min: min1, max: max1 }, Interval { min: min2, max: max2 }) => {
+        (
+            Interval {
+                min: min1,
+                max: max1,
+            },
+            Interval {
+                min: min2,
+                max: max2,
+            },
+        ) => {
             let min = min1.max(*min2);
             let max = max1.min(*max2);
             if min > max {
@@ -462,12 +508,13 @@ fn intersect_domain(a: Domain, b: Domain) -> Domain {
             }
         }
         (Set { values: v1 }, Set { values: v2 }) => {
-            let intersection: Vec<String> =
-                v1.iter().filter(|x| v2.contains(x)).cloned().collect();
+            let intersection: Vec<String> = v1.iter().filter(|x| v2.contains(x)).cloned().collect();
             if intersection.is_empty() {
                 Empty
             } else {
-                Set { values: intersection }
+                Set {
+                    values: intersection,
+                }
             }
         }
         (Set { values }, Interval { min, max }) => {
@@ -504,42 +551,39 @@ pub fn check_consistency(problem: &Problem) -> Vec<ConsistencyIssue> {
     for fc in &problem.fields {
         for c in &fc.constraints {
             match c {
-                Constraint::Range { min, max } => {
-                    if min > max {
-                        issues.push(ConsistencyIssue {
-                            field: fc.name.clone(),
-                            severity: "error".into(),
-                            message: format!(
-                                "Range min ({}) > max ({}) — no possible value",
-                                min, max
-                            ),
-                        });
-                    }
+                Constraint::Range { min, max } if min > max => {
+                    issues.push(ConsistencyIssue {
+                        field: fc.name.clone(),
+                        severity: "error".into(),
+                        message: format!("Range min ({}) > max ({}) — no possible value", min, max),
+                    });
                 }
-                Constraint::Regex { pattern } => {
-                    if regex_lite::Regex::new(pattern).is_err() {
-                        issues.push(ConsistencyIssue {
-                            field: fc.name.clone(),
-                            severity: "error".into(),
-                            message: format!("Invalid regex pattern: '{}'", pattern),
-                        });
-                    }
+                Constraint::Regex { pattern } if regex_lite::Regex::new(pattern).is_err() => {
+                    issues.push(ConsistencyIssue {
+                        field: fc.name.clone(),
+                        severity: "error".into(),
+                        message: format!("Invalid regex pattern: '{}'", pattern),
+                    });
                 }
-                Constraint::Enum { values } => {
-                    if values.is_empty() {
-                        issues.push(ConsistencyIssue {
-                            field: fc.name.clone(),
-                            severity: "error".into(),
-                            message: "Enum has no values — no possible value".into(),
-                        });
-                    }
+                Constraint::Enum { values } if values.is_empty() => {
+                    issues.push(ConsistencyIssue {
+                        field: fc.name.clone(),
+                        severity: "error".into(),
+                        message: "Enum has no values — no possible value".into(),
+                    });
                 }
                 _ => {}
             }
         }
         // Check conflicting constraints
-        let has_forbidden = fc.constraints.iter().any(|c| matches!(c, Constraint::Forbidden));
-        let has_required = fc.constraints.iter().any(|c| matches!(c, Constraint::Required));
+        let has_forbidden = fc
+            .constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::Forbidden));
+        let has_required = fc
+            .constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::Required));
         if has_forbidden && has_required {
             issues.push(ConsistencyIssue {
                 field: fc.name.clone(),
@@ -552,7 +596,11 @@ pub fn check_consistency(problem: &Problem) -> Vec<ConsistencyIssue> {
 }
 
 /// Main entry point: dispatch based on mode.
-pub fn solve(problem: &Problem, mode: SolveMode, assignment: &[(String, serde_json::Value)]) -> SolveResult {
+pub fn solve(
+    problem: &Problem,
+    mode: SolveMode,
+    assignment: &[(String, serde_json::Value)],
+) -> SolveResult {
     match mode {
         SolveMode::Validate => {
             let violations = validate(problem, assignment);
@@ -683,17 +731,26 @@ mod tests {
     fn validate_enum_range_label_membership_and_containment() {
         // A parameter whose allowed values are RANGE LABELS (e.g. sound index).
         let problem = make_problem(vec![("зи", vec![make_enum(&["23-25", "41-43"])])]);
-        let ok = |v: serde_json::Value| validate(&problem, &vec![make_assignment("зи", v)]).is_empty();
-        assert!(ok(serde_json::json!("41—43")), "exact label match, dash variant");
+        let ok = |v: serde_json::Value| validate(&problem, &[make_assignment("зи", v)]).is_empty();
+        assert!(
+            ok(serde_json::json!("41—43")),
+            "exact label match, dash variant"
+        );
         assert!(ok(serde_json::json!(42)), "number inside an allowed range");
-        assert!(ok(serde_json::json!("24")), "number-as-string inside a range");
+        assert!(
+            ok(serde_json::json!("24")),
+            "number-as-string inside a range"
+        );
         assert!(!ok(serde_json::json!(30)), "number outside every range");
         assert!(!ok(serde_json::json!("50-52")), "label not in the set");
     }
 
     #[test]
     fn validate_conditional_only_applies_when_condition_met() {
-        let inner = Constraint::Range { min: 10.0, max: 20.0 };
+        let inner = Constraint::Range {
+            min: 10.0,
+            max: 20.0,
+        };
         let cond = Constraint::Conditional {
             condition_field: "type".into(),
             condition_value: serde_json::json!("special"),
@@ -757,7 +814,10 @@ mod tests {
 
     #[test]
     fn check_consistency_required_and_forbidden_conflict() {
-        let problem = make_problem(vec![("x", vec![Constraint::Required, Constraint::Forbidden])]);
+        let problem = make_problem(vec![(
+            "x",
+            vec![Constraint::Required, Constraint::Forbidden],
+        )]);
         let issues = check_consistency(&problem);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("Required + Forbidden"));
@@ -790,16 +850,34 @@ mod tests {
 
     #[test]
     fn domain_intersection_interval_overlap() {
-        let a = Domain::Interval { min: 0.0, max: 100.0 };
-        let b = Domain::Interval { min: 50.0, max: 150.0 };
+        let a = Domain::Interval {
+            min: 0.0,
+            max: 100.0,
+        };
+        let b = Domain::Interval {
+            min: 50.0,
+            max: 150.0,
+        };
         let c = intersect_domain(a, b);
-        assert_eq!(c, Domain::Interval { min: 50.0, max: 100.0 });
+        assert_eq!(
+            c,
+            Domain::Interval {
+                min: 50.0,
+                max: 100.0
+            }
+        );
     }
 
     #[test]
     fn domain_intersection_interval_disjoint() {
-        let a = Domain::Interval { min: 0.0, max: 10.0 };
-        let b = Domain::Interval { min: 20.0, max: 30.0 };
+        let a = Domain::Interval {
+            min: 0.0,
+            max: 10.0,
+        };
+        let b = Domain::Interval {
+            min: 20.0,
+            max: 30.0,
+        };
         let c = intersect_domain(a, b);
         assert_eq!(c, Domain::Empty);
     }
@@ -809,7 +887,10 @@ mod tests {
         let set = Domain::Set {
             values: vec!["1".into(), "50".into(), "100".into()],
         };
-        let interval = Domain::Interval { min: 10.0, max: 60.0 };
+        let interval = Domain::Interval {
+            min: 10.0,
+            max: 60.0,
+        };
         let c = intersect_domain(set, interval);
         assert_eq!(
             c,
@@ -854,10 +935,21 @@ mod tests {
     #[test]
     fn validate_enum_matches_comma_decimals() {
         let problem = make_problem(vec![("h", vec![make_enum(&["0,6", "1,0", "152,4"])])]);
-        for ok in [serde_json::json!(1), serde_json::json!("1.0"), serde_json::json!("1,0"), serde_json::json!(152.4)] {
-            assert!(validate(&problem, &[make_assignment("h", ok.clone())]).is_empty(), "{ok} should pass");
+        for ok in [
+            serde_json::json!(1),
+            serde_json::json!("1.0"),
+            serde_json::json!("1,0"),
+            serde_json::json!(152.4),
+        ] {
+            assert!(
+                validate(&problem, &[make_assignment("h", ok.clone())]).is_empty(),
+                "{ok} should pass"
+            );
         }
-        assert!(!validate(&problem, &[make_assignment("h", serde_json::json!(2))]).is_empty(), "2 ∉ set");
+        assert!(
+            !validate(&problem, &[make_assignment("h", serde_json::json!(2))]).is_empty(),
+            "2 ∉ set"
+        );
     }
 
     /// An allowed value written as a regex ("[0-9]+А") is a category pattern: a specific
@@ -867,10 +959,16 @@ mod tests {
     fn validate_enum_matches_category_pattern() {
         let problem = make_problem(vec![("m", vec![make_enum(&["[0-9]+А", "Z", "[0-9]+С"])])]);
         for ok in ["14А", "25А", "Z", "63С"] {
-            assert!(validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(), "{ok} should pass");
+            assert!(
+                validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(),
+                "{ok} should pass"
+            );
         }
         for bad in ["14Х", "А14", "99"] {
-            assert!(!validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(), "{bad} should fail");
+            assert!(
+                !validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(),
+                "{bad} should fail"
+            );
         }
     }
 
@@ -878,10 +976,16 @@ mod tests {
     fn validate_enum_matches_backslash_d_pattern() {
         let problem = make_problem(vec![("m", vec![make_enum(&[r"\d+[A]", r"\d+[C]", "Z"])])]);
         for ok in ["14A", "14А", "12A", "53C", "63С", "Z"] {
-            assert!(validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(), "{ok} should pass");
+            assert!(
+                validate(&problem, &[make_assignment("m", serde_json::json!(ok))]).is_empty(),
+                "{ok} should pass"
+            );
         }
         for bad in ["A", "14", "A14", "14X"] {
-            assert!(!validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(), "{bad} should fail");
+            assert!(
+                !validate(&problem, &[make_assignment("m", serde_json::json!(bad))]).is_empty(),
+                "{bad} should fail"
+            );
         }
     }
 
@@ -890,11 +994,21 @@ mod tests {
     fn infer_formula_pins_dependent_field() {
         let problem = make_problem(vec![
             ("d", vec![make_range(2.0, 36.0)]),
-            ("S", vec![Constraint::Formula { expression: "S = d * 1.7".into() }]),
+            (
+                "S",
+                vec![Constraint::Formula {
+                    expression: "S = d * 1.7".into(),
+                }],
+            ),
         ]);
         let domains = infer_domains(&problem, &[make_assignment("d", serde_json::json!(10))]);
         let s = domains.iter().find(|d| d.field == "S").unwrap();
-        assert_eq!(s.domain, Domain::Set { values: vec!["17".into()] });
+        assert_eq!(
+            s.domain,
+            Domain::Set {
+                values: vec!["17".into()]
+            }
+        );
 
         let domains = infer_domains(&problem, &[]);
         let s = domains.iter().find(|d| d.field == "S").unwrap();
@@ -913,9 +1027,17 @@ mod tests {
         let problem = make_problem(vec![("x", vec![cond])]);
 
         let met = infer_domains(&problem, &[make_assignment("mode", serde_json::json!(41))]);
-        assert_eq!(met[0].domain, Domain::Set { values: vec!["a".into(), "b".into()] });
+        assert_eq!(
+            met[0].domain,
+            Domain::Set {
+                values: vec!["a".into(), "b".into()]
+            }
+        );
 
-        let unmet = infer_domains(&problem, &[make_assignment("mode", serde_json::json!("42"))]);
+        let unmet = infer_domains(
+            &problem,
+            &[make_assignment("mode", serde_json::json!("42"))],
+        );
         assert_eq!(unmet[0].domain, Domain::Any);
 
         let unassigned = infer_domains(&problem, &[]);

@@ -68,7 +68,10 @@ mod tests {
         std::fs::write(&p, b"# p.1\nalpha\n# p.10\nbeta\n").unwrap();
         let one = read_region(&p, Some("p.1")).unwrap();
         assert!(one.contains("alpha"), "exact p.1 must include page-1 text");
-        assert!(!one.contains("beta"), "exact p.1 must NOT include p.10 text");
+        assert!(
+            !one.contains("beta"),
+            "exact p.1 must NOT include p.10 text"
+        );
     }
 
     #[test]
@@ -93,11 +96,21 @@ mod tests {
     fn exact_empty_pdf_page_does_not_fallback_to_whole_doc() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("three-page-blank-middle.pdf");
-        std::fs::write(&p, include_bytes!("../tests/fixtures/three-page-blank-middle.pdf")).unwrap();
+        std::fs::write(
+            &p,
+            include_bytes!("../tests/fixtures/three-page-blank-middle.pdf"),
+        )
+        .unwrap();
         let whole = read_region(&p, None).unwrap();
         let p2 = read_region(&p, Some("p.2")).unwrap();
-        assert!(whole.contains("page one") && whole.contains("page three"), "whole: {whole}");
-        assert!(!p2.contains("page one") && !p2.contains("page three"), "p.2 must not fall back: {p2:?}");
+        assert!(
+            whole.contains("page one") && whole.contains("page three"),
+            "whole: {whole}"
+        );
+        assert!(
+            !p2.contains("page one") && !p2.contains("page three"),
+            "p.2 must not fall back: {p2:?}"
+        );
         assert!(p2.trim().is_empty(), "blank page body: {p2:?}");
     }
 }
@@ -130,7 +143,11 @@ fn mime_for(name: &str) -> Option<&'static str> {
 }
 
 pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" => {
             if max == 0 {
@@ -138,7 +155,10 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
             }
             let bytes = std::fs::read(path)?;
             let mime = mime_for(&format!("x.{ext}")).unwrap_or("application/octet-stream");
-            Ok(vec![DocImage { mime: mime.into(), bytes }])
+            Ok(vec![DocImage {
+                mime: mime.into(),
+                bytes,
+            }])
         }
         "pdf" => extract_pdf_page_images(path, page, max),
         _ => extract_zip_media(path, max),
@@ -154,8 +174,7 @@ fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result
     // parallel threads — never share a temp dir and clobber each other's files.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = std::env::temp_dir()
-        .join(format!("glossa-img-{}-{}", std::process::id(), uniq));
+    let tmp = std::env::temp_dir().join(format!("glossa-img-{}-{}", std::process::id(), uniq));
     let _ = std::fs::create_dir_all(&tmp);
     let result = (|| -> anyhow::Result<Vec<DocImage>> {
         let opts = ExtractImagesOptions {
@@ -165,8 +184,8 @@ fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result
         };
         // page is 1-based (chunk number); oxidize-pdf uses 0-based page indices
         let page_0 = page.saturating_sub(1) as usize;
-        let images = extract_images_from_pages(path, &[page_0], opts)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let images =
+            extract_images_from_pages(path, &[page_0], opts).map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut out = Vec::new();
         for img in images.into_iter().take(max) {
             let mime = match img.format {
@@ -176,7 +195,10 @@ fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result
                 _ => continue, // Raw / undecodable → skip
             };
             if let Ok(b) = std::fs::read(&img.file_path) {
-                out.push(DocImage { mime: mime.into(), bytes: b });
+                out.push(DocImage {
+                    mime: mime.into(),
+                    bytes: b,
+                });
             }
         }
         Ok(out)
@@ -208,15 +230,22 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
         if out.len() >= max {
             break;
         }
-        let Some(mime) = mime_for(&name) else { continue };
+        let Some(mime) = mime_for(&name) else {
+            continue;
+        };
         use std::io::Read;
         let mut entry = match archive.by_name(&name) {
             Ok(e) => e,
             Err(_) => continue,
         };
         let mut buf = Vec::new();
-        if entry.read_to_end(&mut buf).is_err() { continue; }
-        out.push(DocImage { mime: mime.into(), bytes: buf });
+        if entry.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        out.push(DocImage {
+            mime: mime.into(),
+            bytes: buf,
+        });
     }
     Ok(out)
 }

@@ -152,10 +152,7 @@ mod tests {
 
     #[test]
     fn glob_discovery_alias_lists_all() {
-        let (_d, idx) = idx_with(&[
-            ("one.pdf", "p.1", "a"),
-            ("two\\three.pdf", "p.1", "b"),
-        ]);
+        let (_d, idx) = idx_with(&[("one.pdf", "p.1", "a"), ("two\\three.pdf", "p.1", "b")]);
         assert_eq!(glob_docs(&idx, "").unwrap().len(), 2);
         assert_eq!(glob_docs(&idx, "**/*").unwrap().len(), 2);
     }

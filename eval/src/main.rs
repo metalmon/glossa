@@ -12,6 +12,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Run a benchmark and score it.
     Run {
@@ -89,34 +90,76 @@ enum Cmd {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum BackendKind { Mock, Cli, Openai, Tensorzero }
+enum BackendKind {
+    Mock,
+    Cli,
+    Openai,
+    Tensorzero,
+}
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Run {
-            dataset, backend, limit, kb_bin, work, timeout_secs, profile, no_graph,
-            endpoint, model, api_key_env, cli_cmd, cli_arg, fullwiki,
-            tensorzero_endpoint, tensorzero_function, tag,
-            judge_endpoint, judge_model, judge_api_key_env,
+            dataset,
+            backend,
+            limit,
+            kb_bin,
+            work,
+            timeout_secs,
+            profile,
+            no_graph,
+            endpoint,
+            model,
+            api_key_env,
+            cli_cmd,
+            cli_arg,
+            fullwiki,
+            tensorzero_endpoint,
+            tensorzero_function,
+            tag,
+            judge_endpoint,
+            judge_model,
+            judge_api_key_env,
         } => {
             use backend::AgentBackend;
             let timeout = Duration::from_secs(timeout_secs);
             let be: Box<dyn AgentBackend> = match backend {
-                BackendKind::Mock => Box::new(backend::mock::MockBackend { canned: std::collections::HashMap::new() }),
+                BackendKind::Mock => Box::new(backend::mock::MockBackend {
+                    canned: std::collections::HashMap::new(),
+                }),
                 BackendKind::Openai => {
                     let api_key = api_key_env.and_then(|v| std::env::var(v).ok());
-                    Box::new(backend::openai::OpenAiBackend { endpoint, model, api_key, timeout })
+                    Box::new(backend::openai::OpenAiBackend {
+                        endpoint,
+                        model,
+                        api_key,
+                        timeout,
+                    })
                 }
                 BackendKind::Cli => {
-                    let args = if cli_arg.is_empty() { backend::cli::CliBackend::claude_preset() } else { cli_arg };
-                    Box::new(backend::cli::CliBackend { command: cli_cmd, args, kb_bin: kb_bin.clone(), profile, no_graph, timeout })
+                    let args = if cli_arg.is_empty() {
+                        backend::cli::CliBackend::claude_preset()
+                    } else {
+                        cli_arg
+                    };
+                    Box::new(backend::cli::CliBackend {
+                        command: cli_cmd,
+                        args,
+                        kb_bin: kb_bin.clone(),
+                        profile,
+                        no_graph,
+                        timeout,
+                    })
                 }
                 BackendKind::Tensorzero => {
                     let mut m = serde_json::Map::new();
                     for t in &tag {
                         if let Some((k, v)) = t.split_once('=') {
-                            m.insert(k.trim().to_string(), serde_json::Value::String(v.trim().to_string()));
+                            m.insert(
+                                k.trim().to_string(),
+                                serde_json::Value::String(v.trim().to_string()),
+                            );
                         }
                     }
                     Box::new(backend::tensorzero::TensorZeroBackend {
@@ -124,14 +167,26 @@ fn main() -> anyhow::Result<()> {
                         function: tensorzero_function,
                         timeout,
                         tags: serde_json::Value::Object(m),
-                        judge_endpoint: if judge_endpoint.is_empty() { None } else { Some(judge_endpoint) },
+                        judge_endpoint: if judge_endpoint.is_empty() {
+                            None
+                        } else {
+                            Some(judge_endpoint)
+                        },
                         judge_model,
                         judge_api_key: judge_api_key_env.and_then(|v| std::env::var(v).ok()),
                     })
                 }
             };
             let name = format!("{backend:?}").to_lowercase();
-            let report = run::run_eval(&dataset, be.as_ref(), &name, limit, &kb_bin, &work, fullwiki.as_deref())?;
+            let report = run::run_eval(
+                &dataset,
+                be.as_ref(),
+                &name,
+                limit,
+                &kb_bin,
+                &work,
+                fullwiki.as_deref(),
+            )?;
             let json_path = format!("eval-{}-{}.json", report.backend, glossa::trace::now_ms());
             std::fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
             println!(
@@ -141,18 +196,19 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::PrepFullwiki { archive, out, max_shards } => {
+        Cmd::PrepFullwiki {
+            archive,
+            out,
+            max_shards,
+        } => {
             let stats = prep::prep_fullwiki(&archive, &out, max_shards)?;
-            println!("prep-fullwiki: {} shard(s), {} article(s) -> {}", stats.shards, stats.articles, out.display());
+            println!(
+                "prep-fullwiki: {} shard(s), {} article(s) -> {}",
+                stats.shards,
+                stats.articles,
+                out.display()
+            );
             Ok(())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder_compiles() {
-        assert!(true);
     }
 }

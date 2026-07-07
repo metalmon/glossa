@@ -1,0 +1,543 @@
+//! Agent notebook: per-document notes under `.glossa/notes/<document>/`.
+
+mod lock;
+mod paths;
+
+pub use lock::{with_notebook_write_lock, LOCK_BUSY_MSG};
+pub use paths::{
+    list_note_paths, mirror_dir_for_doc, normalize_note_file, notes_root, resolve_note_by_document,
+    resolve_note_by_path, NoteEntry, NotePath,
+};
+
+use std::path::Path;
+
+use crate::index::store::DocIndex;
+
+/// Create, fully replace, or (with `append`) extend a note bound to an indexed document.
+///
+/// A `.csp` file (a limit table: `;`-separated CSV, first line = headers) is
+/// validated on write and the reply echoes exactly what the compiler will see
+/// — parsed column headers and data-row count — so a malformed table is
+/// rejected at write time instead of failing silently at compile time.
+/// Replacing an existing file says so explicitly (the previous content is gone).
+pub fn note(
+    root: &Path,
+    idx: &DocIndex,
+    doc: &str,
+    file: &str,
+    content: &str,
+    append: bool,
+) -> String {
+    match with_notebook_write_lock(root, || write_note(root, idx, doc, file, content, append)) {
+        Ok(o) => {
+            let mut msg = match (&o.mode, &o.table) {
+                (WriteMode::Appended { added }, Some(t)) => format!(
+                    "Appended {added} row{} to {} — columns: [{}]; now {} data row{}",
+                    if *added == 1 { "" } else { "s" },
+                    o.rel_path,
+                    t.headers.join("; "),
+                    t.rows,
+                    if t.rows == 1 { "" } else { "s" }
+                ),
+                (WriteMode::Appended { .. }, None) => {
+                    format!("Appended — {} now {} lines", o.rel_path, o.lines)
+                }
+                (_, Some(t)) => format!(
+                    "Noted {} — columns: [{}]; {} data row{}",
+                    o.rel_path,
+                    t.headers.join("; "),
+                    t.rows,
+                    if t.rows == 1 { "" } else { "s" }
+                ),
+                (_, None) => format!("Noted {} — {} lines", o.rel_path, o.lines),
+            };
+            if let WriteMode::Replaced { prev } = &o.mode {
+                msg.push_str(&format!(
+                    "; replaced previous version (was {prev}) — pass append=true to add instead"
+                ));
+            }
+            msg
+        }
+        Err(e) => format!("REJECTED — {e}"),
+    }
+}
+
+/// Read a note by notebook path (from `ls`).
+pub fn cat(root: &Path, idx: &DocIndex, path: &str) -> String {
+    match read_note(root, idx, path) {
+        Ok((rel, body)) => format!("{rel}\n{body}"),
+        Err(e) => format!("REJECTED — {e}"),
+    }
+}
+
+/// List notes, optionally filtered by document.
+pub fn ls(root: &Path, idx: &DocIndex, doc: Option<&str>) -> String {
+    match list_note_paths(root, idx, doc) {
+        Ok(entries) => {
+            if entries.is_empty() {
+                return "(no notes — use note(doc, file, content) to create one)".into();
+            }
+            entries
+                .into_iter()
+                .map(|e| format!("{}  ({})", e.rel_path, e.size))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        Err(e) => format!("REJECTED — {e}"),
+    }
+}
+
+/// Delete a note by notebook path.
+pub fn del(root: &Path, idx: &DocIndex, path: &str) -> String {
+    match with_notebook_write_lock(root, || delete_note(root, idx, path)) {
+        Ok(rel) => format!("Deleted {rel}"),
+        Err(e) => format!("REJECTED — {e}"),
+    }
+}
+
+/// Literal substring replace inside a note (`all` = every occurrence).
+pub fn sed(root: &Path, idx: &DocIndex, path: &str, old: &str, new: &str, all: bool) -> String {
+    match with_notebook_write_lock(root, || patch_note(root, idx, path, old, new, all)) {
+        Ok((rel, n)) => format!(
+            "Patched {rel} ({n} replacement{})",
+            if n == 1 { "" } else { "s" }
+        ),
+        Err(e) => format!("REJECTED — {e}"),
+    }
+}
+
+pub struct TableEcho {
+    pub headers: Vec<String>,
+    pub rows: usize,
+}
+
+pub enum WriteMode {
+    Created,
+    /// Overwrote an existing file; `prev` describes what was lost ("21 data rows" / "5 lines").
+    Replaced {
+        prev: String,
+    },
+    /// Extended an existing file; `added` counts new data rows (`.csp`) or lines.
+    Appended {
+        added: usize,
+    },
+}
+
+pub struct WriteOutcome {
+    pub rel_path: String,
+    pub lines: usize,
+    /// Present for `.csp` files: what the compiler will see (headers + row count).
+    pub table: Option<TableEcho>,
+    pub mode: WriteMode,
+}
+
+/// Validate `.csp` content as the compiler will read it; rejects before anything is written.
+fn validate_csp(content: &str) -> anyhow::Result<TableEcho> {
+    let rel = crate::tables::csv::parse_semicolon_csv(content)?;
+    for (i, h) in rel.headers.iter().enumerate() {
+        if h.is_empty() {
+            anyhow::bail!("empty header cell in column {}", i + 1);
+        }
+    }
+    Ok(TableEcho {
+        headers: rel.headers,
+        rows: rel.rows.len(),
+    })
+}
+
+fn write_note(
+    root: &Path,
+    idx: &DocIndex,
+    doc: &str,
+    file: &str,
+    content: &str,
+    append: bool,
+) -> anyhow::Result<WriteOutcome> {
+    let NotePath { rel_path, abs_path } = resolve_note_by_document(root, idx, doc, file)?;
+    let is_csp = rel_path.to_ascii_lowercase().ends_with(".csp");
+    let existing = if abs_path.is_file() {
+        Some(std::fs::read_to_string(&abs_path)?)
+    } else {
+        None
+    };
+
+    let (full, mode) = match (&existing, append) {
+        // append onto an existing file
+        (Some(old), true) => {
+            if is_csp {
+                let old_rel = crate::tables::csv::parse_semicolon_csv(old)?;
+                // A repeated header line in the appended chunk is tolerated (models resend
+                // it); anything else is data rows under the existing header.
+                let new_body = match content.lines().next() {
+                    Some(first) if split_cells(first) == old_rel.headers => {
+                        content.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+                    }
+                    _ => content,
+                };
+                let mut full = old.trim_end_matches(['\n', '\r']).to_string();
+                if !new_body.trim().is_empty() {
+                    full.push('\n');
+                    full.push_str(new_body);
+                }
+                let added = crate::tables::csv::parse_semicolon_csv(&full)?
+                    .rows
+                    .len()
+                    .saturating_sub(old_rel.rows.len());
+                (full, WriteMode::Appended { added })
+            } else {
+                let mut full = old.clone();
+                if !full.is_empty() && !full.ends_with('\n') {
+                    full.push('\n');
+                }
+                full.push_str(content);
+                let added = content.lines().count();
+                (full, WriteMode::Appended { added })
+            }
+        }
+        // append requested but the file does not exist yet → plain create
+        (None, true) | (None, false) => (content.to_string(), WriteMode::Created),
+        // overwrite an existing file: allowed, but the echo must say what was lost
+        (Some(old), false) => {
+            let prev = if is_csp {
+                match crate::tables::csv::parse_semicolon_csv(old) {
+                    Ok(r) => format!(
+                        "{} data row{}",
+                        r.rows.len(),
+                        if r.rows.len() == 1 { "" } else { "s" }
+                    ),
+                    Err(_) => format!("{} lines", old.lines().count()),
+                }
+            } else {
+                format!("{} lines", old.lines().count())
+            };
+            (content.to_string(), WriteMode::Replaced { prev })
+        }
+    };
+
+    let table = if is_csp {
+        Some(validate_csp(&full)?)
+    } else {
+        None
+    };
+    if let Some(parent) = abs_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&abs_path, &full)?;
+    let lines = full.lines().count();
+    Ok(WriteOutcome {
+        rel_path,
+        lines,
+        table,
+        mode,
+    })
+}
+
+/// Split one `;`-CSV line into trimmed cells, mirroring how the table parser reads it.
+fn split_cells(line: &str) -> Vec<String> {
+    line.trim_end_matches('\r')
+        .split(';')
+        .map(|c| c.trim().to_string())
+        .collect()
+}
+
+fn read_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<(String, String)> {
+    let NotePath { rel_path, abs_path } = resolve_note_by_path(root, idx, path)?;
+    if !abs_path.is_file() {
+        anyhow::bail!("no such note at {rel_path}; use note(doc, file, content) to create");
+    }
+    let body = std::fs::read_to_string(&abs_path)?;
+    Ok((rel_path, body))
+}
+
+fn delete_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<String> {
+    let NotePath { rel_path, abs_path } = resolve_note_by_path(root, idx, path)?;
+    if !abs_path.is_file() {
+        anyhow::bail!("no such note at {rel_path}");
+    }
+    std::fs::remove_file(&abs_path)?;
+    Ok(rel_path)
+}
+
+fn patch_note(
+    root: &Path,
+    idx: &DocIndex,
+    path: &str,
+    old: &str,
+    new: &str,
+    all: bool,
+) -> anyhow::Result<(String, usize)> {
+    let (rel_path, body) = read_note(root, idx, path)?;
+    if old.is_empty() {
+        anyhow::bail!("old must not be empty");
+    }
+    let (patched, n) = if all {
+        let n = body.matches(old).count();
+        (body.replace(old, new), n)
+    } else if let Some(pos) = body.find(old) {
+        let mut out = String::with_capacity(body.len() - old.len() + new.len());
+        out.push_str(&body[..pos]);
+        out.push_str(new);
+        out.push_str(&body[pos + old.len()..]);
+        (out, 1)
+    } else {
+        (body, 0)
+    };
+    if n == 0 {
+        anyhow::bail!("pattern not found in {rel_path}; cat(path) the note first");
+    }
+    // A .csp must stay compiler-readable after the patch, same contract as note().
+    if rel_path.to_ascii_lowercase().ends_with(".csp") {
+        validate_csp(&patched)?;
+    }
+    let NotePath { abs_path, .. } = resolve_note_by_path(root, idx, path)?;
+    std::fs::write(&abs_path, &patched)?;
+    Ok((rel_path, n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Chunk;
+    use fs4::fs_std::FileExt;
+
+    fn idx_with_doc(dir: &std::path::Path, doc: &str) -> DocIndex {
+        let idx = DocIndex::open_or_create(dir).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: doc.into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "stub".into(),
+        }])
+        .unwrap();
+        idx
+    }
+
+    #[test]
+    fn note_then_ls_cat_sed_del() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "parameters.md",
+            "A\nB\n",
+            false,
+        );
+        let listing = ls(dir.path(), &idx, Some("doc.pdf"));
+        assert!(listing.contains("doc.pdf/parameters.md"));
+        let body = cat(dir.path(), &idx, "doc.pdf/parameters.md");
+        assert!(body.contains("A\nB"));
+        let msg = sed(dir.path(), &idx, "doc.pdf/parameters.md", "B", "C", false);
+        assert!(msg.contains("Patched"));
+        assert!(cat(dir.path(), &idx, "doc.pdf/parameters.md").contains("C"));
+        del(dir.path(), &idx, "doc.pdf/parameters.md");
+        assert!(cat(dir.path(), &idx, "doc.pdf/parameters.md").starts_with("REJECTED"));
+    }
+
+    #[test]
+    fn note_strips_document_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(dir.path(), &idx, "doc.pdf#3", "parameters.md", "x\n", false);
+        assert!(msg.contains("doc.pdf/parameters.md"));
+    }
+
+    #[test]
+    fn csp_stays_in_mirror_root_and_echoes_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "t.csp",
+            "h;v\n1;2\n3;4\n",
+            false,
+        );
+        assert!(
+            dir.path().join(".glossa/notes/doc.pdf/t.csp").is_file(),
+            "{msg}"
+        );
+        assert!(msg.contains("columns: [h; v]"), "{msg}");
+        assert!(msg.contains("2 data rows"), "{msg}");
+    }
+
+    #[test]
+    fn malformed_csp_rejected_before_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h;;v\n1;2;3\n", false);
+        assert!(msg.contains("REJECTED"), "{msg}");
+        assert!(msg.contains("empty header cell in column 2"), "{msg}");
+        assert!(!dir.path().join(".glossa/notes/doc.pdf/t.csp").exists());
+    }
+
+    #[test]
+    fn plain_csv_is_freeform() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "scratch.csv",
+            "just;some\nrows\n",
+            false,
+        );
+        assert!(msg.contains("2 lines"), "{msg}");
+        assert!(dir
+            .path()
+            .join(".glossa/notes/doc.pdf/scratch.csv")
+            .is_file());
+    }
+
+    #[test]
+    fn sed_keeps_csp_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n1;2\n", false);
+        let msg = sed(dir.path(), &idx, "doc.pdf/t.csp", "h;v", ";", false);
+        assert!(msg.contains("REJECTED"), "{msg}");
+        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains("h;v"));
+    }
+
+    #[test]
+    fn distinct_mirrors_for_same_stem_different_ext() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: "doc.pdf".into(),
+                location: String::new(),
+                file_type: "pdf".into(),
+                text: "a".into(),
+            },
+            Chunk {
+                doc_path: "doc.docx".into(),
+                location: String::new(),
+                file_type: "docx".into(),
+                text: "b".into(),
+            },
+        ])
+        .unwrap();
+        note(dir.path(), &idx, "doc.pdf", "parameters.md", "pdf\n", false);
+        note(
+            dir.path(),
+            &idx,
+            "doc.docx",
+            "parameters.md",
+            "docx\n",
+            false,
+        );
+        assert!(dir
+            .path()
+            .join(".glossa/notes/doc.pdf/parameters.md")
+            .is_file());
+        assert!(dir
+            .path()
+            .join(".glossa/notes/doc.docx/parameters.md")
+            .is_file());
+        assert_eq!(
+            cat(dir.path(), &idx, "doc.pdf/parameters.md"),
+            "doc.pdf/parameters.md\npdf\n"
+        );
+    }
+
+    #[test]
+    fn note_rejected_when_lock_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let lock_path = dir.path().join(".glossa").join("notebook.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(FileExt::try_lock_exclusive(&holder).unwrap());
+        let msg = note(dir.path(), &idx, "doc.pdf", "parameters.md", "x\n", false);
+        assert!(
+            msg.contains("REJECTED") && msg.contains(LOCK_BUSY_MSG),
+            "{msg}"
+        );
+        FileExt::unlock(&holder).unwrap();
+    }
+
+    #[test]
+    fn csp_append_adds_rows_under_existing_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n1;2\n", false);
+        // without the header line: rows land under the existing header
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "3;4\n5;6\n", true);
+        assert!(msg.contains("Appended 2 rows"), "{msg}");
+        assert!(msg.contains("now 3 data rows"), "{msg}");
+        // with a repeated header line: the duplicate header is dropped
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n7;8\n", true);
+        assert!(msg.contains("Appended 1 row"), "{msg}");
+        assert!(msg.contains("now 4 data rows"), "{msg}");
+        let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
+        assert_eq!(body.matches("h;v").count(), 1, "single header: {body}");
+        assert!(body.contains("7;8"), "{body}");
+    }
+
+    #[test]
+    fn csp_append_rejects_ragged_rows_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n1;2\n", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "3;4;5\n", true);
+        assert!(msg.contains("REJECTED"), "{msg}");
+        // the file keeps its pre-append content
+        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains("1;2"));
+        assert!(!cat(dir.path(), &idx, "doc.pdf/t.csp").contains("3;4;5"));
+    }
+
+    #[test]
+    fn plain_append_concatenates() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "parameters.md", "A\nB", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "parameters.md", "C\n", true);
+        assert!(msg.contains("Appended"), "{msg}");
+        assert!(msg.contains("now 3 lines"), "{msg}");
+        let body = cat(dir.path(), &idx, "doc.pdf/parameters.md");
+        assert!(body.contains("A\nB\nC"), "{body}");
+    }
+
+    #[test]
+    fn append_to_missing_file_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n1;2\n", true);
+        assert!(msg.starts_with("Noted"), "{msg}");
+        assert!(msg.contains("1 data row"), "{msg}");
+    }
+
+    #[test]
+    fn overwrite_echo_warns_about_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "t.csp",
+            "h;v\n1;2\n3;4\n",
+            false,
+        );
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h;v\n9;9\n", false);
+        assert!(
+            msg.contains("replaced previous version (was 2 data rows)"),
+            "{msg}"
+        );
+        note(dir.path(), &idx, "doc.pdf", "s.md", "a\nb\nc\n", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "s.md", "x\n", false);
+        assert!(
+            msg.contains("replaced previous version (was 3 lines)"),
+            "{msg}"
+        );
+    }
+}

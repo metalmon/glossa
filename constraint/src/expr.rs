@@ -132,9 +132,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     }
                 }
                 _ => {
-                chars.next();
-                return Err(format!("unexpected character: '{ch}'"))
-            },
+                    chars.next();
+                    return Err(format!("unexpected character: '{ch}'"));
+                }
             }
         }
     }
@@ -168,12 +168,20 @@ impl Parser {
                 Token::Eq => {
                     self.advance();
                     let right = self.parse_comparison(vars)?;
-                    return Ok(if (left - right).abs() < 1e-12 { 1.0 } else { 0.0 });
+                    return Ok(if (left - right).abs() < 1e-12 {
+                        1.0
+                    } else {
+                        0.0
+                    });
                 }
                 Token::Neq => {
                     self.advance();
                     let right = self.parse_comparison(vars)?;
-                    return Ok(if (left - right).abs() >= 1e-12 { 1.0 } else { 0.0 });
+                    return Ok(if (left - right).abs() >= 1e-12 {
+                        1.0
+                    } else {
+                        0.0
+                    });
                 }
                 Token::Lt => {
                     self.advance();
@@ -442,12 +450,22 @@ mod tests {
     #[test]
     fn tokenize_identifiers() {
         let tokens = tokenize("abc + def").unwrap();
-        assert_eq!(tokens, vec![Token::Var("abc".into()), Token::Plus, Token::Var("def".into())]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Var("abc".into()),
+                Token::Plus,
+                Token::Var("def".into())
+            ]
+        );
     }
 
     #[test]
     fn tokenize_parentheses() {
         let tokens = tokenize("(x)").unwrap();
-        assert_eq!(tokens, vec![Token::LParen, Token::Var("x".into()), Token::RParen]);
+        assert_eq!(
+            tokens,
+            vec![Token::LParen, Token::Var("x".into()), Token::RParen]
+        );
     }
 }

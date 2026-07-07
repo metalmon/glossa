@@ -63,6 +63,7 @@ impl InferenceTurn {
 
 /// One `/inference` call (kb-eval pattern). Pass `system` to override the variant's system template
 /// at runtime (GEPA search/read); omit it for functions whose prompt lives entirely in `tensorzero.toml`.
+#[allow(clippy::too_many_arguments)]
 pub fn infer(
     gateway: &str,
     function: &str,
@@ -229,10 +230,22 @@ mod tests {
 
     #[test]
     fn gateway_base_replaces_localhost() {
-        assert_eq!(gateway_base("http://localhost:3000"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("http://localhost:3000/"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("http://127.0.0.1:3000"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("https://localhost:3000"), "https://127.0.0.1:3000");
+        assert_eq!(
+            gateway_base("http://localhost:3000"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("http://localhost:3000/"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("http://127.0.0.1:3000"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("https://localhost:3000"),
+            "https://127.0.0.1:3000"
+        );
     }
 
     /// `cargo test -p kb-eval live_ensure_function -- --ignored --nocapture`

@@ -79,6 +79,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | `resolve` / `delete_by_source` | **Partial** | Label index for resolve; `delete_by_source` scans `source_path` O(n) |
 | Support ontology overlay | **Shipped** | [eval/ontology-support.toml](../eval/ontology-support.toml) — Symptom/Cause/Task spine, strict mode |
 | Crash atomicity per file | **Open** | Chunk graph writes autocommit; no one-txn-per-file |
+| Cross-process `graph_upsert` lock | **Open** | Advisory `.glossa/graph.lock` (fs4), like `generalize.lock` / `notebook.lock`; today only in-process Mutex on SQLite |
 | Glossary `--expand` | **Open** | Term/co-occurrence layer not built; `CO_OCCURS` declared, no lexical indexer |
 | Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents |
 | Tailored ontology error messages | **Open** | e.g. explain Task → CAUSED_BY → Cause is invalid |

@@ -14,15 +14,17 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 
 | Profile | Typical use | Disabled tools |
 |---------|-------------|----------------|
-| `reader` | Answer agents | `index`, `reindex`, `graph_upsert`, `graph_delete`, `graph_update`, `graph_generalize`, `graph_stats`, `purge` |
-| `editor` | Index + graph editing | `purge` |
+| `reader` | Answer agents | `index`, `reindex`, `graph_*`, `purge`, `note`, `sed`, `del` |
+| `editor` | Index + graph + notebook write | `purge` |
 | `full` | Admin | (none) |
+
+Reader keeps **notebook read** (`ls`, `cat`) to inspect specialist notes.
 
 `--no-graph` hides all graph and index tools (search + read only) for eval control arms.
 
 `resolve` is available in every profile.
 
-## Tools (15)
+## Tools
 
 | Tool | reader | editor | full | Purpose |
 |------|:------:|:------:|:----:|---------|
@@ -33,6 +35,11 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
 | `neighbors` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
 | `resolve` | ✓ | ✓ | ✓ | Entity resolution by name |
+| `ls` | ✓ | ✓ | ✓ | List notebook notes (agent workspace) |
+| `cat` | ✓ | ✓ | ✓ | Read a notebook note by path from `ls` |
+| `note` | | ✓ | ✓ | Create/replace notebook note (`doc`, `file`, `content`; `.csp` = validated limit table) |
+| `sed` | | ✓ | ✓ | Patch a notebook note (literal replace) |
+| `del` | | ✓ | ✓ | Delete a notebook note |
 | `index` | | ✓ | ✓ | Incremental index |
 | `reindex` | | ✓ | ✓ | Full rebuild |
 | `graph_upsert` | | ✓ | ✓ | Create/update reasoning nodes and edges |
@@ -130,7 +137,7 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 
 ## Freshness and maintenance
 
-Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes.
+Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `sed`, `del`) use `.glossa/notebook.lock` the same way.
 
 ## Regenerate external tool schemas
 

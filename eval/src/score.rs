@@ -3,7 +3,16 @@ use crate::dataset::sanitize_title;
 /// HotpotQA answer normalization: lowercase, drop articles, drop punctuation, collapse whitespace.
 pub fn normalize(s: &str) -> String {
     let lower = s.to_lowercase();
-    let no_punct: String = lower.chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' }).collect();
+    let no_punct: String = lower
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
     no_punct
         .split_whitespace()
         .filter(|w| !matches!(*w, "a" | "an" | "the"))
@@ -16,10 +25,20 @@ pub fn exact_match(pred: &str, gold: &str) -> bool {
 }
 
 pub fn token_f1(pred: &str, gold: &str) -> f32 {
-    let p: Vec<String> = normalize(pred).split_whitespace().map(|s| s.to_string()).collect();
-    let g: Vec<String> = normalize(gold).split_whitespace().map(|s| s.to_string()).collect();
+    let p: Vec<String> = normalize(pred)
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    let g: Vec<String> = normalize(gold)
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
     if p.is_empty() || g.is_empty() {
-        return if p.is_empty() && g.is_empty() { 1.0 } else { 0.0 };
+        return if p.is_empty() && g.is_empty() {
+            1.0
+        } else {
+            0.0
+        };
     }
     let mut shared = 0usize;
     let mut gleft = g.clone();
@@ -57,7 +76,9 @@ pub fn retrieval_recall(
         .filter(|t| {
             let stem = sanitize_title(t);
             seen_files.iter().any(|f| f.contains(&stem))
-                || seen_locations.iter().any(|l| sanitize_title(l).contains(&stem))
+                || seen_locations
+                    .iter()
+                    .any(|l| sanitize_title(l).contains(&stem))
         })
         .count();
     hit as f32 / supporting_titles.len() as f32
@@ -130,7 +151,9 @@ mod tests {
     #[test]
     fn retrieval_recall_matches_by_sanitized_title() {
         let seen = vec!["eval-corpus/Bob_Page.md".to_string()];
-        assert!((retrieval_recall(&seen, &[], &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6);
+        assert!(
+            (retrieval_recall(&seen, &[], &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6
+        );
         assert_eq!(retrieval_recall(&seen, &[], &["Bob Page".into()]), 1.0);
         assert_eq!(retrieval_recall(&[], &[], &["Bob Page".into()]), 0.0);
     }
@@ -141,11 +164,25 @@ mod tests {
         let shard_files = vec!["wiki/AA_wiki_00.md".to_string()];
         let locations = vec!["Bob Page".to_string(), "Other Article".to_string()];
         // "Bob Page" not found in shard path, but found via location → recall 1.0
-        assert_eq!(retrieval_recall(&shard_files, &locations, &["Bob Page".into()]), 1.0);
+        assert_eq!(
+            retrieval_recall(&shard_files, &locations, &["Bob Page".into()]),
+            1.0
+        );
         // "Alice" not found anywhere → recall 0.0
-        assert_eq!(retrieval_recall(&shard_files, &locations, &["Alice".into()]), 0.0);
+        assert_eq!(
+            retrieval_recall(&shard_files, &locations, &["Alice".into()]),
+            0.0
+        );
         // Both: Bob found via location, Alice not → 0.5
-        assert!((retrieval_recall(&shard_files, &locations, &["Bob Page".into(), "Alice".into()]) - 0.5).abs() < 1e-6);
+        assert!(
+            (retrieval_recall(
+                &shard_files,
+                &locations,
+                &["Bob Page".into(), "Alice".into()]
+            ) - 0.5)
+                .abs()
+                < 1e-6
+        );
     }
 }
 
@@ -157,18 +194,29 @@ mod retrieval_at_k_tests {
     #[test]
     fn ranked_titles_dedups_across_searches() {
         let mk = |hits: serde_json::Value| TraceEntry {
-            ts_ms: 0, tool: "search".into(), args: serde_json::json!({}), result: hits,
+            ts_ms: 0,
+            tool: "search".into(),
+            args: serde_json::json!({}),
+            result: hits,
         };
         let tr = vec![
             mk(serde_json::json!([{"location":"A","score":2.0},{"location":"B","score":1.0}])),
             mk(serde_json::json!([{"location":"B","score":3.0},{"location":"C","score":1.0}])),
         ];
-        assert_eq!(ranked_titles(&tr), vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(
+            ranked_titles(&tr),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
     }
 
     #[test]
     fn recall_and_mrr() {
-        let ranked = vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()];
+        let ranked = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
         let gold = vec!["C".to_string(), "E".to_string()];
         assert!((recall_at_k(&ranked, &gold, 2) - 0.0).abs() < 1e-6); // C is rank 3
         assert!((recall_at_k(&ranked, &gold, 3) - 0.5).abs() < 1e-6);

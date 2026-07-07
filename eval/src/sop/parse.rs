@@ -353,6 +353,17 @@ pub fn validate_sop(sop: &Sop) -> Vec<String> {
     warnings
 }
 
+/// Parse a step's `mode:` sub-bullet into an execution mode (vendored from zeroclaw).
+pub fn parse_execution_mode(s: &str) -> SopExecutionMode {
+    match s.trim().to_lowercase().as_str() {
+        "auto" => SopExecutionMode::Auto,
+        "step_by_step" => SopExecutionMode::StepByStep,
+        "priority_based" => SopExecutionMode::PriorityBased,
+        "deterministic" => SopExecutionMode::Deterministic,
+        _ => SopExecutionMode::Supervised,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -425,16 +436,5 @@ mod tests {
         assert_eq!(step.routing.depends_on, vec![1, 2]);
         assert_eq!(step.on_failure, StepFailure::Retry { max: 2 });
         assert_eq!(step.mode, Some(SopExecutionMode::Auto));
-    }
-}
-
-/// Parse a step's `mode:` sub-bullet into an execution mode (vendored from zeroclaw).
-pub fn parse_execution_mode(s: &str) -> SopExecutionMode {
-    match s.trim().to_lowercase().as_str() {
-        "auto" => SopExecutionMode::Auto,
-        "step_by_step" => SopExecutionMode::StepByStep,
-        "priority_based" => SopExecutionMode::PriorityBased,
-        "deterministic" => SopExecutionMode::Deterministic,
-        _ => SopExecutionMode::Supervised,
     }
 }

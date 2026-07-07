@@ -171,7 +171,11 @@ description = "Allowed values in aliases."
         assert!(patterns[0].get("example").is_none());
         // example is parsed into Ontology for humans
         assert_eq!(
-            ont.patterns().get("independent_enum").unwrap().example.as_deref(),
+            ont.patterns()
+                .get("independent_enum")
+                .unwrap()
+                .example
+                .as_deref(),
             Some("Field → Enum(aliases=[v1,v2])")
         );
     }
@@ -196,7 +200,10 @@ note = "Literal-only parameter edges."
         .unwrap();
         let j = export_json(&ont);
         assert_eq!(j["meta"]["note"], "Literal-only parameter edges.");
-        assert!(j.get("note").is_none(), "top-level note removed; use meta.note");
+        assert!(
+            j.get("note").is_none(),
+            "top-level note removed; use meta.note"
+        );
     }
 
     #[test]

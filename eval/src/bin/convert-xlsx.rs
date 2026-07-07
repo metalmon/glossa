@@ -20,7 +20,9 @@ use std::path::PathBuf;
 /// A GUID (8-4-4-4-12 hex form).
 fn is_guid(s: &str) -> bool {
     let t = s.trim();
-    t.len() == 36 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-') && t.matches('-').count() == 4
+    t.len() == 36
+        && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && t.matches('-').count() == 4
 }
 
 /// A prod-MDM identifier in a HEADER position: a GUID or a bare numeric id.
@@ -77,8 +79,12 @@ fn typed_value(s: &str) -> Value {
 }
 
 fn main() -> anyhow::Result<()> {
-    let in_dir = std::env::args().nth(1).unwrap_or_else(|| "kb-val-gost".into());
-    let out_dir = std::env::args().nth(2).unwrap_or_else(|| "kb-val-gost".into());
+    let in_dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "kb-val-gost".into());
+    let out_dir = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "kb-val-gost".into());
 
     let out = PathBuf::from(&out_dir);
     std::fs::create_dir_all(&out)?;
@@ -87,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "xlsx") {
+        if path.extension().is_none_or(|e| e != "xlsx") {
             continue;
         }
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -98,7 +104,9 @@ fn main() -> anyhow::Result<()> {
 
         let mut tables = Vec::new();
         for sname in &sheet_names {
-            let Ok(ws) = wb.worksheet_range(sname) else { continue };
+            let Ok(ws) = wb.worksheet_range(sname) else {
+                continue;
+            };
             let raw: Vec<Vec<String>> = ws
                 .rows()
                 .map(|r| r.iter().map(cell_text).collect())
@@ -194,7 +202,10 @@ fn main() -> anyhow::Result<()> {
             path.display(),
             out_path.display(),
             tables.len(),
-            tables.iter().map(|t| t["rows"].as_array().map_or(0, |a| a.len())).sum::<usize>()
+            tables
+                .iter()
+                .map(|t| t["rows"].as_array().map_or(0, |a| a.len()))
+                .sum::<usize>()
         );
     }
     Ok(())

@@ -88,7 +88,10 @@ mod tests {
         let win = read_window(dir.path(), 50, 600).unwrap();
         assert_eq!(win.len(), 2);
         let files = seen_files(&win);
-        assert_eq!(files, vec!["Alice.md".to_string(), "Bob_Page.md".to_string()]);
+        assert_eq!(
+            files,
+            vec!["Alice.md".to_string(), "Bob_Page.md".to_string()]
+        );
     }
 
     #[test]
@@ -107,6 +110,8 @@ mod tests {
     #[test]
     fn missing_dir_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_window(&dir.path().join("nope"), 0, u64::MAX).unwrap().is_empty());
+        assert!(read_window(&dir.path().join("nope"), 0, u64::MAX)
+            .unwrap()
+            .is_empty());
     }
 }

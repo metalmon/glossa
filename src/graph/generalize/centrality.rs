@@ -68,7 +68,11 @@ pub fn pagerank(
         }
         rank = next;
     }
-    node_ids.iter().enumerate().map(|(i, s)| (s.clone(), rank[i])).collect()
+    node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), rank[i]))
+        .collect()
 }
 
 #[cfg(test)]
@@ -96,8 +100,16 @@ mod tests {
         let nodes = vec![s("h"), s("a"), s("b"), s("c")];
         let edges = vec![e("a", "h"), e("b", "h"), e("c", "h")];
         let pr = pagerank(&nodes, &edges, 0.85, 50);
-        assert!(pr["h"] > pr["a"], "hub {} should exceed leaf {}", pr["h"], pr["a"]);
+        assert!(
+            pr["h"] > pr["a"],
+            "hub {} should exceed leaf {}",
+            pr["h"],
+            pr["a"]
+        );
         let sum: f64 = pr.values().sum();
-        assert!((sum - 1.0).abs() < 1e-6, "ranks should sum to ~1, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "ranks should sum to ~1, got {sum}"
+        );
     }
 }

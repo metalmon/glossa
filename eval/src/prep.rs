@@ -23,7 +23,10 @@ pub fn prep_fullwiki(archive: &Path, out: &Path, max_shards: Option<usize>) -> R
     let file = File::open(archive).with_context(|| format!("open {archive:?}"))?;
     let mut ar = Archive::new(BzDecoder::new(BufReader::new(file))); // outer bz2 -> tar
     fs::create_dir_all(out)?;
-    let mut stats = PrepStats { shards: 0, articles: 0 };
+    let mut stats = PrepStats {
+        shards: 0,
+        articles: 0,
+    };
 
     for entry in ar.entries()? {
         let mut entry = entry?;
@@ -74,7 +77,10 @@ fn sanitize_shard_name(path: &Path) -> String {
         .collect();
     let n = comps.len();
     let dir = if n >= 2 { comps[n - 2].as_str() } else { "x" };
-    let file = comps.last().map(|s| s.strip_suffix(".bz2").unwrap_or(s)).unwrap_or("shard");
+    let file = comps
+        .last()
+        .map(|s| s.strip_suffix(".bz2").unwrap_or(s))
+        .unwrap_or("shard");
     format!("{dir}_{file}")
 }
 
@@ -122,8 +128,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // inner shard: two JSON-line articles (one flat text, one nested paragraphs)
         let jsonl = concat!(
-            r#"{"title":"Alpha","text":["A1.","A2."]}"#, "\n",
-            r#"{"title":"Beta","text":[["B1.","B2."]]}"#, "\n",
+            r#"{"title":"Alpha","text":["A1.","A2."]}"#,
+            "\n",
+            r#"{"title":"Beta","text":[["B1.","B2."]]}"#,
+            "\n",
         );
         let inner_bz = bz(jsonl.as_bytes());
         // tar containing enwiki/AA/wiki_00.bz2
@@ -134,7 +142,8 @@ mod tests {
             hdr.set_size(inner_bz.len() as u64);
             hdr.set_mode(0o644);
             hdr.set_cksum();
-            tb.append_data(&mut hdr, "enwiki/AA/wiki_00.bz2", &inner_bz[..]).unwrap();
+            tb.append_data(&mut hdr, "enwiki/AA/wiki_00.bz2", &inner_bz[..])
+                .unwrap();
             tb.finish().unwrap();
         }
         let archive = dir.path().join("abstracts.tar.bz2");
@@ -179,7 +188,8 @@ mod tests {
         use glossa::extract::Extractor;
 
         let dir = tempfile::tempdir().unwrap();
-        let inner_bz = bz(br#"{"title":"Anarchism","text":["Anarchism is a political philosophy."]}"#);
+        let inner_bz =
+            bz(br#"{"title":"Anarchism","text":["Anarchism is a political philosophy."]}"#);
         let mut tar_buf = Vec::new();
         {
             let mut tb = tar::Builder::new(&mut tar_buf);
@@ -187,7 +197,8 @@ mod tests {
             hdr.set_size(inner_bz.len() as u64);
             hdr.set_mode(0o644);
             hdr.set_cksum();
-            tb.append_data(&mut hdr, "enwiki/AA/wiki_00.bz2", &inner_bz[..]).unwrap();
+            tb.append_data(&mut hdr, "enwiki/AA/wiki_00.bz2", &inner_bz[..])
+                .unwrap();
             tb.finish().unwrap();
         }
         let archive = dir.path().join("a.tar.bz2");

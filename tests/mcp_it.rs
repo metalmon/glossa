@@ -3,8 +3,10 @@ use predicates::str::contains;
 
 #[test]
 fn mcp_subcommand_exists_with_profile_flag() {
-    Command::cargo_bin("kb").unwrap()
+    Command::cargo_bin("kb")
+        .unwrap()
         .args(["mcp", "--help"])
-        .assert().success()
+        .assert()
+        .success()
         .stdout(contains("--profile"));
 }

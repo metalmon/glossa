@@ -33,11 +33,8 @@ fn service_name() -> &'static str {
 
 /// Entry point from `main` when `--windows-service` is set: stash the serve config and hand control
 /// to the SCM dispatcher. Blocks until the service stops.
-pub fn run(params: crate::ServeParams) -> anyhow::Result<()> {
-    let name = params
-        .service_name
-        .clone()
-        .unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string());
+pub fn run(params: crate::ServeParams, svc_name: Option<String>) -> anyhow::Result<()> {
+    let name = svc_name.unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string());
     let _ = SERVICE_NAME.set(name);
     let _ = PARAMS.set(params);
     service_dispatcher::start(service_name(), ffi_service_main)
@@ -96,8 +93,16 @@ fn run_service() -> anyhow::Result<()> {
         let _ = status_for_running.set_service_status(running);
     });
 
-    let params = PARAMS.get().expect("serve params set before dispatcher start").clone();
-    let result = crate::run_serve(params, cancel, /* handle_signals = */ false, Some(on_ready));
+    let params = PARAMS
+        .get()
+        .expect("serve params set before dispatcher start")
+        .clone();
+    let result = crate::run_serve(
+        params,
+        cancel,
+        /* handle_signals = */ false,
+        Some(on_ready),
+    );
 
     let stopped = ServiceStatus {
         service_type: SERVICE_TYPE,

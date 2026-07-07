@@ -36,8 +36,14 @@ fn respects_gitignore_by_default() {
 
     let respected = collect_chunks(dir.path(), None, true).unwrap();
     assert!(respected.iter().any(|c| c.location == "K"));
-    assert!(!respected.iter().any(|c| c.location == "S"), "gitignored file must be skipped");
+    assert!(
+        !respected.iter().any(|c| c.location == "S"),
+        "gitignored file must be skipped"
+    );
 
     let all = collect_chunks(dir.path(), None, false).unwrap();
-    assert!(all.iter().any(|c| c.location == "S"), "--no-ignore indexes everything");
+    assert!(
+        all.iter().any(|c| c.location == "S"),
+        "--no-ignore indexes everything"
+    );
 }

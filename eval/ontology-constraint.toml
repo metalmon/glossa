@@ -120,3 +120,11 @@ example = "Field → Range + Enum(aliases=[…])"
 
 [patterns.provenance]
 description = "Record where values were read: Field ──MENTIONS──► section path#n (built-in edge, not declared here). Provenance is separate from ownership (source_path on nodes)."
+
+# ── Table import (constraint compiler) ──
+[tables]
+delimiter = ";"
+skip_columns = ["Сопроводительный документ"]
+
+[tables.compile_hints."Марка шлифматериала"]
+strategy = "skip"

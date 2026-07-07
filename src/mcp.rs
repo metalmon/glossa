@@ -14,7 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile { Reader, Editor, Full }
+pub enum Profile {
+    Reader,
+    Editor,
+    Full,
+}
 
 impl Profile {
     pub fn parse(s: &str) -> Profile {
@@ -43,15 +47,41 @@ pub struct GlossaServer {
     indexing: Arc<AtomicBool>,
 }
 
-const EDITOR_TOOLS: &[&str] = &["index", "reindex", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "graph_stats"];
+#[allow(dead_code)] // read tools stay enabled for Reader; listed for profile documentation
+const NOTEBOOK_READ_TOOLS: &[&str] = &["ls", "cat"];
+const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "sed", "del"];
+const EDITOR_TOOLS: &[&str] = &[
+    "index",
+    "reindex",
+    "graph_upsert",
+    "graph_delete",
+    "graph_update",
+    "graph_generalize",
+    "graph_stats",
+];
 const FULL_TOOLS: &[&str] = &["purge"];
-const GRAPH_TOOLS: &[&str] = &["glossary", "neighbors", "graph_upsert", "graph_delete", "graph_update", "graph_generalize", "resolve", "index", "reindex", "purge"];
+const GRAPH_TOOLS: &[&str] = &[
+    "glossary",
+    "neighbors",
+    "graph_upsert",
+    "graph_delete",
+    "graph_update",
+    "graph_generalize",
+    "resolve",
+    "index",
+    "reindex",
+    "purge",
+];
 
 impl GlossaServer {
     pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
-            for t in EDITOR_TOOLS.iter().chain(FULL_TOOLS) {
+            for t in EDITOR_TOOLS
+                .iter()
+                .chain(FULL_TOOLS)
+                .chain(NOTEBOOK_WRITE_TOOLS)
+            {
                 router.disable_route(*t);
             }
         } else if profile == Profile::Editor {
@@ -64,7 +94,17 @@ impl GlossaServer {
                 router.disable_route(*t);
             }
         }
-        let trace = if trace { crate::trace::TraceLog::to_dir(&root) } else { crate::trace::TraceLog::disabled() };
+        #[cfg(not(feature = "notebook"))]
+        {
+            for t in NOTEBOOK_READ_TOOLS.iter().chain(NOTEBOOK_WRITE_TOOLS) {
+                router.disable_route(*t);
+            }
+        }
+        let trace = if trace {
+            crate::trace::TraceLog::to_dir(&root)
+        } else {
+            crate::trace::TraceLog::disabled()
+        };
         // Seed `last_fresh` to "now" so bursty first calls don't each scan — `run_serve` kicks one
         // background freshen after the transport is up. Keeps `new()` free of filesystem access.
         Self {
@@ -115,7 +155,8 @@ impl GlossaServer {
         let last_change = self.last_change.clone();
         let indexing = self.indexing.clone();
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
+            let result =
+                tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
             indexing.store(false, Ordering::Release);
             if let Ok(Ok(stats)) = result {
                 if stats.added + stats.removed > 0 {
@@ -129,7 +170,8 @@ impl GlossaServer {
     /// Mark the derived graph layer stale (a freshen reindexed something) and stamp the change time —
     /// the debounce clock the maintenance loop waits on before running `generalize`.
     pub fn mark_dirty(&self) {
-        self.last_change.store(crate::trace::now_ms(), Ordering::Relaxed);
+        self.last_change
+            .store(crate::trace::now_ms(), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -149,14 +191,21 @@ impl GlossaServer {
     fn run_generalize(&self) {
         use fs4::fs_std::FileExt;
         let lock_path = self.root.join(".glossa").join("generalize.lock");
-        let Ok(_lock) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path) else {
+        let Ok(_lock) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+        else {
             return;
         };
         match _lock.try_lock_exclusive() {
-            Ok(true) => {}    // acquired — we are the one editor running the pass this round
-            _ => return,      // held by another editor (false) or lock error → skip
+            Ok(true) => {} // acquired — we are the one editor running the pass this round
+            _ => return,   // held by another editor (false) or lock error → skip
         }
-        let Ok(g) = GraphStore::open(&self.root) else { return };
+        let Ok(g) = GraphStore::open(&self.root) else {
+            return;
+        };
         let ont = Ontology::load_or_default(&self.root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -231,7 +280,11 @@ impl GlossaServer {
 
     #[cfg(test)]
     pub fn enabled_tools(&self) -> Vec<String> {
-        self.tool_router.list_all().iter().map(|t| t.name.to_string()).collect()
+        self.tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 }
 
@@ -241,13 +294,17 @@ fn internal(e: anyhow::Error) -> McpError {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchArgs {
-    #[schemars(description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex")]
+    #[schemars(
+        description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex"
+    )]
     query: String,
     #[serde(default)]
     #[schemars(description = "max hits (default 50)")]
     limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "only documents whose path matches this ripgrep -g glob, e.g. *.pdf, **/*, *.{pdf,md}")]
+    #[schemars(
+        description = "only documents whose path matches this ripgrep -g glob, e.g. *.pdf, **/*, *.{pdf,md}"
+    )]
     glob: Option<String>,
     #[serde(default)]
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
@@ -256,7 +313,9 @@ struct SearchArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GlobArgs {
-    #[schemars(description = "ripgrep -g glob over document paths, e.g. *, **/*, *.pdf, *.{pdf,htm}, *АБАК*")]
+    #[schemars(
+        description = "ripgrep -g glob over document paths, e.g. *, **/*, *.pdf, *.{pdf,htm}, *АБАК*"
+    )]
     pattern: String,
 }
 
@@ -264,7 +323,9 @@ struct GlobArgs {
 struct ReadArgs {
     #[schemars(description = "document path, exactly as shown in a search result")]
     path: String,
-    #[schemars(description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)")]
+    #[schemars(
+        description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)"
+    )]
     n: u32,
     #[serde(default)]
     #[schemars(description = "include embedded images (default true)")]
@@ -274,10 +335,14 @@ struct ReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NeighborsArgs {
     #[serde(default)]
-    #[schemars(description = "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases")]
+    #[schemars(
+        description = "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases"
+    )]
     node: Option<String>,
     #[serde(default)]
-    #[schemars(description = "document path, exactly as shown in a search result (use with `n` instead of `node`)")]
+    #[schemars(
+        description = "document path, exactly as shown in a search result (use with `n` instead of `node`)"
+    )]
     path: Option<String>,
     #[serde(default)]
     #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
@@ -285,15 +350,21 @@ struct NeighborsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct NameArg { name: String }
+struct NameArg {
+    name: String,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphStatsArgs {
     #[serde(default)]
-    #[schemars(description = "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)")]
+    #[schemars(
+        description = "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)"
+    )]
     doc: Option<String>,
     #[serde(default)]
-    #[schemars(description = "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge")]
+    #[schemars(
+        description = "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge"
+    )]
     node: Option<String>,
 }
 
@@ -330,26 +401,88 @@ impl JsonSchema for Empty {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct NoteArgs {
+    #[schemars(description = "Indexed document path from grep/read (#n stripped server-side)")]
+    doc: String,
+    #[schemars(
+        description = "Note filename with extension. `.csp` = a limit table (`;`-separated CSV, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note"
+    )]
+    file: String,
+    #[schemars(
+        description = "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing"
+    )]
+    content: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is."
+    )]
+    append: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NotebookPathArgs {
+    #[schemars(
+        description = "Notebook path from ls (<document>/<file>; document includes extension)"
+    )]
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LsArgs {
+    #[serde(default)]
+    #[schemars(description = "Optional indexed document path to list notes for one standard only")]
+    doc: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SedArgs {
+    #[schemars(
+        description = "Notebook path from ls (<document>/<file>; document path includes extension)"
+    )]
+    path: String,
+    #[schemars(description = "Literal substring to find (not regex)")]
+    old: String,
+    #[schemars(description = "Replacement text")]
+    new: String,
+    #[serde(default)]
+    #[schemars(description = "Replace all occurrences (default: first only)")]
+    all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct GrepArgs {
-    #[schemars(description = "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window.")]
+    #[schemars(
+        description = "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window."
+    )]
     pattern: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Search only this document — the same path `glob`/`read`/`search` show (a trailing `#chunk` is ignored). Omit to search the whole base."
+    )]
+    path: Option<String>,
     #[serde(default)]
     #[schemars(description = "case-insensitive matching (-i)")]
     ignore_case: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F).")]
+    #[schemars(
+        description = "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F)."
+    )]
     fixed: Option<bool>,
     #[serde(default)]
     #[schemars(description = "match whole words only (-w)")]
     word: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*")]
+    #[schemars(
+        description = "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*"
+    )]
     glob: Option<String>,
     #[serde(default)]
     #[schemars(description = "only this file type, e.g. pdf (-t)")]
     file_type: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C).")]
+    #[schemars(
+        description = "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C)."
+    )]
     context: Option<usize>,
     #[serde(default)]
     #[schemars(description = "emit N context lines before each match (-B)")]
@@ -358,19 +491,27 @@ struct GrepArgs {
     #[schemars(description = "emit N context lines after each match (-A)")]
     after: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "print only the matched substring(s), one per line, not the whole line (-o)")]
+    #[schemars(
+        description = "print only the matched substring(s), one per line, not the whole line (-o)"
+    )]
     only_matching: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n).")]
+    #[schemars(
+        description = "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n)."
+    )]
     line_number: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "output only a count of matching lines per chunk, not the lines (-c)")]
+    #[schemars(
+        description = "output only a count of matching lines per chunk, not the lines (-c)"
+    )]
     count: Option<bool>,
     #[serde(default)]
     #[schemars(description = "stop after N matching lines per chunk (-m)")]
     max_count: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)")]
+    #[schemars(
+        description = "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)"
+    )]
     multiline: Option<bool>,
 }
 
@@ -391,7 +532,11 @@ impl<'de> serde::Deserialize<'de> for GraphUpsertArgs {
     {
         let v = serde_json::Value::deserialize(deserializer)?;
         let (nodes, edges, parse_notes) = crate::graph::ops::parse_upsert_payload(&v);
-        Ok(Self { nodes, edges, parse_notes })
+        Ok(Self {
+            nodes,
+            edges,
+            parse_notes,
+        })
     }
 }
 
@@ -433,7 +578,9 @@ struct GraphUpdateArgs {
     // The model commonly sends a SINGLE update FLAT — {label, new_label, new_type} — instead of
     // wrapping it in `nodes`. Accept that shape too rather than silently updating nothing.
     #[serde(default)]
-    #[schemars(description = "single-update shortcut: current label of the node to edit (alternative to `nodes`)")]
+    #[schemars(
+        description = "single-update shortcut: current label of the node to edit (alternative to `nodes`)"
+    )]
     label: Option<String>,
     #[serde(default)]
     new_label: Option<String>,
@@ -449,10 +596,18 @@ impl GraphUpdateArgs {
         if !self.nodes.is_empty() {
             self.nodes
                 .into_iter()
-                .map(|n| NodeUpdate { label: n.label, new_label: n.new_label, new_type: n.new_type })
+                .map(|n| NodeUpdate {
+                    label: n.label,
+                    new_label: n.new_label,
+                    new_type: n.new_type,
+                })
                 .collect()
         } else if let Some(label) = self.label {
-            vec![NodeUpdate { label, new_label: self.new_label, new_type: self.new_type }]
+            vec![NodeUpdate {
+                label,
+                new_label: self.new_label,
+                new_type: self.new_type,
+            }]
         } else {
             vec![]
         }
@@ -461,15 +616,29 @@ impl GraphUpdateArgs {
 
 #[tool_router]
 impl GlossaServer {
-    #[tool(description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.")]
-    async fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
+    )]
+    async fn search(
+        &self,
+        Parameters(a): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let (body, _hits) = crate::tools::search(&idx, &a.query, a.limit.unwrap_or(50), a.glob.as_deref(), a.file_type.as_deref(), &self.trace);
+        let (body, _hits) = crate::tools::search(
+            &idx,
+            &a.query,
+            a.limit.unwrap_or(50),
+            a.glob.as_deref(),
+            a.file_type.as_deref(),
+            &self.trace,
+        );
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
-    #[tool(description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from.")]
+    #[tool(
+        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+    )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -485,53 +654,94 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
-    #[tool(description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one.")]
-    async fn glossary(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
+    )]
+    async fn glossary(
+        &self,
+        Parameters(a): Parameters<NameArg>,
+    ) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace),
+        )]))
     }
 
-    #[tool(description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors.")]
-    async fn neighbors(&self, Parameters(a): Parameters<NeighborsArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors."
+    )]
+    async fn neighbors(
+        &self,
+        Parameters(a): Parameters<NeighborsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::neighbors(&idx, &g, a.node.as_deref(), a.path.as_deref(), a.n, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::neighbors(
+                &idx,
+                &g,
+                a.node.as_deref(),
+                a.path.as_deref(),
+                a.n,
+                &self.trace,
+            ),
+        )]))
     }
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
     async fn index(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
         let s = index_dir(&self.root, false).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!("indexed: {} added, {} removed, {} unchanged", s.added, s.removed, s.unchanged))]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "indexed: {} added, {} removed, {} unchanged",
+            s.added, s.removed, s.unchanged
+        ))]))
     }
 
     #[tool(description = "Rebuild the index + graph from scratch.")]
     async fn reindex(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
         let s = index_dir(&self.root, true).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!("reindexed: {} files", s.added))]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "reindexed: {} files",
+            s.added
+        ))]))
     }
 
     #[tool(description = "Resolve a name to existing graph node ids (entity resolution).")]
-    async fn resolve(&self, Parameters(a): Parameters<NameArg>) -> Result<CallToolResult, McpError> {
+    async fn resolve(
+        &self,
+        Parameters(a): Parameters<NameArg>,
+    ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(g.resolve(&a.name).map_err(internal)?.join("\n"))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            g.resolve(&a.name).map_err(internal)?.join("\n"),
+        )]))
     }
 
-    #[tool(description = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert.")]
-    async fn get_ontology(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert."
+    )]
+    async fn get_ontology(
+        &self,
+        Parameters(_): Parameters<Empty>,
+    ) -> Result<CallToolResult, McpError> {
         let ont = Ontology::load_or_default(&self.root);
         Ok(CallToolResult::success(vec![Content::text(
             crate::graph::ontology_export::export_pretty(&ont),
         )]))
     }
 
-
     #[cfg_attr(not(feature = "constraint"), allow(dead_code))]
-    #[tool(description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels.")]
-    async fn constraint_solve(&self, Parameters(_a): Parameters<ConstraintSolveArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels."
+    )]
+    async fn constraint_solve(
+        &self,
+        Parameters(_a): Parameters<ConstraintSolveArgs>,
+    ) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "constraint")]
         {
             let a = _a;
@@ -552,33 +762,43 @@ impl GlossaServer {
                 }
             };
 
-            let assignment: Vec<(String, serde_json::Value)> = a
-                .assignment
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let assignment: Vec<(String, serde_json::Value)> =
+                a.assignment.unwrap_or_default().into_iter().collect();
             // Re-key onto the graph's Field labels via the morphology resolver, so a
             // value keyed by a paraphrase of a parameter name still hits its constraint.
-            let assignment = crate::constraint_adapter::resolve_assignment_fields(&g, &problem, &assignment);
+            let assignment =
+                crate::constraint_adapter::resolve_assignment_fields(&g, &problem, &assignment);
 
             let result = glossa_constraint::solver::solve(&problem, mode, &assignment);
 
             return Ok(CallToolResult::success(vec![Content::text(
-                crate::constraint_adapter::format_solve_feedback(&problem, &result, &assignment, &a.source_path),
+                crate::constraint_adapter::format_solve_feedback(
+                    &problem,
+                    &result,
+                    &assignment,
+                    &a.source_path,
+                ),
             )]));
         }
 
         #[cfg(not(feature = "constraint"))]
         {
             Err(McpError::internal_error(
-                String::from("constraint feature is not enabled. Build glossa with --features constraint"),
+                String::from(
+                    "constraint feature is not enabled. Build glossa with --features constraint",
+                ),
                 None,
             ))
         }
     }
 
-    #[tool(description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call.")]
-    async fn graph_upsert(&self, Parameters(a): Parameters<GraphUpsertArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+    )]
+    async fn graph_upsert(
+        &self,
+        Parameters(a): Parameters<GraphUpsertArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -596,28 +816,48 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
-    #[tool(description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it.")]
-    async fn graph_delete(&self, Parameters(a): Parameters<GraphDeleteArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
+    )]
+    async fn graph_delete(
+        &self,
+        Parameters(a): Parameters<GraphDeleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let refs: Vec<crate::graph::agent::EdgeRef> = a.edges
+        let refs: Vec<crate::graph::agent::EdgeRef> = a
+            .edges
             .into_iter()
-            .map(|e| crate::graph::agent::EdgeRef { from: e.from, edge_type: e.edge_type, to: e.to })
+            .map(|e| crate::graph::agent::EdgeRef {
+                from: e.from,
+                edge_type: e.edge_type,
+                to: e.to,
+            })
             .collect();
         let msg = crate::graph::ops::graph_delete(&idx, &g, a.nodes, refs);
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert.")]
-    async fn graph_update(&self, Parameters(a): Parameters<GraphUpdateArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
+    )]
+    async fn graph_update(
+        &self,
+        Parameters(a): Parameters<GraphUpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let msg = crate::graph::ops::graph_update(&g, a.into_updates());
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view.")]
-    async fn graph_generalize(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
+    )]
+    async fn graph_generalize(
+        &self,
+        Parameters(_): Parameters<Empty>,
+    ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
         let now = std::time::SystemTime::now()
@@ -625,14 +865,23 @@ impl GlossaServer {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // Non-destructive (shared with the eval enricher → identical output).
-        Ok(CallToolResult::success(vec![Content::text(crate::graph::ops::graph_generalize(&g, &ont, now))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::graph::ops::graph_generalize(&g, &ont, now),
+        )]))
     }
 
-    #[tool(description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have a materialized constraint (per ontology) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label.")]
-    async fn graph_stats(&self, Parameters(a): Parameters<GraphStatsArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have a materialized constraint (per ontology) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
+    )]
+    async fn graph_stats(
+        &self,
+        Parameters(a): Parameters<GraphStatsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         if let Some(id) = a.node.as_deref() {
-            return Ok(CallToolResult::success(vec![Content::text(crate::tools::node_inspect(&g, id))]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                crate::tools::node_inspect(&g, id),
+            )]));
         }
         let mut out = crate::tools::graph_stats(&g);
         if let Some(doc) = a.doc.as_deref() {
@@ -643,7 +892,9 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
-    #[tool(description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `F24`, `400`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline.")]
+    #[tool(
+        description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `F24`, `400`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
+    )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -651,7 +902,10 @@ impl GlossaServer {
             ignore_case: a.ignore_case.unwrap_or(false),
             fixed: a.fixed.unwrap_or(false),
             word: a.word.unwrap_or(false),
-            glob: a.glob,
+            // Explicit `glob` wins; otherwise `path` scopes the search to that one document.
+            glob: a
+                .glob
+                .or_else(|| a.path.as_deref().map(crate::grep::path_to_glob)),
             file_type: a.file_type,
             // -A/-B take precedence over the shared -C on their respective side.
             before: a.before.or(a.context).unwrap_or(0),
@@ -661,15 +915,155 @@ impl GlossaServer {
             count: a.count.unwrap_or(false),
             max_count: a.max_count,
             multiline: a.multiline.unwrap_or(false),
+            line_cap: None,
         };
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(&idx, &a.pattern, &opts.with_default_context(), &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::grep(&idx, &a.pattern, &opts.with_default_context(), &self.trace),
+        )]))
     }
 
-    #[tool(description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; for PDFs every page 1..N is addressable (blank pages return empty text).")]
+    #[tool(
+        description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; for PDFs every page 1..N is addressable (blank pages return empty text)."
+    )]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::glob(&idx, &a.pattern, &self.trace))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::glob(&idx, &a.pattern, &self.trace),
+        )]))
+    }
+
+    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
+    #[tool(
+        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (`;`-separated CSV, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
+    )]
+    async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "notebook")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let msg = crate::tools::note(
+                &self.root,
+                &idx,
+                &a.doc,
+                &a.file,
+                &a.content,
+                a.append.unwrap_or(false),
+            );
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
+        #[cfg(not(feature = "notebook"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "notebook feature is not enabled. Build glossa with --features notebook",
+                ),
+                None,
+            ))
+        }
+    }
+
+    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
+    #[tool(
+        description = "Read a notebook note by path (from ls). Not for indexed corpus documents — use read(path, n)."
+    )]
+    async fn cat(
+        &self,
+        Parameters(a): Parameters<NotebookPathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "notebook")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let msg = crate::tools::cat_note(&self.root, &idx, &a.path);
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
+        #[cfg(not(feature = "notebook"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "notebook feature is not enabled. Build glossa with --features notebook",
+                ),
+                None,
+            ))
+        }
+    }
+
+    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
+    #[tool(
+        description = "List notebook notes. Optional doc filter. Paths in the output are arguments for cat/sed/del."
+    )]
+    async fn ls(&self, Parameters(a): Parameters<LsArgs>) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "notebook")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let msg = crate::tools::ls_notes(&self.root, &idx, a.doc.as_deref());
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
+        #[cfg(not(feature = "notebook"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "notebook feature is not enabled. Build glossa with --features notebook",
+                ),
+                None,
+            ))
+        }
+    }
+
+    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
+    #[tool(description = "Delete a notebook note by path (from ls).")]
+    async fn del(
+        &self,
+        Parameters(a): Parameters<NotebookPathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "notebook")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let msg = crate::tools::del_note(&self.root, &idx, &a.path);
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
+        #[cfg(not(feature = "notebook"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "notebook feature is not enabled. Build glossa with --features notebook",
+                ),
+                None,
+            ))
+        }
+    }
+
+    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
+    #[tool(
+        description = "Patch a notebook note: literal substring replace. Use cat(path) first if unsure of the exact old text."
+    )]
+    async fn sed(&self, Parameters(a): Parameters<SedArgs>) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "notebook")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let msg = crate::tools::sed_note(
+                &self.root,
+                &idx,
+                &a.path,
+                &a.old,
+                &a.new,
+                a.all.unwrap_or(false),
+            );
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
+        #[cfg(not(feature = "notebook"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "notebook feature is not enabled. Build glossa with --features notebook",
+                ),
+                None,
+            ))
+        }
     }
 
     #[tool(description = "Delete the index + graph for the knowledge base.")]
@@ -678,7 +1072,9 @@ impl GlossaServer {
         if g.exists() {
             std::fs::remove_dir_all(&g).map_err(|e| internal(e.into()))?;
         }
-        Ok(CallToolResult::success(vec![Content::text("purged .glossa")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            "purged .glossa",
+        )]))
     }
 }
 
@@ -711,7 +1107,8 @@ mod tests {
 
     #[test]
     fn graph_upsert_args_deserialize_from_json() {
-        let json = r#"{"nodes":[{"node_type":"Document","label":"a","source_path":"a.md"}],"edges":[]}"#;
+        let json =
+            r#"{"nodes":[{"node_type":"Document","label":"a","source_path":"a.md"}],"edges":[]}"#;
         let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].label, "a");
@@ -731,8 +1128,10 @@ mod tests {
     #[test]
     fn graph_update_args_accept_nested_and_flat() {
         // canonical nested shape
-        let nested: GraphUpdateArgs =
-            serde_json::from_str(r#"{"nodes":[{"label":"old","new_label":"new","new_type":"Resolution"}]}"#).unwrap();
+        let nested: GraphUpdateArgs = serde_json::from_str(
+            r#"{"nodes":[{"label":"old","new_label":"new","new_type":"Resolution"}]}"#,
+        )
+        .unwrap();
         let u = nested.into_updates();
         assert_eq!(u.len(), 1);
         assert_eq!(u[0].label, "old");
@@ -740,7 +1139,8 @@ mod tests {
 
         // FLAT shape the model commonly sends — must be accepted, not silently dropped
         let flat: GraphUpdateArgs =
-            serde_json::from_str(r#"{"label":"old","new_label":"new","new_type":"Resolution"}"#).unwrap();
+            serde_json::from_str(r#"{"label":"old","new_label":"new","new_type":"Resolution"}"#)
+                .unwrap();
         let u = flat.into_updates();
         assert_eq!(u.len(), 1, "a flat single update must yield one NodeUpdate");
         assert_eq!(u[0].label, "old");
@@ -759,10 +1159,20 @@ mod tests {
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
         let path = "d.md".to_string(); // canonical key: corpus-root-relative
 
-        let out = srv.read(Parameters(ReadArgs { path, n: 1, include_images: Some(false) })).await.unwrap();
+        let out = srv
+            .read(Parameters(ReadArgs {
+                path,
+                n: 1,
+                include_images: Some(false),
+            }))
+            .await
+            .unwrap();
         let text = format!("{:?}", out);
         assert!(text.contains("alpha"), "body present: {text}");
-        assert!(text.contains("#2") || text.contains("next"), "footer offers next: {text}");
+        assert!(
+            text.contains("#2") || text.contains("next"),
+            "footer offers next: {text}"
+        );
     }
 
     #[tokio::test]
@@ -771,10 +1181,26 @@ mod tests {
         std::fs::write(dir.path().join("d.md"), b"# A\nmaxTsdr 3000\n# B\nother\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
-        let out = srv.grep(Parameters(GrepArgs {
-            pattern: "maxTsdr".into(), ignore_case: None, fixed: None, word: None, glob: None, file_type: None,
-            context: None, before: None, after: None, only_matching: None, line_number: None, count: None, max_count: None, multiline: None,
-        })).await.unwrap();
+        let out = srv
+            .grep(Parameters(GrepArgs {
+                pattern: "maxTsdr".into(),
+                path: None,
+                ignore_case: None,
+                fixed: None,
+                word: None,
+                glob: None,
+                file_type: None,
+                context: None,
+                before: None,
+                after: None,
+                only_matching: None,
+                line_number: None,
+                count: None,
+                max_count: None,
+                multiline: None,
+            }))
+            .await
+            .unwrap();
         assert!(format!("{:?}", out).contains("maxTsdr"));
         assert!(format!("{:?}", out).contains(":#")); // carries the #n read key
     }
@@ -782,11 +1208,22 @@ mod tests {
     #[tokio::test]
     async fn glob_tool_lists_documents() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("АБАК.md"), "# A\nраз\n# B\nдва\n".as_bytes()).unwrap();
+        std::fs::write(
+            dir.path().join("АБАК.md"),
+            "# A\nраз\n# B\nдва\n".as_bytes(),
+        )
+        .unwrap();
         std::fs::write(dir.path().join("Other.md"), "# A\nраз\n".as_bytes()).unwrap();
         index_dir(dir.path(), true).unwrap();
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
-        let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "*АБАК*".into() })).await.unwrap());
+        let out = format!(
+            "{:?}",
+            srv.glob(Parameters(GlobArgs {
+                pattern: "*АБАК*".into()
+            }))
+            .await
+            .unwrap()
+        );
         assert!(out.contains("АБАК"), "lists the matching doc: {out}");
         assert!(!out.contains("Other"), "excludes non-matching: {out}");
     }
@@ -796,10 +1233,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("top.md"), "# A\none\n".as_bytes()).unwrap();
-        std::fs::write(dir.path().join("sub").join("nested.md"), "# A\ntwo\n".as_bytes()).unwrap();
+        std::fs::write(
+            dir.path().join("sub").join("nested.md"),
+            "# A\ntwo\n".as_bytes(),
+        )
+        .unwrap();
         index_dir(dir.path(), true).unwrap();
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
-        let out = format!("{:?}", srv.glob(Parameters(GlobArgs { pattern: "**/*".into() })).await.unwrap());
+        let out = format!(
+            "{:?}",
+            srv.glob(Parameters(GlobArgs {
+                pattern: "**/*".into()
+            }))
+            .await
+            .unwrap()
+        );
         assert!(out.contains("top.md"), "lists top-level: {out}");
         assert!(out.contains("nested"), "lists nested: {out}");
     }
@@ -822,9 +1270,12 @@ mod tests {
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // pre-cancelled → the loop must return promptly, not hang
-        tokio::time::timeout(std::time::Duration::from_secs(2), srv.maintenance_loop(cancel))
-            .await
-            .expect("maintenance_loop honored cancel");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            srv.maintenance_loop(cancel),
+        )
+        .await
+        .expect("maintenance_loop honored cancel");
     }
 
     #[test]
@@ -842,8 +1293,16 @@ mod tests {
                 node_type: "Symptom".into(),
                 label: "потеря связи".into(),
                 aliases: vec![],
-                prov: Provenance { source_path: "a.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 },
-            }).unwrap();
+                prov: Provenance {
+                    source_path: "a.md".into(),
+                    range: None,
+                    file_sig: None,
+                    origin: "agent".into(),
+                    confidence: 0.8,
+                    created_at: 1,
+                },
+            })
+            .unwrap();
         }
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
         srv.run_generalize();
@@ -882,20 +1341,40 @@ mod tests {
                 node_type: "Symptom".into(),
                 label: "потеря связи".into(),
                 aliases: vec![],
-                prov: Provenance { source_path: "a.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 },
-            }).unwrap();
+                prov: Provenance {
+                    source_path: "a.md".into(),
+                    range: None,
+                    file_sig: None,
+                    origin: "agent".into(),
+                    confidence: 0.8,
+                    created_at: 1,
+                },
+            })
+            .unwrap();
         }
         let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
 
         // Another editor holds the cross-process generalize lock.
         let lock_path = dir.path().join(".glossa").join("generalize.lock");
-        let holder = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path).unwrap();
-        assert!(FileExt::try_lock_exclusive(&holder).unwrap(), "test acquires the lock");
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        assert!(
+            FileExt::try_lock_exclusive(&holder).unwrap(),
+            "test acquires the lock"
+        );
 
         // Lock held → this instance must SKIP the pass (no derived layer written).
         srv.run_generalize();
         assert!(
-            GraphStore::open(dir.path()).unwrap().node_meta("sym:x").unwrap().is_none(),
+            GraphStore::open(dir.path())
+                .unwrap()
+                .node_meta("sym:x")
+                .unwrap()
+                .is_none(),
             "lock held → generalize skipped, no node_meta"
         );
 
@@ -903,7 +1382,11 @@ mod tests {
         FileExt::unlock(&holder).unwrap();
         srv.run_generalize();
         assert!(
-            GraphStore::open(dir.path()).unwrap().node_meta("sym:x").unwrap().is_some(),
+            GraphStore::open(dir.path())
+                .unwrap()
+                .node_meta("sym:x")
+                .unwrap()
+                .is_some(),
             "lock free → generalize ran, node_meta written"
         );
     }
@@ -913,26 +1396,62 @@ mod tests {
         let root = std::path::PathBuf::from(".");
         let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
-        assert!(!reader.contains(&"index".to_string()) && !reader.contains(&"graph_upsert".to_string()) && !reader.contains(&"purge".to_string()));
+        assert!(reader.contains(&"ls".to_string()) && reader.contains(&"cat".to_string()));
+        assert!(
+            !reader.contains(&"note".to_string())
+                && !reader.contains(&"sed".to_string())
+                && !reader.contains(&"del".to_string())
+        );
+        assert!(
+            !reader.contains(&"index".to_string())
+                && !reader.contains(&"graph_upsert".to_string())
+                && !reader.contains(&"purge".to_string())
+        );
+        assert!(!reader.contains(&"write".to_string()));
 
         let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
+        assert!(
+            editor.contains(&"note".to_string())
+                && editor.contains(&"ls".to_string())
+                && editor.contains(&"cat".to_string())
+        );
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
-        assert!(editor.contains(&"graph_generalize".to_string()), "editor exposes the non-destructive generalize tool");
-        assert!(editor.contains(&"graph_stats".to_string()), "editor exposes graph stats");
+        assert!(
+            editor.contains(&"graph_generalize".to_string()),
+            "editor exposes the non-destructive generalize tool"
+        );
+        assert!(
+            editor.contains(&"graph_stats".to_string()),
+            "editor exposes graph stats"
+        );
         assert!(!editor.contains(&"purge".to_string()));
-        assert!(!reader.contains(&"graph_generalize".to_string()), "reader cannot generalize");
-        assert!(!reader.contains(&"graph_stats".to_string()), "reader cannot graph_stats");
+        assert!(
+            !reader.contains(&"graph_generalize".to_string()),
+            "reader cannot generalize"
+        );
+        assert!(
+            !reader.contains(&"graph_stats".to_string()),
+            "reader cannot graph_stats"
+        );
 
         let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
+        assert!(full.contains(&"note".to_string()) && full.contains(&"sed".to_string()));
 
         // resolve is a universally available tool — present in EVERY profile (not gated).
         for prof in [&reader, &editor, &full] {
-            assert!(prof.contains(&"resolve".to_string()), "resolve must be in every profile");
+            assert!(
+                prof.contains(&"resolve".to_string()),
+                "resolve must be in every profile"
+            );
         }
 
         let ng = GlossaServer::new(root, Profile::Editor, false, true).enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
-        assert!(!ng.contains(&"neighbors".to_string()) && !ng.contains(&"graph_upsert".to_string()) && !ng.contains(&"index".to_string()));
+        assert!(
+            !ng.contains(&"neighbors".to_string())
+                && !ng.contains(&"graph_upsert".to_string())
+                && !ng.contains(&"index".to_string())
+        );
     }
 }

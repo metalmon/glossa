@@ -49,7 +49,11 @@ fn char_trigrams(s: &str) -> Option<Vec<String>> {
     if chars.len() < 3 {
         return None;
     }
-    Some((0..=chars.len() - 3).map(|i| chars[i..i + 3].iter().collect()).collect())
+    Some(
+        (0..=chars.len() - 3)
+            .map(|i| chars[i..i + 3].iter().collect())
+            .collect(),
+    )
 }
 
 fn literal_to_and(literal: &str, case_insensitive: bool) -> TrigramQuery {
@@ -109,7 +113,10 @@ fn hir_to_query(hir: &Hir, case_insensitive: bool) -> TrigramQuery {
             if subs.len() > MAX_SET_SIZE {
                 return TrigramQuery::Any;
             }
-            let parts: Vec<TrigramQuery> = subs.iter().map(|h| hir_to_query(h, case_insensitive)).collect();
+            let parts: Vec<TrigramQuery> = subs
+                .iter()
+                .map(|h| hir_to_query(h, case_insensitive))
+                .collect();
             merge_and(parts)
         }
         HirKind::Alternation(alts) => {
@@ -140,14 +147,26 @@ mod tests {
     fn literal_trigrams_windows() {
         assert_eq!(
             literal_trigrams("maxTsdr", true),
-            Some(vec!["max".into(), "axt".into(), "xts".into(), "tsd".into(), "sdr".into()])
+            Some(vec![
+                "max".into(),
+                "axt".into(),
+                "xts".into(),
+                "tsd".into(),
+                "sdr".into()
+            ])
         );
         assert!(literal_trigrams("ab", true).is_none());
     }
 
     #[test]
     fn fixed_pattern_is_and() {
-        match trigram_plan("maxTsdr", &GrepOpts { fixed: true, ..Default::default() }) {
+        match trigram_plan(
+            "maxTsdr",
+            &GrepOpts {
+                fixed: true,
+                ..Default::default()
+            },
+        ) {
             TrigramQuery::And(g) => assert!(g.contains(&"max".to_string())),
             _ => panic!("expected And"),
         }
@@ -155,7 +174,13 @@ mod tests {
 
     #[test]
     fn alternation_is_or() {
-        match trigram_plan("регистрация|компонент", &GrepOpts { ignore_case: true, ..Default::default() }) {
+        match trigram_plan(
+            "регистрация|компонент",
+            &GrepOpts {
+                ignore_case: true,
+                ..Default::default()
+            },
+        ) {
             TrigramQuery::Or(branches) => assert_eq!(branches.len(), 2),
             q => panic!("expected Or, got {q:?}"),
         }
@@ -163,6 +188,13 @@ mod tests {
 
     #[test]
     fn short_pattern_is_any() {
-        assert!(trigram_plan("ab", &GrepOpts { fixed: true, ..Default::default() }).is_any());
+        assert!(trigram_plan(
+            "ab",
+            &GrepOpts {
+                fixed: true,
+                ..Default::default()
+            }
+        )
+        .is_any());
     }
 }

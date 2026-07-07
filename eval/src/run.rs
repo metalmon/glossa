@@ -65,29 +65,59 @@ pub fn run_eval(
     let recall_at_20_mean = rows.iter().map(|r| r.recall_at_20).sum::<f32>() / n;
     let mrr_mean = rows.iter().map(|r| r.mrr).sum::<f32>() / n;
     Ok(Report {
-        backend: backend_name.to_string(), rows, em_mean, f1_mean, recall_mean,
-        recall_at_5_mean, recall_at_10_mean, recall_at_20_mean, mrr_mean,
+        backend: backend_name.to_string(),
+        rows,
+        em_mean,
+        f1_mean,
+        recall_mean,
+        recall_at_5_mean,
+        recall_at_10_mean,
+        recall_at_20_mean,
+        mrr_mean,
     })
 }
 
-fn eval_one(backend: &dyn AgentBackend, q: &dataset::Question, kb_bin: &str, work: &Path, fullwiki: bool) -> Row {
+fn eval_one(
+    backend: &dyn AgentBackend,
+    q: &dataset::Question,
+    kb_bin: &str,
+    work: &Path,
+    fullwiki: bool,
+) -> Row {
     let base = Row {
-        id: q.id.clone(), question: q.question.clone(), gold: q.answer.clone(),
-        pred: String::new(), em: false, f1: 0.0, retrieval_recall: 0.0, failed: None,
+        id: q.id.clone(),
+        question: q.question.clone(),
+        gold: q.answer.clone(),
+        pred: String::new(),
+        em: false,
+        f1: 0.0,
+        retrieval_recall: 0.0,
+        failed: None,
         transcript: Vec::new(),
-        recall_at_5: 0.0, recall_at_10: 0.0, recall_at_20: 0.0, mrr: 0.0,
+        recall_at_5: 0.0,
+        recall_at_10: 0.0,
+        recall_at_20: 0.0,
+        mrr: 0.0,
     };
     // HotpotQA rows with inline `context` may rebuild a mini-corpus (CLI/OpenAI backends only).
     // TensorZero eval uses a pre-built index in `work`; `--fullwiki` skips even for Hotpot.
     if backend.rebuild_corpus_each_question() && !fullwiki && !q.paragraphs.is_empty() {
         if let Err(e) = corpus::write_corpus(work, q).and_then(|_| corpus::index(work, kb_bin)) {
-            return Row { failed: Some(format!("corpus: {e}")), ..base };
+            return Row {
+                failed: Some(format!("corpus: {e}")),
+                ..base
+            };
         }
     }
     let t0 = now_ms();
     let pred = match backend.answer(work, q) {
         Ok(p) => p,
-        Err(e) => return Row { failed: Some(format!("backend: {e}")), ..base },
+        Err(e) => {
+            return Row {
+                failed: Some(format!("backend: {e}")),
+                ..base
+            }
+        }
     };
     let t1 = now_ms();
     let entries = if backend.needs_corpus() {
@@ -136,14 +166,32 @@ mod fullwiki_tests {
         std::fs::write(corpus.join("Sentinel.md"), b"# Sentinel\nkeep me\n").unwrap();
 
         let dataset = dir.path().join("d.json");
-        std::fs::write(&dataset, br#"[{"_id":"q1","question":"Who?","answer":"Bob",
-            "context":[["Bob Page",["b."]]],"supporting_facts":[["Bob Page",0]]}]"#).unwrap();
+        std::fs::write(
+            &dataset,
+            br#"[{"_id":"q1","question":"Who?","answer":"Bob",
+            "context":[["Bob Page",["b."]]],"supporting_facts":[["Bob Page",0]]}]"#,
+        )
+        .unwrap();
 
-        let be = MockBackend { canned: HashMap::new() };
-        let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), Some(corpus.as_path())).unwrap();
+        let be = MockBackend {
+            canned: HashMap::new(),
+        };
+        let report = run_eval(
+            &dataset,
+            &be,
+            "mock",
+            0,
+            "kb",
+            dir.path(),
+            Some(corpus.as_path()),
+        )
+        .unwrap();
 
         assert_eq!(report.rows.len(), 1);
-        assert!(corpus.join("Sentinel.md").exists(), "fullwiki must NOT clear the shared corpus");
+        assert!(
+            corpus.join("Sentinel.md").exists(),
+            "fullwiki must NOT clear the shared corpus"
+        );
         assert_eq!(report.recall_at_5_mean, 0.0); // empty mock transcript
     }
 
@@ -159,7 +207,9 @@ mod fullwiki_tests {
         )
         .unwrap();
 
-        let be = MockBackend { canned: HashMap::new() };
+        let be = MockBackend {
+            canned: HashMap::new(),
+        };
         let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), None).unwrap();
 
         assert_eq!(report.rows.len(), 1);

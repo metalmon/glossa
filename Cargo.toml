@@ -48,9 +48,10 @@ glossa-constraint = { path = "constraint", optional = true }
 windows-service = "0.7"
 
 [features]
-default = []
+default = ["notebook"]
+notebook = []
 lingua = ["dep:lingua"]
-constraint = ["dep:glossa-constraint"]
+constraint = ["dep:glossa-constraint", "notebook"]
 
 [dev-dependencies]
 tempfile = "3"
