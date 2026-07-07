@@ -30,6 +30,8 @@ Write operations (`note`, `sed`, `del`) are serialized across MCP editor process
 
 `kb-eval-constraint` uses a temp copy of `.glossa` (or `--keep-agent-dir`). Corpus reads use `--kb`; notes write to the agent copy. Default `--tables-only` scores table coverage vs `kb-val-gost`; use `--full-pipeline` for compile + CSP.
 
+On each run, any prior `agent_g_dir/.glossa` is wiped before seeding from the KB. After the episode, notebook files export to `eval/results/<run>/agent/` when `--tag run=…` is set (or `--export-notes` / `--export-notes-dir`). Temp workspaces are removed explicitly on exit; Ctrl+C removes the temp dir when not using `--keep-agent-dir`.
+
 ## Cargo feature
 
 ```toml

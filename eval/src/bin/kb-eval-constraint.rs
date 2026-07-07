@@ -9,7 +9,8 @@ use glossa_constraint::solver::{SolveMode, SolveResult};
 use kb_eval::backend::tensorzero::{run_episode, EpisodePolicy, TzTurn};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// List the knowledge base's documents and pick a primary. A product's
@@ -76,6 +77,12 @@ struct Cli {
     /// Keep the agent workspace directory after the run (for inspecting notebook files).
     #[arg(long)]
     keep_agent_dir: Option<PathBuf>,
+    /// Export agent notebook files after the episode (also auto-enabled when --tag run=… is set).
+    #[arg(long)]
+    export_notes: bool,
+    /// Override export destination root (default: eval/results/<run>/agent or eval/results/agent/<episode-id>).
+    #[arg(long)]
+    export_notes_dir: Option<PathBuf>,
     /// Phase A: table coverage metrics only; skip tables-to-graph and CSP validation.
     #[arg(long, default_value_t = true)]
     tables_only: bool,
@@ -335,6 +342,109 @@ fn exec_notebook(
             args.get("all").and_then(|v| v.as_bool()).unwrap_or(false),
         ),
         other => format!("unknown notebook tool: {other}"),
+    }
+}
+
+/// Remove a previous agent workspace overlay so stale notebook files and graph
+/// state from an earlier run (or `--keep-agent-dir` reuse) cannot leak into scoring.
+fn wipe_agent_glossa(agent_g_dir: &std::path::Path) -> std::io::Result<()> {
+    let glossa = agent_g_dir.join(".glossa");
+    if glossa.exists() {
+        std::fs::remove_dir_all(&glossa)?;
+    }
+    Ok(())
+}
+
+static INTERRUPT_TEMP: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn register_interrupt_temp_cleanup(path: PathBuf) {
+    let slot = INTERRUPT_TEMP.get_or_init(|| Mutex::new(None));
+    *slot.lock().expect("interrupt temp lock") = Some(path);
+    static HANDLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if HANDLER
+        .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        .is_ok()
+    {
+        let _ = ctrlc::set_handler(|| {
+            if let Some(slot) = INTERRUPT_TEMP.get() {
+                if let Ok(mut guard) = slot.lock() {
+                    if let Some(path) = guard.take() {
+                        eprintln!("\n[agent] interrupted — removing {}", path.display());
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
+            }
+            std::process::exit(130);
+        });
+    }
+}
+
+fn unregister_interrupt_temp_cleanup() {
+    if let Some(slot) = INTERRUPT_TEMP.get() {
+        *slot.lock().expect("interrupt temp lock") = None;
+    }
+}
+
+fn should_export_notes(cli: &Cli, tags: &Value) -> bool {
+    cli.export_notes || tags.get("run").is_some()
+}
+
+fn resolve_export_notes_root(cli: &Cli, tags: &Value, episode_id: &str) -> Option<PathBuf> {
+    if !should_export_notes(cli, tags) {
+        return None;
+    }
+    if let Some(dir) = &cli.export_notes_dir {
+        return Some(dir.clone());
+    }
+    if let Some(run) = tags.get("run").and_then(|v| v.as_str()) {
+        return Some(PathBuf::from("eval/results").join(run).join("agent"));
+    }
+    Some(PathBuf::from("eval/results/agent").join(episode_id))
+}
+
+fn export_agent_notes(agent_g_dir: &Path, src_doc: &str, dst_root: &Path) -> Result<PathBuf> {
+    let src = glossa::notebook::notes_root(agent_g_dir)
+        .join(glossa::notebook::mirror_dir_for_doc(src_doc));
+    if !src.exists() {
+        anyhow::bail!("no notebook files at {}", src.display());
+    }
+    let dst = dst_root.join(glossa::notebook::mirror_dir_for_doc(src_doc));
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst).with_context(|| format!("clear export dir {}", dst.display()))?;
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create export parent {}", parent.display()))?;
+    }
+    copy_dir_all(&src, &dst).with_context(|| format!("export notebook to {}", dst.display()))?;
+    Ok(dst)
+}
+
+fn finalize_agent_workspace(
+    agent_g_dir: &Path,
+    src_doc: &str,
+    export_dst: Option<&Path>,
+    mut agent_temp: Option<tempfile::TempDir>,
+    keep_agent_dir: bool,
+) {
+    if let Some(dst_root) = export_dst {
+        match export_agent_notes(agent_g_dir, src_doc, dst_root) {
+            Ok(dst) => println!("[agent] exported notebook → {}", dst.display()),
+            Err(e) => eprintln!("[agent] export notes failed: {e:#}"),
+        }
+    }
+    unregister_interrupt_temp_cleanup();
+    if keep_agent_dir {
+        return;
+    }
+    if let Some(temp) = agent_temp.take() {
+        match temp.close() {
+            Ok(()) => eprintln!("[agent] removed temp workspace"),
+            Err(e) => eprintln!(
+                "[agent] WARN: failed to remove temp workspace {}: {e}",
+                agent_g_dir.display()
+            ),
+        }
     }
 }
 
@@ -1214,8 +1324,10 @@ fn main() -> Result<()> {
             })
         };
 
-        let agent_store = if let Some(ref keep) = cli.keep_agent_dir {
-            std::fs::create_dir_all(keep).context("create keep-agent-dir")?;
+        let agent_temp = if cli.keep_agent_dir.is_some() {
+            if let Some(ref keep) = cli.keep_agent_dir {
+                std::fs::create_dir_all(keep).context("create keep-agent-dir")?;
+            }
             None
         } else {
             Some(tempfile::tempdir().context("agent tempdir")?)
@@ -1223,12 +1335,17 @@ fn main() -> Result<()> {
         let agent_g_dir = cli
             .keep_agent_dir
             .clone()
-            .unwrap_or_else(|| agent_store.as_ref().unwrap().path().to_path_buf());
+            .unwrap_or_else(|| agent_temp.as_ref().unwrap().path().to_path_buf());
+        if cli.keep_agent_dir.is_none() {
+            register_interrupt_temp_cleanup(agent_g_dir.clone());
+        }
+        let export_notes_root = resolve_export_notes_root(&cli, &tags, &eid);
         let ont_path = agent_g_dir.join(".glossa").join("ontology.toml");
         // Seed the agent's store with a per-run copy of the indexed KB (index + graph,
         // including the Document/Section nodes) so index and graph share ONE store, as
-        // in prod and the glossa kb-train eval. Runs stay isolated (fresh temp copy) and
-        // the shared KB is never mutated; the constraint ontology then overrides the copy.
+        // in prod and the glossa kb-train eval. Runs stay isolated and the shared KB
+        // is never mutated; wipe any prior `.glossa` first (keep-agent-dir reuse).
+        wipe_agent_glossa(&agent_g_dir).context("wipe prior agent store")?;
         copy_dir_all(&cli.kb.join(".glossa"), &agent_g_dir.join(".glossa"))
             .context("seed agent store from KB")?;
         std::fs::write(&ont_path, &ontology_toml).unwrap();
@@ -1447,6 +1564,14 @@ fn main() -> Result<()> {
                 "TABLES episode={eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
                 agent_g_dir.display()
             );
+            drop(agent_g);
+            finalize_agent_workspace(
+                &agent_g_dir,
+                &src_doc,
+                export_notes_root.as_deref(),
+                agent_temp,
+                cli.keep_agent_dir.is_some(),
+            );
             break;
         }
 
@@ -1653,6 +1778,14 @@ fn main() -> Result<()> {
         println!("VALIDATION over {} rows (mapped {}/{} params)  acc={val_acc:.3}  valid_pass={vpass}/{vtot}  invalid_catch={icatch}/{itot}{}",
             cases.len(), mdm_to_agent.len(), cols.len(),
             if agent_constrains { "" } else { "  [WARN: agent graph has no constraints]" });
+        drop(agent_g);
+        finalize_agent_workspace(
+            &agent_g_dir,
+            &src_doc,
+            export_notes_root.as_deref(),
+            agent_temp,
+            cli.keep_agent_dir.is_some(),
+        );
         break;
     }
 
@@ -1694,6 +1827,59 @@ mod tests {
         assert_eq!(parse_reported_remaining("no report at all"), None);
         assert_eq!(parse_reported_remaining("remaining params: none"), None);
         assert_eq!(parse_reported_remaining(""), None);
+    }
+
+    #[test]
+    fn export_agent_notes_copies_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("t.csp"), "X\n1\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let dst = export_agent_notes(dir.path(), doc, out.path()).unwrap();
+        assert!(dst.join("t.csp").exists());
+    }
+
+    #[test]
+    fn resolve_export_notes_root_uses_run_tag() {
+        let cli = Cli {
+            gateway: String::new(),
+            ontology: PathBuf::new(),
+            kb: PathBuf::new(),
+            val_dir: PathBuf::new(),
+            doc: None,
+            timeout_secs: 60,
+            tag: vec!["run=deploy-test".into()],
+            csp_only: false,
+            limit: 0,
+            sop_dir: None,
+            variant: None,
+            keep_agent_dir: None,
+            export_notes: false,
+            export_notes_dir: None,
+            tables_only: true,
+            full_pipeline: false,
+        };
+        let tags: Value = json!({"run": "deploy-test"});
+        let root = resolve_export_notes_root(&cli, &tags, "ep1").unwrap();
+        assert_eq!(root, PathBuf::from("eval/results/deploy-test/agent"));
+    }
+
+    #[test]
+    fn wipe_agent_glossa_removes_notes_and_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("stale.csp"), "X\n1\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+        std::fs::write(dir.path().join(".glossa/graph.sqlite"), b"").unwrap();
+
+        wipe_agent_glossa(dir.path()).unwrap();
+        assert!(!dir.path().join(".glossa").exists());
     }
 
     #[test]

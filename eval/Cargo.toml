@@ -44,6 +44,7 @@ bzip2 = "0.4"
 tar = "0.4"
 calamine = "0.26"
 tempfile = "3"
+ctrlc = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
