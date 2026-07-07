@@ -37,6 +37,20 @@ pub struct TablesCompileWiring {
 }
 
 impl TablesCompileWiring {
+    /// Node types emitted by the table compiler — safe to replace per document on recompile.
+    pub fn compile_layer_node_types(&self, ont: &Ontology) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let mut types = BTreeSet::new();
+        types.insert(self.parameter_entity.clone());
+        types.insert(self.literal_entity.clone());
+        types.insert(self.enum_constraint.clone());
+        types.insert(self.conditional_constraint.clone());
+        for name in ont.constraint_types().keys() {
+            types.insert(name.clone());
+        }
+        types.into_iter().collect()
+    }
+
     /// Resolve wiring from declared relations. Fails with an actionable message when the
     /// overlay is missing a required edge or endpoint type.
     pub fn resolve(ont: &Ontology) -> Result<Self, String> {

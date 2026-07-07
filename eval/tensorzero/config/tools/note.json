@@ -10,7 +10,7 @@
       ]
     },
     "content": {
-      "description": "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes parsed columns, row count, and may add a brief observation about grid shape; ragged rows are rejected without writing",
+      "description": "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing",
       "type": "string"
     },
     "doc": {

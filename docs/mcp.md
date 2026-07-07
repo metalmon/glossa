@@ -43,6 +43,7 @@ Reader keeps **notebook read** (`ls`, `cat`) to inspect specialist notes.
 | `index` | | ✓ | ✓ | Incremental index |
 | `reindex` | | ✓ | ✓ | Full rebuild |
 | `graph_upsert` | | ✓ | ✓ | Create/update reasoning nodes and edges |
+| `graph_build` | | ✓ | ✓ | Compile `.csp` limit tables into constraint graph |
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
 | `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive) |

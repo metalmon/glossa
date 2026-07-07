@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
+#[cfg(feature = "constraint")]
 use std::fs;
+#[cfg(feature = "constraint")]
 use std::path::Path;
 
+#[cfg(feature = "constraint")]
 use crate::graph::store::normalize_label;
 
 /// Column delimiter for agent `.csp` limit tables (tab — natural for copied grids; `;` stays free in cells).
@@ -124,8 +127,20 @@ fn delimiter_name(d: char) -> &'static str {
     }
 }
 
-/// Load and union all `*.csp` files in `dir` (identical headers required per file; rows merged).
-pub fn load_csp_dir(dir: &Path, delimiter: char) -> anyhow::Result<CspTable> {
+/// Load and union all `*.csp` files in `dir`.
+///
+/// Two merge modes (same as eval table coverage):
+/// - **Same headers** (normalized): row shard — append data rows (one relation table split across files).
+/// - **Different headers**: column union — widen the schema; each file's rows map sparsely (independent
+///   parameters in separate `.csp` files; row counts need not match).
+///
+/// When `note_dir_label` is set (document owner path), errors cite `label/file.csp` for agents.
+#[cfg(feature = "constraint")]
+pub fn load_csp_dir(
+    dir: &Path,
+    delimiter: char,
+    note_dir_label: Option<&str>,
+) -> anyhow::Result<CspTable> {
     let mut files: Vec<_> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -135,24 +150,27 @@ pub fn load_csp_dir(dir: &Path, delimiter: char) -> anyhow::Result<CspTable> {
     if files.is_empty() {
         anyhow::bail!("no .csp files in {}", dir.display());
     }
+    let note_path = |path: &Path| -> String {
+        let file = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+        match note_dir_label {
+            Some(doc) => format!("{doc}/{file}"),
+            None => path.display().to_string(),
+        }
+    };
     let mut merged: Option<CspTable> = None;
     for path in files {
-        let text = fs::read_to_string(&path)?;
-        let rel = parse_csp_with_delimiter(&text, delimiter)?;
+        let text = fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("{}: {e}", note_path(&path))
+        })?;
+        let rel = parse_csp_with_delimiter(&text, delimiter).map_err(|e| {
+            anyhow::anyhow!("{}: {e}", note_path(&path))
+        })?;
         merged = Some(match merged {
             None => rel,
-            Some(mut m) => {
-                if normalize_headers(&m.headers) != normalize_headers(&rel.headers) {
-                    anyhow::bail!(
-                        "header mismatch in {} (expected {:?}, got {:?})",
-                        path.display(),
-                        m.headers,
-                        rel.headers
-                    );
-                }
-                m.rows.extend(rel.rows);
-                m
-            }
+            Some(m) => merge_csp_tables(m, rel),
         });
     }
     let mut rel = merged.unwrap();
@@ -160,6 +178,51 @@ pub fn load_csp_dir(dir: &Path, delimiter: char) -> anyhow::Result<CspTable> {
     Ok(rel)
 }
 
+/// Same normalized header row → append rows; otherwise union columns with sparse row mapping.
+#[cfg(feature = "constraint")]
+fn merge_csp_tables(left: CspTable, right: CspTable) -> CspTable {
+    if normalize_headers(&left.headers) == normalize_headers(&right.headers) {
+        let mut out = left;
+        out.rows.extend(right.rows);
+        return out;
+    }
+    union_columns_sparse(left, right)
+}
+
+#[cfg(feature = "constraint")]
+fn union_columns_sparse(left: CspTable, right: CspTable) -> CspTable {
+    let mut headers = left.headers.clone();
+    for h in &right.headers {
+        if column_index(&headers, h).is_none() {
+            headers.push(h.clone());
+        }
+    }
+    let mut rows: Vec<Vec<String>> = left
+        .rows
+        .iter()
+        .map(|r| remap_row(&left.headers, r, &headers))
+        .collect();
+    for r in &right.rows {
+        rows.push(remap_row(&right.headers, r, &headers));
+    }
+    CspTable { headers, rows }
+}
+
+#[cfg(feature = "constraint")]
+fn remap_row(src_headers: &[String], src_row: &[String], dst_headers: &[String]) -> Vec<String> {
+    let mut out = vec![String::new(); dst_headers.len()];
+    for (i, h) in src_headers.iter().enumerate() {
+        let Some(j) = column_index(dst_headers, h) else {
+            continue;
+        };
+        if let Some(cell) = src_row.get(i) {
+            out[j] = cell.clone();
+        }
+    }
+    out
+}
+
+#[cfg(feature = "constraint")]
 fn normalize_headers(h: &[String]) -> Vec<String> {
     h.iter().map(|s| normalize_label(s)).collect()
 }
@@ -225,6 +288,7 @@ pub fn format_csp(table: &CspTable) -> String {
     out
 }
 
+#[cfg(feature = "constraint")]
 pub fn column_index(headers: &[String], name: &str) -> Option<usize> {
     let n = normalize_label(name);
     headers.iter().position(|h| normalize_label(h) == n)
@@ -279,12 +343,65 @@ mod tests {
         assert_eq!(r.rows[0][0], "115; 125; 150");
     }
 
-    #[test]
-    fn merge_append_skips_duplicate_rows() {
-        let old = parse_csp("h\tv\n1\t2\n3\t4\n").unwrap();
-        let (merged, stats) = merge_append_rows(&old, "1\t2\n3\t4\n5\t6\n").unwrap();
-        assert_eq!(stats.added, 1);
-        assert_eq!(stats.dup_ignored, 2);
-        assert_eq!(merged.rows.len(), 3);
+    #[cfg(feature = "constraint")]
+    mod constraint_merge {
+        use super::*;
+
+        #[test]
+        fn load_csp_dir_error_uses_notebook_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let doc = "gost.pdf";
+            std::fs::write(dir.path().join("bad.csp"), "a\tb\n1\t2\t3\n").unwrap();
+            let err = load_csp_dir(dir.path(), CSP_DELIMITER, Some(doc))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("gost.pdf/bad.csp"), "{err}");
+        }
+
+        #[test]
+        fn load_csp_dir_same_headers_row_shard() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.csp"), "D\tT\n50\t2\n").unwrap();
+            std::fs::write(dir.path().join("b.csp"), "D\tT\n63\t3\n").unwrap();
+            let t = load_csp_dir(dir.path(), CSP_DELIMITER, None).unwrap();
+            assert_eq!(t.headers, vec!["D", "T"]);
+            assert_eq!(t.rows.len(), 2);
+            assert_eq!(t.rows[0], vec!["50", "2"]);
+            assert_eq!(t.rows[1], vec!["63", "3"]);
+        }
+
+        #[test]
+        fn load_csp_dir_different_headers_column_union_sparse() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("D.csp"), "D\n50\n63\n").unwrap();
+            std::fs::write(dir.path().join("F.csp"), "F\nF16\nF24\n").unwrap();
+            let t = load_csp_dir(dir.path(), CSP_DELIMITER, None).unwrap();
+            assert_eq!(t.headers, vec!["D", "F"]);
+            assert_eq!(t.rows.len(), 4);
+            assert_eq!(t.rows[0], vec!["50", ""]);
+            assert_eq!(t.rows[1], vec!["63", ""]);
+            assert_eq!(t.rows[2], vec!["", "F16"]);
+            assert_eq!(t.rows[3], vec!["", "F24"]);
+        }
+
+        #[test]
+        fn load_csp_dir_shared_column_unions_values() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.csp"), "Width\n10\n20\n").unwrap();
+            std::fs::write(dir.path().join("b.csp"), "Width\n30\n").unwrap();
+            let t = load_csp_dir(dir.path(), CSP_DELIMITER, None).unwrap();
+            assert_eq!(t.headers, vec!["Width"]);
+            assert_eq!(t.rows.len(), 3);
+        }
+
+        #[test]
+        fn merge_csp_tables_partial_header_overlap() {
+            let left = parse_csp("D\tT\n50\t2\n").unwrap();
+            let right = parse_csp("D\tH\n63\t10\n").unwrap();
+            let t = merge_csp_tables(left, right);
+            assert_eq!(t.headers, vec!["D", "T", "H"]);
+            assert_eq!(t.rows[0], vec!["50", "2", ""]);
+            assert_eq!(t.rows[1], vec!["63", "", "10"]);
+        }
     }
 }

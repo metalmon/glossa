@@ -55,6 +55,13 @@ pub struct NodeMeta {
     pub degree: Option<i64>,
 }
 
+/// Count of nodes and edges removed by [`GraphStore::delete_agent_table_compile_layer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AgentLayerDeleteStats {
+    pub nodes_removed: usize,
+    pub edges_removed: usize,
+}
+
 pub struct GraphStore {
     conn: Mutex<Connection>,
     /// BM25 search view over node labels/aliases, for `resolve`'s fuzzy match. Derived from the
@@ -342,6 +349,59 @@ impl GraphStore {
         .context("delete edges by source")?;
         let edges_deleted = c.changes() as usize;
         Ok(nodes_deleted + ref_edges + edges_deleted)
+    }
+
+    /// Remove prior table-compile output for one document: agent-origin nodes whose type is in
+    /// `node_types`, plus agent edges for that `source_path`. Structural/index nodes are untouched.
+    pub fn delete_agent_table_compile_layer(
+        &self,
+        doc: &str,
+        node_types: &[String],
+    ) -> anyhow::Result<AgentLayerDeleteStats> {
+        if node_types.is_empty() {
+            return Ok(AgentLayerDeleteStats::default());
+        }
+        let c = self.conn.lock().unwrap();
+        let in_list: String = (0..node_types.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let node_sub = format!(
+            "SELECT id FROM nodes WHERE source_path = ?1 AND origin = 'agent' \
+             AND node_type IN ({in_list})"
+        );
+        let mut edge_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        edge_params.push(Box::new(doc.to_string()));
+        for t in node_types {
+            edge_params.push(Box::new(t.clone()));
+        }
+        c.execute(
+            &format!(
+                "DELETE FROM edges WHERE efrom IN ({node_sub}) OR eto IN ({node_sub})"
+            ),
+            rusqlite::params_from_iter(edge_params.iter().map(|p| p.as_ref())),
+        )
+        .context("delete edges touching table-compile nodes")?;
+        let mut edges_removed = c.changes() as usize;
+        c.execute(
+            "DELETE FROM edges WHERE source_path = ?1 AND origin = 'agent'",
+            rusqlite::params![doc],
+        )
+        .context("delete agent edges by source")?;
+        edges_removed += c.changes() as usize;
+        c.execute(
+            &format!(
+                "DELETE FROM nodes WHERE source_path = ?1 AND origin = 'agent' \
+                 AND node_type IN ({in_list})"
+            ),
+            rusqlite::params_from_iter(edge_params.iter().map(|p| p.as_ref())),
+        )
+        .context("delete table-compile nodes")?;
+        let nodes_removed = c.changes() as usize;
+        Ok(AgentLayerDeleteStats {
+            nodes_removed,
+            edges_removed,
+        })
     }
 
     /// Delete only the DOCUMENT-DERIVED layer (origin `auto-*`: structural + lexical), preserving

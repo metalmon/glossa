@@ -284,6 +284,10 @@ parameters = "tools/glob.json"
 description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
 parameters = "tools/glossary.json"
 
+[tools.graph_build]
+description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with cat/sed/note, then call again."
+parameters = "tools/graph_build.json"
+
 [tools.graph_delete]
 description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
 parameters = "tools/graph_delete.json"
@@ -359,7 +363,7 @@ parameters = "tools/done.json"
 # kb-eval-constraint compiles the tables to a graph after the episode.
 [functions.constraint_validate]
 type = "chat"
-tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
+tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
 parallel_tool_calls = true
 
 # Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)
@@ -395,7 +399,7 @@ extra_body = [
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
+tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 

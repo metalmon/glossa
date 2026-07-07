@@ -53,6 +53,7 @@ const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "sed", "del"];
 const EDITOR_TOOLS: &[&str] = &[
     "index",
     "reindex",
+    "graph_build",
     "graph_upsert",
     "graph_delete",
     "graph_update",
@@ -381,6 +382,20 @@ struct ConstraintSolveArgs {
     #[serde(default)]
     #[schemars(description = "field assignments for validation mode (JSON object of field→value)")]
     assignment: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct GraphBuildArgs {
+    #[schemars(
+        description = "Document owner source_path — compiles every *.csp limit table under .glossa/notes/<doc>/ into the constraint graph (same as kb graph build)"
+    )]
+    doc: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional directory of .csp files; default is the document's notebook mirror"
+    )]
+    tables_dir: Option<String>,
 }
 
 // No-arg tools take `Parameters<Empty>`. A derived empty-struct schema is a bare
@@ -781,6 +796,36 @@ impl GlossaServer {
             )]));
         }
 
+        #[cfg(not(feature = "constraint"))]
+        {
+            Err(McpError::internal_error(
+                String::from(
+                    "constraint feature is not enabled. Build glossa with --features constraint",
+                ),
+                None,
+            ))
+        }
+    }
+
+    #[cfg_attr(not(feature = "constraint"), allow(dead_code))]
+    #[cfg_attr(not(feature = "constraint"), allow(unused_variables))]
+    #[tool(
+        description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with cat/sed/note, then call again."
+    )]
+    async fn graph_build(
+        &self,
+        Parameters(args): Parameters<GraphBuildArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "constraint")]
+        {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let g = GraphStore::open(&self.root).map_err(internal)?;
+            let ont = Ontology::load_or_default(&self.root);
+            let tables_dir = args.tables_dir.as_deref().map(std::path::Path::new);
+            let msg = crate::tools::graph_build(&self.root, &idx, &g, &ont, &args.doc, tables_dir);
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+        }
         #[cfg(not(feature = "constraint"))]
         {
             Err(McpError::internal_error(
@@ -1423,6 +1468,11 @@ mod tests {
         assert!(
             editor.contains(&"graph_stats".to_string()),
             "editor exposes graph stats"
+        );
+        #[cfg(feature = "constraint")]
+        assert!(
+            editor.contains(&"graph_build".to_string()),
+            "editor exposes graph_build with constraint feature"
         );
         assert!(!editor.contains(&"purge".to_string()));
         assert!(

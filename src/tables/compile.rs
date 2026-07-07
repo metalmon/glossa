@@ -31,7 +31,7 @@ pub fn tables_to_graph(
 
     let cfg = ont.tables();
     let delimiter = cfg.delimiter.chars().next().unwrap_or(crate::tables::csp::CSP_DELIMITER);
-    let rel = load_csp_dir(tables_dir, delimiter)?;
+    let rel = load_csp_dir(tables_dir, delimiter, Some(doc))?;
     let param_cols = parameter_columns(&rel, ont);
     if param_cols.is_empty() {
         anyhow::bail!("no parameter columns found in {}", tables_dir.display());
@@ -103,6 +103,17 @@ pub fn tables_to_graph(
             &mut edges,
         )?;
         lines.push(format!("Field «{field_label}» → {shape}"));
+    }
+
+    let layer_types = wiring.compile_layer_node_types(ont);
+    let replaced = g
+        .delete_agent_table_compile_layer(doc, &layer_types)
+        .map_err(|e| anyhow::anyhow!("replace prior table-compile layer: {e}"))?;
+    if replaced.nodes_removed > 0 || replaced.edges_removed > 0 {
+        lines.push(format!(
+            "replaced: {} nodes, {} edges removed",
+            replaced.nodes_removed, replaced.edges_removed
+        ));
     }
 
     let now = std::time::SystemTime::now()
@@ -396,5 +407,57 @@ mod tests {
             "expected Conditional for D: {:?}",
             d.constraints
         );
+    }
+
+    #[test]
+    fn recompile_replaces_stale_conditional_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "test_doc.pdf";
+        let tables =
+            crate::notebook::notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&tables).unwrap();
+        let write_csp = |body: &str| {
+            std::fs::write(tables.join("d.csp"), body).unwrap();
+        };
+        write_csp(
+            "Обозначение типа\tНаружный диаметр\n41\t50\n41\t63\n42\t80\n",
+        );
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: doc.into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "stub".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = eval_ontology();
+        tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
+        let before = g.all_nodes().unwrap().len();
+
+        write_csp("Обозначение типа\tНаружный диаметр\n41\t50\n");
+        let report = tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|l| l.contains("replaced:")),
+            "expected replace line: {:?}",
+            report.lines
+        );
+        let problem = crate::constraint_adapter::load_problem(&g, &ont, Some(doc)).unwrap();
+        let d = problem
+            .fields
+            .iter()
+            .find(|f| f.name == "Наружный диаметр")
+            .unwrap();
+        assert_eq!(
+            d.constraints.len(),
+            1,
+            "stale conditional branch should be removed: {:?}",
+            d.constraints
+        );
+        let after = g.all_nodes().unwrap().len();
+        assert!(after <= before, "recompile should not accumulate orphan nodes");
     }
 }

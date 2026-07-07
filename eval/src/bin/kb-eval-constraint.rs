@@ -45,7 +45,7 @@ struct Cli {
     gateway: String,
     #[arg(long, default_value = "eval/ontology-constraint.toml")]
     ontology: PathBuf,
-    #[arg(long, default_value = "kb-gost")]
+    #[arg(long, default_value = "kb-test")]
     kb: PathBuf,
     /// Directory with reference validation tables (xlsx-converted JSON).
     #[arg(long, default_value = "kb-val-gost")]
@@ -516,6 +516,25 @@ fn make_exec(
                 vec![],
             ),
             "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
+            "graph_build" => {
+                let doc = args
+                    .get("doc")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&src_doc);
+                let tables_dir = args.get("tables_dir").and_then(|v| v.as_str());
+                (
+                    glossa::tools::graph_build(
+                        &agent_g_dir,
+                        &idx_kb,
+                        &g,
+                        &ont,
+                        doc,
+                        tables_dir.map(std::path::Path::new),
+                    ),
+                    vec![],
+                    vec![],
+                )
+            }
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
             "graph_stats" => {
@@ -605,7 +624,7 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
 const SOP_EVAL_MAX_STEP_VISITS: u32 = 20;
 /// Abort when the agent burns this many LLM turns on one SOP step without calling
 /// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
-const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 50;
+const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 75;
 
 /// TensorZero may assign a different episode id on the first `/inference` response than
 /// the client-generated UUID we send; `run_episode` tracks the gateway's id.
@@ -1385,6 +1404,25 @@ fn main() -> Result<()> {
                     vec![],
                 ),
                 "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
+                "graph_build" => {
+                    let doc = args
+                        .get("doc")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&src_doc_exec);
+                    let tables_dir = args.get("tables_dir").and_then(|v| v.as_str());
+                    (
+                        glossa::tools::graph_build(
+                            &agent_g_dir_clone,
+                            &idx_kb,
+                            &g,
+                            &ont,
+                            doc,
+                            tables_dir.map(std::path::Path::new),
+                        ),
+                        vec![],
+                        vec![],
+                    )
+                }
                 "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
                 "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
                 "graph_stats" => {

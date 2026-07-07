@@ -15,9 +15,13 @@ mod compile;
 #[cfg(feature = "constraint")]
 mod coverage;
 #[cfg(feature = "constraint")]
+mod report;
+#[cfg(feature = "constraint")]
 mod wiring;
 
 #[cfg(feature = "constraint")]
 pub use compile::tables_to_graph;
 #[cfg(feature = "constraint")]
 pub use coverage::{count_csp_files, csp_column_values};
+#[cfg(feature = "constraint")]
+pub use report::format_graph_build_output;

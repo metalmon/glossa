@@ -135,6 +135,23 @@ If emitted graph violates strict ontology validation, the whole compile fails wi
 
 ---
 
+## Multi-file `.csp` merge
+
+`graph build` / `graph_build` reads **every** `*.csp` in the document notes dir. Two merge modes (same semantics as eval table coverage in `csp_column_values`):
+
+| Mode | When | Result |
+|------|------|--------|
+| **Row shard** | All files share the same header row (normalized) | Data rows are **appended** — one relation table split across files (e.g. type 41 + type 42 size tables with columns `D`, `T`, `H`). |
+| **Column union** | Headers differ | Schemas are **widened**; each file's rows map **sparsely** into the union columns. Row counts **need not match** across files. |
+
+**Independent parameters** (D, grit, bond — flat enums): one narrow `.csp` per parameter is fine. The compiler collects allowed values **per column**; empty cells in other columns are ignored. A 31-row `D.csp` and a 25-row `F.csp` do not need aligned rows.
+
+**Dependent parameters** (domain varies with a trigger): keep **multiple columns on the same rows** in one `.csp` (or shard files with **identical** headers). Conditional detection needs co-occurring values in one row.
+
+Unit columns and metadata (e.g. `мм`) are not parameters unless listed in `[tables.parameter_columns]`; prefer omitting them from headers or add to `[tables.skip_columns]`.
+
+---
+
 ## CLI
 
 ```bash
@@ -149,6 +166,8 @@ See [agent-workspace-contract.md](agent-workspace-contract.md) for notebook tool
 
 Post-step in the constraint eval harness runs the same function after a phase-A episode.
 
+MCP / eval agent tool: **`graph_build(doc)`** — same compile, compiler-style OK/FAILED output; use on SOP step 3 to fix `.csp` before `done`.
+
 ---
 
 ## Implementation map (code)
@@ -157,6 +176,7 @@ Post-step in the constraint eval harness runs the same function after a phase-A 
 |-----------|------|
 | `src/tables/capabilities.rs` | Capability registry, ontology scan, required relations per pattern |
 | `src/tables/wiring.rs` | Resolve entity/edge types from `Ontology::endpoint_types` |
+| `src/tables/csp.rs` | Parse `.csp`, multi-file merge (row shard + column union) |
 | `src/tables/compile.rs` | FD algorithm, emit via wiring |
 | `src/graph/ontology.rs` | `[tables]`, `compile_hints`, `on_unsupported` |
 | This doc | User-facing contract; update when capabilities ship |

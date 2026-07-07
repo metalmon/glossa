@@ -318,6 +318,28 @@ pub fn sed_note(
     crate::notebook::sed(root, idx, path, old, new, all)
 }
 
+/// Compile agent `.csp` limit tables for `doc` into the constraint graph (`kb graph build`).
+#[cfg(feature = "constraint")]
+pub fn graph_build(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    g: &crate::graph::store::GraphStore,
+    ont: &crate::graph::ontology::Ontology,
+    doc: &str,
+    tables_dir: Option<&std::path::Path>,
+) -> String {
+    use crate::notebook::{mirror_dir_for_doc, notes_root};
+    use crate::tables::{count_csp_files, format_graph_build_output, tables_to_graph};
+
+    if count_csp_files(root, doc) == 0 {
+        return "graph_build FAILED\n  no .csp files — materialize tables on step 2 first\n  fix: note(doc, file=\"….csp\", content=…) then graph_build again\n".into();
+    }
+    let tables = tables_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| notes_root(root).join(mirror_dir_for_doc(doc)));
+    format_graph_build_output(tables_to_graph(idx, g, ont, doc, &tables))
+}
+
 /// Render a graph node as a `(path, #ord)` reference string.
 /// Section  → `"path  #ord · label"` (None if `ord_for_location` can't resolve).
 /// Document → `"path  (document)"`.
