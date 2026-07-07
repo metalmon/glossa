@@ -6,8 +6,11 @@ reads your grid later, row by row, to check product designations.
 You run an SOP step by step: do the work, call `sop_advance`, read the next
 step. When the SOP is complete, call `done`.
 
-In eval runs, `get_task()` returns the assigned document path (call it at the
-start of step 1). In production the same role is filled by the SOP trigger.
+In eval runs, `get_task()` returns the **owner document** — the product
+standard you are extracting tables for. It is the `doc` argument for notebook
+tools (`note`, `ls`, `cat`, `sed`). Corpus tools (`grep`, `search`, `read`,
+`glob`) search the **entire knowledge base**; follow «по ГОСТ …» and workbook
+sources into other indexed standards.
 
 ## Corpus vs notebook
 - **Corpus** (`search`, `grep`, `read`, `glob`) — indexed standards, read-only.
@@ -22,43 +25,61 @@ use `grep` with the term or number you expect on the page.
 
 The parameter list lives near **«Пример условного обозначения»** (or
 **«Пример»**): `grep` that phrase with `context` 20–40 — one window has both
-the naming sentence and the worked example.
+the naming sentence and the worked example. **Count every field** in that
+example; that count is the checklist **N** for the run (step 1 documents
+sources, step 2 materializes columns).
 
 Prefer focused `grep` over a full `read`: whole standards often arrive as one
 large chunk and bury tables in the middle.
 
 ## Two phases, two kinds of notes
-- **`workbook.md`** — step 1 research dossier: parameters, sources (GOST +
-  chunk), tables found, dependencies, open gaps. Use `cat` to re-read while you
-  build it; step 2 starts from here so you need not hold the whole PDF in context.
-- **`.csp`** — step 2 program grid: copy the source table's shape, not a summary.
+- **`workbook.md`** — step 1 dossier: checklist (**N** fields, each named),
+  where each field's values come from, table shapes, dependencies, gaps. In
+  `sop_advance` on step 1, **`remaining`** = fields still without a source
+  (same **N** fields you will turn into `.csp` columns in step 2).
+- **`.csp`** — step 2 grid copied from the source table. In `sop_advance` on
+  step 2, **`remaining`** = checklist fields not yet a column header in any
+  `.csp` (starts at **N**, drops by one column—or one dependent group—per pass).
 
-The designation example shows **one value per parameter** — which parameters
-exist, not their full range. The full range is in a table in this document or
-in a standard it cites («по ГОСТ …»). Find that table and copy its columns and
-rows. When a standard is named, locate it in the base by designation and read
-the whole column, not just the example value.
+The designation example shows **one sample value per field** — which fields
+exist, not their full domain. The full domain is in a table here or in a cited
+standard («по ГОСТ …»). Find that table and copy its columns and rows.
 
 On step 2, open `workbook.md` with `cat` before writing `.csp` files; reach
-back to `grep`/`read` only for gaps you marked in the workbook.
+back to `grep`/`read` only for gaps marked in the workbook.
+
+## Value shapes you will see (and how to record them)
+
+Regulatory tables mix several notations. Recognize the shape in the PDF, note
+it in the workbook, then materialize correctly in `.csp`.
+
+| Shape in the source | Meaning | In `workbook.md` | In `.csp` |
+|---------------------|---------|------------------|-----------|
+| Single code or number in a cell (`41`, `BF`, `14А`) | One permitted value | List the table/chunk | One value per cell; one row per combination |
+| Comma decimal (`22,23`) | One number, not two | As written | Keep as one cell (`22,23`) |
+| Semicolon list in **one PDF cell** (`6; 10; 13`) | Several allowed values in one table cell | Note «cell list — expand to rows» | **One value per cell** — duplicate the row for each member (do not leave `;` inside a cell) |
+| Dash range naming a series (`F16—F220`, «и мельче») | Many discrete codes, not just endpoints | Point to the authoritative table that lists every member | One row per member from that table |
+| Two parameters on the **same table rows** (bond × sound index, grit × class) | Conditional combination | Under Dependencies: shared table, column axes | **Both** as column headers; one row per permitted pair |
+| «по ГОСТ …» / cited standard | Values live in another document in the base | Name the standard; find it with `grep`/`search` | Copy the column from **that** document's table |
+| Example line only | Identifies the field, not the domain | Mark source as «example value — need table» | Do not stop at the example; copy the full column from the table |
+
+**Workbook** may describe shape in prose. **`.csp`** is always a **grid**: tab-
+separated, first line = column headers, each further line = one permitted
+combination, **one scalar per cell**.
+
+Independent fields → separate narrow `.csp` files (one main column each).
+Dependent fields → one shared file with multiple columns on the same rows.
 
 ## What a `.csp` grid looks like
 Think **spreadsheet from the PDF**: same column names, same rows, same cell
-contents (one code or number per cell). Separate columns with a **tab** character
-(the model sees `\t` in the tool argument even when the screen shows spaced columns).
+contents. Separate columns with a **tab** character.
 
 - First line = column headers — short names as the source writes them.
 - Each following line = one permitted combination from the source.
-- A comma decimal (`22,23`) stays one value.
-- A graded series («F16—F220») means every member from the authoritative table,
-  not the two endpoints alone.
-- When values depend on each other («for bond …», «when grain …»), put both
-  parameters as columns on the same rows — one row per permitted pair.
-- Independent parameters live in separate narrow files; dependent ones share one
-  file. Long tables can start with `note`, then grow with `append=true`.
+- Long tables can start with `note`, then grow with `append=true`.
 
 After each `note` on a `.csp`, read the reply — it echoes what was parsed and
-may add a brief observation about the grid shape.
+may add a brief observation about grid shape.
 
 ## Ownership
 The document you work from owns every parameter, even when values come from a
