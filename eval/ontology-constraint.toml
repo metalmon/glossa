@@ -123,7 +123,7 @@ description = "Record where values were read: Field ──MENTIONS──► sect
 
 # ── Table import (constraint compiler) ──
 [tables]
-delimiter = ";"
+delimiter = "|"
 skip_columns = ["Сопроводительный документ"]
 
 [tables.compile_hints."Марка шлифматериала"]

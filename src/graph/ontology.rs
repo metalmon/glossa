@@ -152,7 +152,7 @@ pub struct TablesConfig {
 impl Default for TablesConfig {
     fn default() -> Self {
         Self {
-            delimiter: ";".into(),
+            delimiter: "|".into(),
             skip_columns: vec![],
             parameter_columns: vec![],
             compile_hints: BTreeMap::new(),

@@ -1356,7 +1356,7 @@ fn main() -> Result<()> {
              The knowledge base holds: {kb_docs_list}. Values may live in the main GOST or a referenced standard.\n\n\
              === PHASE A: limit tables ===\n\
              1. note(doc, file=\"parameters.md\", content=…) — your working notes: the parameter list and anything else you need (free format).\n\
-             2. note(doc, file=\"….csp\", content=…) — semicolon CSV; column headers = parameter names.\n\
+             2. note(doc, file=\"….csp\", content=…) — pipe-separated rows (`|` between columns); column headers = parameter names.\n\
              Use grep/read to find tables; use note(doc, file, content) for parameters.md and .csp tables.\n\
              Then ls/cat/sed/del with paths from ls.\n\n\
              === DONE ===\n\
@@ -1893,7 +1893,7 @@ mod tests {
         // set reproduces the reference domain → covered.
         std::fs::write(
             mirror.join("t.csp"),
-            "Диаметр круга;Марка\n125;14A\n150;25A\n",
+            "Диаметр круга|Марка\n125|14A\n150|25A\n",
         )
         .unwrap();
         let cols = vec![

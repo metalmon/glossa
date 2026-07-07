@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::notebook::{mirror_dir_for_doc, notes_root};
-use crate::tables::csv::parse_semicolon_csv;
+use crate::tables::csp::parse_csp;
 
 fn csp_files(dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut files: Vec<_> = std::fs::read_dir(dir)?
@@ -41,7 +41,7 @@ pub fn csp_column_values(
     }
     for path in csp_files(&tables_dir)? {
         let text = std::fs::read_to_string(&path)?;
-        let Ok(rel) = parse_semicolon_csv(&text) else {
+        let Ok(rel) = parse_csp(&text) else {
             continue;
         };
         for (i, header) in rel.headers.iter().enumerate() {
@@ -71,7 +71,7 @@ mod tests {
         let doc = "kb-gost/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("a.csp"), "Width;Note\n10;ok\n20;\n").unwrap();
+        std::fs::write(mirror.join("a.csp"), "Width|Note\n10|ok\n20|\n").unwrap();
         std::fs::write(mirror.join("b.csp"), "Height\n5\n7\n").unwrap();
         std::fs::write(mirror.join("c.csp"), "Width\n30\n").unwrap();
         let cols = csp_column_values(dir.path(), doc).unwrap();
@@ -93,7 +93,7 @@ mod tests {
         let doc = "kb-gost/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("bad.csp"), "a;b\n1;2;3;4\n").unwrap();
+        std::fs::write(mirror.join("bad.csp"), "a|b\n1|2|3|4\n").unwrap();
         std::fs::write(mirror.join("good.csp"), "Width\n10\n").unwrap();
         let cols = csp_column_values(dir.path(), doc).unwrap();
         assert!(cols.contains_key("Width"));

@@ -29,8 +29,8 @@ Capabilities not listed here are **out of scope** for the table compiler (e.g. `
 If the agent materializes:
 
 ```csv
-Parameter;Expression
-S;S = d * k
+Parameter|Expression
+S|S = d * k
 ```
 
 and the ontology declares `patterns.formula_cross_field`, `relations.CONSTRAINED_BY`, `relations.HAS_EXPRESSION`, and:

@@ -18,7 +18,7 @@
       "type": "string"
     },
     "file": {
-      "description": "Note filename with extension. `.csp` = a limit table (`;`-separated CSV, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note",
+      "description": "Note filename with extension. `.csp` = a limit table (`|`-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note",
       "type": "string"
     }
   },

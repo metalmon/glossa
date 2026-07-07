@@ -11,7 +11,7 @@ use crate::tables::capabilities::{
     CapabilityId, CapabilityScan, CapabilityStatus, PATTERN_CONDITIONAL_ENUM,
     PATTERN_INDEPENDENT_ENUM,
 };
-use crate::tables::csv::{column_index, load_relation_dir, Relation};
+use crate::tables::csp::{column_index, load_csp_dir, CspTable};
 use crate::tables::wiring::TablesCompileWiring;
 
 pub struct CompileReport {
@@ -30,8 +30,8 @@ pub fn tables_to_graph(
     let scan = CapabilityScan::scan(ont, &wiring);
 
     let cfg = ont.tables();
-    let delimiter = cfg.delimiter.chars().next().unwrap_or(';');
-    let rel = load_relation_dir(tables_dir, delimiter)?;
+    let delimiter = cfg.delimiter.chars().next().unwrap_or(crate::tables::csp::CSP_DELIMITER);
+    let rel = load_csp_dir(tables_dir, delimiter)?;
     let param_cols = parameter_columns(&rel, ont);
     if param_cols.is_empty() {
         anyhow::bail!("no parameter columns found in {}", tables_dir.display());
@@ -136,7 +136,7 @@ fn require_capability(
     }
 }
 
-fn parameter_columns(rel: &Relation, ont: &Ontology) -> Vec<String> {
+fn parameter_columns(rel: &CspTable, ont: &Ontology) -> Vec<String> {
     let cfg = ont.tables();
     let skip: BTreeSet<String> = cfg
         .skip_columns
@@ -160,7 +160,7 @@ fn parameter_columns(rel: &Relation, ont: &Ontology) -> Vec<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn compile_field(
-    rel: &Relation,
+    rel: &CspTable,
     y_idx: usize,
     triggers: &[String],
     field_label: &str,
@@ -270,7 +270,7 @@ fn compile_field(
 }
 
 /// Pick the trigger column with the fewest groups that still splits Y (>1 group).
-fn best_single_trigger(rel: &Relation, y_idx: usize, triggers: &[String]) -> Option<String> {
+fn best_single_trigger(rel: &CspTable, y_idx: usize, triggers: &[String]) -> Option<String> {
     let mut best: Option<(String, usize)> = None;
     for t in triggers {
         let t_idx = column_index(&rel.headers, t)?;
@@ -287,7 +287,7 @@ fn best_single_trigger(rel: &Relation, y_idx: usize, triggers: &[String]) -> Opt
 }
 
 fn group_by_trigger(
-    rel: &Relation,
+    rel: &CspTable,
     y_idx: usize,
     t_idx: usize,
 ) -> BTreeMap<String, BTreeSet<String>> {
@@ -341,7 +341,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Связка;Сопроводительный документ\nB;GOST\nBF;GOST\n",
+            "Связка|Сопроводительный документ\nB|GOST\nBF|GOST\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();
@@ -369,7 +369,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Обозначение типа;Наружный диаметр;Сопроводительный документ\n41;50;G\n41;63;G\n42;80;G\n",
+            "Обозначение типа|Наружный диаметр|Сопроводительный документ\n41|50|G\n41|63|G\n42|80|G\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();

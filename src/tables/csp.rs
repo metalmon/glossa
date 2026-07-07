@@ -4,9 +4,12 @@ use std::path::Path;
 
 use crate::graph::store::normalize_label;
 
-/// Parsed table: header row + data rows (same width as header).
+/// Column delimiter for agent `.csp` limit tables (pipe keeps `;` free inside cell values).
+pub const CSP_DELIMITER: char = '|';
+
+/// Parsed `.csp` table: header row + data rows (same width as header).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Relation {
+pub struct CspTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
 }
@@ -16,8 +19,8 @@ pub fn normalize_cell(s: &str) -> String {
     s.trim().to_string()
 }
 
-/// Parse one line of semicolon-separated CSV (RFC-style quoted fields).
-pub fn parse_semicolon_row(line: &str) -> Vec<String> {
+/// Parse one line of delimiter-separated CSP (RFC-style quoted fields).
+pub fn parse_csp_row(line: &str, delimiter: char) -> Vec<String> {
     let mut out = Vec::new();
     let mut field = String::new();
     let mut in_quotes = false;
@@ -33,7 +36,7 @@ pub fn parse_semicolon_row(line: &str) -> Vec<String> {
                     in_quotes = false;
                 }
             }
-            ';' if !in_quotes => {
+            d if d == delimiter && !in_quotes => {
                 out.push(normalize_cell(&field));
                 field.clear();
             }
@@ -44,21 +47,25 @@ pub fn parse_semicolon_row(line: &str) -> Vec<String> {
     out
 }
 
-/// Parse full CSV text (header + rows). Skips empty lines.
-pub fn parse_semicolon_csv(text: &str) -> anyhow::Result<Relation> {
+/// Parse full `.csp` text (header + rows). Skips empty lines.
+pub fn parse_csp(text: &str) -> anyhow::Result<CspTable> {
+    parse_csp_with_delimiter(text, CSP_DELIMITER)
+}
+
+pub fn parse_csp_with_delimiter(text: &str, delimiter: char) -> anyhow::Result<CspTable> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty()).peekable();
     let header = match lines.next() {
-        Some(h) => parse_semicolon_row(h),
-        None => anyhow::bail!("empty CSV"),
+        Some(h) => parse_csp_row(h, delimiter),
+        None => anyhow::bail!("empty CSP table"),
     };
     if header.is_empty() || header.iter().all(|c| c.is_empty()) {
-        anyhow::bail!("CSV header is empty");
+        anyhow::bail!("CSP header is empty");
     }
     let width = header.len();
     let mut rows = Vec::new();
     for (i, line) in lines.enumerate() {
-        let mut row = parse_semicolon_row(line);
-        // A trailing `;` (or several) produces empty cells past the header width — an easy
+        let mut row = parse_csp_row(line, delimiter);
+        // A trailing delimiter (or several) produces empty cells past the header width — an easy
         // slip that carries no data. Forgive it instead of rejecting the whole table.
         while row.len() > width && row.last().is_some_and(|c| c.is_empty()) {
             row.pop();
@@ -67,7 +74,7 @@ pub fn parse_semicolon_csv(text: &str) -> anyhow::Result<Relation> {
             row.resize(width, String::new());
         } else if row.len() > width {
             anyhow::bail!(
-                "row {} has {} cells for {} headers (a valid row has exactly {} ';'):\n{}",
+                "row {} has {} cells for {} headers (a valid row has exactly {} '{delimiter}'):\n{}",
                 i + 2,
                 row.len(),
                 width,
@@ -77,14 +84,14 @@ pub fn parse_semicolon_csv(text: &str) -> anyhow::Result<Relation> {
         }
         rows.push(row);
     }
-    Ok(Relation {
+    Ok(CspTable {
         headers: header,
         rows,
     })
 }
 
 /// Pair each cell of an over-wide row with its header (`header=cell | … | EXTRA=cell`), so
-/// the writer sees WHERE the row slipped instead of having to count `;` by hand.
+/// the writer sees WHERE the row slipped instead of having to count delimiters by hand.
 fn misalignment_layout(headers: &[String], row: &[String]) -> String {
     let show = |c: &str| {
         if c.is_empty() {
@@ -104,10 +111,7 @@ fn misalignment_layout(headers: &[String], row: &[String]) -> String {
 }
 
 /// Load and union all `*.csp` files in `dir` (identical headers required per file; rows merged).
-pub fn load_relation_dir(dir: &Path, delimiter: char) -> anyhow::Result<Relation> {
-    if delimiter != ';' {
-        anyhow::bail!("only semicolon delimiter is supported today (got {delimiter})");
-    }
+pub fn load_csp_dir(dir: &Path, delimiter: char) -> anyhow::Result<CspTable> {
     let mut files: Vec<_> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -117,10 +121,10 @@ pub fn load_relation_dir(dir: &Path, delimiter: char) -> anyhow::Result<Relation
     if files.is_empty() {
         anyhow::bail!("no .csp files in {}", dir.display());
     }
-    let mut merged: Option<Relation> = None;
+    let mut merged: Option<CspTable> = None;
     for path in files {
         let text = fs::read_to_string(&path)?;
-        let rel = parse_semicolon_csv(&text)?;
+        let rel = parse_csp_with_delimiter(&text, delimiter)?;
         merged = Some(match merged {
             None => rel,
             Some(mut m) => {
@@ -146,7 +150,7 @@ fn normalize_headers(h: &[String]) -> Vec<String> {
     h.iter().map(|s| normalize_label(s)).collect()
 }
 
-fn dedupe_rows(rel: &mut Relation) {
+fn dedupe_rows(rel: &mut CspTable) {
     let mut seen = BTreeSet::new();
     rel.rows.retain(|row| seen.insert(row.clone()));
 }
@@ -161,15 +165,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_semicolon_and_quoted_comma() {
-        let row = parse_semicolon_row(r#"a;"22,23";c"#);
+    fn parses_pipe_and_quoted_comma() {
+        let row = parse_csp_row(r#"a|"22,23"|c"#, CSP_DELIMITER);
         assert_eq!(row, vec!["a", "22,23", "c"]);
     }
 
     #[test]
-    fn parse_full_csv() {
-        let csv = "Тип;D\n41;50\n42;63\n";
-        let r = parse_semicolon_csv(csv).unwrap();
+    fn parse_full_csp() {
+        let text = "Тип|D\n41|50\n42|63\n";
+        let r = parse_csp(text).unwrap();
         assert_eq!(r.headers, vec!["Тип", "D"]);
         assert_eq!(r.rows.len(), 2);
         assert_eq!(r.rows[0][1], "50");
@@ -177,11 +181,9 @@ mod tests {
 
     #[test]
     fn trailing_empty_cells_are_forgiven() {
-        // "1;2;;" → 4 cells, but the extras are empty → trimmed back to header width
-        let r = parse_semicolon_csv("a;b\n1;2;;\n").unwrap();
+        let r = parse_csp("a|b\n1|2||\n").unwrap();
         assert_eq!(r.rows, vec![vec!["1".to_string(), "2".to_string()]]);
-        // an empty cell WITHIN the width is kept as a normal empty value
-        let r = parse_semicolon_csv("a;b;c\n1;;3\n").unwrap();
+        let r = parse_csp("a|b|c\n1||3\n").unwrap();
         assert_eq!(
             r.rows,
             vec![vec!["1".to_string(), String::new(), "3".to_string()]]
@@ -190,14 +192,20 @@ mod tests {
 
     #[test]
     fn overwide_row_error_shows_header_cell_layout() {
-        let err = parse_semicolon_csv("Тип;D;Скорость\n41;;50;80\n")
+        let err = parse_csp("Тип|D|Скорость\n41||50|80\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("row 2 has 4 cells for 3 headers"), "{err}");
-        assert!(err.contains("exactly 2 ';'"), "{err}");
+        assert!(err.contains("exactly 2 '|'"), "{err}");
         assert!(err.contains("Тип=41"), "{err}");
         assert!(err.contains("D=(empty)"), "{err}");
         assert!(err.contains("Скорость=50"), "{err}");
         assert!(err.contains("EXTRA=80"), "{err}");
+    }
+
+    #[test]
+    fn semicolon_in_cell_value_is_preserved() {
+        let r = parse_csp("D\n115; 125; 150\n").unwrap();
+        assert_eq!(r.rows[0][0], "115; 125; 150");
     }
 }
