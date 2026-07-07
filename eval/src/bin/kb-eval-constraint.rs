@@ -1356,7 +1356,7 @@ fn main() -> Result<()> {
              The knowledge base holds: {kb_docs_list}. Values may live in the main GOST or a referenced standard.\n\n\
              === PHASE A: limit tables ===\n\
              1. note(doc, file=\"parameters.md\", content=…) — your working notes: the parameter list and anything else you need (free format).\n\
-             2. note(doc, file=\"….csp\", content=…) — pipe-separated rows (`|` between columns); column headers = parameter names.\n\
+             2. note(doc, file=\"….csp\", content=…) — tab-separated rows (tab between columns); column headers = parameter names.\n\
              Use grep/read to find tables; use note(doc, file, content) for parameters.md and .csp tables.\n\
              Then ls/cat/sed/del with paths from ls.\n\n\
              === DONE ===\n\

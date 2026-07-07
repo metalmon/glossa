@@ -12,10 +12,13 @@ pub use paths::{
 use std::path::Path;
 
 use crate::index::store::DocIndex;
-use crate::tables::csp::{dedupe_csp_rows, format_csp, merge_append_rows, parse_csp, parse_csp_row, CSP_DELIMITER};
+use crate::tables::csp::{
+    dedupe_csp_rows, format_csp, join_csp_fields, merge_append_rows, parse_csp, parse_csp_row,
+    CspTable, CSP_DELIMITER,
+};
 
 fn format_csp_columns(headers: &[String]) -> String {
-    headers.join(" | ")
+    join_csp_fields(headers)
 }
 
 fn csp_dup_ignored_suffix(dup_ignored: usize) -> String {
@@ -40,6 +43,74 @@ fn csp_dup_removed_suffix(dup_removed: usize) -> String {
     }
 }
 
+fn header_looks_like_commentary(h: &str) -> bool {
+    h.chars().count() > 35
+        || h.contains(" - ")
+        || h.contains(" — ")
+        || h.contains("из пун")
+        || h.contains("из табл")
+        || h.contains('(')
+}
+
+fn cell_looks_like_prose(cell: &str) -> bool {
+    let n = cell.chars().count();
+    if n > 45 {
+        return true;
+    }
+    cell.contains('(')
+        || cell.contains('—')
+        || cell.contains(" - ")
+        || cell.contains(" для ")
+        || cell.contains(" из ")
+        || cell.contains(" и мельче")
+        || cell.contains(" и крупнее")
+        || cell.contains('±')
+        || cell.contains("±")
+}
+
+/// Soft observations after a successful `.csp` write (at most two lines).
+pub fn csp_tutor_hints(table: &CspTable) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if table.headers.iter().any(|h| header_looks_like_commentary(h)) {
+        hints.push(
+            "column headers look long — source tables usually name the parameter alone \
+             (e.g. «Наружный диаметр», «Связка»)"
+                .into(),
+        );
+    }
+
+    let mut total = 0usize;
+    let mut prose = 0usize;
+    let mut max_len = 0usize;
+    for row in &table.rows {
+        for cell in row {
+            if cell.is_empty() {
+                continue;
+            }
+            total += 1;
+            max_len = max_len.max(cell.chars().count());
+            if cell_looks_like_prose(cell) {
+                prose += 1;
+            }
+        }
+    }
+
+    if total > 0 {
+        let prose_ratio = prose as f64 / total as f64;
+        if prose_ratio >= 0.25 || (prose >= 2 && max_len > 25) {
+            hints.push(
+                "many cells read like sentences; a copied source grid usually has one code \
+                 or number per cell"
+                    .into(),
+            );
+        }
+    }
+
+    hints.truncate(2);
+    hints
+}
+
 fn normalize_csp_content(content: &str) -> anyhow::Result<(String, usize)> {
     let mut table = parse_csp(content)?;
     for (i, h) in table.headers.iter().enumerate() {
@@ -53,7 +124,7 @@ fn normalize_csp_content(content: &str) -> anyhow::Result<(String, usize)> {
 
 /// Create, fully replace, or (with `append`) extend a note bound to an indexed document.
 ///
-/// A `.csp` file (a limit table: `|`-separated rows, first line = headers) is
+/// A `.csp` file (a limit table: tab-separated rows, first line = headers) is
 /// validated on write and the reply echoes exactly what the compiler will see
 /// — parsed column headers and data-row count — so a malformed table is
 /// rejected at write time instead of failing silently at compile time.
@@ -103,6 +174,9 @@ pub fn note(
                 msg.push_str(&format!(
                     "; replaced previous version (was {prev}) — pass append=true to add instead"
                 ));
+            }
+            for hint in &o.tutor_hints {
+                msg.push_str(&format!("\n  · {hint}"));
             }
             msg
         }
@@ -180,6 +254,8 @@ pub struct WriteOutcome {
     pub lines: usize,
     /// Present for `.csp` files: what the compiler will see (headers + row count).
     pub table: Option<TableEcho>,
+    /// Optional soft observations on table shape (`.csp` only).
+    pub tutor_hints: Vec<String>,
     pub mode: WriteMode,
 }
 
@@ -292,10 +368,13 @@ fn write_note(
         }
     };
 
-    let table = if is_csp {
-        Some(validate_csp(&full)?)
+    let (table, tutor_hints) = if is_csp {
+        let parsed = parse_csp(&full)?;
+        let echo = validate_csp(&full)?;
+        let hints = csp_tutor_hints(&parsed);
+        (Some(echo), hints)
     } else {
-        None
+        (None, Vec::new())
     };
     if let Some(parent) = abs_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -306,6 +385,7 @@ fn write_note(
         rel_path,
         lines,
         table,
+        tutor_hints,
         mode,
     })
 }
@@ -375,6 +455,8 @@ mod tests {
     use crate::model::Chunk;
     use fs4::fs_std::FileExt;
 
+    const TAB: &str = "\t";
+
     fn idx_with_doc(dir: &std::path::Path, doc: &str) -> DocIndex {
         let idx = DocIndex::open_or_create(dir).unwrap();
         idx.write_chunks(&[Chunk {
@@ -427,14 +509,14 @@ mod tests {
             &idx,
             "doc.pdf",
             "t.csp",
-            "h|v\n1|2\n3|4\n",
+            &format!("h{TAB}v\n1{TAB}2\n3{TAB}4\n"),
             false,
         );
         assert!(
             dir.path().join(".glossa/notes/doc.pdf/t.csp").is_file(),
             "{msg}"
         );
-        assert!(msg.contains("columns: [h | v]"), "{msg}");
+        assert!(msg.contains(&format!("columns: [h{TAB}v]")), "{msg}");
         assert!(msg.contains("2 data rows"), "{msg}");
     }
 
@@ -442,7 +524,7 @@ mod tests {
     fn malformed_csp_rejected_before_write() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h||v\n1|2|3\n", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}{TAB}v\n1{TAB}2{TAB}3\n"), false);
         assert!(msg.contains("REJECTED"), "{msg}");
         assert!(msg.contains("empty header cell in column 2"), "{msg}");
         assert!(!dir.path().join(".glossa/notes/doc.pdf/t.csp").exists());
@@ -471,10 +553,17 @@ mod tests {
     fn sed_keeps_csp_valid() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n", false);
-        let msg = sed(dir.path(), &idx, "doc.pdf/t.csp", "h|v", "|", false);
+        note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n1{TAB}2\n"), false);
+        let msg = sed(
+            dir.path(),
+            &idx,
+            "doc.pdf/t.csp",
+            &format!("1{TAB}2"),
+            &format!("1{TAB}2{TAB}3"),
+            false,
+        );
         assert!(msg.contains("REJECTED"), "{msg}");
-        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains("h|v"));
+        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("1{TAB}2")));
     }
 
     #[test]
@@ -544,31 +633,31 @@ mod tests {
     fn csp_append_adds_rows_under_existing_header() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n", false);
+        note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n1{TAB}2\n"), false);
         // without the header line: rows land under the existing header
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "3|4\n5|6\n", true);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("3{TAB}4\n5{TAB}6\n"), true);
         assert!(msg.contains("Appended 2 rows"), "{msg}");
         assert!(msg.contains("now 3 data rows"), "{msg}");
         // with a repeated header line: the duplicate header is dropped
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n7|8\n", true);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n7{TAB}8\n"), true);
         assert!(msg.contains("Appended 1 row"), "{msg}");
         assert!(msg.contains("now 4 data rows"), "{msg}");
         let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
-        assert_eq!(body.matches("h|v").count(), 1, "single header: {body}");
-        assert!(body.contains("7|8"), "{body}");
+        assert_eq!(body.matches(&format!("h{TAB}v")).count(), 1, "single header: {body}");
+        assert!(body.contains(&format!("7{TAB}8")), "{body}");
     }
 
     #[test]
     fn csp_append_ignores_duplicate_rows() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n3|4\n", false);
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "1|2\n3|4\n", true);
+        note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n1{TAB}2\n3{TAB}4\n"), false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("1{TAB}2\n3{TAB}4\n"), true);
         assert!(msg.contains("Appended 0 rows"), "{msg}");
         assert!(msg.contains("now 2 data rows"), "{msg}");
         assert!(msg.contains("2 duplicate rows ignored"), "{msg}");
         let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
-        assert_eq!(body.matches("1|2").count(), 1, "{body}");
+        assert_eq!(body.matches(&format!("1{TAB}2")).count(), 1, "{body}");
     }
 
     #[test]
@@ -580,7 +669,7 @@ mod tests {
             &idx,
             "doc.pdf",
             "t.csp",
-            "h|v\n1|2\n1|2\n3|4\n",
+            &format!("h{TAB}v\n1{TAB}2\n1{TAB}2\n3{TAB}4\n"),
             false,
         );
         assert!(msg.contains("2 data rows"), "{msg}");
@@ -591,12 +680,12 @@ mod tests {
     fn csp_append_rejects_ragged_rows_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n", false);
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "3|4|5\n", true);
+        note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n1{TAB}2\n"), false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("3{TAB}4{TAB}5\n"), true);
         assert!(msg.contains("REJECTED"), "{msg}");
         // the file keeps its pre-append content
-        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains("1|2"));
-        assert!(!cat(dir.path(), &idx, "doc.pdf/t.csp").contains("3|4|5"));
+        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("1{TAB}2")));
+        assert!(!cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("3{TAB}4{TAB}5")));
     }
 
     #[test]
@@ -615,7 +704,7 @@ mod tests {
     fn append_to_missing_file_creates_it() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n1|2\n", true);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n1{TAB}2\n"), true);
         assert!(msg.starts_with("Noted"), "{msg}");
         assert!(msg.contains("1 data row"), "{msg}");
     }
@@ -629,10 +718,10 @@ mod tests {
             &idx,
             "doc.pdf",
             "t.csp",
-            "h|v\n1|2\n3|4\n",
+            &format!("h{TAB}v\n1{TAB}2\n3{TAB}4\n"),
             false,
         );
-        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", "h|v\n9|9\n", false);
+        let msg = note(dir.path(), &idx, "doc.pdf", "t.csp", &format!("h{TAB}v\n9{TAB}9\n"), false);
         assert!(
             msg.contains("replaced previous version (was 2 data rows)"),
             "{msg}"
@@ -643,5 +732,47 @@ mod tests {
             msg.contains("replaced previous version (was 3 lines)"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn csp_tutor_hints_clean_grid_is_silent() {
+        let table = parse_csp(&format!("Связка{TAB}Зернистость\nBF{TAB}F24\nR{TAB}F30\n")).unwrap();
+        assert!(csp_tutor_hints(&table).is_empty());
+    }
+
+    #[test]
+    fn csp_tutor_hints_prose_cells_and_long_header() {
+        let table = parse_csp(
+            "Связка (bond type) - из пункта 4.4\n\
+             B (бакелитовая)\n\
+             BF (с упрочняющими)\n",
+        )
+        .unwrap();
+        let hints = csp_tutor_hints(&table);
+        assert!(
+            hints.iter().any(|h| h.contains("headers look long")),
+            "{hints:?}"
+        );
+        assert!(
+            hints.iter().any(|h| h.contains("sentences")),
+            "{hints:?}"
+        );
+    }
+
+    #[test]
+    fn note_echoes_csp_tutor_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "bond.csp",
+            "Связка (bond type) - из пункта 4.4\n\
+             B (бакелитовая)\n",
+            false,
+        );
+        assert!(msg.contains("  · "), "{msg}");
+        assert!(msg.contains("headers look long"), "{msg}");
     }
 }

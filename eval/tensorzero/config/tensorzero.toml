@@ -321,7 +321,7 @@ description = "Broaden a `glossary` hit — list OTHER solved cases linked to th
 parameters = "tools/neighbors.json"
 
 [tools.note]
-description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (`|`-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
+description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
 parameters = "tools/note.json"
 
 [tools.purge]

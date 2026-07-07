@@ -341,7 +341,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Связка|Сопроводительный документ\nB|GOST\nBF|GOST\n",
+            "Связка\tСопроводительный документ\nB\tGOST\nBF\tGOST\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();
@@ -369,7 +369,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Обозначение типа|Наружный диаметр|Сопроводительный документ\n41|50|G\n41|63|G\n42|80|G\n",
+            "Обозначение типа\tНаружный диаметр\tСопроводительный документ\n41\t50\tG\n41\t63\tG\n42\t80\tG\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();

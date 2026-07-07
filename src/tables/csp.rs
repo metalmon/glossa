@@ -4,8 +4,13 @@ use std::path::Path;
 
 use crate::graph::store::normalize_label;
 
-/// Column delimiter for agent `.csp` limit tables (pipe keeps `;` free inside cell values).
-pub const CSP_DELIMITER: char = '|';
+/// Column delimiter for agent `.csp` limit tables (tab — natural for copied grids; `;` stays free in cells).
+pub const CSP_DELIMITER: char = '\t';
+
+/// Join row cells for serialization / synthetic headers.
+pub fn join_csp_fields(fields: &[String]) -> String {
+    fields.join("\t")
+}
 
 /// Parsed `.csp` table: header row + data rows (same width as header).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +79,12 @@ pub fn parse_csp_with_delimiter(text: &str, delimiter: char) -> anyhow::Result<C
             row.resize(width, String::new());
         } else if row.len() > width {
             anyhow::bail!(
-                "row {} has {} cells for {} headers (a valid row has exactly {} '{delimiter}'):\n{}",
+                "row {} has {} cells for {} headers (a valid row has exactly {} {}):\n{}",
                 i + 2,
                 row.len(),
                 width,
                 width - 1,
+                delimiter_name(delimiter),
                 misalignment_layout(&header, &row)
             );
         }
@@ -108,6 +114,14 @@ fn misalignment_layout(headers: &[String], row: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn delimiter_name(d: char) -> &'static str {
+    if d == '\t' {
+        "tab characters"
+    } else {
+        "column delimiters"
+    }
 }
 
 /// Load and union all `*.csp` files in `dir` (identical headers required per file; rows merged).
@@ -172,7 +186,7 @@ pub fn merge_append_rows(old: &CspTable, new_body: &str) -> anyhow::Result<(CspT
     let new_rows = if new_body.trim().is_empty() {
         Vec::new()
     } else {
-        let synthetic = format!("{}\n{}", old.headers.join("|"), new_body.trim());
+        let synthetic = format!("{}\n{}", join_csp_fields(&old.headers), new_body.trim());
         parse_csp(&synthetic)?.rows
     };
     let mut merged = old.clone();
@@ -200,12 +214,12 @@ pub fn merge_append_rows(old: &CspTable, new_body: &str) -> anyhow::Result<(CspT
     ))
 }
 
-/// Serialize a table back to `.csp` text (`|`-separated).
+/// Serialize a table back to `.csp` text (tab-separated).
 pub fn format_csp(table: &CspTable) -> String {
-    let mut out = table.headers.join("|");
+    let mut out = join_csp_fields(&table.headers);
     out.push('\n');
     for row in &table.rows {
-        out.push_str(&row.join("|"));
+        out.push_str(&join_csp_fields(row));
         out.push('\n');
     }
     out
@@ -221,14 +235,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_pipe_and_quoted_comma() {
-        let row = parse_csp_row(r#"a|"22,23"|c"#, CSP_DELIMITER);
+    fn parses_tab_and_quoted_comma() {
+        let row = parse_csp_row("a\t\"22,23\"\tc", CSP_DELIMITER);
         assert_eq!(row, vec!["a", "22,23", "c"]);
     }
 
     #[test]
     fn parse_full_csp() {
-        let text = "Тип|D\n41|50\n42|63\n";
+        let text = "Тип\tD\n41\t50\n42\t63\n";
         let r = parse_csp(text).unwrap();
         assert_eq!(r.headers, vec!["Тип", "D"]);
         assert_eq!(r.rows.len(), 2);
@@ -237,9 +251,9 @@ mod tests {
 
     #[test]
     fn trailing_empty_cells_are_forgiven() {
-        let r = parse_csp("a|b\n1|2||\n").unwrap();
+        let r = parse_csp("a\tb\n1\t2\t\t\n").unwrap();
         assert_eq!(r.rows, vec![vec!["1".to_string(), "2".to_string()]]);
-        let r = parse_csp("a|b|c\n1||3\n").unwrap();
+        let r = parse_csp("a\tb\tc\n1\t\t3\n").unwrap();
         assert_eq!(
             r.rows,
             vec![vec!["1".to_string(), String::new(), "3".to_string()]]
@@ -248,11 +262,11 @@ mod tests {
 
     #[test]
     fn overwide_row_error_shows_header_cell_layout() {
-        let err = parse_csp("Тип|D|Скорость\n41||50|80\n")
+        let err = parse_csp("Тип\tD\tСкорость\n41\t\t50\t80\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("row 2 has 4 cells for 3 headers"), "{err}");
-        assert!(err.contains("exactly 2 '|'"), "{err}");
+        assert!(err.contains("exactly 2 tab characters"), "{err}");
         assert!(err.contains("Тип=41"), "{err}");
         assert!(err.contains("D=(empty)"), "{err}");
         assert!(err.contains("Скорость=50"), "{err}");
@@ -267,8 +281,8 @@ mod tests {
 
     #[test]
     fn merge_append_skips_duplicate_rows() {
-        let old = parse_csp("h|v\n1|2\n3|4\n").unwrap();
-        let (merged, stats) = merge_append_rows(&old, "1|2\n3|4\n5|6\n").unwrap();
+        let old = parse_csp("h\tv\n1\t2\n3\t4\n").unwrap();
+        let (merged, stats) = merge_append_rows(&old, "1\t2\n3\t4\n5\t6\n").unwrap();
         assert_eq!(stats.added, 1);
         assert_eq!(stats.dup_ignored, 2);
         assert_eq!(merged.rows.len(), 3);

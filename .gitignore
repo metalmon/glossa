@@ -15,6 +15,7 @@ eval-data/
 # Eval working corpus + generated result reports
 /eval-corpus/
 /eval-*.json
+/eval/results/
 
 # GEPA dump/optimize artifacts (search.jsonl/select.jsonl derived from the corpus — never commit)
 /gepa-out/

@@ -405,7 +405,7 @@ struct NoteArgs {
     #[schemars(description = "Indexed document path from grep/read (#n stripped server-side)")]
     doc: String,
     #[schemars(
-        description = "Note filename with extension. `.csp` = a limit table (`|`-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note"
+        description = "Note filename with extension. `.csp` = a limit table (tab-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note"
     )]
     file: String,
     #[schemars(
@@ -935,7 +935,7 @@ impl GlossaServer {
 
     #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
     #[tool(
-        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (`|`-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
+        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
     )]
     async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "notebook")]

@@ -71,7 +71,7 @@ mod tests {
         let doc = "kb-gost/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("a.csp"), "Width|Note\n10|ok\n20|\n").unwrap();
+        std::fs::write(mirror.join("a.csp"), "Width\tNote\n10\tok\n20\t\n").unwrap();
         std::fs::write(mirror.join("b.csp"), "Height\n5\n7\n").unwrap();
         std::fs::write(mirror.join("c.csp"), "Width\n30\n").unwrap();
         let cols = csp_column_values(dir.path(), doc).unwrap();
@@ -93,7 +93,7 @@ mod tests {
         let doc = "kb-gost/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("bad.csp"), "a|b\n1|2|3|4\n").unwrap();
+        std::fs::write(mirror.join("bad.csp"), "a\tb\n1\t2\t3\t4\n").unwrap();
         std::fs::write(mirror.join("good.csp"), "Width\n10\n").unwrap();
         let cols = csp_column_values(dir.path(), doc).unwrap();
         assert!(cols.contains_key("Width"));
