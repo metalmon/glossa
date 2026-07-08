@@ -437,4 +437,38 @@ mod tests {
         assert_eq!(step.on_failure, StepFailure::Retry { max: 2 });
         assert_eq!(step.mode, Some(SopExecutionMode::Auto));
     }
+
+    #[test]
+    fn parse_gost_constraints_five_steps_with_materialize_loop() {
+        let md = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
+        )
+        .expect("read gost-constraints SOP.md");
+        let steps = parse_steps(&md);
+
+        assert_eq!(steps.len(), 5, "expected 5 macro steps");
+        assert!(steps[0].title.contains("Discover"));
+        assert!(steps[1].title.contains("Materialize"));
+        assert!(steps[2].title.contains("Compile"));
+        assert!(steps[3].title.contains("Coverage"));
+        assert!(steps[4].title.contains("Validate"));
+
+        let mat = &steps[1];
+        assert_eq!(mat.routing.when.as_deref(), Some("$.steps.2.remaining > 0"));
+        assert_eq!(mat.routing.next, Some(2));
+        assert!(
+            mat.suggested_tools.contains(&"graph_build".to_string()),
+            "step 2 must include graph_build for incremental compile"
+        );
+        assert!(
+            !mat.suggested_tools.contains(&"grep".to_string()),
+            "step 2 must not list corpus tools"
+        );
+
+        let cov = &steps[3];
+        assert!(cov.suggested_tools.contains(&"graph_stats".to_string()));
+
+        let val = &steps[4];
+        assert!(val.suggested_tools.contains(&"constraint_solve".to_string()));
+    }
 }

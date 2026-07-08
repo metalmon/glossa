@@ -180,4 +180,44 @@ mod tests {
 
         assert_eq!(resolve_next(&ctx), NextStep::Wait(2));
     }
+
+    #[test]
+    fn materialize_loop_exits_to_compile_when_remaining_zero() {
+        use crate::sop::parse::parse_steps;
+        use crate::sop::rundata::RunData;
+        use crate::sop::types::SopStepResult;
+
+        let md = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
+        )
+        .expect("read SOP.md");
+        let mut sop = sop();
+        sop.steps = parse_steps(&md);
+        sop.steps.truncate(3); // only need steps 1-3 for routing test
+
+        let mut run = run();
+        run.total_steps = 3;
+        run.current_step = 2;
+        run.step_results = vec![SopStepResult {
+            step_number: 2,
+            status: SopStepStatus::Completed,
+            output: r#"{"remaining": 0}"#.into(),
+            started_at: String::new(),
+            completed_at: None,
+        }];
+        let run_data = RunData::from_step_results(&run.step_results);
+        let ctx = RouteCtx {
+            sop: &sop,
+            run: &run,
+            run_data: &run_data,
+            last_status: SopStepStatus::Completed,
+            max_step_visits: 256,
+        };
+
+        assert_eq!(
+            resolve_next(&ctx),
+            NextStep::Step(3),
+            "remaining=0 must fall through to step 3 Compile, not Complete"
+        );
+    }
 }

@@ -22,6 +22,7 @@ kb_bin       := if os() == "windows" { "./" + bin + "/kb.exe" } else { "./" + bi
 kb_train_bin := if os() == "windows" { "./" + bin + "/kb-train.exe" } else { "./" + bin + "/kb-train" }
 kb_eval_bin  := if os() == "windows" { "./" + bin + "/kb-eval.exe" } else { "./" + bin + "/kb-eval" }
 kb_dump_episode_bin := if os() == "windows" { "./" + bin + "/kb-dump-episode.exe" } else { "./" + bin + "/kb-dump-episode" }
+kb_eval_constraint_bin := if os() == "windows" { "./" + bin + "/kb-eval-constraint.exe" } else { "./" + bin + "/kb-eval-constraint" }
 
 work    := "kb-test"                              # corpus root: index + reasoning graph live here
 train   := "kb-val/derived/synthetic-train.json"  # solved cases the enricher reverse-traces
@@ -185,26 +186,7 @@ gepa-constraint-apply:
     {{preface}} \
     SRC="{{tzcfg}}/constraint_validate/system.minijinja"; \
     cp "$SRC" "$SRC.bak"; \
-    python3 - <<'PY'
-import re, pathlib
-root = pathlib.Path("eval/tensorzero/config/constraint_validate/system.minijinja")
-out = pathlib.Path("gepa-constraint-out")
-pairs = [
-    ("GEPA:RESEARCH", out / "constraint_research.prompt.txt"),
-    ("GEPA:MATERIALIZE", out / "constraint_materialize.prompt.txt"),
-    ("GEPA:COMPILE_FIX", out / "constraint_compile_fix.prompt.txt"),
-]
-text = root.read_text(encoding="utf-8")
-for tag, prompt_path in pairs:
-    body = prompt_path.read_text(encoding="utf-8").strip()
-    pattern = rf"\{{# {tag}_START #\}}.*?\{{# {tag}_END #\}}"
-    repl = f"{{# {tag}_START #}}\n{body}\n{{# {tag}_END #}}"
-    text, n = re.subn(pattern, repl, text, count=1, flags=re.S)
-    if n != 1:
-        raise SystemExit(f"anchor {tag} not found or ambiguous")
-root.write_text(text, encoding="utf-8")
-print("applied 3 GEPA slices to", root)
-PY
+    python3 eval/scripts/apply_gepa_constraint_slices.py
     @echo "backup: {{tzcfg}}/constraint_validate/system.minijinja.bak — run: just gw-restart"
 
 # ── eval ────────────────────────────────────────────────────────────────────
@@ -254,6 +236,20 @@ constraint-dump episode="" run="" latest="false" out="eval/results/episode-dump.
     [[ "{{latest}}" == "true" ]] && args="$args --latest"; \
     {{kb_dump_episode_bin}} $args --out {{out}}; \
     echo "wrote {{out}}"
+
+# Full 5-step SOP constraint eval (single episode, continuous conversation).
+# Requires: gateway up (just up), kb-test corpus indexed.
+constraint-eval variant="" run="sop5-baseline" doc="gost_r_57978-2017.docx": build-eval
+    {{preface}}cargo build --release -p kb-eval --bin kb-eval-constraint --locked
+    {{preface}}run_tag='{{run}}'; run_tag="${run_tag#run=}"; \
+    variant_arg='{{variant}}'; variant_arg="${variant_arg#variant=}"; \
+    extra=''; [[ -n "$variant_arg" ]] && extra=" --variant $variant_arg"; \
+    {{kb_eval_constraint_bin}} \
+      --kb kb-test \
+      --doc {{doc}} \
+      --sop-dir eval/sops/gost-constraints \
+      --tag run=$run_tag \
+      $extra
 
 build-dump-episode force="":
     {{preface}}b='{{kb_dump_episode_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-dump-episode: already built"; else cargo build {{release}} -p kb-eval --bin kb-dump-episode --locked; fi

@@ -621,10 +621,10 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// Eval harness cap: step 1 may loop while workbook gaps remain; step 2 loops
-/// once per parameter (~10) plus a small margin.
-/// Production zeroclaw keeps `DriverConfig::default().max_step_visits` (256).
-const SOP_EVAL_MAX_STEP_VISITS: u32 = 20;
+/// Step 2 may visit ~10× (one per .csp); steps 3–5 add visits; compile fix-loop retries.
+const SOP_EVAL_MAX_STEP_VISITS: u32 = 32;
+/// Step number for full compile (used by stuck-recovery escape hatch).
+const SOP_COMPILE_STEP: u32 = 3;
 /// Abort when the agent burns this many LLM turns on one SOP step without calling
 /// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
 const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 75;
@@ -749,12 +749,14 @@ fn run_sop_conversation(
                 .unwrap_or_else(|| "?".into());
             eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining");
             if let Some(stuck_at) = step2_advance_stuck(&run.step_results) {
-                eprintln!("  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step 3");
-                run.current_step = 3;
+                eprintln!(
+                    "  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step {SOP_COMPILE_STEP}"
+                );
+                run.current_step = SOP_COMPILE_STEP;
                 let msg = sop_def
                     .steps
                     .iter()
-                    .find(|s| s.number == 3)
+                    .find(|s| s.number == SOP_COMPILE_STEP)
                     .map(|s| sop::prompt::format_sop_advance_reply(&sop_def, &run, s))
                     .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
                 return (msg, vec![], vec![]);
@@ -1817,6 +1819,18 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_step_number_is_three_in_five_step_sop() {
+        use kb_eval::sop::{load_sop, types::SopExecutionMode};
+        let sop = load_sop(&default_eval_sop_dir(), SopExecutionMode::Auto).expect("load sop");
+        let compile = sop
+            .steps
+            .iter()
+            .find(|s| s.title.contains("Compile"))
+            .expect("Compile step");
+        assert_eq!(compile.number, 3);
+    }
 
     #[test]
     fn step2_advance_stuck_detects_flat_remaining() {
