@@ -66,7 +66,9 @@ mod tests {
 
     #[test]
     fn failed_banner_includes_fix_hint_and_field() {
-        let err = anyhow::anyhow!("Field \"Связка\" requires capability formula_cross_field (planned v2)");
+        let err = anyhow::anyhow!(
+            "Field \"Связка\" requires capability formula_cross_field (planned v2)"
+        );
         let out = format_graph_build_error(&err);
         assert!(out.starts_with("graph_build FAILED\n"));
         assert!(out.contains("at field: Связка"));

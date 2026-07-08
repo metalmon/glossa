@@ -151,10 +151,7 @@ pub fn load_csp_dir(
         anyhow::bail!("no .csp files in {}", dir.display());
     }
     let note_path = |path: &Path| -> String {
-        let file = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
+        let file = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
         match note_dir_label {
             Some(doc) => format!("{doc}/{file}"),
             None => path.display().to_string(),
@@ -162,12 +159,10 @@ pub fn load_csp_dir(
     };
     let mut merged: Option<CspTable> = None;
     for path in files {
-        let text = fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("{}: {e}", note_path(&path))
-        })?;
-        let rel = parse_csp_with_delimiter(&text, delimiter).map_err(|e| {
-            anyhow::anyhow!("{}: {e}", note_path(&path))
-        })?;
+        let text =
+            fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", note_path(&path)))?;
+        let rel = parse_csp_with_delimiter(&text, delimiter)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", note_path(&path)))?;
         merged = Some(match merged {
             None => rel,
             Some(m) => merge_csp_tables(m, rel),
@@ -245,7 +240,10 @@ pub struct CspAppendStats {
 }
 
 /// Append parsed data rows from `new_body` onto `old`, skipping duplicates.
-pub fn merge_append_rows(old: &CspTable, new_body: &str) -> anyhow::Result<(CspTable, CspAppendStats)> {
+pub fn merge_append_rows(
+    old: &CspTable,
+    new_body: &str,
+) -> anyhow::Result<(CspTable, CspAppendStats)> {
     let new_rows = if new_body.trim().is_empty() {
         Vec::new()
     } else {
@@ -268,13 +266,7 @@ pub fn merge_append_rows(old: &CspTable, new_body: &str) -> anyhow::Result<(CspT
             added += 1;
         }
     }
-    Ok((
-        merged,
-        CspAppendStats {
-            added,
-            dup_ignored,
-        },
-    ))
+    Ok((merged, CspAppendStats { added, dup_ignored }))
 }
 
 /// Serialize a table back to `.csp` text (tab-separated).

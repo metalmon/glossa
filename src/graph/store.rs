@@ -376,9 +376,7 @@ impl GraphStore {
             edge_params.push(Box::new(t.clone()));
         }
         c.execute(
-            &format!(
-                "DELETE FROM edges WHERE efrom IN ({node_sub}) OR eto IN ({node_sub})"
-            ),
+            &format!("DELETE FROM edges WHERE efrom IN ({node_sub}) OR eto IN ({node_sub})"),
             rusqlite::params_from_iter(edge_params.iter().map(|p| p.as_ref())),
         )
         .context("delete edges touching table-compile nodes")?;

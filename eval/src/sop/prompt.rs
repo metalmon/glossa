@@ -113,11 +113,11 @@ mod tests {
         let sop = minimal_sop();
         let mut run = minimal_run(&sop);
         run.step_results.push(SopStepResult {
-                step_number: 1,
-                status: SopStepStatus::Completed,
-                output: r#"{"remaining": 2}"#.into(),
-                started_at: String::new(),
-                completed_at: None,
+            step_number: 1,
+            status: SopStepStatus::Completed,
+            output: r#"{"remaining": 2}"#.into(),
+            started_at: String::new(),
+            completed_at: None,
         });
         let out = format_step_context(&sop, &run, &sop.steps[0]);
         assert!(out.starts_with("[SOP: test-sop (run "));

@@ -362,7 +362,12 @@ fn register_interrupt_temp_cleanup(path: PathBuf) {
     *slot.lock().expect("interrupt temp lock") = Some(path);
     static HANDLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if HANDLER
-        .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
         .is_ok()
     {
         let _ = ctrlc::set_handler(|| {
@@ -410,7 +415,8 @@ fn export_agent_notes(agent_g_dir: &Path, src_doc: &str, dst_root: &Path) -> Res
     }
     let dst = dst_root.join(glossa::notebook::mirror_dir_for_doc(src_doc));
     if dst.exists() {
-        std::fs::remove_dir_all(&dst).with_context(|| format!("clear export dir {}", dst.display()))?;
+        std::fs::remove_dir_all(&dst)
+            .with_context(|| format!("clear export dir {}", dst.display()))?;
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
@@ -517,10 +523,7 @@ fn make_exec(
             ),
             "graph_upsert" => (exec_graph_upsert(&idx_kb, &g, &ont, args), vec![], vec![]),
             "graph_build" => {
-                let doc = args
-                    .get("doc")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&src_doc);
+                let doc = args.get("doc").and_then(|v| v.as_str()).unwrap_or(&src_doc);
                 let tables_dir = args.get("tables_dir").and_then(|v| v.as_str());
                 (
                     glossa::tools::graph_build(
@@ -1304,8 +1307,8 @@ fn main() -> Result<()> {
         let tim = timeout;
 
         let eval_sop_dir = default_eval_sop_dir();
-        let get_task_tool =
-            kb_eval::sop::prompt::load_get_task_tool(&eval_sop_dir).context("load get_task.json")?;
+        let get_task_tool = kb_eval::sop::prompt::load_get_task_tool(&eval_sop_dir)
+            .context("load get_task.json")?;
         let eval_tools = [get_task_tool.clone()];
 
         let variant_chat = cli.variant.clone();
@@ -1623,7 +1626,13 @@ fn main() -> Result<()> {
             .unwrap_or(0);
 
         // ── DISCOVERY coverage feedback (one build) ──
-        kb_eval::tz::post_feedback(cli_gateway, &reported_eid, "field_coverage", json!(field_cov), &tags);
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &reported_eid,
+            "field_coverage",
+            json!(field_cov),
+            &tags,
+        );
         kb_eval::tz::post_feedback(
             cli_gateway,
             &reported_eid,
@@ -1652,7 +1661,13 @@ fn main() -> Result<()> {
             json!(agent_edges as f64),
             &tags,
         );
-        kb_eval::tz::post_feedback(cli_gateway, &reported_eid, "tools_used", json!(rounds as f64), &tags);
+        kb_eval::tz::post_feedback(
+            cli_gateway,
+            &reported_eid,
+            "tools_used",
+            json!(rounds as f64),
+            &tags,
+        );
         if let Err(e) = &outcome {
             println!("EPISODE ERROR: {e}");
         }

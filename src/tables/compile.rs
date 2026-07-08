@@ -30,7 +30,11 @@ pub fn tables_to_graph(
     let scan = CapabilityScan::scan(ont, &wiring);
 
     let cfg = ont.tables();
-    let delimiter = cfg.delimiter.chars().next().unwrap_or(crate::tables::csp::CSP_DELIMITER);
+    let delimiter = cfg
+        .delimiter
+        .chars()
+        .next()
+        .unwrap_or(crate::tables::csp::CSP_DELIMITER);
     let rel = load_csp_dir(tables_dir, delimiter, Some(doc))?;
     let param_cols = parameter_columns(&rel, ont);
     if param_cols.is_empty() {
@@ -413,15 +417,12 @@ mod tests {
     fn recompile_replaces_stale_conditional_branches() {
         let dir = tempfile::tempdir().unwrap();
         let doc = "test_doc.pdf";
-        let tables =
-            crate::notebook::notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        let tables = crate::notebook::notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&tables).unwrap();
         let write_csp = |body: &str| {
             std::fs::write(tables.join("d.csp"), body).unwrap();
         };
-        write_csp(
-            "Обозначение типа\tНаружный диаметр\n41\t50\n41\t63\n42\t80\n",
-        );
+        write_csp("Обозначение типа\tНаружный диаметр\n41\t50\n41\t63\n42\t80\n");
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
             doc_path: doc.into(),
@@ -438,10 +439,7 @@ mod tests {
         write_csp("Обозначение типа\tНаружный диаметр\n41\t50\n");
         let report = tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
         assert!(
-            report
-                .lines
-                .iter()
-                .any(|l| l.contains("replaced:")),
+            report.lines.iter().any(|l| l.contains("replaced:")),
             "expected replace line: {:?}",
             report.lines
         );
@@ -458,6 +456,9 @@ mod tests {
             d.constraints
         );
         let after = g.all_nodes().unwrap().len();
-        assert!(after <= before, "recompile should not accumulate orphan nodes");
+        assert!(
+            after <= before,
+            "recompile should not accumulate orphan nodes"
+        );
     }
 }
