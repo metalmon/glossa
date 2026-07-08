@@ -37,7 +37,8 @@ pub fn format_step_context(sop: &Sop, run: &SopRun, step: &SopStep) -> String {
         );
     }
 
-    let _ = write!(ctx, "\nCurrent step: **{}**\n{}\n", step.title, step.body);
+    let body = crate::constraint_gepa_sop::strip_gepa_anchor_lines(&step.body);
+    let _ = write!(ctx, "\nCurrent step: **{}**\n{}\n", step.title, body);
 
     if !step.suggested_tools.is_empty() {
         let _ = write!(
@@ -106,6 +107,17 @@ mod tests {
             location: None,
             deterministic: false,
         }
+    }
+
+    #[test]
+    fn format_step_context_strips_gepa_anchors_from_body() {
+        let sop = minimal_sop();
+        let run = minimal_run(&sop);
+        let mut step = sop.steps[0].clone();
+        step.body = "{# GEPA:DISCOVER_START #}\nDo work.\n{# GEPA:DISCOVER_END #}".into();
+        let out = format_step_context(&sop, &run, &step);
+        assert!(!out.contains("GEPA:DISCOVER"));
+        assert!(out.contains("Do work."));
     }
 
     #[test]
