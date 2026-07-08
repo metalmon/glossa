@@ -149,6 +149,22 @@ gepa-reset:
     @just ch "ALTER TABLE tensorzero.FloatMetricFeedback DELETE WHERE metric_name IN ('gepa_baseline_search','gepa_baseline_grep','gepa_baseline_glob','gepa_baseline_read','gepa_baseline_combined','gepa_iter_search','gepa_iter_grep','gepa_iter_glob','gepa_iter_read','gepa_iter_combined','gepa_iter_candidates','gepa_final_search','gepa_final_grep','gepa_final_glob','gepa_final_read','gepa_final_combined','gepa_combined_acc','gepa_candidates','gepa_examples_train','gepa_examples_val','select_acc','select_baseline_acc','search_acc','search_baseline_acc','read_acc','gepa_baseline_query','gepa_iter_query','gepa_final_query','query_acc','query_baseline_acc')"
     @echo "gepa-reset: mutations queued — wait ~5s then: just gepa-metrics"
 
+constraint_out := "gepa-constraint-out"
+
+constraint-synthetic: build-train
+    {{kb_train_bin}} synthetic-constraint --out {{constraint_out}}
+
+gepa-constraint budget="6" minibatch="8" run="": build-train constraint-synthetic
+    {{preface}}run_tag='{{run}}'; [[ -z "$run_tag" ]] && run_tag="gepa-c-$(date +%Y%m%d-%H%M)"; \
+    {{kb_train_bin}} optimize-constraint \
+      --materialize {{constraint_out}}/materialize.jsonl \
+      --out {{constraint_out}}/constraint_materialize.prompt.txt \
+      --budget {{budget}} --minibatch {{minibatch}} \
+      --tag run=$run_tag
+
+gepa-constraint-metrics:
+    @just ch "SELECT t.value AS run, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_combined'), 3) AS baseline, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_combined_acc'), 3) AS final, round(avgIf(f.value, f.metric_name='gepa_c_iter_materialize'), 3) AS iter_avg, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_materialize'), 3) AS materialize FROM tensorzero.FloatMetricFeedback f JOIN tensorzero.FloatMetricFeedbackTagView t ON f.id = t.feedback_id AND t.key = 'run' WHERE f.metric_name IN ('gepa_c_baseline_combined','gepa_c_combined_acc','gepa_c_iter_materialize','gepa_c_final_materialize') GROUP BY run ORDER BY run DESC LIMIT 20"
+
 # ── eval ────────────────────────────────────────────────────────────────────
 eval dataset func="answer_hotpot" corpus="eval-corpus" run="": build-eval
     {{preface}}run_tag='{{run}}'; run_tag="${run_tag#run=}"; extra=''; [[ -n "$run_tag" ]] && extra=" --tag run=$run_tag"; \

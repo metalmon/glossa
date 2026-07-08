@@ -20,6 +20,7 @@ eval-data/
 
 # GEPA dump/optimize artifacts (search.jsonl/select.jsonl derived from the corpus — never commit)
 /gepa-out/
+/gepa-constraint-out/
 
 # TensorZero local secrets + the fullwiki corpus/archive (large/secret, not committed)
 eval/tensorzero/.env
