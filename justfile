@@ -154,6 +154,11 @@ constraint_out := "gepa-constraint-out"
 constraint-synthetic: build-train
     {{kb_train_bin}} synthetic-constraint --out {{constraint_out}}
 
+export-tz-constraint run="": build-train
+    @mkdir -p {{constraint_out}}
+    {{preface}}{{kb_train_bin}} export-tz-constraint --out {{constraint_out}} \
+      $(if [ -n "{{run}}" ]; then echo --run {{run}}; fi)
+
 gepa-constraint budget="6" minibatch="8" run="": build-train constraint-synthetic
     {{preface}}run_tag='{{run}}'; [[ -z "$run_tag" ]] && run_tag="gepa-c-$(date +%Y%m%d-%H%M)"; \
     {{kb_train_bin}} optimize-constraint \
@@ -163,7 +168,15 @@ gepa-constraint budget="6" minibatch="8" run="": build-train constraint-syntheti
       --tag run=$run_tag
 
 gepa-constraint-metrics:
-    @just ch "SELECT t.value AS run, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_combined'), 3) AS baseline, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_combined_acc'), 3) AS final, round(avgIf(f.value, f.metric_name='gepa_c_iter_materialize'), 3) AS iter_avg, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_materialize'), 3) AS materialize FROM tensorzero.FloatMetricFeedback f JOIN tensorzero.FloatMetricFeedbackTagView t ON f.id = t.feedback_id AND t.key = 'run' WHERE f.metric_name IN ('gepa_c_baseline_combined','gepa_c_combined_acc','gepa_c_iter_materialize','gepa_c_final_materialize') GROUP BY run ORDER BY run DESC LIMIT 20"
+    @just ch "SELECT t.value AS run, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_materialize'), 3) AS baseline_m, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_research'), 3) AS baseline_r, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_compile_fix'), 3) AS baseline_f, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_combined_acc'), 3) AS final, round(avgIf(f.value, f.metric_name='gepa_c_iter_materialize'), 3) AS iter_m, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_research'), 3) AS research, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_materialize'), 3) AS materialize, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_compile_fix'), 3) AS compile_fix FROM tensorzero.FloatMetricFeedback f JOIN tensorzero.FloatMetricFeedbackTagView t ON f.id = t.feedback_id AND t.key = 'run' WHERE f.metric_name IN ('gepa_c_baseline_research','gepa_c_baseline_materialize','gepa_c_baseline_compile_fix','gepa_c_baseline_combined','gepa_c_iter_materialize','gepa_c_iter_combined','gepa_c_combined_acc','gepa_c_final_research','gepa_c_final_materialize','gepa_c_final_compile_fix','gepa_c_final_combined','gepa_c_candidates') GROUP BY run ORDER BY run DESC LIMIT 20 FORMAT PrettyCompact"
+
+gepa-constraint-reset:
+    @just ch "ALTER TABLE tensorzero.ModelInference DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name IN ('cresearch', 'cmaterialize', 'ccompile_fix'))"
+    @just ch "ALTER TABLE tensorzero.InferenceTag DELETE WHERE inference_id IN (SELECT id FROM tensorzero.ChatInference WHERE function_name IN ('cresearch', 'cmaterialize', 'ccompile_fix'))"
+    @just ch "ALTER TABLE tensorzero.ChatInference DELETE WHERE function_name IN ('cresearch', 'cmaterialize', 'ccompile_fix')"
+    @just ch "ALTER TABLE tensorzero.FeedbackTag DELETE WHERE feedback_id IN (SELECT id FROM tensorzero.FloatMetricFeedback WHERE metric_name IN ('gepa_c_baseline_research','gepa_c_baseline_materialize','gepa_c_baseline_compile_fix','gepa_c_baseline_combined','gepa_c_iter_research','gepa_c_iter_materialize','gepa_c_iter_compile_fix','gepa_c_iter_combined','gepa_c_final_research','gepa_c_final_materialize','gepa_c_final_compile_fix','gepa_c_final_combined','gepa_c_combined_acc','gepa_c_candidates'))"
+    @just ch "ALTER TABLE tensorzero.FloatMetricFeedback DELETE WHERE metric_name IN ('gepa_c_baseline_research','gepa_c_baseline_materialize','gepa_c_baseline_compile_fix','gepa_c_baseline_combined','gepa_c_iter_research','gepa_c_iter_materialize','gepa_c_iter_compile_fix','gepa_c_iter_combined','gepa_c_final_research','gepa_c_final_materialize','gepa_c_final_compile_fix','gepa_c_final_combined','gepa_c_combined_acc','gepa_c_candidates')"
+    @echo "gepa-constraint-reset: mutations queued — wait ~5s then: just gepa-constraint-metrics"
 
 gepa-constraint-apply:
     @test -f {{constraint_out}}/constraint_research.prompt.txt || (echo "missing research prompt" && exit 1)

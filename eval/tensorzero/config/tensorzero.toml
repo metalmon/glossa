@@ -632,12 +632,47 @@ optimize = "max"
 level = "episode"
 
 # ── Constraint GEPA materialize optimization ──
+[metrics.gepa_c_baseline_research]
+type = "float"
+optimize = "max"
+level = "episode"
+
 [metrics.gepa_c_baseline_materialize]
 type = "float"
 optimize = "max"
 level = "episode"
 
+[metrics.gepa_c_baseline_compile_fix]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_research]
+type = "float"
+optimize = "max"
+level = "episode"
+
 [metrics.gepa_c_iter_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_compile_fix]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_research]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -648,6 +683,21 @@ optimize = "max"
 level = "episode"
 
 [metrics.gepa_c_final_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_compile_fix]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_candidates]
 type = "float"
 optimize = "max"
 level = "episode"
