@@ -600,6 +600,27 @@ type = "float"
 optimize = "max"
 level = "episode"
 
+# ── Constraint GEPA materialize optimization ──
+[metrics.gepa_c_baseline_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_combined_acc]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
 # ── Constraint eval feedback (CSP solver + LLM epistemic comparison) ──
 [metrics.csp_violations]
 type = "float"
