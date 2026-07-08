@@ -286,7 +286,7 @@ just eval-metrics
 
 Target: [`eval/tensorzero/config/constraint_validate/system.minijinja`](../eval/tensorzero/config/constraint_validate/system.minijinja) (phase-A table extraction).
 
-Unlike main GEPA (chunk retrieval), constraint GEPA scores **`.csp` table value recall** against reference validation tables — before `graph_build`. Three micro-functions during optimization (`cresearch`, `cmaterialize`, `ccompile_fix`); production stays **one agent** with merged prompt slices.
+Unlike main GEPA (chunk retrieval), constraint GEPA uses **five micro-task pools** aligned with the 5-step SOP (Discover → Materialize → Compile → Coverage → Validate). Production stays **one agent** with five merged prompt slices.
 
 **Full playbook:** [constraint-gepa.md](constraint-gepa.md)
 

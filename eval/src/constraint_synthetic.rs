@@ -29,6 +29,32 @@ pub struct CompileFixExample {
     pub synthetic: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageExample {
+    pub episode_id: String,
+    pub doc: String,
+    pub parameter: String,
+    pub graph_stats_report: String,
+    pub broken_csp: String,
+    pub gold_csp: String,
+    pub gold_values: Vec<String>,
+    #[serde(default)]
+    pub synthetic: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateExample {
+    pub episode_id: String,
+    pub doc: String,
+    pub parameter: String,
+    pub solve_error: String,
+    pub broken_csp: String,
+    pub gold_csp: String,
+    pub gold_values: Vec<String>,
+    #[serde(default)]
+    pub synthetic: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ResearchGoldExample {
     episode_id: String,
@@ -153,6 +179,57 @@ pub fn compile_fix_examples_from_materialize(
         .collect()
 }
 
+pub fn coverage_examples_from_materialize(examples: &[MaterializeExample]) -> Vec<CoverageExample> {
+    examples
+        .iter()
+        .map(|ex| {
+            let missing: Vec<&str> = ex
+                .gold_values
+                .iter()
+                .skip(1)
+                .map(String::as_str)
+                .collect();
+            let graph_stats_report = format!(
+                "checklist_coverage for {}:\n  parameter \"{}\": sourced 1/1, valued {}/{} (to value: {})\n",
+                ex.doc,
+                ex.parameter,
+                ex.gold_values.len().saturating_sub(missing.len()).max(1),
+                ex.gold_values.len(),
+                missing.join(", "),
+            );
+            CoverageExample {
+                episode_id: ex.episode_id.clone(),
+                doc: ex.doc.clone(),
+                parameter: ex.parameter.clone(),
+                graph_stats_report,
+                broken_csp: broken_csp_first_thirty_percent(&ex.gold_csp),
+                gold_csp: ex.gold_csp.clone(),
+                gold_values: ex.gold_values.clone(),
+                synthetic: true,
+            }
+        })
+        .collect()
+}
+
+pub fn validate_examples_from_materialize(examples: &[MaterializeExample]) -> Vec<ValidateExample> {
+    examples
+        .iter()
+        .map(|ex| ValidateExample {
+            episode_id: ex.episode_id.clone(),
+            doc: ex.doc.clone(),
+            parameter: ex.parameter.clone(),
+            solve_error: format!(
+                "constraint_solve REJECTED: marking invalid for parameter \"{}\"",
+                ex.parameter
+            ),
+            broken_csp: broken_csp_first_thirty_percent(&ex.gold_csp),
+            gold_csp: ex.gold_csp.clone(),
+            gold_values: ex.gold_values.clone(),
+            synthetic: true,
+        })
+        .collect()
+}
+
 pub fn load_research_grep_examples(path: &Path) -> anyhow::Result<Vec<GrepExample>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read research gold {}", path.display()))?;
@@ -190,6 +267,30 @@ pub fn write_compile_fix_jsonl(path: &Path, examples: &[CompileFixExample]) -> a
 }
 
 pub fn write_research_jsonl(path: &Path, examples: &[GrepExample]) -> anyhow::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    for ex in examples {
+        writeln!(f, "{}", serde_json::to_string(ex)?)?;
+    }
+    Ok(())
+}
+
+pub fn write_discover_jsonl(path: &Path, examples: &[GrepExample]) -> anyhow::Result<()> {
+    write_research_jsonl(path, examples)
+}
+
+pub fn write_compile_jsonl(path: &Path, examples: &[CompileFixExample]) -> anyhow::Result<()> {
+    write_compile_fix_jsonl(path, examples)
+}
+
+pub fn write_coverage_jsonl(path: &Path, examples: &[CoverageExample]) -> anyhow::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    for ex in examples {
+        writeln!(f, "{}", serde_json::to_string(ex)?)?;
+    }
+    Ok(())
+}
+
+pub fn write_validate_jsonl(path: &Path, examples: &[ValidateExample]) -> anyhow::Result<()> {
     let mut f = std::fs::File::create(path)?;
     for ex in examples {
         writeln!(f, "{}", serde_json::to_string(ex)?)?;

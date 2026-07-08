@@ -2,302 +2,308 @@
 
 Playbook for GEPA optimization of the `constraint_validate` agent (phase A: extract `.csp` limit tables from regulatory documents).
 
-See also: [eval-and-training.md](eval-and-training.md) (main GEPA for `answer_hotpot`), [constraint-tables-compiler.md](constraint-tables-compiler.md) (`.csp` → graph compiler), [eval/results/constraint-runs.md](../eval/results/constraint-runs.md) (eval run log).
+The agent follows a **5-step SOP**: Discover → Materialize → Compile → Coverage → Validate. Constraint GEPA uses **five micro-task pools** (one per step) during optimization; production remains **one agent** with five merged prompt slices.
+
+See also: [eval-and-training.md](eval-and-training.md), [constraint-tables-compiler.md](constraint-tables-compiler.md), [eval/results/constraint-runs.md](../eval/results/constraint-runs.md).
 
 ---
 
 ## Why this exists
 
-`kb-eval-constraint` shows the main gap on qwen3.5-4b is **valid_pass**: the agent under-captures allowed values in `.csp` files (value coverage `l` ≈ 0.66–0.71). Typical causes:
+`kb-eval-constraint` shows the main gap on small models is **valid_pass**: the agent under-captures allowed values in `.csp` files. Failures cluster by SOP step:
 
-- **Step 1:** does not open referenced standards and full domain tables.
-- **Step 2:** materializes incomplete `.csp` from an incomplete workbook.
-- **Step 3:** fixes syntax but does not recover missing values.
+| SOP step | Typical failure |
+|----------|-----------------|
+| 1 Discover | misses referenced standards / full domain tables |
+| 2 Materialize | incomplete `.csp`, TableEcho reject, incremental `graph_build` fail |
+| 3 Compile | full-set `graph_build` fail after all tables written |
+| 4 Coverage | `graph_stats` gaps (`to source` / `to value`) |
+| 5 Validate | `constraint_solve` rejects valid markings |
 
-Constraint GEPA improves the system prompt on **table quality before graph compilation**, analogous to quad GEPA for `answer_hotpot`.
+GEPA optimizes **per-step SOP bodies** with isolated micro-functions. Production `constraint_validate` uses a **light system prompt** plus step text from `SOP.md` at runtime.
 
-**Optimized in the loop:** `.csp` value recall vs reference validation tables.  
-**Not optimized in the loop:** end-to-end `acc` on marking rows, graph metrics `f/c/l` — sanity-check only after apply.
+**In the GEPA loop:** step-specific hits (retrieval, table recall, compile OK, coverage closed, validate probes).  
+**Sanity after apply:** full `kb-eval-constraint` run (all marking rows) — not scored every GEPA iteration.
 
 ---
 
-## Architecture
+## Architecture (5 pools ↔ 5 SOP steps)
 
 ```mermaid
 flowchart TB
   subgraph dataset [Dataset]
-    synth[constraint-synthetic\nreference tables → jsonl]
-    export[export-tz-constraint\nClickHouse episodes]
+    synth[constraint-synthetic]
+    export[export-tz-constraint]
   end
 
-  subgraph gepa [GEPA loop]
-    cresearch[cresearch]
-    cmaterialize[cmaterialize]
-    ccompile_fix[ccompile_fix]
+  subgraph gepa [GEPA loop — 5 pools]
+    d[cdiscover]
+    m[cmaterialize]
+    c[ccompile]
+    cov[ccoverage]
+    v[cvalidate]
     reflect[gepa_reflect]
   end
 
   subgraph prod [Production]
-    cv[constraint_validate\nsingle agent]
-    sop[SOP.md steps 1–3]
+    agent[constraint_validate]
+    sop[SOP.md steps 1–5]
   end
 
   synth --> gepa
   export --> gepa
-  cresearch --> reflect
-  cmaterialize --> reflect
-  ccompile_fix --> reflect
-  reflect --> prompts[3 × *.prompt.txt]
+  d --> reflect
+  m --> reflect
+  c --> reflect
+  cov --> reflect
+  v --> reflect
+  reflect --> prompts[5 × *.prompt.txt]
   prompts --> apply[gepa-constraint-apply]
-  apply --> cv
-  sop --> cv
+  apply --> agent
+  sop --> agent
 ```
 
 ### Micro-functions for training ≠ subagents in production
 
-As in main GEPA (`search` / `grep` / `glob` / `read` → one `answer_hotpot`), three TZ functions exist only for **isolated scoring** during optimization:
+Same pattern as main GEPA (`search`/`grep`/`glob`/`read` → one `answer_hotpot`):
 
-| GEPA (TensorZero) | What it trains | Production (runtime) |
-|-------------------|----------------|---------------------|
-| `cresearch` | grep/read/glob/search on step 1 | Single `constraint_validate` |
-| `cmaterialize` | `.csp` from workbook | + SOP step instructions |
-| `ccompile_fix` | fix `.csp` from compiler errors | |
+| GEPA pool | TZ function | SOP step | SOP anchor in `SOP.md` |
+|-----------|-------------|----------|-------------------------|
+| discover | `cdiscover` | 1 Discover | `{# GEPA:DISCOVER_* #}` |
+| materialize | `cmaterialize` | 2 Materialize | `{# GEPA:MATERIALIZE_* #}` |
+| compile | `ccompile` | 3 Compile | `{# GEPA:COMPILE_* #}` |
+| coverage | `ccoverage` | 4 Coverage | `{# GEPA:COVERAGE_* #}` |
+| validate | `cvalidate` | 5 Validate | `{# GEPA:VALIDATE_* #}` |
 
-After `gepa-constraint-apply`, three optimized slices merge into `constraint_validate/system.minijinja` at `{# GEPA:* #}` anchors.
+`gepa-constraint-apply` merges five artifacts into `eval/sops/gost-constraints/SOP.md`. `constraint_validate/system.minijinja` stays a short role + corpus/notebook contract. Anchor marker lines are stripped before the agent sees step body text.
+
+### Migration from 3-pool design
+
+| Legacy (3 pools) | 5-pool mapping |
+|----------------|----------------|
+| `cresearch` | → `cdiscover` |
+| `cmaterialize` | → `cmaterialize` (+ incremental compile in scorer) |
+| `ccompile_fix` | split → `ccompile` (step 3) + `ccoverage` (step 4) + `cvalidate` (step 5) |
+| `GEPA:RESEARCH_*` | → `GEPA:DISCOVER_*` |
+| `GEPA:COMPILE_FIX_*` | split into `GEPA:COMPILE_*`, `GEPA:COVERAGE_*`, `GEPA:VALIDATE_*` |
+
+Keep backward-compatible TZ aliases (`cresearch` = `cdiscover`) for one release if needed.
 
 ---
 
-## Three micro-task pools
+## Five micro-task pools — scoring
 
-| Pool | TZ function | Input | Hit |
-|------|-------------|-------|-----|
-| **research** | `cresearch` | Question about doc/parameter | gold chunk `path#loc` in top-k grep |
-| **materialize** | `cmaterialize` | workbook excerpt + parameter | value recall ≥ `hit_threshold` (default 0.5) |
-| **compile-fix** | `ccompile_fix` | broken `.csp` + compiler error | same recall on fixed `.csp` |
+| Pool | Input (prefill) | Model output | Hit |
+|------|-----------------|--------------|-----|
+| **discover** | Question about doc/parameter | `grep`/`read` tool call | gold chunk `path#loc` in top-k |
+| **materialize** | workbook excerpt + parameter | `.csp` TSV body | `value_recall ≥ θ` **and** per-table `graph_build OK` |
+| **compile** | full broken `.csp` set + compiler error | fixed `.csp` set | full-set `graph_build OK` |
+| **coverage** | `graph_stats` report with gaps | `.csp` patch / rewritten table | gaps closed on re-run `graph_stats` |
+| **validate** | compiled graph + probe markings | `.csp` fix (text) or tool trace | probe valid accepted + invalid rejected by `constraint_solve` |
 
-**Combined metric:**
+**Default weights:**
 
 ```
-gepa_c_combined = (0.35·research + 0.45·materialize + 0.20·compile_fix) / sum(weights)
+gepa_c_combined = (
+  0.25·discover + 0.30·materialize + 0.15·compile + 0.20·coverage + 0.10·validate
+) / sum(active_weights)
 ```
 
-Weights are configurable in `kb-train optimize-constraint` (`--w-research`, `--w-materialize`, `--w-compile-fix`).
+Configurable via `kb-train optimize-constraint` (`--w-discover`, `--w-materialize`, …).
 
-Table scoring: `eval/src/constraint_score.rs` (`value_recall`, `domain_covers`) — same semantics as `compare_tables_by_domain` in `kb-eval-constraint`.
+### Scoring implementation notes
+
+| Pool | Scorer module | Notes |
+|------|---------------|-------|
+| discover | reuse `gepa.rs` grep/read helpers | Corpus index from `--work` |
+| materialize | `constraint_score.rs` + temp `graph_build` | Write one `.csp` to notes mirror, compile |
+| compile | `constraint_score.rs` + `graph_build` | Full multi-file set in temp dir |
+| coverage | `checklist_coverage` + `graph_stats` | Parse report lines `to source` / `to value` |
+| validate | `constraint_solve` on probe set | ~20 rows from reference cases, not full eval |
+
+Table value recall (`value_recall`, `domain_covers`) remains the core signal for materialize/compile; coverage/validate add graph-level gates from steps 4–5.
 
 ---
 
-## Prerequisites
+## Prompt slices (what each optimizes)
 
-1. **Build:** `just build` (needs `kb-train`)
-2. **TensorZero + ClickHouse:** `just up` (for optimize and export)
-3. **LM Studio:** Qwen3.5-4B on `:1234` — micro-task scoring
-4. **OpenRouter:** `gepa_reflect` / DeepSeek-R1 (see [eval/tensorzero/README.md](../eval/tensorzero/README.md))
-5. **Reference tables:** JSON validation sets under `--val-dir` (local, gitignored)
-6. **Indexed corpus:** `--work` / `--kb` with the owner document indexed (for research pool)
+### Discover (step 1)
+
+- Corpus search: marking example anchor, referenced standards, full domain tables.
+- Workbook is optional draft, not a hard gate.
+- **Does not** create `.csp`.
+
+### Materialize (step 2)
+
+- TSV `.csp` from notebook only (no corpus).
+- TableEcho / REJECTED handling.
+- **Incremental** `graph_build` after each table.
+
+### Compile (step 3)
+
+- Full-set `graph_build` fix loop.
+- Compiler errors → `sed`/`note` → retry until OK.
+
+### Coverage (step 4)
+
+- Read `graph_stats(doc)` checklist: sourced / to source, valued / to value.
+- Close gaps before advance; may edit `.csp` and recompile.
+
+### Validate (step 5)
+
+- `constraint_solve` validate/check modes.
+- On failure: fix tables, optionally re-run compile + coverage.
+- Then `done`.
 
 ---
 
-## Playbook 1 — Bootstrap dataset (synthetic)
+## Dataset pipeline
 
-No ClickHouse episodes required:
+### Synthetic bootstrap
 
 ```bash
 just constraint-synthetic
 ```
 
-Writes to `gepa-constraint-out/` (gitignored):
+Writes to `gepa-constraint-out/`:
 
-| File | Source |
-|------|--------|
-| `materialize.jsonl` | reference table JSON — oracle workbook + gold `.csp` |
-| `compile_fix.jsonl` | mutated gold (truncated values) + synthetic compiler error |
-| `research.jsonl` | `eval/fixtures/constraint-research-gold.json` — oracle grep targets |
-
-Direct CLI:
-
-```bash
-kb-train synthetic-constraint \
-  --val-dir <reference-tables-dir> \
-  --doc <owner-document.pdf> \
-  --out gepa-constraint-out
-```
-
-Defaults match `kb-train synthetic-constraint --help`.
-
----
-
-## Playbook 2 — GEPA optimize
-
-```bash
-just gepa-constraint budget=6 minibatch=8 run=my-gepa-c
-```
-
-Equivalent:
-
-```bash
-kb-train optimize-constraint \
-  --research gepa-constraint-out/research.jsonl \
-  --materialize gepa-constraint-out/materialize.jsonl \
-  --compile-fix gepa-constraint-out/compile_fix.jsonl \
-  --out-dir gepa-constraint-out \
-  --out gepa-constraint-out/constraint_materialize.prompt.txt \
-  --work <indexed-corpus> \
-  --budget 6 --minibatch 8 \
-  --tag run=my-gepa-c
-```
-
-**Artifacts:**
-
-| File | Purpose |
+| File | Content |
 |------|---------|
-| `constraint_research.prompt.txt` | optimized step-1 slice |
-| `constraint_materialize.prompt.txt` | optimized step-2 slice |
-| `constraint_compile_fix.prompt.txt` | optimized step-3 fix-loop slice |
+| `discover.jsonl` | oracle grep/read targets |
+| `materialize.jsonl` | workbook excerpt → gold `.csp` |
+| `compile.jsonl` | broken full set + error → gold set |
+| `coverage.jsonl` | partial graph_stats report → gold fix |
+| `validate.jsonl` | probe markings + expected solve outcome |
 
-Seed: if `*.prompt.txt` already exist, continues from them; otherwise reads `eval/tensorzero/config/constraint_*/system.minijinja`.
+Generators live in `eval/src/constraint_synthetic.rs`.
 
-**ClickHouse metrics:**
-
-```bash
-just gepa-constraint-metrics
-```
-
-Key metrics: `gepa_c_baseline_*`, `gepa_c_combined_acc`, `gepa_c_final_materialize`, `gepa_c_final_research`, `gepa_c_final_compile_fix`.
-
-Reset history:
-
-```bash
-just gepa-constraint-reset
-# wait ~5s
-just gepa-constraint-metrics
-```
-
----
-
-## Playbook 3 — Export from real episodes
-
-After `kb-eval-constraint` runs tagged with `run=…`:
+### Episode export
 
 ```bash
 just export-tz-constraint run=my-eval-run
 ```
 
-Parses `constraint_validate` episodes from ClickHouse:
+Parses `constraint_validate` transcripts:
 
-- `note(…, file="*.csp")` → materialize rows
-- step-1 `grep`/`read` → research rows
-- `graph_build FAILED` → `sed`/`note` → compile-fix rows
+| SOP step | Export signal |
+|----------|---------------|
+| 1 | early `grep`/`read` |
+| 2 | `note(*.csp)`, incremental `graph_build` |
+| 3 | full-set `graph_build FAILED` → fix |
+| 4 | `graph_stats` → subsequent `.csp` edits |
+| 5 | `constraint_solve` fail → fix trace |
 
-Gold join: `tags.doc` + parameter name → reference table JSON under `--val-dir`.
-
-Merge synthetic + exported jsonl before optimize (or overwrite files in `gepa-constraint-out/`).
-
----
-
-## Playbook 4 — Apply to production + sanity-check
-
-```bash
-just gepa-constraint-apply
-just gw-restart
-```
-
-`gepa-constraint-apply`:
-
-1. Checks all three `*.prompt.txt` exist in `gepa-constraint-out/`
-2. Copies backup `system.minijinja.bak`
-3. Replaces text between `{# GEPA:RESEARCH_START #}` … `{# GEPA:RESEARCH_END #}` (and MATERIALIZE, COMPILE_FIX likewise)
-
-**Sanity-check** (outside GEPA loop):
-
-```bash
-kb-eval-constraint \
-  --kb <indexed-corpus> \
-  --val-dir <reference-tables-dir> \
-  --tag run=gepa-c-applied
-```
-
-Expect higher value recall / `valid_pass` with stable `invalid_catch`. If recall improves but `acc` is flat, inspect field mapping or the compiler — not the prompt.
+Gold join: `tags.doc` + parameter → reference table JSON under `--val-dir`.
 
 ---
 
-## Full cycle (production checklist)
+## GEPA optimize + apply
 
 ```bash
-just build-train force
-just up
-just gw-restart
-
-# 1. Dataset
-just constraint-synthetic
-# optional after eval run:
-just export-tz-constraint run=my-eval-run
-
-# 2. Optimize
-just gepa-constraint budget=6 run=gepa-c-v1
-
-# 3. Review + apply
+just gepa-constraint budget=6 run=my-gepa-c
 just gepa-constraint-metrics
-# review gepa-constraint-out/*.prompt.txt
 just gepa-constraint-apply
 just gw-restart
+```
 
-# 4. Sanity
-kb-eval-constraint --tag run=gepa-c-v1-applied ...
+**Artifacts (5 files):**
+
+```
+gepa-constraint-out/
+  constraint_discover.prompt.txt
+  constraint_materialize.prompt.txt
+  constraint_compile.prompt.txt
+  constraint_coverage.prompt.txt
+  constraint_validate.prompt.txt
+```
+
+**Apply** replaces text between matching `{# GEPA:*_START #}` … `{# GEPA:*_END #}` anchors in `eval/sops/gost-constraints/SOP.md`.
+
+**Sanity-check** (full eval, outside loop):
+
+```bash
+kb-eval-constraint --kb <corpus> --val-dir <reference-tables> --tag run=gepa-c-applied
 ```
 
 ---
 
-## CLI reference (`kb-train`)
-
-| Subcommand | Purpose |
-|------------|---------|
-| `synthetic-constraint` | Bootstrap jsonl from reference tables |
-| `export-tz-constraint` | Episodes → jsonl |
-| `optimize-constraint` | GEPA loop, 3 prompt slices |
-
-### `optimize-constraint` — main flags
+## CLI (`kb-train optimize-constraint`)
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--budget` | 6 | Reflect→mutate iterations |
-| `--minibatch` | 8 | Failure traces per iteration |
-| `--hit-threshold` | 0.5 | Value recall threshold for hit |
-| `--val-frac` | 0.3 | Val fraction by `episode_id` |
-| `--pareto-size` | 20 | D_pareto sample size |
-| `--w-research` | 0.35 | Research weight in combined |
-| `--w-materialize` | 0.45 | Materialize weight |
-| `--w-compile-fix` | 0.20 | Compile-fix weight |
-| `--work` | kb-test | Corpus for research grep scoring |
+| `--discover` | `gepa-constraint-out/discover.jsonl` | Discover pool |
+| `--materialize` | `…/materialize.jsonl` | Materialize pool |
+| `--compile` | `…/compile.jsonl` | Compile pool |
+| `--coverage` | `…/coverage.jsonl` | Coverage pool |
+| `--validate` | `…/validate.jsonl` | Validate pool |
+| `--out-dir` | `gepa-constraint-out` | All prompt outputs |
+| `--hit-threshold` | 0.5 | Materialize value recall |
+| `--w-discover` | 0.25 | Combined weight |
+| `--w-materialize` | 0.30 | |
+| `--w-compile` | 0.15 | |
+| `--w-coverage` | 0.20 | |
+| `--w-validate` | 0.10 | |
+
+Reflect mutates **one slice per iteration** (pool with most minibatch failures).
 
 ---
 
 ## Just recipes
 
-| Recipe | When |
-|--------|------|
-| `just constraint-synthetic` | Bootstrap jsonl |
+| Recipe | Purpose |
+|--------|---------|
+| `just constraint-synthetic` | Bootstrap 5 jsonl files |
 | `just export-tz-constraint [run=…]` | Episodes → jsonl |
-| `just gepa-constraint [budget=…] [run=…]` | Synthetic + optimize |
-| `just gepa-constraint-metrics` | Metrics table in terminal |
-| `just gepa-constraint-reset` | Clear CH history |
-| `just gepa-constraint-apply` | Merge → prod prompt |
+| `just gepa-constraint` | Synthetic + optimize |
+| `just gepa-constraint-metrics` | ClickHouse `gepa_c_*` table |
+| `just gepa-constraint-reset` | Clear constraint GEPA history |
+| `just gepa-constraint-apply` | Merge 5 slices → prod |
 
 ---
 
-## Repository files
+## Code map (target after refactor)
 
 | Path | Role |
 |------|------|
-| `eval/src/constraint_score.rs` | Table value recall scorer |
-| `eval/src/constraint_synthetic.rs` | Synthetic jsonl generator |
-| `eval/src/gepa_constraint.rs` | GEPA loop (triple pool) |
-| `eval/src/export_tz_constraint.rs` | ClickHouse export |
-| `eval/tensorzero/config/constraint_research/` | Research micro-prompt |
+| `eval/src/constraint_score.rs` | Table recall + temp-dir compile helpers |
+| `eval/src/constraint_synthetic.rs` | 5 jsonl generators |
+| `eval/src/gepa_constraint.rs` | 5-pool GEPA loop |
+| `eval/src/export_tz_constraint.rs` | 5-way episode export |
+| `eval/tensorzero/config/constraint_discover/` | Discover micro-prompt |
 | `eval/tensorzero/config/constraint_materialize/` | Materialize micro-prompt |
-| `eval/tensorzero/config/constraint_compile_fix/` | Compile-fix micro-prompt |
-| `eval/tensorzero/config/constraint_validate/system.minijinja` | Prod prompt + GEPA anchors |
-| `eval/fixtures/constraint-research-gold.json` | Oracle research targets |
+| `eval/tensorzero/config/constraint_compile/` | Compile micro-prompt |
+| `eval/tensorzero/config/constraint_coverage/` | Coverage micro-prompt |
+| `eval/tensorzero/config/constraint_validate_micro/` | Validate micro-prompt (not prod template) |
+| `eval/tensorzero/config/constraint_validate/system.minijinja` | Prod prompt + 5 anchors |
+
+> **Naming:** prod agent template stays `constraint_validate/`; the step-5 GEPA micro-prompt directory should not collide — use `constraint_validate_micro/` or `constraint_solve_prompt/`.
+
+---
+
+## TensorZero metrics (`gepa_c_*`)
+
+Per pool: `gepa_c_baseline_<pool>`, `gepa_c_iter_<pool>`, `gepa_c_final_<pool>`, plus `gepa_c_combined_acc`, `gepa_c_candidates`.
+
+Legacy names (`gepa_c_baseline_research`, `compile_fix`) deprecated after migration.
+
+---
+
+## Implementation checklist
+
+Refactor from current 3-pool code to 5-pool:
+
+- [x] Split `SOP.md` anchors: `DISCOVER`, `MATERIALIZE`, `COMPILE`, `COVERAGE`, `VALIDATE`
+- [x] Slim `constraint_validate/system.minijinja` (role + corpus/notebook only)
+- [x] Add TZ functions `cdiscover`, `ccompile`, `ccoverage`, `cvalidate`; extend `cmaterialize` scorer
+- [ ] Extend `constraint_score.rs`: `materialize_hit(csp, gold, doc, root)` with incremental compile
+- [ ] Add `coverage_score.rs` or helpers: parse `checklist_coverage_report`, re-check after fix
+- [ ] Add `validate_score.rs`: run `constraint_solve` on probe subset
+- [x] Rewrite `gepa_constraint.rs`: 5 pools, 5 slice reflect, 5-way combined metric
+- [x] Extend `constraint_synthetic.rs` + `export_tz_constraint.rs` for compile/coverage/validate jsonl
+- [x] Update `kb-train optimize-constraint` flags and 5 prompt outputs
+- [x] Update `gepa-constraint-apply` for 5 SOP step files
+- [x] Update `gepa-constraint-metrics` / `gepa-constraint-reset` SQL
+- [x] Deprecate `cresearch`, `ccompile_fix`, `compile_fix.jsonl` (shim one release)
 
 ---
 
@@ -305,24 +311,22 @@ kb-eval-constraint --tag run=gepa-c-v1-applied ...
 
 | Symptom | Check |
 |---------|-------|
-| `wrote 0 rows` in synthetic | `--val-dir` populated? JSON files not prefixed with `_`? |
-| baseline 0.000 | LM Studio up? `just gw-restart`? Corpus indexed (`kb reindex`)? |
-| `Unknown function: cmaterialize` | Gateway on stale config — `just gw-restart` |
-| `missing research prompt` on apply | All 3 `*.prompt.txt` required — run full `optimize-constraint` |
-| `anchor GEPA:* not found` | `system.minijinja` missing anchors — restore from git |
-| GEPA recall ↑, acc flat | Field mapping / compiler — not prompt |
+| Materialize pool always 0 | Incremental `graph_build` fails — scorer now requires compile OK |
+| Coverage pool empty | Export not capturing `graph_stats` traces |
+| Validate pool slow | Reduce probe count in synthetic jsonl |
+| Apply fails on anchor | Check `{# GEPA:*_START #}` markers in `SOP.md` |
+| Stale system-prompt slices | GEPA no longer applies to `system.minijinja` — optimize SOP bodies |
 
 ---
 
 ## Comparison with main GEPA
 
-| | Main GEPA | Constraint GEPA |
-|---|-----------|-----------------|
-| Target agent | `answer_hotpot` | `constraint_validate` |
-| Pools | search, grep, glob, read | research, materialize, compile-fix |
-| Gold | `path#loc` chunks | reference table value domains |
+| | Main GEPA | Constraint GEPA (5-pool) |
+|---|-----------|--------------------------|
+| Target | `answer_hotpot` | `constraint_validate` |
+| Pools | 4 (search/grep/glob/read) | 5 (discover/materialize/compile/coverage/validate) |
+| Gold | chunk `path#loc` | reference tables + graph/solver probes |
 | Output dir | `gepa-out/` | `gepa-constraint-out/` |
-| Apply | `just gepa-apply` | `just gepa-constraint-apply` |
-| Metrics prefix | `gepa_*` | `gepa_c_*` |
+| Apply | `gepa-apply` | `gepa-constraint-apply` (5 slices) |
 
-Both use `gepa_reflect` (DeepSeek-R1) and TensorZero ClickHouse feedback.
+Both use `gepa_reflect` and TensorZero ClickHouse feedback.

@@ -1,7 +1,8 @@
 //! Export constraint GEPA supervision datasets from `constraint_validate` TensorZero episodes.
 
 use crate::constraint_synthetic::{
-    gold_csp_tsv, load_gold_param, CompileFixExample, MaterializeExample,
+    coverage_examples_from_materialize, gold_csp_tsv, load_gold_param, CompileFixExample,
+    CoverageExample, MaterializeExample, ValidateExample, validate_examples_from_materialize,
 };
 use crate::export_tz::{GrepExample, ReadExample, ReadPick};
 use anyhow::{Context, Result};
@@ -547,18 +548,26 @@ pub fn run(cfg: ExportTzConstraintConfig) -> Result<ExportTzConstraintStats> {
     stats.compile_fix_rows = compile_fix.len() as u64;
 
     write_jsonl(&cfg.out.join("materialize.jsonl"), &materialize)?;
+    write_jsonl(&cfg.out.join("discover.jsonl"), &research)?;
     write_jsonl(&cfg.out.join("research.jsonl"), &research)?;
     write_jsonl(&cfg.out.join(READ_RESEARCH_JSONL), &research_reads)?;
+    write_jsonl(&cfg.out.join("compile.jsonl"), &compile_fix)?;
     write_jsonl(&cfg.out.join("compile_fix.jsonl"), &compile_fix)?;
+    let coverage: Vec<CoverageExample> = coverage_examples_from_materialize(&materialize);
+    let validate: Vec<ValidateExample> = validate_examples_from_materialize(&materialize);
+    write_jsonl(&cfg.out.join("coverage.jsonl"), &coverage)?;
+    write_jsonl(&cfg.out.join("validate.jsonl"), &validate)?;
 
     println!(
-        "export-tz-constraint: episodes={} skipped_parse={} materialize={} research_grep={} research_read={} compile_fix={} -> {}",
+        "export-tz-constraint: episodes={} skipped_parse={} materialize={} discover={} research_read={} compile={} coverage={} validate={} -> {}",
         stats.episodes_total,
         stats.skipped_parse,
         stats.materialize_rows,
         stats.research_rows,
         stats.research_read_rows,
         stats.compile_fix_rows,
+        coverage.len(),
+        validate.len(),
         cfg.out.display()
     );
     Ok(stats)

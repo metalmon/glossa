@@ -1,6 +1,8 @@
 //! GEPA-style reflective optimization for constraint `.csp` materialization.
 
-pub use crate::constraint_synthetic::{CompileFixExample, MaterializeExample};
+pub use crate::constraint_synthetic::{
+    CompileFixExample, CoverageExample, MaterializeExample, ValidateExample,
+};
 use crate::export_tz::GrepExample;
 use anyhow::{Context, Result};
 use glossa::grep::GrepOpts;
@@ -14,12 +16,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MINIBATCH_RESAMPLE_ATTEMPTS: usize = 3;
+const POOL_COUNT: usize = 5;
 
 pub struct GepaConstraintConfig {
     pub gateway: String,
-    pub research_function: String,
+    pub discover_function: String,
     pub materialize_function: String,
-    pub compile_fix_function: String,
+    pub compile_function: String,
+    pub coverage_function: String,
+    pub validate_function: String,
     pub reflect_function: String,
     pub variant: String,
     pub episode_id: String,
@@ -27,41 +32,49 @@ pub struct GepaConstraintConfig {
     pub val_frac: f64,
     pub budget: usize,
     pub minibatch: usize,
-    pub seed_research_prompt: String,
+    pub seed_discover_prompt: String,
     pub seed_materialize_prompt: String,
-    pub seed_compile_fix_prompt: String,
+    pub seed_compile_prompt: String,
+    pub seed_coverage_prompt: String,
+    pub seed_validate_prompt: String,
     pub hit_threshold: f64,
     pub seed: u64,
     pub pareto_size: usize,
-    pub w_research: f64,
+    pub w_discover: f64,
     pub w_materialize: f64,
-    pub w_compile_fix: f64,
+    pub w_compile: f64,
+    pub w_coverage: f64,
+    pub w_validate: f64,
     pub work: PathBuf,
 }
 
 pub struct GepaConstraintRunResult {
     pub prompt: String,
-    pub research_prompt: String,
+    pub discover_prompt: String,
     pub materialize_prompt: String,
-    pub compile_fix_prompt: String,
+    pub compile_prompt: String,
+    pub coverage_prompt: String,
+    pub validate_prompt: String,
     pub baseline_acc: f64,
     pub best_acc: f64,
-    pub research_acc: f64,
+    pub discover_acc: f64,
     pub materialize_acc: f64,
-    pub compile_fix_acc: f64,
+    pub compile_acc: f64,
+    pub coverage_acc: f64,
+    pub validate_acc: f64,
     pub candidates: usize,
     pub episode_id: String,
 }
 
 #[derive(Clone)]
-struct MaterializeOutcome {
+struct CspOutcome {
     ok: bool,
     model_csp: String,
     recall: f64,
 }
 
 #[derive(Clone)]
-struct ResearchOutcome {
+struct DiscoverOutcome {
     ok: bool,
     model_pattern: Option<String>,
     top_k: String,
@@ -87,9 +100,9 @@ struct Candidate {
     val_bools: Vec<bool>,
 }
 
-pub fn load_materialize_jsonl(path: &Path) -> Result<Vec<MaterializeExample>> {
+fn load_jsonl<T: serde::de::DeserializeOwned>(path: &Path, label: &str) -> Result<Vec<T>> {
     let file = std::fs::File::open(path)
-        .with_context(|| format!("open materialize jsonl {}", path.display()))?;
+        .with_context(|| format!("open {label} jsonl {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut out = Vec::new();
     for (i, line) in reader.lines().enumerate() {
@@ -97,45 +110,39 @@ pub fn load_materialize_jsonl(path: &Path) -> Result<Vec<MaterializeExample>> {
         if line.trim().is_empty() {
             continue;
         }
-        let ex: MaterializeExample = serde_json::from_str(&line)
-            .with_context(|| format!("parse materialize example line {}", i + 1))?;
+        let ex: T = serde_json::from_str(&line)
+            .with_context(|| format!("parse {label} example line {}", i + 1))?;
         out.push(ex);
     }
     Ok(out)
 }
 
-pub fn load_compile_fix_jsonl(path: &Path) -> Result<Vec<CompileFixExample>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open compile-fix jsonl {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut out = Vec::new();
-    for (i, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("read line {} from {}", i + 1, path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let ex: CompileFixExample = serde_json::from_str(&line)
-            .with_context(|| format!("parse compile-fix example line {}", i + 1))?;
-        out.push(ex);
-    }
-    Ok(out)
+pub fn load_materialize_jsonl(path: &Path) -> Result<Vec<MaterializeExample>> {
+    load_jsonl(path, "materialize")
+}
+
+pub fn load_discover_jsonl(path: &Path) -> Result<Vec<GrepExample>> {
+    load_jsonl(path, "discover")
 }
 
 pub fn load_research_jsonl(path: &Path) -> Result<Vec<GrepExample>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open research jsonl {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut out = Vec::new();
-    for (i, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("read line {} from {}", i + 1, path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let ex: GrepExample = serde_json::from_str(&line)
-            .with_context(|| format!("parse research line {}", i + 1))?;
-        out.push(ex);
-    }
-    Ok(out)
+    load_discover_jsonl(path)
+}
+
+pub fn load_compile_jsonl(path: &Path) -> Result<Vec<CompileFixExample>> {
+    load_jsonl(path, "compile")
+}
+
+pub fn load_compile_fix_jsonl(path: &Path) -> Result<Vec<CompileFixExample>> {
+    load_compile_jsonl(path)
+}
+
+pub fn load_coverage_jsonl(path: &Path) -> Result<Vec<CoverageExample>> {
+    load_jsonl(path, "coverage")
+}
+
+pub fn load_validate_jsonl(path: &Path) -> Result<Vec<ValidateExample>> {
+    load_jsonl(path, "validate")
 }
 
 fn hit_threshold(cfg: &GepaConstraintConfig) -> f64 {
@@ -157,7 +164,7 @@ fn score_materialize_one(
     cfg: &GepaConstraintConfig,
     prompt: &str,
     ex: &MaterializeExample,
-) -> Result<MaterializeOutcome> {
+) -> Result<CspOutcome> {
     let msg = materialize_user_message(ex);
     let turn = crate::tz::infer(
         &cfg.gateway,
@@ -173,7 +180,7 @@ fn score_materialize_one(
     let model_csp = turn.text().trim().to_string();
     let recall = crate::constraint_score::value_recall(&model_csp, &ex.gold_values);
     let ok = crate::constraint_score::param_hit(&model_csp, &ex.gold_values, hit_threshold(cfg));
-    Ok(MaterializeOutcome {
+    Ok(CspOutcome {
         ok,
         model_csp,
         recall,
@@ -184,31 +191,46 @@ fn score_materialize(
     cfg: &GepaConstraintConfig,
     prompt: &str,
     examples: &[MaterializeExample],
-) -> Result<Vec<MaterializeOutcome>> {
+) -> Result<Vec<CspOutcome>> {
     examples
         .iter()
         .map(|ex| score_materialize_one(cfg, prompt, ex))
         .collect()
 }
 
-fn compile_fix_user_message(ex: &CompileFixExample) -> String {
+fn compile_user_message(ex: &CompileFixExample) -> String {
     format!(
         "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== COMPILER ERROR ===\n{}\n\n=== FIXED CSP ===\n",
         ex.doc, ex.parameter, ex.broken_csp, ex.compiler_error
     )
 }
 
-fn score_compile_fix_one(
+fn coverage_user_message(ex: &CoverageExample) -> String {
+    format!(
+        "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== GRAPH STATS REPORT ===\n{}\n\n=== FIXED CSP ===\n",
+        ex.doc, ex.parameter, ex.broken_csp, ex.graph_stats_report
+    )
+}
+
+fn validate_user_message(ex: &ValidateExample) -> String {
+    format!(
+        "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== SOLVE ERROR ===\n{}\n\n=== FIXED CSP ===\n",
+        ex.doc, ex.parameter, ex.broken_csp, ex.solve_error
+    )
+}
+
+fn score_csp_one(
     cfg: &GepaConstraintConfig,
+    function: &str,
     prompt: &str,
-    ex: &CompileFixExample,
-) -> Result<MaterializeOutcome> {
-    let msg = compile_fix_user_message(ex);
+    user_message: &str,
+    gold_values: &[String],
+) -> Result<CspOutcome> {
     let turn = crate::tz::infer(
         &cfg.gateway,
-        &cfg.compile_fix_function,
+        function,
         &cfg.episode_id,
-        &[json!({"role": "user", "content": msg})],
+        &[json!({"role": "user", "content": user_message})],
         &cfg.tags,
         Duration::from_secs(120),
         Some(&cfg.variant),
@@ -216,23 +238,87 @@ fn score_compile_fix_one(
         None,
     )?;
     let model_csp = turn.text().trim().to_string();
-    let recall = crate::constraint_score::value_recall(&model_csp, &ex.gold_values);
-    let ok = crate::constraint_score::param_hit(&model_csp, &ex.gold_values, hit_threshold(cfg));
-    Ok(MaterializeOutcome {
+    let recall = crate::constraint_score::value_recall(&model_csp, gold_values);
+    let ok = crate::constraint_score::param_hit(&model_csp, gold_values, hit_threshold(cfg));
+    Ok(CspOutcome {
         ok,
         model_csp,
         recall,
     })
 }
 
-fn score_compile_fix(
+fn score_compile_one(
+    cfg: &GepaConstraintConfig,
+    prompt: &str,
+    ex: &CompileFixExample,
+) -> Result<CspOutcome> {
+    score_csp_one(
+        cfg,
+        &cfg.compile_function,
+        prompt,
+        &compile_user_message(ex),
+        &ex.gold_values,
+    )
+}
+
+fn score_compile(
     cfg: &GepaConstraintConfig,
     prompt: &str,
     examples: &[CompileFixExample],
-) -> Result<Vec<MaterializeOutcome>> {
+) -> Result<Vec<CspOutcome>> {
     examples
         .iter()
-        .map(|ex| score_compile_fix_one(cfg, prompt, ex))
+        .map(|ex| score_compile_one(cfg, prompt, ex))
+        .collect()
+}
+
+fn score_coverage_one(
+    cfg: &GepaConstraintConfig,
+    prompt: &str,
+    ex: &CoverageExample,
+) -> Result<CspOutcome> {
+    score_csp_one(
+        cfg,
+        &cfg.coverage_function,
+        prompt,
+        &coverage_user_message(ex),
+        &ex.gold_values,
+    )
+}
+
+fn score_coverage(
+    cfg: &GepaConstraintConfig,
+    prompt: &str,
+    examples: &[CoverageExample],
+) -> Result<Vec<CspOutcome>> {
+    examples
+        .iter()
+        .map(|ex| score_coverage_one(cfg, prompt, ex))
+        .collect()
+}
+
+fn score_validate_one(
+    cfg: &GepaConstraintConfig,
+    prompt: &str,
+    ex: &ValidateExample,
+) -> Result<CspOutcome> {
+    score_csp_one(
+        cfg,
+        &cfg.validate_function,
+        prompt,
+        &validate_user_message(ex),
+        &ex.gold_values,
+    )
+}
+
+fn score_validate(
+    cfg: &GepaConstraintConfig,
+    prompt: &str,
+    examples: &[ValidateExample],
+) -> Result<Vec<CspOutcome>> {
+    examples
+        .iter()
+        .map(|ex| score_validate_one(cfg, prompt, ex))
         .collect()
 }
 
@@ -318,16 +404,16 @@ fn grep_hit_hits(
     false
 }
 
-fn score_research_one(
+fn score_discover_one(
     cfg: &GepaConstraintConfig,
     prompt: &str,
     ex: &GrepExample,
     idx: &DocIndex,
-) -> ResearchOutcome {
+) -> DiscoverOutcome {
     let messages = [json!({"role": "user", "content": format!("Question: {}", ex.question)})];
     let turn = match crate::tz::infer(
         &cfg.gateway,
-        &cfg.research_function,
+        &cfg.discover_function,
         &cfg.episode_id,
         &messages,
         &cfg.tags,
@@ -338,8 +424,8 @@ fn score_research_one(
     ) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("constraint research inference failed: {e:#}");
-            return ResearchOutcome {
+            eprintln!("constraint discover inference failed: {e:#}");
+            return DiscoverOutcome {
                 ok: false,
                 model_pattern: None,
                 top_k: String::new(),
@@ -347,7 +433,7 @@ fn score_research_one(
         }
     };
     let Some(pattern) = first_grep_call(&turn.content) else {
-        return ResearchOutcome {
+        return DiscoverOutcome {
             ok: false,
             model_pattern: None,
             top_k: String::new(),
@@ -355,22 +441,22 @@ fn score_research_one(
     };
     let hits = grep_top_k(idx, &pattern, 10);
     let gold = gold_pairs(&ex.gold);
-    ResearchOutcome {
+    DiscoverOutcome {
         ok: grep_hit_hits(&hits, &gold, idx),
         model_pattern: Some(pattern),
         top_k: render_grep_hits(&hits),
     }
 }
 
-fn score_research(
+fn score_discover(
     cfg: &GepaConstraintConfig,
     prompt: &str,
     examples: &[GrepExample],
     idx: &DocIndex,
-) -> Vec<ResearchOutcome> {
+) -> Vec<DiscoverOutcome> {
     examples
         .iter()
-        .map(|ex| score_research_one(cfg, prompt, ex, idx))
+        .map(|ex| score_discover_one(cfg, prompt, ex, idx))
         .collect()
 }
 
@@ -381,62 +467,58 @@ fn acc(scores: &[bool]) -> f64 {
     scores.iter().filter(|b| **b).count() as f64 / scores.len() as f64
 }
 
-fn outcome_acc(scores: &[MaterializeOutcome]) -> f64 {
+fn csp_acc(scores: &[CspOutcome]) -> f64 {
     if scores.is_empty() {
         return 0.0;
     }
     scores.iter().filter(|o| o.ok).count() as f64 / scores.len() as f64
 }
 
-fn research_acc(scores: &[ResearchOutcome]) -> f64 {
+fn discover_acc(scores: &[DiscoverOutcome]) -> f64 {
     if scores.is_empty() {
         return 0.0;
     }
     scores.iter().filter(|o| o.ok).count() as f64 / scores.len() as f64
 }
 
-fn research_to_bools(scores: &[ResearchOutcome]) -> Vec<bool> {
+fn discover_to_bools(scores: &[DiscoverOutcome]) -> Vec<bool> {
     scores.iter().map(|o| o.ok).collect()
 }
 
-fn outcomes_to_bools(scores: &[MaterializeOutcome]) -> Vec<bool> {
+fn csp_to_bools(scores: &[CspOutcome]) -> Vec<bool> {
     scores.iter().map(|o| o.ok).collect()
 }
 
-fn combined_acc_from_pools(
-    have_research: bool,
-    have_materialize: bool,
-    have_compile_fix: bool,
-    research: f64,
-    materialize: f64,
-    compile_fix: f64,
-    cfg: &GepaConstraintConfig,
-) -> f64 {
-    let wr = if have_research {
-        cfg.w_research.max(0.0)
-    } else {
-        0.0
-    };
-    let wm = if have_materialize {
-        cfg.w_materialize.max(0.0)
-    } else {
-        0.0
-    };
-    let wf = if have_compile_fix {
-        cfg.w_compile_fix.max(0.0)
-    } else {
-        0.0
-    };
-    let w = wr + wm + wf;
+fn pool_weights(cfg: &GepaConstraintConfig) -> [f64; POOL_COUNT] {
+    [
+        cfg.w_discover,
+        cfg.w_materialize,
+        cfg.w_compile,
+        cfg.w_coverage,
+        cfg.w_validate,
+    ]
+}
+
+fn combined_acc_from_pools(have: [bool; POOL_COUNT], accs: [f64; POOL_COUNT], cfg: &GepaConstraintConfig) -> f64 {
+    let weights = pool_weights(cfg);
+    let mut w = 0.0;
+    let mut sum = 0.0;
+    for i in 0..POOL_COUNT {
+        if have[i] {
+            let wi = weights[i].max(0.0);
+            w += wi;
+            sum += wi * accs[i];
+        }
+    }
     if w <= 0.0 {
         return 0.0;
     }
-    (wr * research + wm * materialize + wf * compile_fix) / w
+    sum / w
 }
 
 fn traces_from_outcomes(
     examples: &[MaterializeExample],
-    outcomes: &[MaterializeOutcome],
+    outcomes: &[CspOutcome],
 ) -> Vec<MaterializeTrace> {
     examples
         .iter()
@@ -716,50 +798,66 @@ fn feedback_tags(cfg: &GepaConstraintConfig, stage: &str) -> Value {
     Value::Object(m)
 }
 
-fn post_materialize_feedback(cfg: &GepaConstraintConfig, stage: &str, metric: &str, value: f64) {
+fn post_feedback(cfg: &GepaConstraintConfig, stage: &str, metric: &str, value: f64) {
     let tags = feedback_tags(cfg, stage);
     crate::tz::post_feedback(&cfg.gateway, &cfg.episode_id, metric, json!(value), &tags);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromptSlice {
-    Research,
+    Discover,
     Materialize,
-    CompileFix,
+    Compile,
+    Coverage,
+    Validate,
 }
 
 #[derive(Clone)]
-struct TripleCandidate {
-    research_prompt: String,
+struct QuintupleCandidate {
+    discover_prompt: String,
     materialize_prompt: String,
-    compile_fix_prompt: String,
-    r_val: Vec<bool>,
+    compile_prompt: String,
+    coverage_prompt: String,
+    validate_prompt: String,
+    d_val: Vec<bool>,
     m_val: Vec<bool>,
-    f_val: Vec<bool>,
+    c_val: Vec<bool>,
+    cov_val: Vec<bool>,
+    v_val: Vec<bool>,
 }
 
-fn candidate_triple_bits(c: &TripleCandidate) -> Vec<bool> {
-    c.r_val
+fn candidate_quintuple_bits(c: &QuintupleCandidate) -> Vec<bool> {
+    c.d_val
         .iter()
         .chain(&c.m_val)
-        .chain(&c.f_val)
+        .chain(&c.c_val)
+        .chain(&c.cov_val)
+        .chain(&c.v_val)
         .copied()
         .collect()
 }
 
-fn triple_candidate_combined(c: &TripleCandidate, cfg: &GepaConstraintConfig) -> f64 {
+fn quintuple_candidate_combined(c: &QuintupleCandidate, cfg: &GepaConstraintConfig) -> f64 {
     combined_acc_from_pools(
-        !c.r_val.is_empty(),
-        !c.m_val.is_empty(),
-        !c.f_val.is_empty(),
-        acc(&c.r_val),
-        acc(&c.m_val),
-        acc(&c.f_val),
+        [
+            !c.d_val.is_empty(),
+            !c.m_val.is_empty(),
+            !c.c_val.is_empty(),
+            !c.cov_val.is_empty(),
+            !c.v_val.is_empty(),
+        ],
+        [
+            acc(&c.d_val),
+            acc(&c.m_val),
+            acc(&c.c_val),
+            acc(&c.cov_val),
+            acc(&c.v_val),
+        ],
         cfg,
     )
 }
 
-fn select_triple_parent(pool: &[TripleCandidate], rng: &mut StdRng) -> usize {
+fn select_quintuple_parent(pool: &[QuintupleCandidate], rng: &mut StdRng) -> usize {
     if pool.len() <= 1 {
         return 0;
     }
@@ -768,7 +866,7 @@ fn select_triple_parent(pool: &[TripleCandidate], rng: &mut StdRng) -> usize {
         .enumerate()
         .map(|(i, c)| Candidate {
             prompt: i.to_string(),
-            val_bools: candidate_triple_bits(c),
+            val_bools: candidate_quintuple_bits(c),
         })
         .collect();
     select_parent_pareto_weighted(&candidates, rng)
@@ -781,13 +879,13 @@ fn sample_slice<T: Clone>(items: &[T], n: usize, rng: &mut StdRng) -> Vec<T> {
         .collect()
 }
 
-fn weighted_slots(minibatch: usize, have: [bool; 3], weights: [f64; 3]) -> [usize; 3] {
+fn weighted_slots(minibatch: usize, have: [bool; POOL_COUNT], weights: [f64; POOL_COUNT]) -> [usize; POOL_COUNT] {
     let active = have.iter().filter(|&&h| h).count();
     if minibatch == 0 || active == 0 {
-        return [0; 3];
+        return [0; POOL_COUNT];
     }
     if minibatch < active {
-        let mut out = [0; 3];
+        let mut out = [0; POOL_COUNT];
         let mut left = minibatch;
         for (i, h) in have.iter().enumerate() {
             if *h && left > 0 {
@@ -797,9 +895,9 @@ fn weighted_slots(minibatch: usize, have: [bool; 3], weights: [f64; 3]) -> [usiz
         }
         return out;
     }
-    let mut out = [0; 3];
+    let mut out = [0; POOL_COUNT];
     let mut total_w = 0.0;
-    for i in 0..3 {
+    for i in 0..POOL_COUNT {
         if have[i] {
             out[i] = 1;
             total_w += weights[i].max(0.0);
@@ -810,11 +908,11 @@ fn weighted_slots(minibatch: usize, have: [bool; 3], weights: [f64; 3]) -> [usiz
         return out;
     }
     if total_w <= 0.0 {
-        return weighted_slots(minibatch, have, [1.0; 3]);
+        return weighted_slots(minibatch, have, [1.0; POOL_COUNT]);
     }
     let mut frac = Vec::new();
     let mut assigned = 0usize;
-    for i in 0..3 {
+    for i in 0..POOL_COUNT {
         if !have[i] {
             continue;
         }
@@ -837,73 +935,92 @@ fn weighted_slots(minibatch: usize, have: [bool; 3], weights: [f64; 3]) -> [usiz
 }
 
 #[derive(Clone)]
-struct TripleBatch {
-    research: Vec<GrepExample>,
+struct QuintupleBatch {
+    discover: Vec<GrepExample>,
     materialize: Vec<MaterializeExample>,
-    compile_fix: Vec<CompileFixExample>,
+    compile: Vec<CompileFixExample>,
+    coverage: Vec<CoverageExample>,
+    validate: Vec<ValidateExample>,
 }
 
-fn sample_triple_batch(
+fn sample_quintuple_batch(
     cfg: &GepaConstraintConfig,
-    research: &[GrepExample],
+    discover: &[GrepExample],
     materialize: &[MaterializeExample],
-    compile_fix: &[CompileFixExample],
+    compile: &[CompileFixExample],
+    coverage: &[CoverageExample],
+    validate: &[ValidateExample],
     rng: &mut StdRng,
-) -> TripleBatch {
+) -> QuintupleBatch {
     let slots = weighted_slots(
         cfg.minibatch,
         [
-            !research.is_empty(),
+            !discover.is_empty(),
             !materialize.is_empty(),
-            !compile_fix.is_empty(),
+            !compile.is_empty(),
+            !coverage.is_empty(),
+            !validate.is_empty(),
         ],
-        [cfg.w_research, cfg.w_materialize, cfg.w_compile_fix],
+        pool_weights(cfg),
     );
-    TripleBatch {
-        research: sample_slice(research, slots[0], rng),
+    QuintupleBatch {
+        discover: sample_slice(discover, slots[0], rng),
         materialize: sample_slice(materialize, slots[1], rng),
-        compile_fix: sample_slice(compile_fix, slots[2], rng),
+        compile: sample_slice(compile, slots[2], rng),
+        coverage: sample_slice(coverage, slots[3], rng),
+        validate: sample_slice(validate, slots[4], rng),
     }
 }
 
-fn target_from_failures(r_fail: usize, m_fail: usize, f_fail: usize) -> Option<PromptSlice> {
-    if r_fail == 0 && m_fail == 0 && f_fail == 0 {
+fn target_from_failures(fails: [usize; POOL_COUNT]) -> Option<PromptSlice> {
+    if fails.iter().all(|&n| n == 0) {
         return None;
     }
-    if r_fail >= m_fail && r_fail >= f_fail {
-        Some(PromptSlice::Research)
-    } else if m_fail >= f_fail {
+    let max_fail = *fails.iter().max().unwrap_or(&0);
+    if fails[0] == max_fail {
+        Some(PromptSlice::Discover)
+    } else if fails[1] == max_fail {
         Some(PromptSlice::Materialize)
+    } else if fails[2] == max_fail {
+        Some(PromptSlice::Compile)
+    } else if fails[3] == max_fail {
+        Some(PromptSlice::Coverage)
     } else {
-        Some(PromptSlice::CompileFix)
+        Some(PromptSlice::Validate)
     }
 }
 
-fn reflect_triple(
+fn reflect_quintuple(
     cfg: &GepaConstraintConfig,
     target: PromptSlice,
     current_prompt: &str,
-    parent_scores: (f64, f64, f64, f64),
+    parent_scores: ([f64; POOL_COUNT], f64),
     traces: &str,
 ) -> Result<String> {
     let target_name = match target {
-        PromptSlice::Research => "research",
+        PromptSlice::Discover => "discover",
         PromptSlice::Materialize => "materialize",
-        PromptSlice::CompileFix => "compile_fix",
+        PromptSlice::Compile => "compile",
+        PromptSlice::Coverage => "coverage",
+        PromptSlice::Validate => "validate",
     };
     let instruction = format!(
         "You are improving one SYSTEM PROMPT slice for a constraint-table GEPA optimizer.\n\
          Target slice to mutate: {target_name}\n\
-         Slices are: research (find source chunks with grep/read), materialize (write .csp from workbook), compile_fix (repair broken .csp from compiler errors).\n\
+         Slices are: discover (find source chunks with grep/read), materialize (write .csp from workbook), \
+         compile (repair broken .csp from compiler errors), coverage (close graph_stats gaps), \
+         validate (fix .csp from constraint_solve errors).\n\
          Diagnose FAIL traces and rewrite ONLY the target slice prompt. Preserve behavior that works. Do not mention exact gold values or case IDs.\n\
          Reply with ONLY the new prompt text.\n\n\
          === PARENT SCORES ON MINIBATCH ===\n\
-         research={:.3} materialize={:.3} compile_fix={:.3} combined={:.3}\n\n\
+         discover={:.3} materialize={:.3} compile={:.3} coverage={:.3} validate={:.3} combined={:.3}\n\n\
          === CURRENT TARGET PROMPT ===\n{}\n\n=== TRACES ===\n{}=== NEW TARGET PROMPT ===",
-        parent_scores.0,
+        parent_scores.0[0],
+        parent_scores.0[1],
+        parent_scores.0[2],
+        parent_scores.0[3],
+        parent_scores.0[4],
         parent_scores.1,
-        parent_scores.2,
-        parent_scores.3,
         current_prompt,
         traces,
     );
@@ -937,19 +1054,23 @@ fn reflect_triple(
     Ok(out)
 }
 
-fn format_triple_traces(
-    research: &[GrepExample],
-    r_out: &[ResearchOutcome],
+fn format_quintuple_traces(
+    discover: &[GrepExample],
+    d_out: &[DiscoverOutcome],
     materialize: &[MaterializeExample],
-    m_out: &[MaterializeOutcome],
-    compile_fix: &[CompileFixExample],
-    f_out: &[MaterializeOutcome],
+    m_out: &[CspOutcome],
+    compile: &[CompileFixExample],
+    c_out: &[CspOutcome],
+    coverage: &[CoverageExample],
+    cov_out: &[CspOutcome],
+    validate: &[ValidateExample],
+    v_out: &[CspOutcome],
 ) -> String {
     let mut out = String::new();
-    for (i, (ex, score)) in research.iter().zip(r_out).enumerate() {
+    for (i, (ex, score)) in discover.iter().zip(d_out).enumerate() {
         let status = if score.ok { "OK" } else { "FAIL" };
         out.push_str(&format!(
-            "--- Research trace {} ({status}) ---\nQuestion: {}\nGold chunks: {}\nModel grep: {:?}\nTop hits:\n{}\n\n",
+            "--- Discover trace {} ({status}) ---\nQuestion: {}\nGold chunks: {}\nModel grep: {:?}\nTop hits:\n{}\n\n",
             i + 1,
             ex.question,
             ex.gold.join(", "),
@@ -970,13 +1091,39 @@ fn format_triple_traces(
         ));
         out.push_str(&format!("Trace type: materialize ({status})\n\n"));
     }
-    for (i, (ex, score)) in compile_fix.iter().zip(f_out).enumerate() {
+    for (i, (ex, score)) in compile.iter().zip(c_out).enumerate() {
         let status = if score.ok { "OK" } else { "FAIL" };
         out.push_str(&format!(
-            "--- Compile-fix trace {} ({status}) ---\nParameter: {}\nCompiler error: {}\nBroken .csp:\n{}\nGold values: {}\nModel .csp snippet:\n{}\nRecall: {:.3}\n\n",
+            "--- Compile trace {} ({status}) ---\nParameter: {}\nCompiler error: {}\nBroken .csp:\n{}\nGold values: {}\nModel .csp snippet:\n{}\nRecall: {:.3}\n\n",
             i + 1,
             ex.parameter,
             ex.compiler_error,
+            truncate_chars(&ex.broken_csp, 300),
+            ex.gold_values.join(", "),
+            truncate_chars(&score.model_csp, 500),
+            score.recall,
+        ));
+    }
+    for (i, (ex, score)) in coverage.iter().zip(cov_out).enumerate() {
+        let status = if score.ok { "OK" } else { "FAIL" };
+        out.push_str(&format!(
+            "--- Coverage trace {} ({status}) ---\nParameter: {}\nGraph stats report: {}\nBroken .csp:\n{}\nGold values: {}\nModel .csp snippet:\n{}\nRecall: {:.3}\n\n",
+            i + 1,
+            ex.parameter,
+            truncate_chars(&ex.graph_stats_report, 300),
+            truncate_chars(&ex.broken_csp, 300),
+            ex.gold_values.join(", "),
+            truncate_chars(&score.model_csp, 500),
+            score.recall,
+        ));
+    }
+    for (i, (ex, score)) in validate.iter().zip(v_out).enumerate() {
+        let status = if score.ok { "OK" } else { "FAIL" };
+        out.push_str(&format!(
+            "--- Validate trace {} ({status}) ---\nParameter: {}\nSolve error: {}\nBroken .csp:\n{}\nGold values: {}\nModel .csp snippet:\n{}\nRecall: {:.3}\n\n",
+            i + 1,
+            ex.parameter,
+            ex.solve_error,
             truncate_chars(&ex.broken_csp, 300),
             ex.gold_values.join(", "),
             truncate_chars(&score.model_csp, 500),
@@ -987,161 +1134,231 @@ fn format_triple_traces(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn score_triple(
+fn score_quintuple(
     cfg: &GepaConstraintConfig,
-    candidate: &TripleCandidate,
-    research: &[GrepExample],
+    candidate: &QuintupleCandidate,
+    discover: &[GrepExample],
     materialize: &[MaterializeExample],
-    compile_fix: &[CompileFixExample],
+    compile: &[CompileFixExample],
+    coverage: &[CoverageExample],
+    validate: &[ValidateExample],
     idx: &DocIndex,
 ) -> Result<(
-    Vec<ResearchOutcome>,
-    Vec<MaterializeOutcome>,
-    Vec<MaterializeOutcome>,
+    Vec<DiscoverOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
 )> {
-    let r = score_research(cfg, &candidate.research_prompt, research, idx);
+    let d = score_discover(cfg, &candidate.discover_prompt, discover, idx);
     let m = score_materialize(cfg, &candidate.materialize_prompt, materialize)?;
-    let f = score_compile_fix(cfg, &candidate.compile_fix_prompt, compile_fix)?;
-    Ok((r, m, f))
+    let c = score_compile(cfg, &candidate.compile_prompt, compile)?;
+    let cov = score_coverage(cfg, &candidate.coverage_prompt, coverage)?;
+    let v = score_validate(cfg, &candidate.validate_prompt, validate)?;
+    Ok((d, m, c, cov, v))
 }
 
 pub fn run(
     cfg: GepaConstraintConfig,
-    research_grep: Vec<GrepExample>,
+    discover: Vec<GrepExample>,
     materialize: Vec<MaterializeExample>,
-    compile_fix: Vec<CompileFixExample>,
+    compile: Vec<CompileFixExample>,
+    coverage: Vec<CoverageExample>,
+    validate: Vec<ValidateExample>,
 ) -> Result<GepaConstraintRunResult> {
     anyhow::ensure!(
-        !research_grep.is_empty() || !materialize.is_empty() || !compile_fix.is_empty(),
-        "no research/materialize/compile-fix examples to optimize against"
+        !discover.is_empty()
+            || !materialize.is_empty()
+            || !compile.is_empty()
+            || !coverage.is_empty()
+            || !validate.is_empty(),
+        "no discover/materialize/compile/coverage/validate examples to optimize against"
     );
-    let idx = DocIndex::open_or_create(&cfg.work).context("open index for constraint research")?;
-    if !research_grep.is_empty() {
-        crate::tz::ensure_function(&cfg.gateway, &cfg.research_function, Some(&cfg.variant))
-            .context("GEPA constraint research function")?;
+    let idx = DocIndex::open_or_create(&cfg.work).context("open index for constraint discover")?;
+    if !discover.is_empty() {
+        crate::tz::ensure_function(&cfg.gateway, &cfg.discover_function, Some(&cfg.variant))
+            .context("GEPA constraint discover function")?;
     }
     if !materialize.is_empty() {
         crate::tz::ensure_function(&cfg.gateway, &cfg.materialize_function, Some(&cfg.variant))
             .context("GEPA constraint materialize function")?;
     }
-    if !compile_fix.is_empty() {
-        crate::tz::ensure_function(&cfg.gateway, &cfg.compile_fix_function, Some(&cfg.variant))
-            .context("GEPA constraint compile-fix function")?;
+    if !compile.is_empty() {
+        crate::tz::ensure_function(&cfg.gateway, &cfg.compile_function, Some(&cfg.variant))
+            .context("GEPA constraint compile function")?;
+    }
+    if !coverage.is_empty() {
+        crate::tz::ensure_function(&cfg.gateway, &cfg.coverage_function, Some(&cfg.variant))
+            .context("GEPA constraint coverage function")?;
+    }
+    if !validate.is_empty() {
+        crate::tz::ensure_function(&cfg.gateway, &cfg.validate_function, Some(&cfg.variant))
+            .context("GEPA constraint validate function")?;
     }
 
-    let (train_r, val_r) = split_by_episode(&research_grep, |ex| &ex.episode_id, cfg.val_frac);
+    let (train_d, val_d) = split_by_episode(&discover, |ex| &ex.episode_id, cfg.val_frac);
     let (train_m, val_m) = split_by_episode(&materialize, |ex| &ex.episode_id, cfg.val_frac);
-    let (train_f, val_f) = split_by_episode(&compile_fix, |ex| &ex.episode_id, cfg.val_frac);
+    let (train_c, val_c) = split_by_episode(&compile, |ex| &ex.episode_id, cfg.val_frac);
+    let (train_cov, val_cov) = split_by_episode(&coverage, |ex| &ex.episode_id, cfg.val_frac);
+    let (train_v, val_v) = split_by_episode(&validate, |ex| &ex.episode_id, cfg.val_frac);
     println!(
-        "gepa_constraint: research {} ({} train, {} val), materialize {} ({} train, {} val), compile_fix {} ({} train, {} val), budget={}, minibatch={}, work={}",
-        research_grep.len(),
-        train_r.len(),
-        val_r.len(),
+        "gepa_constraint: discover {} ({} train, {} val), materialize {} ({} train, {} val), compile {} ({} train, {} val), coverage {} ({} train, {} val), validate {} ({} train, {} val), budget={}, minibatch={}, work={}",
+        discover.len(),
+        train_d.len(),
+        val_d.len(),
         materialize.len(),
         train_m.len(),
         val_m.len(),
-        compile_fix.len(),
-        train_f.len(),
-        val_f.len(),
+        compile.len(),
+        train_c.len(),
+        val_c.len(),
+        coverage.len(),
+        train_cov.len(),
+        val_cov.len(),
+        validate.len(),
+        train_v.len(),
+        val_v.len(),
         cfg.budget,
         cfg.minibatch,
         cfg.work.display(),
     );
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
-    let base = TripleCandidate {
-        research_prompt: cfg.seed_research_prompt.clone(),
+    let base = QuintupleCandidate {
+        discover_prompt: cfg.seed_discover_prompt.clone(),
         materialize_prompt: cfg.seed_materialize_prompt.clone(),
-        compile_fix_prompt: cfg.seed_compile_fix_prompt.clone(),
-        r_val: Vec::new(),
+        compile_prompt: cfg.seed_compile_prompt.clone(),
+        coverage_prompt: cfg.seed_coverage_prompt.clone(),
+        validate_prompt: cfg.seed_validate_prompt.clone(),
+        d_val: Vec::new(),
         m_val: Vec::new(),
-        f_val: Vec::new(),
+        c_val: Vec::new(),
+        cov_val: Vec::new(),
+        v_val: Vec::new(),
     };
-    let (base_r, base_m, base_f) = score_triple(&cfg, &base, &val_r, &val_m, &val_f, &idx)?;
-    let base_r_acc = research_acc(&base_r);
-    let base_m_acc = outcome_acc(&base_m);
-    let base_f_acc = outcome_acc(&base_f);
+    let (base_d, base_m, base_c, base_cov, base_v) =
+        score_quintuple(&cfg, &base, &val_d, &val_m, &val_c, &val_cov, &val_v, &idx)?;
+    let base_d_acc = discover_acc(&base_d);
+    let base_m_acc = csp_acc(&base_m);
+    let base_c_acc = csp_acc(&base_c);
+    let base_cov_acc = csp_acc(&base_cov);
+    let base_v_acc = csp_acc(&base_v);
     let baseline_acc = combined_acc_from_pools(
-        !base_r.is_empty(),
-        !base_m.is_empty(),
-        !base_f.is_empty(),
-        base_r_acc,
-        base_m_acc,
-        base_f_acc,
+        [
+            !base_d.is_empty(),
+            !base_m.is_empty(),
+            !base_c.is_empty(),
+            !base_cov.is_empty(),
+            !base_v.is_empty(),
+        ],
+        [base_d_acc, base_m_acc, base_c_acc, base_cov_acc, base_v_acc],
         &cfg,
     );
-    post_materialize_feedback(&cfg, "baseline", "gepa_c_baseline_research", base_r_acc);
-    post_materialize_feedback(&cfg, "baseline", "gepa_c_baseline_materialize", base_m_acc);
-    post_materialize_feedback(&cfg, "baseline", "gepa_c_baseline_compile_fix", base_f_acc);
-    post_materialize_feedback(&cfg, "baseline", "gepa_c_combined_acc", baseline_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_baseline_discover", base_d_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_baseline_materialize", base_m_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_baseline_compile", base_c_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_baseline_coverage", base_cov_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_baseline_validate", base_v_acc);
+    post_feedback(&cfg, "baseline", "gepa_c_combined_acc", baseline_acc);
 
-    let pr = sample_slice(&val_r, cfg.pareto_size, &mut rng);
+    let pd = sample_slice(&val_d, cfg.pareto_size, &mut rng);
     let pm = sample_slice(&val_m, cfg.pareto_size, &mut rng);
-    let pf = sample_slice(&val_f, cfg.pareto_size, &mut rng);
-    let (base_pr, base_pm, base_pf) = score_triple(&cfg, &base, &pr, &pm, &pf, &idx)?;
-    let mut pool = vec![TripleCandidate {
-        r_val: research_to_bools(&base_pr),
-        m_val: outcomes_to_bools(&base_pm),
-        f_val: outcomes_to_bools(&base_pf),
+    let pc = sample_slice(&val_c, cfg.pareto_size, &mut rng);
+    let pcov = sample_slice(&val_cov, cfg.pareto_size, &mut rng);
+    let pv = sample_slice(&val_v, cfg.pareto_size, &mut rng);
+    let (base_pd, base_pm, base_pc, base_pcov, base_pv) =
+        score_quintuple(&cfg, &base, &pd, &pm, &pc, &pcov, &pv, &idx)?;
+    let mut pool = vec![QuintupleCandidate {
+        d_val: discover_to_bools(&base_pd),
+        m_val: csp_to_bools(&base_pm),
+        c_val: csp_to_bools(&base_pc),
+        cov_val: csp_to_bools(&base_pcov),
+        v_val: csp_to_bools(&base_pv),
         ..base
     }];
 
     for it in 0..cfg.budget {
-        let parent_idx = select_triple_parent(&pool, &mut rng);
+        let parent_idx = select_quintuple_parent(&pool, &mut rng);
         let parent = pool[parent_idx].clone();
         let mut selected = None;
         for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
-            let batch = sample_triple_batch(&cfg, &train_r, &train_m, &train_f, &mut rng);
-            let (r_out, m_out, f_out) = score_triple(
+            let batch = sample_quintuple_batch(
+                &cfg,
+                &train_d,
+                &train_m,
+                &train_c,
+                &train_cov,
+                &train_v,
+                &mut rng,
+            );
+            let (d_out, m_out, c_out, cov_out, v_out) = score_quintuple(
                 &cfg,
                 &parent,
-                &batch.research,
+                &batch.discover,
                 &batch.materialize,
-                &batch.compile_fix,
+                &batch.compile,
+                &batch.coverage,
+                &batch.validate,
                 &idx,
             )?;
-            let r_fail = r_out.iter().filter(|o| !o.ok).count();
-            let m_fail = m_out.iter().filter(|o| !o.ok).count();
-            let f_fail = f_out.iter().filter(|o| !o.ok).count();
-            if let Some(target) = target_from_failures(r_fail, m_fail, f_fail) {
-                selected = Some((batch, r_out, m_out, f_out, target));
+            let fails = [
+                d_out.iter().filter(|o| !o.ok).count(),
+                m_out.iter().filter(|o| !o.ok).count(),
+                c_out.iter().filter(|o| !o.ok).count(),
+                cov_out.iter().filter(|o| !o.ok).count(),
+                v_out.iter().filter(|o| !o.ok).count(),
+            ];
+            if let Some(target) = target_from_failures(fails) {
+                selected = Some((batch, d_out, m_out, c_out, cov_out, v_out, target));
                 break;
             }
         }
-        let Some((batch, r_out, m_out, f_out, target)) = selected else {
-            println!("[iter {it}] no failures in sampled triple minibatch — skip");
+        let Some((batch, d_out, m_out, c_out, cov_out, v_out, target)) = selected else {
+            println!("[iter {it}] no failures in sampled quintuple minibatch — skip");
             continue;
         };
-        let parent_r = research_acc(&r_out);
-        let parent_m = outcome_acc(&m_out);
-        let parent_f = outcome_acc(&f_out);
+        let parent_pool_accs = [
+            discover_acc(&d_out),
+            csp_acc(&m_out),
+            csp_acc(&c_out),
+            csp_acc(&cov_out),
+            csp_acc(&v_out),
+        ];
         let parent_c = combined_acc_from_pools(
-            !r_out.is_empty(),
-            !m_out.is_empty(),
-            !f_out.is_empty(),
-            parent_r,
-            parent_m,
-            parent_f,
+            [
+                !d_out.is_empty(),
+                !m_out.is_empty(),
+                !c_out.is_empty(),
+                !cov_out.is_empty(),
+                !v_out.is_empty(),
+            ],
+            parent_pool_accs,
             &cfg,
         );
-        let traces = format_triple_traces(
-            &batch.research,
-            &r_out,
+        let traces = format_quintuple_traces(
+            &batch.discover,
+            &d_out,
             &batch.materialize,
             &m_out,
-            &batch.compile_fix,
-            &f_out,
+            &batch.compile,
+            &c_out,
+            &batch.coverage,
+            &cov_out,
+            &batch.validate,
+            &v_out,
         );
         let current_prompt = match target {
-            PromptSlice::Research => &parent.research_prompt,
+            PromptSlice::Discover => &parent.discover_prompt,
             PromptSlice::Materialize => &parent.materialize_prompt,
-            PromptSlice::CompileFix => &parent.compile_fix_prompt,
+            PromptSlice::Compile => &parent.compile_prompt,
+            PromptSlice::Coverage => &parent.coverage_prompt,
+            PromptSlice::Validate => &parent.validate_prompt,
         };
-        let child_slice = match reflect_triple(
+        let child_slice = match reflect_quintuple(
             &cfg,
             target,
             current_prompt,
-            (parent_r, parent_m, parent_f, parent_c),
+            (parent_pool_accs, parent_c),
             &traces,
         ) {
             Ok(prompt) => prompt,
@@ -1152,95 +1369,131 @@ pub fn run(
         };
         let mut child = parent.clone();
         match target {
-            PromptSlice::Research => child.research_prompt = child_slice,
+            PromptSlice::Discover => child.discover_prompt = child_slice,
             PromptSlice::Materialize => child.materialize_prompt = child_slice,
-            PromptSlice::CompileFix => child.compile_fix_prompt = child_slice,
+            PromptSlice::Compile => child.compile_prompt = child_slice,
+            PromptSlice::Coverage => child.coverage_prompt = child_slice,
+            PromptSlice::Validate => child.validate_prompt = child_slice,
         }
-        let (child_r_out, child_m_out, child_f_out) = score_triple(
+        let (child_d_out, child_m_out, child_c_out, child_cov_out, child_v_out) = score_quintuple(
             &cfg,
             &child,
-            &batch.research,
+            &batch.discover,
             &batch.materialize,
-            &batch.compile_fix,
+            &batch.compile,
+            &batch.coverage,
+            &batch.validate,
             &idx,
         )?;
         let child_c = combined_acc_from_pools(
-            !child_r_out.is_empty(),
-            !child_m_out.is_empty(),
-            !child_f_out.is_empty(),
-            research_acc(&child_r_out),
-            outcome_acc(&child_m_out),
-            outcome_acc(&child_f_out),
+            [
+                !child_d_out.is_empty(),
+                !child_m_out.is_empty(),
+                !child_c_out.is_empty(),
+                !child_cov_out.is_empty(),
+                !child_v_out.is_empty(),
+            ],
+            [
+                discover_acc(&child_d_out),
+                csp_acc(&child_m_out),
+                csp_acc(&child_c_out),
+                csp_acc(&child_cov_out),
+                csp_acc(&child_v_out),
+            ],
             &cfg,
         );
         if child_c <= parent_c {
             println!("[iter {it}] child_mb {child_c:.3} <= parent_mb {parent_c:.3} — discarded");
             continue;
         }
-        let (child_pr, child_pm, child_pf) = score_triple(&cfg, &child, &pr, &pm, &pf, &idx)?;
-        child.r_val = research_to_bools(&child_pr);
-        child.m_val = outcomes_to_bools(&child_pm);
-        child.f_val = outcomes_to_bools(&child_pf);
+        let (child_pd, child_pm, child_pc, child_pcov, child_pv) =
+            score_quintuple(&cfg, &child, &pd, &pm, &pc, &pcov, &pv, &idx)?;
+        child.d_val = discover_to_bools(&child_pd);
+        child.m_val = csp_to_bools(&child_pm);
+        child.c_val = csp_to_bools(&child_pc);
+        child.cov_val = csp_to_bools(&child_pcov);
+        child.v_val = csp_to_bools(&child_pv);
         pool.push(child);
         let best = pool
             .iter()
-            .map(|c| triple_candidate_combined(c, &cfg))
+            .map(|c| quintuple_candidate_combined(c, &cfg))
             .fold(f64::NEG_INFINITY, f64::max);
         println!(
             "[iter {it}] accepted target={target:?} parent_mb={parent_c:.3} child_mb={child_c:.3} pareto_combined={best:.3} pool_size={}",
             pool.len()
         );
-        post_materialize_feedback(&cfg, &format!("iter_{it}"), "gepa_c_combined_acc", best);
+        post_feedback(&cfg, &format!("iter_{it}"), "gepa_c_combined_acc", best);
     }
 
     let mut best = pool[0].clone();
     let mut best_acc = f64::NEG_INFINITY;
-    let mut best_r_acc = 0.0;
+    let mut best_d_acc = 0.0;
     let mut best_m_acc = 0.0;
-    let mut best_f_acc = 0.0;
+    let mut best_c_acc = 0.0;
+    let mut best_cov_acc = 0.0;
+    let mut best_v_acc = 0.0;
     for candidate in &pool {
-        let (r, m, f) = score_triple(&cfg, candidate, &val_r, &val_m, &val_f, &idx)?;
-        let r_acc = research_acc(&r);
-        let m_acc = outcome_acc(&m);
-        let f_acc = outcome_acc(&f);
+        let (d, m, c, cov, v) =
+            score_quintuple(&cfg, candidate, &val_d, &val_m, &val_c, &val_cov, &val_v, &idx)?;
+        let d_acc = discover_acc(&d);
+        let m_acc = csp_acc(&m);
+        let c_acc = csp_acc(&c);
+        let cov_acc = csp_acc(&cov);
+        let v_acc = csp_acc(&v);
         let combined = combined_acc_from_pools(
-            !r.is_empty(),
-            !m.is_empty(),
-            !f.is_empty(),
-            r_acc,
-            m_acc,
-            f_acc,
+            [
+                !d.is_empty(),
+                !m.is_empty(),
+                !c.is_empty(),
+                !cov.is_empty(),
+                !v.is_empty(),
+            ],
+            [d_acc, m_acc, c_acc, cov_acc, v_acc],
             &cfg,
         );
         if combined > best_acc {
             best_acc = combined;
             best = candidate.clone();
-            best_r_acc = r_acc;
+            best_d_acc = d_acc;
             best_m_acc = m_acc;
-            best_f_acc = f_acc;
+            best_c_acc = c_acc;
+            best_cov_acc = cov_acc;
+            best_v_acc = v_acc;
         }
     }
     if !best_acc.is_finite() {
         best_acc = 0.0;
     }
-    post_materialize_feedback(&cfg, "final", "gepa_c_final_research", best_r_acc);
-    post_materialize_feedback(&cfg, "final", "gepa_c_final_materialize", best_m_acc);
-    post_materialize_feedback(&cfg, "final", "gepa_c_final_compile_fix", best_f_acc);
-    post_materialize_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_discover", best_d_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_materialize", best_m_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_compile", best_c_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_coverage", best_cov_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_validate", best_v_acc);
+    post_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
+    post_feedback(
+        &cfg,
+        "final",
+        "gepa_c_candidates",
+        pool.len() as f64,
+    );
     println!(
-        "TZ final: episode={} research={best_r_acc:.3} materialize={best_m_acc:.3} compile_fix={best_f_acc:.3} combined={best_acc:.3} (baseline was {baseline_acc:.3})",
+        "TZ final: episode={} discover={best_d_acc:.3} materialize={best_m_acc:.3} compile={best_c_acc:.3} coverage={best_cov_acc:.3} validate={best_v_acc:.3} combined={best_acc:.3} (baseline was {baseline_acc:.3})",
         cfg.episode_id,
     );
     Ok(GepaConstraintRunResult {
         prompt: best.materialize_prompt.clone(),
-        research_prompt: best.research_prompt,
+        discover_prompt: best.discover_prompt,
         materialize_prompt: best.materialize_prompt,
-        compile_fix_prompt: best.compile_fix_prompt,
+        compile_prompt: best.compile_prompt,
+        coverage_prompt: best.coverage_prompt,
+        validate_prompt: best.validate_prompt,
         baseline_acc,
         best_acc,
-        research_acc: best_r_acc,
+        discover_acc: best_d_acc,
         materialize_acc: best_m_acc,
-        compile_fix_acc: best_f_acc,
+        compile_acc: best_c_acc,
+        coverage_acc: best_cov_acc,
+        validate_acc: best_v_acc,
         candidates: pool.len(),
         episode_id: cfg.episode_id,
     })
@@ -1270,9 +1523,9 @@ pub fn run_materialize(
 
     let baseline_out = score_materialize(&cfg, &cfg.seed_materialize_prompt, &val)
         .context("score baseline materialize on validation set")?;
-    let baseline_acc = outcome_acc(&baseline_out);
+    let baseline_acc = csp_acc(&baseline_out);
     println!("baseline val: materialize={baseline_acc:.3}");
-    post_materialize_feedback(
+    post_feedback(
         &cfg,
         "baseline",
         "gepa_c_baseline_materialize",
@@ -1291,7 +1544,7 @@ pub fn run_materialize(
         .context("score baseline materialize on pareto set")?;
     let mut pool = vec![Candidate {
         prompt: cfg.seed_materialize_prompt.clone(),
-        val_bools: outcomes_to_bools(&base_pareto),
+        val_bools: csp_to_bools(&base_pareto),
     }];
 
     for it in 0..cfg.budget {
@@ -1311,7 +1564,7 @@ pub fn run_materialize(
             let traces = traces_from_outcomes(&batch, &outcomes);
             let failures = traces.iter().filter(|t| !t.ok).count();
             if failures > 0 {
-                parent_acc = outcome_acc(&outcomes);
+                parent_acc = csp_acc(&outcomes);
                 parent_traces = Some(traces);
                 minibatch = Some(batch);
                 break;
@@ -1344,7 +1597,7 @@ pub fn run_materialize(
 
         let child_mb = score_materialize(&cfg, &child_prompt, &batch)
             .with_context(|| format!("score child minibatch at iter {it}"))?;
-        let child_acc = outcome_acc(&child_mb);
+        let child_acc = csp_acc(&child_mb);
         if child_acc <= parent_acc {
             println!(
                 "[iter {it}] child_mb {child_acc:.3} <= parent_mb {parent_acc:.3} — discarded"
@@ -1356,7 +1609,7 @@ pub fn run_materialize(
             .with_context(|| format!("score child pareto set at iter {it}"))?;
         pool.push(Candidate {
             prompt: child_prompt,
-            val_bools: outcomes_to_bools(&child_pareto),
+            val_bools: csp_to_bools(&child_pareto),
         });
         let best_pareto = pool
             .iter()
@@ -1366,13 +1619,13 @@ pub fn run_materialize(
             "[iter {it}] parent_idx={parent_idx} parent_mb={parent_acc:.3} -> child_mb={child_acc:.3} — accepted (pareto_materialize={best_pareto:.3}, pool_size={})",
             pool.len(),
         );
-        post_materialize_feedback(
+        post_feedback(
             &cfg,
             &format!("iter_{it}"),
             "gepa_c_iter_materialize",
             best_pareto,
         );
-        post_materialize_feedback(
+        post_feedback(
             &cfg,
             &format!("iter_{it}"),
             "gepa_c_combined_acc",
@@ -1386,7 +1639,7 @@ pub fn run_materialize(
     for candidate in &pool {
         let outcomes = score_materialize(&cfg, &candidate.prompt, &val)
             .context("score final materialize candidate on validation set")?;
-        let candidate_acc = outcome_acc(&outcomes);
+        let candidate_acc = csp_acc(&outcomes);
         if candidate_acc > best_acc {
             best_acc = candidate_acc;
             best_prompt = candidate.prompt.clone();
@@ -1396,8 +1649,14 @@ pub fn run_materialize(
         best_acc = 0.0;
     }
 
-    post_materialize_feedback(&cfg, "final", "gepa_c_final_materialize", best_acc);
-    post_materialize_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
+    post_feedback(&cfg, "final", "gepa_c_final_materialize", best_acc);
+    post_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
+    post_feedback(
+        &cfg,
+        "final",
+        "gepa_c_candidates",
+        pool.len() as f64,
+    );
     println!(
         "TZ final: episode={} materialize={best_acc:.3} (baseline was {baseline_acc:.3})",
         cfg.episode_id,
@@ -1405,14 +1664,18 @@ pub fn run_materialize(
 
     Ok(GepaConstraintRunResult {
         prompt: best_prompt.clone(),
-        research_prompt: cfg.seed_research_prompt,
+        discover_prompt: cfg.seed_discover_prompt,
         materialize_prompt: best_prompt,
-        compile_fix_prompt: cfg.seed_compile_fix_prompt,
+        compile_prompt: cfg.seed_compile_prompt,
+        coverage_prompt: cfg.seed_coverage_prompt,
+        validate_prompt: cfg.seed_validate_prompt,
         baseline_acc,
         best_acc,
-        research_acc: 0.0,
+        discover_acc: 0.0,
         materialize_acc: best_acc,
-        compile_fix_acc: 0.0,
+        compile_acc: 0.0,
+        coverage_acc: 0.0,
+        validate_acc: 0.0,
         candidates: pool.len(),
         episode_id: cfg.episode_id,
     })
@@ -1437,25 +1700,31 @@ mod tests {
     fn test_cfg() -> GepaConstraintConfig {
         GepaConstraintConfig {
             gateway: "http://127.0.0.1:3000".to_string(),
-            research_function: "cresearch".to_string(),
+            discover_function: "cdiscover".to_string(),
             materialize_function: "cmaterialize".to_string(),
-            compile_fix_function: "ccompile_fix".to_string(),
+            compile_function: "ccompile".to_string(),
+            coverage_function: "ccoverage".to_string(),
+            validate_function: "cvalidate".to_string(),
             reflect_function: "gepa_reflect".to_string(),
             variant: "baseline".to_string(),
             episode_id: "ep".to_string(),
             tags: json!({}),
             val_frac: 0.3,
             budget: 1,
-            minibatch: 3,
-            seed_research_prompt: "research prompt".to_string(),
+            minibatch: 5,
+            seed_discover_prompt: "discover prompt".to_string(),
             seed_materialize_prompt: "materialize prompt".to_string(),
-            seed_compile_fix_prompt: "compile fix prompt".to_string(),
+            seed_compile_prompt: "compile prompt".to_string(),
+            seed_coverage_prompt: "coverage prompt".to_string(),
+            seed_validate_prompt: "validate prompt".to_string(),
             hit_threshold: 0.5,
             seed: 7,
             pareto_size: 6,
-            w_research: 0.35,
-            w_materialize: 0.45,
-            w_compile_fix: 0.20,
+            w_discover: 0.25,
+            w_materialize: 0.30,
+            w_compile: 0.15,
+            w_coverage: 0.20,
+            w_validate: 0.10,
             work: "kb-test".into(),
         }
     }
@@ -1464,9 +1733,26 @@ mod tests {
     fn combined_acc_renormalizes_weights_for_non_empty_constraint_pools() {
         let cfg = test_cfg();
 
-        let score = combined_acc_from_pools(true, true, false, 0.0, 1.0, 0.25, &cfg);
+        let score = combined_acc_from_pools(
+            [true, true, false, false, false],
+            [0.0, 1.0, 0.25, 0.0, 0.0],
+            &cfg,
+        );
 
-        assert!((score - (0.45 / (0.35 + 0.45))).abs() < 1e-9);
+        assert!((score - (0.30 / (0.25 + 0.30))).abs() < 1e-9);
+    }
+
+    #[test]
+    fn weighted_slots_respects_five_pool_weights() {
+        let cfg = test_cfg();
+        let slots = weighted_slots(
+            10,
+            [true, true, true, true, true],
+            pool_weights(&cfg),
+        );
+        assert_eq!(slots.iter().sum::<usize>(), 10);
+        assert!(slots[1] >= slots[0]); // materialize weight >= discover
+        assert!(slots[1] >= slots[4]); // materialize weight >= validate
     }
 
     #[test]

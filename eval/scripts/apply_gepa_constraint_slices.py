@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Apply GEPA-optimized prompt slices into constraint_validate system.minijinja."""
+"""Apply GEPA-optimized prompt slices into SOP.md step bodies."""
 import re
 import pathlib
 import sys
 
-ROOT = pathlib.Path("eval/tensorzero/config/constraint_validate/system.minijinja")
+ROOT = pathlib.Path("eval/sops/gost-constraints/SOP.md")
 OUT = pathlib.Path("gepa-constraint-out")
 PAIRS = [
-    ("GEPA:RESEARCH", OUT / "constraint_research.prompt.txt"),
+    ("GEPA:DISCOVER", OUT / "constraint_discover.prompt.txt"),
     ("GEPA:MATERIALIZE", OUT / "constraint_materialize.prompt.txt"),
-    ("GEPA:COMPILE_FIX", OUT / "constraint_compile_fix.prompt.txt"),
+    ("GEPA:COMPILE", OUT / "constraint_compile.prompt.txt"),
+    ("GEPA:COVERAGE", OUT / "constraint_coverage.prompt.txt"),
+    ("GEPA:VALIDATE", OUT / "constraint_validate.prompt.txt"),
 ]
 
 
@@ -24,7 +26,7 @@ def main() -> int:
             print(f"anchor {tag} not found or ambiguous", file=sys.stderr)
             return 1
     ROOT.write_text(text, encoding="utf-8")
-    print("applied 3 GEPA slices to", ROOT)
+    print("applied 5 GEPA slices to", ROOT)
     return 0
 
 

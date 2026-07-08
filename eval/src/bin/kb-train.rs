@@ -157,14 +157,18 @@ enum Cmd {
         #[arg(long, default_value = "pareto")]
         candidate_selection: String,
     },
-    /// GEPA-optimize constraint materialize system prompt (table value recall).
+    /// GEPA-optimize constraint agent prompt slices (5 pools: discover → validate).
     OptimizeConstraint {
-        #[arg(long, default_value = "gepa-constraint-out/research.jsonl")]
-        research: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/discover.jsonl")]
+        discover: PathBuf,
         #[arg(long, default_value = "gepa-constraint-out/materialize.jsonl")]
         materialize: PathBuf,
-        #[arg(long, default_value = "gepa-constraint-out/compile_fix.jsonl")]
-        compile_fix: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/compile.jsonl")]
+        compile: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/coverage.jsonl")]
+        coverage: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/validate.jsonl")]
+        validate: PathBuf,
         #[arg(long, default_value = "gepa-constraint-out")]
         out_dir: PathBuf,
         #[arg(
@@ -172,31 +176,22 @@ enum Cmd {
             default_value = "gepa-constraint-out/constraint_materialize.prompt.txt"
         )]
         out: PathBuf,
-        #[arg(
-            long,
-            default_value = "eval/tensorzero/config/constraint_research/system.minijinja"
-        )]
-        seed_research: PathBuf,
-        #[arg(
-            long,
-            default_value = "eval/tensorzero/config/constraint_materialize/system.minijinja"
-        )]
-        seed: PathBuf,
-        #[arg(
-            long,
-            default_value = "eval/tensorzero/config/constraint_compile_fix/system.minijinja"
-        )]
-        seed_compile_fix: PathBuf,
+        #[arg(long, default_value = "eval/sops/gost-constraints")]
+        sop_dir: PathBuf,
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:3000")]
         gateway: String,
-        #[arg(long, default_value = "cresearch")]
-        research_function: String,
+        #[arg(long, default_value = "cdiscover")]
+        discover_function: String,
         #[arg(long, default_value = "cmaterialize")]
         materialize_function: String,
-        #[arg(long, default_value = "ccompile_fix")]
-        compile_fix_function: String,
+        #[arg(long, default_value = "ccompile")]
+        compile_function: String,
+        #[arg(long, default_value = "ccoverage")]
+        coverage_function: String,
+        #[arg(long, default_value = "cvalidate")]
+        validate_function: String,
         #[arg(long, default_value = "gepa_reflect")]
         reflect_function: String,
         #[arg(long, default_value = "baseline")]
@@ -217,12 +212,16 @@ enum Cmd {
         rng_seed: Option<u64>,
         #[arg(long, default_value_t = 20)]
         pareto_size: usize,
-        #[arg(long, default_value_t = 0.35)]
-        w_research: f64,
-        #[arg(long, default_value_t = 0.45)]
+        #[arg(long, default_value_t = 0.25)]
+        w_discover: f64,
+        #[arg(long, default_value_t = 0.30)]
         w_materialize: f64,
+        #[arg(long, default_value_t = 0.15)]
+        w_compile: f64,
         #[arg(long, default_value_t = 0.20)]
-        w_compile_fix: f64,
+        w_coverage: f64,
+        #[arg(long, default_value_t = 0.10)]
+        w_validate: f64,
     },
 }
 
@@ -305,25 +304,34 @@ fn main() -> Result<()> {
                 kb_eval::constraint_synthetic::materialize_examples_from_dir(&val_dir, &doc)?;
             let materialize_path = out.join("materialize.jsonl");
             kb_eval::constraint_synthetic::write_materialize_jsonl(&materialize_path, &examples)?;
-            let compile_fix =
+            let compile =
                 kb_eval::constraint_synthetic::compile_fix_examples_from_materialize(&examples);
-            let compile_fix_path = out.join("compile_fix.jsonl");
-            kb_eval::constraint_synthetic::write_compile_fix_jsonl(
-                &compile_fix_path,
-                &compile_fix,
-            )?;
-            let research =
+            let compile_path = out.join("compile.jsonl");
+            kb_eval::constraint_synthetic::write_compile_jsonl(&compile_path, &compile)?;
+            let coverage =
+                kb_eval::constraint_synthetic::coverage_examples_from_materialize(&examples);
+            let coverage_path = out.join("coverage.jsonl");
+            kb_eval::constraint_synthetic::write_coverage_jsonl(&coverage_path, &coverage)?;
+            let validate =
+                kb_eval::constraint_synthetic::validate_examples_from_materialize(&examples);
+            let validate_path = out.join("validate.jsonl");
+            kb_eval::constraint_synthetic::write_validate_jsonl(&validate_path, &validate)?;
+            let discover =
                 kb_eval::constraint_synthetic::load_research_grep_examples(&research_gold)?;
-            let research_path = out.join("research.jsonl");
-            kb_eval::constraint_synthetic::write_research_jsonl(&research_path, &research)?;
+            let discover_path = out.join("discover.jsonl");
+            kb_eval::constraint_synthetic::write_discover_jsonl(&discover_path, &discover)?;
             println!(
-                "wrote materialize={} -> {}, compile_fix={} -> {}, research={} -> {}",
+                "wrote materialize={} -> {}, compile={} -> {}, coverage={} -> {}, validate={} -> {}, discover={} -> {}",
                 examples.len(),
                 materialize_path.display(),
-                compile_fix.len(),
-                compile_fix_path.display(),
-                research.len(),
-                research_path.display()
+                compile.len(),
+                compile_path.display(),
+                coverage.len(),
+                coverage_path.display(),
+                validate.len(),
+                validate_path.display(),
+                discover.len(),
+                discover_path.display()
             );
             Ok(())
         }
@@ -385,19 +393,21 @@ fn main() -> Result<()> {
             candidate_selection,
         ),
         Cmd::OptimizeConstraint {
-            research,
+            discover,
             materialize,
-            compile_fix,
+            compile,
+            coverage,
+            validate,
             out_dir,
             out,
-            seed_research,
-            seed,
-            seed_compile_fix,
+            sop_dir,
             work,
             gateway,
-            research_function,
+            discover_function,
             materialize_function,
-            compile_fix_function,
+            compile_function,
+            coverage_function,
+            validate_function,
             reflect_function,
             variant,
             run,
@@ -408,23 +418,27 @@ fn main() -> Result<()> {
             hit_threshold,
             rng_seed,
             pareto_size,
-            w_research,
+            w_discover,
             w_materialize,
-            w_compile_fix,
+            w_compile,
+            w_coverage,
+            w_validate,
         } => run_optimize_constraint(
-            research,
+            discover,
             materialize,
-            compile_fix,
+            compile,
+            coverage,
+            validate,
             out_dir,
             out,
-            seed_research,
-            seed,
-            seed_compile_fix,
+            sop_dir,
             work,
             gateway,
-            research_function,
+            discover_function,
             materialize_function,
-            compile_fix_function,
+            compile_function,
+            coverage_function,
+            validate_function,
             reflect_function,
             variant,
             run,
@@ -435,9 +449,11 @@ fn main() -> Result<()> {
             hit_threshold,
             rng_seed,
             pareto_size,
-            w_research,
+            w_discover,
             w_materialize,
-            w_compile_fix,
+            w_compile,
+            w_coverage,
+            w_validate,
         ),
     }
 }
@@ -585,7 +601,7 @@ fn run_optimize(
     Ok(())
 }
 
-fn load_constraint_seed_prompt(out: &Path, seed: &Path) -> Result<String> {
+fn load_sop_gepa_seed(sop_dir: &Path, out: &Path, tag: &str) -> Result<String> {
     if out.exists() {
         let content = std::fs::read_to_string(out)
             .with_context(|| format!("read prior prompt {}", out.display()))?;
@@ -593,24 +609,28 @@ fn load_constraint_seed_prompt(out: &Path, seed: &Path) -> Result<String> {
             return Ok(content);
         }
     }
-    kb_eval::gepa::load_seed_prompt(seed)
+    let md = kb_eval::constraint_gepa_sop::load_sop_md(sop_dir)?;
+    kb_eval::constraint_gepa_sop::extract_gepa_slice(&md, tag)
+        .with_context(|| format!("extract GEPA:{tag} seed from SOP.md"))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_optimize_constraint(
-    research: PathBuf,
+    discover: PathBuf,
     materialize: PathBuf,
-    compile_fix: PathBuf,
+    compile: PathBuf,
+    coverage: PathBuf,
+    validate: PathBuf,
     out_dir: PathBuf,
     out: PathBuf,
-    seed_research: PathBuf,
-    seed: PathBuf,
-    seed_compile_fix: PathBuf,
+    sop_dir: PathBuf,
     work: PathBuf,
     gateway: String,
-    research_function: String,
+    discover_function: String,
     materialize_function: String,
-    compile_fix_function: String,
+    compile_function: String,
+    coverage_function: String,
+    validate_function: String,
     reflect_function: String,
     variant: String,
     run: Option<String>,
@@ -621,27 +641,43 @@ fn run_optimize_constraint(
     hit_threshold: f64,
     rng_seed: Option<u64>,
     pareto_size: usize,
-    w_research: f64,
+    w_discover: f64,
     w_materialize: f64,
-    w_compile_fix: f64,
+    w_compile: f64,
+    w_coverage: f64,
+    w_validate: f64,
 ) -> Result<()> {
-    let research_examples = if research.exists() {
-        kb_eval::gepa_constraint::load_research_jsonl(&research)?
+    let discover_examples = if discover.exists() {
+        kb_eval::gepa_constraint::load_discover_jsonl(&discover)?
     } else {
         Vec::new()
     };
     let materialize_examples = kb_eval::gepa_constraint::load_materialize_jsonl(&materialize)?;
-    let compile_fix_examples = if compile_fix.exists() {
-        kb_eval::gepa_constraint::load_compile_fix_jsonl(&compile_fix)?
+    let compile_examples = if compile.exists() {
+        kb_eval::gepa_constraint::load_compile_jsonl(&compile)?
     } else {
         Vec::new()
     };
-    let research_out = out_dir.join("constraint_research.prompt.txt");
+    let coverage_examples = if coverage.exists() {
+        kb_eval::gepa_constraint::load_coverage_jsonl(&coverage)?
+    } else {
+        Vec::new()
+    };
+    let validate_examples = if validate.exists() {
+        kb_eval::gepa_constraint::load_validate_jsonl(&validate)?
+    } else {
+        Vec::new()
+    };
+    let discover_out = out_dir.join("constraint_discover.prompt.txt");
     let materialize_out = out;
-    let compile_fix_out = out_dir.join("constraint_compile_fix.prompt.txt");
-    let seed_research_prompt = load_constraint_seed_prompt(&research_out, &seed_research)?;
-    let seed_materialize_prompt = load_constraint_seed_prompt(&materialize_out, &seed)?;
-    let seed_compile_fix_prompt = load_constraint_seed_prompt(&compile_fix_out, &seed_compile_fix)?;
+    let compile_out = out_dir.join("constraint_compile.prompt.txt");
+    let coverage_out = out_dir.join("constraint_coverage.prompt.txt");
+    let validate_out = out_dir.join("constraint_validate.prompt.txt");
+    let seed_discover_prompt = load_sop_gepa_seed(&sop_dir, &discover_out, "DISCOVER")?;
+    let seed_materialize_prompt = load_sop_gepa_seed(&sop_dir, &materialize_out, "MATERIALIZE")?;
+    let seed_compile_prompt = load_sop_gepa_seed(&sop_dir, &compile_out, "COMPILE")?;
+    let seed_coverage_prompt = load_sop_gepa_seed(&sop_dir, &coverage_out, "COVERAGE")?;
+    let seed_validate_prompt = load_sop_gepa_seed(&sop_dir, &validate_out, "VALIDATE")?;
     let run_label = run.clone().unwrap_or_else(kb_eval::gepa::default_run_tag);
     let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
     let mut tags = serde_json::Map::new();
@@ -657,9 +693,11 @@ fn run_optimize_constraint(
     let result = kb_eval::gepa_constraint::run(
         kb_eval::gepa_constraint::GepaConstraintConfig {
             gateway,
-            research_function,
+            discover_function,
             materialize_function,
-            compile_fix_function,
+            compile_function,
+            coverage_function,
+            validate_function,
             reflect_function,
             variant,
             episode_id: kb_eval::tz::backdated_episode_id(30),
@@ -667,42 +705,56 @@ fn run_optimize_constraint(
             val_frac,
             budget,
             minibatch,
-            seed_research_prompt,
+            seed_discover_prompt,
             seed_materialize_prompt,
-            seed_compile_fix_prompt,
+            seed_compile_prompt,
+            seed_coverage_prompt,
+            seed_validate_prompt,
             hit_threshold,
             seed: rng_seed,
             pareto_size,
-            w_research,
+            w_discover,
             w_materialize,
-            w_compile_fix,
+            w_compile,
+            w_coverage,
+            w_validate,
             work,
         },
-        research_examples,
+        discover_examples,
         materialize_examples,
-        compile_fix_examples,
+        compile_examples,
+        coverage_examples,
+        validate_examples,
     )?;
     std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
     if let Some(parent) = materialize_out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&research_out, &result.research_prompt)
-        .with_context(|| format!("write {}", research_out.display()))?;
+    std::fs::write(&discover_out, &result.discover_prompt)
+        .with_context(|| format!("write {}", discover_out.display()))?;
     std::fs::write(&materialize_out, &result.materialize_prompt)
         .with_context(|| format!("write {}", materialize_out.display()))?;
-    std::fs::write(&compile_fix_out, &result.compile_fix_prompt)
-        .with_context(|| format!("write {}", compile_fix_out.display()))?;
+    std::fs::write(&compile_out, &result.compile_prompt)
+        .with_context(|| format!("write {}", compile_out.display()))?;
+    std::fs::write(&coverage_out, &result.coverage_prompt)
+        .with_context(|| format!("write {}", coverage_out.display()))?;
+    std::fs::write(&validate_out, &result.validate_prompt)
+        .with_context(|| format!("write {}", validate_out.display()))?;
     println!(
-        "wrote best prompts -> {}, {}, {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, research_acc={:.3}, materialize_acc={:.3}, compile_fix_acc={:.3}, candidates={})",
-        research_out.display(),
+        "wrote best prompts -> {}, {}, {}, {}, {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, discover_acc={:.3}, materialize_acc={:.3}, compile_acc={:.3}, coverage_acc={:.3}, validate_acc={:.3}, candidates={})",
+        discover_out.display(),
         materialize_out.display(),
-        compile_fix_out.display(),
+        compile_out.display(),
+        coverage_out.display(),
+        validate_out.display(),
         result.episode_id,
         result.baseline_acc,
         result.best_acc,
-        result.research_acc,
+        result.discover_acc,
         result.materialize_acc,
-        result.compile_fix_acc,
+        result.compile_acc,
+        result.coverage_acc,
+        result.validate_acc,
         result.candidates,
     );
     Ok(())

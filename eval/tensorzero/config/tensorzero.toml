@@ -213,16 +213,16 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
-# ── Constraint GEPA research micro-task: find source chunks for constraint data ──
-[functions.cresearch]
+# ── Constraint GEPA discover micro-task: find source chunks for constraint data ──
+[functions.cdiscover]
 type = "chat"
 tools = ["grep", "read", "glob", "search"]
 parallel_tool_calls = false
 
-[functions.cresearch.variants.baseline]
+[functions.cdiscover.variants.baseline]
 type = "chat_completion"
 model = "qwen"
-system_template = "constraint_research/system.minijinja"
+system_template = "constraint_discover/system.minijinja"
 temperature = 1.0
 top_p = 0.95
 extra_body = [
@@ -231,7 +231,64 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
-# ── Constraint GEPA compile-fix micro-task: repair .csp after graph_build errors ──
+# ── Constraint GEPA research micro-task (legacy alias → discover template) ──
+[functions.cresearch]
+type = "chat"
+tools = ["grep", "read", "glob", "search"]
+parallel_tool_calls = false
+
+[functions.cresearch.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_discover/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Constraint GEPA compile micro-task: repair .csp after graph_build errors ──
+[functions.ccompile]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccompile.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_compile/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA coverage micro-task: close graph_stats gaps ──
+[functions.ccoverage]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccoverage.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_coverage/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA validate micro-task: repair .csp after constraint_solve errors ──
+[functions.cvalidate]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.cvalidate.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_solve_micro/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA compile-fix micro-task (legacy alias → compile template) ──
 [functions.ccompile_fix]
 type = "chat"
 parallel_tool_calls = false
@@ -239,7 +296,7 @@ parallel_tool_calls = false
 [functions.ccompile_fix.variants.baseline]
 type = "chat_completion"
 model = "qwen"
-system_template = "constraint_compile_fix/system.minijinja"
+system_template = "constraint_compile/system.minijinja"
 temperature = 1.0
 top_p = 0.95
 max_tokens = 2048
@@ -631,13 +688,33 @@ type = "float"
 optimize = "max"
 level = "episode"
 
-# ── Constraint GEPA materialize optimization ──
-[metrics.gepa_c_baseline_research]
+# ── Constraint GEPA optimization (5 pools) ──
+[metrics.gepa_c_baseline_discover]
 type = "float"
 optimize = "max"
 level = "episode"
 
 [metrics.gepa_c_baseline_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_compile]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_validate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_research]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -652,17 +729,7 @@ type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.gepa_c_iter_research]
-type = "float"
-optimize = "max"
-level = "episode"
-
 [metrics.gepa_c_iter_materialize]
-type = "float"
-optimize = "max"
-level = "episode"
-
-[metrics.gepa_c_iter_compile_fix]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -672,7 +739,7 @@ type = "float"
 optimize = "max"
 level = "episode"
 
-[metrics.gepa_c_final_research]
+[metrics.gepa_c_final_discover]
 type = "float"
 optimize = "max"
 level = "episode"
@@ -683,6 +750,26 @@ optimize = "max"
 level = "episode"
 
 [metrics.gepa_c_final_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_compile]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_validate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_research]
 type = "float"
 optimize = "max"
 level = "episode"
