@@ -165,6 +165,35 @@ gepa-constraint budget="6" minibatch="8" run="": build-train constraint-syntheti
 gepa-constraint-metrics:
     @just ch "SELECT t.value AS run, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_baseline_combined'), 3) AS baseline, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_combined_acc'), 3) AS final, round(avgIf(f.value, f.metric_name='gepa_c_iter_materialize'), 3) AS iter_avg, round(argMaxIf(f.value, f.timestamp, f.metric_name='gepa_c_final_materialize'), 3) AS materialize FROM tensorzero.FloatMetricFeedback f JOIN tensorzero.FloatMetricFeedbackTagView t ON f.id = t.feedback_id AND t.key = 'run' WHERE f.metric_name IN ('gepa_c_baseline_combined','gepa_c_combined_acc','gepa_c_iter_materialize','gepa_c_final_materialize') GROUP BY run ORDER BY run DESC LIMIT 20"
 
+gepa-constraint-apply:
+    @test -f {{constraint_out}}/constraint_research.prompt.txt || (echo "missing research prompt" && exit 1)
+    @test -f {{constraint_out}}/constraint_materialize.prompt.txt || (echo "missing materialize prompt" && exit 1)
+    @test -f {{constraint_out}}/constraint_compile_fix.prompt.txt || (echo "missing compile_fix prompt" && exit 1)
+    {{preface}} \
+    SRC="{{tzcfg}}/constraint_validate/system.minijinja"; \
+    cp "$SRC" "$SRC.bak"; \
+    python3 - <<'PY'
+import re, pathlib
+root = pathlib.Path("eval/tensorzero/config/constraint_validate/system.minijinja")
+out = pathlib.Path("gepa-constraint-out")
+pairs = [
+    ("GEPA:RESEARCH", out / "constraint_research.prompt.txt"),
+    ("GEPA:MATERIALIZE", out / "constraint_materialize.prompt.txt"),
+    ("GEPA:COMPILE_FIX", out / "constraint_compile_fix.prompt.txt"),
+]
+text = root.read_text(encoding="utf-8")
+for tag, prompt_path in pairs:
+    body = prompt_path.read_text(encoding="utf-8").strip()
+    pattern = rf"\{{# {tag}_START #\}}.*?\{{# {tag}_END #\}}"
+    repl = f"{{# {tag}_START #}}\n{body}\n{{# {tag}_END #}}"
+    text, n = re.subn(pattern, repl, text, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit(f"anchor {tag} not found or ambiguous")
+root.write_text(text, encoding="utf-8")
+print("applied 3 GEPA slices to", root)
+PY
+    @echo "backup: {{tzcfg}}/constraint_validate/system.minijinja.bak — run: just gw-restart"
+
 # ── eval ────────────────────────────────────────────────────────────────────
 eval dataset func="answer_hotpot" corpus="eval-corpus" run="": build-eval
     {{preface}}run_tag='{{run}}'; run_tag="${run_tag#run=}"; extra=''; [[ -n "$run_tag" ]] && extra=" --tag run=$run_tag"; \
