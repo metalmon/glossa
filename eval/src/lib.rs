@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod constraint_score;
+pub mod constraint_synthetic;
 pub mod corpus;
 pub mod dataset;
 pub mod enrich;

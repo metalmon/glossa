@@ -68,6 +68,15 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
+    /// Bootstrap constraint GEPA materialize.jsonl from kb-val-gost gold tables.
+    SyntheticConstraint {
+        #[arg(long, default_value = "kb-val-gost")]
+        val_dir: PathBuf,
+        #[arg(long, default_value = "gost_r_57978-2017.pdf")]
+        doc: String,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out: PathBuf,
+    },
     /// GEPA-optimize the prod answer_hotpot system prompt (quad search + grep + glob + read scoring).
     Optimize {
         #[arg(long, default_value = "gepa-out/search.jsonl")]
@@ -182,6 +191,15 @@ fn main() -> Result<()> {
             idle_stop,
             once,
         } => run_dump(work, out, k, poll_secs, idle_stop, once),
+        Cmd::SyntheticConstraint { val_dir, doc, out } => {
+            std::fs::create_dir_all(&out)?;
+            let examples =
+                kb_eval::constraint_synthetic::materialize_examples_from_dir(&val_dir, &doc)?;
+            let path = out.join("materialize.jsonl");
+            kb_eval::constraint_synthetic::write_materialize_jsonl(&path, &examples)?;
+            println!("wrote {} rows to {}", examples.len(), path.display());
+            Ok(())
+        }
         Cmd::Optimize {
             search,
             grep,
