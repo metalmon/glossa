@@ -195,6 +195,24 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
+# ── Constraint GEPA materialize micro-task: emit .csp from workbook excerpt ──
+[functions.cmaterialize]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.cmaterialize.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_materialize/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
 # ── GEPA reflection: mutator proposes an improved answer_hotpot system prompt ──
 [functions.gepa_reflect]
 type = "chat"
