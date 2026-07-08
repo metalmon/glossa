@@ -120,6 +120,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Hotpot distractor runs | **Shipped** | Logged in [benchmarks.md](benchmarks.md) (50q slices) |
 | `prep-fullwiki` | **Shipped** | CLI + shard builder in `kb-eval prep-fullwiki` |
 | `export-tz` quad jsonl + GEPA | **Shipped** | v1.2.0 — search, grep, glob, read micro-tasks only |
+| Constraint GEPA (`cresearch` / `cmaterialize` / `ccompile_fix`) | **Shipped** | Table value recall vs reference validation tables; hybrid synthetic + `export-tz-constraint`; merge via GEPA anchors in `constraint_validate/system.minijinja`. See [constraint-gepa.md](constraint-gepa.md). |
 | GEPA graph micro-tasks (`glossary`, `neighbors`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, neighbors → related case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
 | `--no-graph` control arm | **Shipped** | `kb-eval run --no-graph`, MCP `--no-graph` |
 | Gold join / `case_id` | **Partial** | TZ sets `case_id`; export joins by id or question; OpenAI backend has no tags; enrich sets `case_id` |

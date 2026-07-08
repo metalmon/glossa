@@ -282,6 +282,27 @@ just eval-metrics
 
 ---
 
+## Playbook 5b — Constraint GEPA: improve `constraint_validate` prompts
+
+Target: [`eval/tensorzero/config/constraint_validate/system.minijinja`](../eval/tensorzero/config/constraint_validate/system.minijinja) (phase-A table extraction).
+
+Unlike main GEPA (chunk retrieval), constraint GEPA scores **`.csp` table value recall** against reference validation tables — before `graph_build`. Three micro-functions during optimization (`cresearch`, `cmaterialize`, `ccompile_fix`); production stays **one agent** with merged prompt slices.
+
+**Full playbook:** [constraint-gepa.md](constraint-gepa.md)
+
+```bash
+just constraint-synthetic          # reference tables → gepa-constraint-out/*.jsonl
+just gepa-constraint budget=6      # optimize 3 prompt slices
+just gepa-constraint-metrics
+just gepa-constraint-apply         # merge → system.minijinja
+just gw-restart
+# sanity: kb-eval-constraint --tag run=gepa-c-applied ...
+```
+
+Artifacts: `gepa-constraint-out/constraint_{research,materialize,compile_fix}.prompt.txt` (git-ignored).
+
+---
+
 ## Playbook 6 — Reset ClickHouse history
 
 ```bash
@@ -310,6 +331,10 @@ Eval and GEPA history are independent.
 | `just gepa-all` | export-tz + gepa |
 | `just gepa-apply` | Copy optimized prompt → prod (manual step) |
 | `just gepa-metrics` / `just eval-metrics` | Terminal tables |
+| `just constraint-synthetic` | Bootstrap constraint GEPA jsonl from reference tables |
+| `just gepa-constraint` | Optimize `constraint_validate` prompt slices |
+| `just gepa-constraint-apply` | Merge constraint GEPA prompts → prod template |
+| `just gepa-constraint-metrics` | Constraint GEPA metrics table |
 | `just dump` | **Legacy** graph dump |
 | `just graph-stats` | Graph size |
 
@@ -346,6 +371,7 @@ Full list: `just --list`.
 
 ## Related
 
+- [constraint-gepa.md](constraint-gepa.md) — GEPA prompt optimization for `.csp` table extraction
 - [graph-and-ontology.md](graph-and-ontology.md) — ontology for enrich
 - [benchmarks.md](benchmarks.md) — published eval numbers
 - [mcp.md](mcp.md) — agent tools
