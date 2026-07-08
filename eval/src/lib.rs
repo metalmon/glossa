@@ -8,6 +8,7 @@ pub mod corpus;
 pub mod dataset;
 pub mod enrich;
 pub mod export_tz;
+pub mod export_tz_constraint;
 pub mod gepa;
 pub mod gepa_constraint;
 pub mod prep;

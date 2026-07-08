@@ -53,6 +53,21 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         k: usize,
     },
+    /// Export constraint materialize/research/compile-fix datasets from TZ ClickHouse episodes.
+    ExportTzConstraint {
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out: PathBuf,
+        #[arg(long, default_value = "constraint_validate")]
+        function: String,
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long, default_value = "kb-val-gost")]
+        val_dir: PathBuf,
+        #[arg(long)]
+        clickhouse: Option<String>,
+    },
     /// Legacy graph dump (auxiliary gold index only — not primary training source).
     Dump {
         #[arg(long, default_value = "kb-test")]
@@ -252,6 +267,25 @@ fn main() -> Result<()> {
             })
             .map(|_| ())
         }
+        Cmd::ExportTzConstraint {
+            work,
+            out,
+            function,
+            run,
+            val_dir,
+            clickhouse,
+        } => kb_eval::export_tz_constraint::run(
+            kb_eval::export_tz_constraint::ExportTzConstraintConfig {
+                clickhouse_url: clickhouse
+                    .unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
+                work,
+                out,
+                function,
+                run,
+                val_dir,
+            },
+        )
+        .map(|_| ()),
         Cmd::Dump {
             work,
             out,
