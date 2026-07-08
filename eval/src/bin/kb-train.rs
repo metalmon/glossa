@@ -74,6 +74,8 @@ enum Cmd {
         val_dir: PathBuf,
         #[arg(long, default_value = "gost_r_57978-2017.pdf")]
         doc: String,
+        #[arg(long, default_value = "eval/fixtures/constraint-research-gold.json")]
+        research_gold: PathBuf,
         #[arg(long, default_value = "gepa-constraint-out")]
         out: PathBuf,
     },
@@ -142,19 +144,44 @@ enum Cmd {
     },
     /// GEPA-optimize constraint materialize system prompt (table value recall).
     OptimizeConstraint {
+        #[arg(long, default_value = "gepa-constraint-out/research.jsonl")]
+        research: PathBuf,
         #[arg(long, default_value = "gepa-constraint-out/materialize.jsonl")]
         materialize: PathBuf,
-        #[arg(long, default_value = "gepa-constraint-out/constraint_materialize.prompt.txt")]
+        #[arg(long, default_value = "gepa-constraint-out/compile_fix.jsonl")]
+        compile_fix: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out_dir: PathBuf,
+        #[arg(
+            long,
+            default_value = "gepa-constraint-out/constraint_materialize.prompt.txt"
+        )]
         out: PathBuf,
+        #[arg(
+            long,
+            default_value = "eval/tensorzero/config/constraint_research/system.minijinja"
+        )]
+        seed_research: PathBuf,
         #[arg(
             long,
             default_value = "eval/tensorzero/config/constraint_materialize/system.minijinja"
         )]
         seed: PathBuf,
+        #[arg(
+            long,
+            default_value = "eval/tensorzero/config/constraint_compile_fix/system.minijinja"
+        )]
+        seed_compile_fix: PathBuf,
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:3000")]
         gateway: String,
+        #[arg(long, default_value = "cresearch")]
+        research_function: String,
         #[arg(long, default_value = "cmaterialize")]
         materialize_function: String,
+        #[arg(long, default_value = "ccompile_fix")]
+        compile_fix_function: String,
         #[arg(long, default_value = "gepa_reflect")]
         reflect_function: String,
         #[arg(long, default_value = "baseline")]
@@ -175,6 +202,12 @@ enum Cmd {
         rng_seed: Option<u64>,
         #[arg(long, default_value_t = 20)]
         pareto_size: usize,
+        #[arg(long, default_value_t = 0.35)]
+        w_research: f64,
+        #[arg(long, default_value_t = 0.45)]
+        w_materialize: f64,
+        #[arg(long, default_value_t = 0.20)]
+        w_compile_fix: f64,
     },
 }
 
@@ -227,13 +260,37 @@ fn main() -> Result<()> {
             idle_stop,
             once,
         } => run_dump(work, out, k, poll_secs, idle_stop, once),
-        Cmd::SyntheticConstraint { val_dir, doc, out } => {
+        Cmd::SyntheticConstraint {
+            val_dir,
+            doc,
+            research_gold,
+            out,
+        } => {
             std::fs::create_dir_all(&out)?;
             let examples =
                 kb_eval::constraint_synthetic::materialize_examples_from_dir(&val_dir, &doc)?;
-            let path = out.join("materialize.jsonl");
-            kb_eval::constraint_synthetic::write_materialize_jsonl(&path, &examples)?;
-            println!("wrote {} rows to {}", examples.len(), path.display());
+            let materialize_path = out.join("materialize.jsonl");
+            kb_eval::constraint_synthetic::write_materialize_jsonl(&materialize_path, &examples)?;
+            let compile_fix =
+                kb_eval::constraint_synthetic::compile_fix_examples_from_materialize(&examples);
+            let compile_fix_path = out.join("compile_fix.jsonl");
+            kb_eval::constraint_synthetic::write_compile_fix_jsonl(
+                &compile_fix_path,
+                &compile_fix,
+            )?;
+            let research =
+                kb_eval::constraint_synthetic::load_research_grep_examples(&research_gold)?;
+            let research_path = out.join("research.jsonl");
+            kb_eval::constraint_synthetic::write_research_jsonl(&research_path, &research)?;
+            println!(
+                "wrote materialize={} -> {}, compile_fix={} -> {}, research={} -> {}",
+                examples.len(),
+                materialize_path.display(),
+                compile_fix.len(),
+                compile_fix_path.display(),
+                research.len(),
+                research_path.display()
+            );
             Ok(())
         }
         Cmd::Optimize {
@@ -294,11 +351,19 @@ fn main() -> Result<()> {
             candidate_selection,
         ),
         Cmd::OptimizeConstraint {
+            research,
             materialize,
+            compile_fix,
+            out_dir,
             out,
+            seed_research,
             seed,
+            seed_compile_fix,
+            work,
             gateway,
+            research_function,
             materialize_function,
+            compile_fix_function,
             reflect_function,
             variant,
             run,
@@ -309,12 +374,23 @@ fn main() -> Result<()> {
             hit_threshold,
             rng_seed,
             pareto_size,
+            w_research,
+            w_materialize,
+            w_compile_fix,
         } => run_optimize_constraint(
+            research,
             materialize,
+            compile_fix,
+            out_dir,
             out,
+            seed_research,
             seed,
+            seed_compile_fix,
+            work,
             gateway,
+            research_function,
             materialize_function,
+            compile_fix_function,
             reflect_function,
             variant,
             run,
@@ -325,6 +401,9 @@ fn main() -> Result<()> {
             hit_threshold,
             rng_seed,
             pareto_size,
+            w_research,
+            w_materialize,
+            w_compile_fix,
         ),
     }
 }
@@ -485,11 +564,19 @@ fn load_constraint_seed_prompt(out: &Path, seed: &Path) -> Result<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_optimize_constraint(
+    research: PathBuf,
     materialize: PathBuf,
+    compile_fix: PathBuf,
+    out_dir: PathBuf,
     out: PathBuf,
+    seed_research: PathBuf,
     seed: PathBuf,
+    seed_compile_fix: PathBuf,
+    work: PathBuf,
     gateway: String,
+    research_function: String,
     materialize_function: String,
+    compile_fix_function: String,
     reflect_function: String,
     variant: String,
     run: Option<String>,
@@ -500,9 +587,27 @@ fn run_optimize_constraint(
     hit_threshold: f64,
     rng_seed: Option<u64>,
     pareto_size: usize,
+    w_research: f64,
+    w_materialize: f64,
+    w_compile_fix: f64,
 ) -> Result<()> {
-    let examples = kb_eval::gepa_constraint::load_materialize_jsonl(&materialize)?;
-    let seed_prompt = load_constraint_seed_prompt(&out, &seed)?;
+    let research_examples = if research.exists() {
+        kb_eval::gepa_constraint::load_research_jsonl(&research)?
+    } else {
+        Vec::new()
+    };
+    let materialize_examples = kb_eval::gepa_constraint::load_materialize_jsonl(&materialize)?;
+    let compile_fix_examples = if compile_fix.exists() {
+        kb_eval::gepa_constraint::load_compile_fix_jsonl(&compile_fix)?
+    } else {
+        Vec::new()
+    };
+    let research_out = out_dir.join("constraint_research.prompt.txt");
+    let materialize_out = out;
+    let compile_fix_out = out_dir.join("constraint_compile_fix.prompt.txt");
+    let seed_research_prompt = load_constraint_seed_prompt(&research_out, &seed_research)?;
+    let seed_materialize_prompt = load_constraint_seed_prompt(&materialize_out, &seed)?;
+    let seed_compile_fix_prompt = load_constraint_seed_prompt(&compile_fix_out, &seed_compile_fix)?;
     let run_label = run.clone().unwrap_or_else(kb_eval::gepa::default_run_tag);
     let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
     let mut tags = serde_json::Map::new();
@@ -515,10 +620,12 @@ fn run_optimize_constraint(
         }
     }
 
-    let result = kb_eval::gepa_constraint::run_materialize(
+    let result = kb_eval::gepa_constraint::run(
         kb_eval::gepa_constraint::GepaConstraintConfig {
             gateway,
+            research_function,
             materialize_function,
+            compile_fix_function,
             reflect_function,
             variant,
             episode_id: kb_eval::tz::backdated_episode_id(30),
@@ -526,24 +633,42 @@ fn run_optimize_constraint(
             val_frac,
             budget,
             minibatch,
-            seed_prompt,
+            seed_research_prompt,
+            seed_materialize_prompt,
+            seed_compile_fix_prompt,
             hit_threshold,
             seed: rng_seed,
             pareto_size,
+            w_research,
+            w_materialize,
+            w_compile_fix,
+            work,
         },
-        examples,
+        research_examples,
+        materialize_examples,
+        compile_fix_examples,
     )?;
-    if let Some(parent) = out.parent() {
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    if let Some(parent) = materialize_out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
+    std::fs::write(&research_out, &result.research_prompt)
+        .with_context(|| format!("write {}", research_out.display()))?;
+    std::fs::write(&materialize_out, &result.materialize_prompt)
+        .with_context(|| format!("write {}", materialize_out.display()))?;
+    std::fs::write(&compile_fix_out, &result.compile_fix_prompt)
+        .with_context(|| format!("write {}", compile_fix_out.display()))?;
     println!(
-        "wrote best prompt -> {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, materialize_acc={:.3}, candidates={})",
-        out.display(),
+        "wrote best prompts -> {}, {}, {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, research_acc={:.3}, materialize_acc={:.3}, compile_fix_acc={:.3}, candidates={})",
+        research_out.display(),
+        materialize_out.display(),
+        compile_fix_out.display(),
         result.episode_id,
         result.baseline_acc,
         result.best_acc,
+        result.research_acc,
         result.materialize_acc,
+        result.compile_fix_acc,
         result.candidates,
     );
     Ok(())

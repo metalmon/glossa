@@ -213,6 +213,37 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
+# ── Constraint GEPA research micro-task: find source chunks for constraint data ──
+[functions.cresearch]
+type = "chat"
+tools = ["grep", "read", "glob", "search"]
+parallel_tool_calls = false
+
+[functions.cresearch.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_research/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Constraint GEPA compile-fix micro-task: repair .csp after graph_build errors ──
+[functions.ccompile_fix]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccompile_fix.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_compile_fix/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
 # ── GEPA reflection: mutator proposes an improved answer_hotpot system prompt ──
 [functions.gepa_reflect]
 type = "chat"
