@@ -7,7 +7,7 @@ use glossa::graph::store::GraphStore;
 use glossa::index::store::{DocIndex, RankedHit};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -140,6 +140,42 @@ enum Cmd {
         #[arg(long, default_value = "pareto")]
         candidate_selection: String,
     },
+    /// GEPA-optimize constraint materialize system prompt (table value recall).
+    OptimizeConstraint {
+        #[arg(long, default_value = "gepa-constraint-out/materialize.jsonl")]
+        materialize: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/constraint_materialize.prompt.txt")]
+        out: PathBuf,
+        #[arg(
+            long,
+            default_value = "eval/tensorzero/config/constraint_materialize/system.minijinja"
+        )]
+        seed: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        gateway: String,
+        #[arg(long, default_value = "cmaterialize")]
+        materialize_function: String,
+        #[arg(long, default_value = "gepa_reflect")]
+        reflect_function: String,
+        #[arg(long, default_value = "baseline")]
+        variant: String,
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tag: Vec<String>,
+        #[arg(long, default_value_t = 0.3)]
+        val_frac: f64,
+        #[arg(long, default_value_t = 6)]
+        budget: usize,
+        #[arg(long, default_value_t = 8)]
+        minibatch: usize,
+        #[arg(long, default_value_t = 0.5)]
+        hit_threshold: f64,
+        #[arg(long)]
+        rng_seed: Option<u64>,
+        #[arg(long, default_value_t = 20)]
+        pareto_size: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -256,6 +292,39 @@ fn main() -> Result<()> {
             rng_seed,
             pareto_size,
             candidate_selection,
+        ),
+        Cmd::OptimizeConstraint {
+            materialize,
+            out,
+            seed,
+            gateway,
+            materialize_function,
+            reflect_function,
+            variant,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            hit_threshold,
+            rng_seed,
+            pareto_size,
+        } => run_optimize_constraint(
+            materialize,
+            out,
+            seed,
+            gateway,
+            materialize_function,
+            reflect_function,
+            variant,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            hit_threshold,
+            rng_seed,
+            pareto_size,
         ),
     }
 }
@@ -399,6 +468,83 @@ fn run_optimize(
         result.grep_acc,
         result.glob_acc,
         result.read_acc,
+    );
+    Ok(())
+}
+
+fn load_constraint_seed_prompt(out: &Path, seed: &Path) -> Result<String> {
+    if out.exists() {
+        let content = std::fs::read_to_string(out)
+            .with_context(|| format!("read prior prompt {}", out.display()))?;
+        if !content.trim().is_empty() {
+            return Ok(content);
+        }
+    }
+    kb_eval::gepa::load_seed_prompt(seed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize_constraint(
+    materialize: PathBuf,
+    out: PathBuf,
+    seed: PathBuf,
+    gateway: String,
+    materialize_function: String,
+    reflect_function: String,
+    variant: String,
+    run: Option<String>,
+    tag: Vec<String>,
+    val_frac: f64,
+    budget: usize,
+    minibatch: usize,
+    hit_threshold: f64,
+    rng_seed: Option<u64>,
+    pareto_size: usize,
+) -> Result<()> {
+    let examples = kb_eval::gepa_constraint::load_materialize_jsonl(&materialize)?;
+    let seed_prompt = load_constraint_seed_prompt(&out, &seed)?;
+    let run_label = run.clone().unwrap_or_else(kb_eval::gepa::default_run_tag);
+    let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
+    let mut tags = serde_json::Map::new();
+    if let Some(ref r) = run {
+        tags.insert("run".into(), r.clone().into());
+    }
+    for t in &tag {
+        if let Some((k, v)) = t.split_once('=') {
+            tags.insert(k.to_string(), v.into());
+        }
+    }
+
+    let result = kb_eval::gepa_constraint::run_materialize(
+        kb_eval::gepa_constraint::GepaConstraintConfig {
+            gateway,
+            materialize_function,
+            reflect_function,
+            variant,
+            episode_id: kb_eval::tz::backdated_episode_id(30),
+            tags: Value::Object(tags),
+            val_frac,
+            budget,
+            minibatch,
+            seed_prompt,
+            hit_threshold,
+            seed: rng_seed,
+            pareto_size,
+        },
+        examples,
+    )?;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
+    println!(
+        "wrote best prompt -> {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, materialize_acc={:.3}, candidates={})",
+        out.display(),
+        result.episode_id,
+        result.baseline_acc,
+        result.best_acc,
+        result.materialize_acc,
+        result.candidates,
     );
     Ok(())
 }
