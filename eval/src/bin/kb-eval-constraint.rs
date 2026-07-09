@@ -1158,6 +1158,35 @@ impl TablesReport {
     }
 }
 
+fn format_param_table(report: &TablesReport, threshold: f64) -> String {
+    let mut out = String::new();
+    for p in &report.params {
+        let recall = if p.recall_total == 0 {
+            1.0
+        } else {
+            p.recall_hit as f64 / p.recall_total as f64
+        };
+        let mark = if recall >= threshold { "  " } else { "XX" };
+        let col = p.agent_col.as_deref().unwrap_or("—");
+        let missing = if p.missing.is_empty() {
+            "—".to_string()
+        } else {
+            let shown: Vec<&str> = p.missing.iter().take(8).map(String::as_str).collect();
+            let extra = p.missing.len().saturating_sub(8);
+            if extra > 0 {
+                format!("{}…+{}", shown.join(","), extra)
+            } else {
+                shown.join(",")
+            }
+        };
+        out.push_str(&format!(
+            "  {mark} {:<34} {:<14} {}/{}  missing: {}\n",
+            p.ref_name, col, p.recall_hit, p.recall_total, missing
+        ));
+    }
+    out
+}
+
 /// Tables-only comparison, by domain: a reference parameter is identified among
 /// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
 /// as `compare_graphs`' field/literal coverage — synonyms don't matter).
@@ -1673,6 +1702,7 @@ fn main() -> Result<()> {
                 println!("EPISODE ERROR: {e}");
             }
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
+            print!("{}", format_param_table(&report, PARAM_COVERED_THRESHOLD));
             println!(
                 "TABLES episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
                 agent_g_dir.display()
@@ -2154,5 +2184,47 @@ mod tests {
         let p = &report.params[0];
         assert_eq!((p.recall_hit, p.recall_total), (2, 4));
         assert_eq!(p.missing, vec!["3".to_string(), "4".to_string()]);
+    }
+
+    #[test]
+    fn format_param_table_marks_and_missing() {
+        let report = TablesReport {
+            params: vec![
+                ParamCoverage {
+                    ref_name: "Наружный диаметр".into(),
+                    agent_col: Some("diameter".into()),
+                    recall_hit: 5,
+                    recall_total: 5,
+                    missing: vec![],
+                },
+                ParamCoverage {
+                    ref_name: "Скорость".into(),
+                    agent_col: Some("speed".into()),
+                    recall_hit: 3,
+                    recall_total: 6,
+                    missing: vec!["100".into(), "32".into(), "50".into()],
+                },
+                ParamCoverage {
+                    ref_name: "Звуковой индекс".into(),
+                    agent_col: None,
+                    recall_hit: 0,
+                    recall_total: 8,
+                    missing: vec!["23-25".into()],
+                },
+            ],
+            values_covered: 97,
+            values_total: 105,
+        };
+        let out = format_param_table(&report, PARAM_COVERED_THRESHOLD);
+        // Covered param has no XX flag; its line names its column.
+        assert!(out.contains("diameter"));
+        // Under-covered param is flagged and shows its recall + missing values.
+        assert!(out.contains("XX"));
+        assert!(out.contains("speed"));
+        assert!(out.contains("3/6"));
+        assert!(out.contains("missing: 100,32,50"));
+        // Unassigned param shows a dash for the column.
+        assert!(out.contains("Звуковой индекс"));
+        assert!(out.contains("—"));
     }
 }
