@@ -1190,7 +1190,8 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
 /// Tables-only comparison, by domain: a reference parameter is identified among
 /// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
 /// as `compare_graphs`' field/literal coverage — synonyms don't matter).
-/// Returns ((params_covered, params_total), (values_covered, values_total)).
+/// Returns TablesReport: per-parameter assignments (greedy by recall) with recall
+/// metrics, plus union value-coverage.
 fn compare_tables_by_domain(
     agent_g_dir: &std::path::Path,
     src_doc: &str,
