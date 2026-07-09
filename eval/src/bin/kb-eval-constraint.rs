@@ -1125,6 +1125,39 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     (field_cov, constraint_cov, literal_cov)
 }
 
+const PARAM_COVERED_THRESHOLD: f64 = 0.8;
+
+#[derive(Debug)]
+struct ParamCoverage {
+    ref_name: String,
+    agent_col: Option<String>,
+    recall_hit: usize,
+    recall_total: usize,
+    missing: Vec<String>,
+}
+
+#[derive(Debug)]
+struct TablesReport {
+    params: Vec<ParamCoverage>,
+    values_covered: usize,
+    values_total: usize,
+}
+
+impl TablesReport {
+    fn params_covered(&self, threshold: f64) -> usize {
+        self.params
+            .iter()
+            .filter(|p| {
+                p.recall_total > 0
+                    && p.recall_hit as f64 / p.recall_total as f64 >= threshold
+            })
+            .count()
+    }
+    fn params_total(&self) -> usize {
+        self.params.len()
+    }
+}
+
 /// Tables-only comparison, by domain: a reference parameter is identified among
 /// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
 /// as `compare_graphs`' field/literal coverage — synonyms don't matter).
@@ -1133,43 +1166,107 @@ fn compare_tables_by_domain(
     agent_g_dir: &std::path::Path,
     src_doc: &str,
     cols: &[ColInfo],
-) -> ((usize, usize), (usize, usize)) {
+) -> TablesReport {
     let col_values = glossa::tables::csp_column_values(agent_g_dir, src_doc).unwrap_or_else(|e| {
         eprintln!("[tables] csp scan error: {e:#}");
         Default::default()
     });
-    let agent_domains: Vec<BTreeSet<String>> = col_values
-        .values()
-        .map(|vals| vals.iter().map(|v| norm_value(v)).collect())
-        .collect();
-    // A parameter is covered when some single .csp column reproduces ≥ half of
-    // its allowed-value set.
-    let params_covered = cols
+    // Agent columns as an ordered list (BTreeMap is name-sorted → stable indices).
+    let agent_cols: Vec<(String, BTreeSet<String>)> = col_values
         .iter()
-        .filter(|c| {
-            let dom: BTreeSet<String> = c.valid.iter().map(|v| norm_value(v)).collect();
-            !dom.is_empty()
-                && agent_domains.iter().any(|ad| {
-                    dom.iter().filter(|v| domain_covers(ad, v)).count() as f64 / dom.len() as f64
-                        >= 0.5
-                })
+        .map(|(name, vals)| (name.clone(), vals.iter().map(|v| norm_value(v)).collect()))
+        .collect();
+    // Reference domains (canon), preserving `cols` order.
+    let ref_doms: Vec<BTreeSet<String>> = cols
+        .iter()
+        .map(|c| c.valid.iter().map(|v| norm_value(v)).collect())
+        .collect();
+
+    // Candidate (ref, agent) pairs with a non-zero overlap.
+    struct Cand {
+        ri: usize,
+        ai: usize,
+        hit: usize,
+        recall: f64,
+    }
+    let mut cands: Vec<Cand> = Vec::new();
+    for (ri, dom) in ref_doms.iter().enumerate() {
+        if dom.is_empty() {
+            continue;
+        }
+        for (ai, (_, ad)) in agent_cols.iter().enumerate() {
+            let hit = dom.iter().filter(|v| domain_covers(ad, v)).count();
+            if hit > 0 {
+                cands.push(Cand {
+                    ri,
+                    ai,
+                    hit,
+                    recall: hit as f64 / dom.len() as f64,
+                });
+            }
+        }
+    }
+    // Greedy one-to-one: best recall first; deterministic tie-breaks.
+    cands.sort_by(|a, b| {
+        b.recall
+            .partial_cmp(&a.recall)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.hit.cmp(&a.hit))
+            .then(cols[a.ri].name.cmp(&cols[b.ri].name))
+            .then(agent_cols[a.ai].0.cmp(&agent_cols[b.ai].0))
+    });
+    let mut assigned: Vec<Option<usize>> = vec![None; cols.len()];
+    let mut agent_taken = vec![false; agent_cols.len()];
+    for c in &cands {
+        if assigned[c.ri].is_none() && !agent_taken[c.ai] {
+            assigned[c.ri] = Some(c.ai);
+            agent_taken[c.ai] = true;
+        }
+    }
+
+    let params: Vec<ParamCoverage> = cols
+        .iter()
+        .enumerate()
+        .map(|(ri, c)| {
+            let dom = &ref_doms[ri];
+            match assigned[ri] {
+                Some(ai) => {
+                    let ad = &agent_cols[ai].1;
+                    let missing: Vec<String> =
+                        dom.iter().filter(|v| !domain_covers(ad, v)).cloned().collect();
+                    ParamCoverage {
+                        ref_name: c.name.clone(),
+                        agent_col: Some(agent_cols[ai].0.clone()),
+                        recall_hit: dom.len() - missing.len(),
+                        recall_total: dom.len(),
+                        missing,
+                    }
+                }
+                None => ParamCoverage {
+                    ref_name: c.name.clone(),
+                    agent_col: None,
+                    recall_hit: 0,
+                    recall_total: dom.len(),
+                    missing: dom.iter().cloned().collect(),
+                },
+            }
         })
-        .count();
-    // Value coverage: union of reference values vs union of all agent cells.
-    let agent_union: BTreeSet<String> = agent_domains.into_iter().flatten().collect();
-    let ref_union: BTreeSet<String> = cols
-        .iter()
-        .flat_map(|c| c.valid.iter())
-        .map(|v| norm_value(v))
         .collect();
+
+    // Value coverage (union) — unchanged definition.
+    let agent_union: BTreeSet<String> =
+        agent_cols.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
+    let ref_union: BTreeSet<String> = ref_doms.iter().flatten().cloned().collect();
     let values_covered = ref_union
         .iter()
         .filter(|v| domain_covers(&agent_union, v))
         .count();
-    (
-        (params_covered, cols.len()),
-        (values_covered, ref_union.len()),
-    )
+
+    TablesReport {
+        params,
+        values_covered,
+        values_total: ref_union.len(),
+    }
 }
 
 // ── Main ──
@@ -1537,7 +1634,11 @@ fn main() -> Result<()> {
         let cli_gateway = &cli.gateway;
 
         if tables_only {
-            let ((pc, pt), (vc, vt)) = compare_tables_by_domain(&agent_g_dir, &src_doc, &cols);
+            let report = compare_tables_by_domain(&agent_g_dir, &src_doc, &cols);
+            let pc = report.params_covered(PARAM_COVERED_THRESHOLD);
+            let pt = report.params_total();
+            let vc = report.values_covered;
+            let vt = report.values_total;
             let csp_count = glossa::tables::count_csp_files(&agent_g_dir, &src_doc);
             let frac = |n: usize, d: usize| if d == 0 { 1.0 } else { n as f64 / d as f64 };
             kb_eval::tz::post_feedback(
@@ -1959,9 +2060,12 @@ mod tests {
                 valid: vec!["20".into(), "32".into()],
             },
         ];
-        let ((pc, pt), (vc, vt)) = compare_tables_by_domain(dir.path(), doc, &cols);
-        assert_eq!((pc, pt), (1, 2));
-        assert_eq!((vc, vt), (2, 4));
+        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        assert_eq!(
+            (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
+            (1, 2)
+        );
+        assert_eq!((report.values_covered, report.values_total), (2, 4));
     }
 
     #[test]
@@ -1978,9 +2082,12 @@ mod tests {
             name: "Марка материала".into(),
             valid: vec!["14A".into(), "25A".into()],
         }];
-        let ((pc, pt), (vc, vt)) = compare_tables_by_domain(dir.path(), doc, &cols);
-        assert_eq!((pc, pt), (1, 1));
-        assert_eq!((vc, vt), (2, 2));
+        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        assert_eq!(
+            (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
+            (1, 1)
+        );
+        assert_eq!((report.values_covered, report.values_total), (2, 2));
     }
 
     #[test]
@@ -1990,8 +2097,62 @@ mod tests {
             name: "X".into(),
             valid: vec!["1".into()],
         }];
-        let ((pc, _), (vc, _)) = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols);
-        assert_eq!(pc, 0);
-        assert_eq!(vc, 0);
+        let report = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols);
+        assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 0);
+        assert_eq!(report.values_covered, 0);
+    }
+
+    #[test]
+    fn tables_domain_compare_exclusive_assignment_no_parasite() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Diameter column fully covers its own ref AND coincidentally most speeds.
+        std::fs::write(mirror.join("diameter.csp"), "D\n50\n63\n80\n100\n125\n").unwrap();
+        // The agent's own speed column is wrong: only 3 of 6 gold speeds.
+        std::fs::write(mirror.join("speed.csp"), "speed\n63\n80\n100\n").unwrap();
+        let cols = vec![
+            ColInfo {
+                name: "Наружный диаметр".into(),
+                valid: vec!["50".into(), "63".into(), "80".into(), "100".into(), "125".into()],
+            },
+            ColInfo {
+                name: "Скорость".into(),
+                valid: vec![
+                    "32".into(), "50".into(), "63".into(), "80".into(), "100".into(), "125".into(),
+                ],
+            },
+        ];
+        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        // Diameter takes the diameter column; speed can only be served by speed.csp.
+        let speed = report.params.iter().find(|p| p.ref_name == "Скорость").unwrap();
+        assert_eq!(speed.agent_col.as_deref(), Some("speed"));
+        assert_eq!((speed.recall_hit, speed.recall_total), (3, 6));
+        // At the 0.8 bar only Diameter (1.0) counts; speed (0.5) does not.
+        assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 1);
+        assert_eq!(report.params_total(), 2);
+    }
+
+    #[test]
+    fn tables_domain_compare_threshold_bite_at_half() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = glossa::notebook::notes_root(dir.path())
+            .join(glossa::notebook::mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Exactly half the reference domain present.
+        std::fs::write(mirror.join("t.csp"), "V\n1\n2\n").unwrap();
+        let cols = vec![ColInfo {
+            name: "P".into(),
+            valid: vec!["1".into(), "2".into(), "3".into(), "4".into()],
+        }];
+        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        assert_eq!(report.params_covered(0.5), 1); // old bar would pass
+        assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 0); // 0.8 fails it
+        let p = &report.params[0];
+        assert_eq!((p.recall_hit, p.recall_total), (2, 4));
+        assert_eq!(p.missing, vec!["3".to_string(), "4".to_string()]);
     }
 }
