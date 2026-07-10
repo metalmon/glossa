@@ -58,8 +58,46 @@ pub fn search(
     }
 }
 
-/// ripgrep-style literal/regex search; model text only.
-pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
+/// A notebook file's line-filtered grep: iterate `body.lines()`, keeping lines that match
+/// `pattern` under the same flag semantics (`fixed`/`ignore_case`/`word`) as the corpus grep —
+/// reusing its `prepare`/matcher so a notebook and a corpus grep agree on what counts as a
+/// match. Notebook files are short (no chunking), so every hit renders against a fixed `#1`,
+/// mirroring the corpus format `path:#ord: line`.
+#[cfg(feature = "notebook")]
+fn grep_notebook_body(rel: &str, body: &str, pattern: &str, opts: &GrepOpts) -> String {
+    if pattern.trim().is_empty() {
+        return "(no matches)".to_string();
+    }
+    let (pattern, opts) = crate::grep::prepare(pattern, opts);
+    let matcher = match crate::grep::build_matcher(&pattern, &opts) {
+        Ok(m) => m,
+        Err(e) => return format!("grep error: {e}"),
+    };
+    let hits: Vec<String> = body
+        .lines()
+        .filter(|l| matcher.is_match(l))
+        .map(|l| format!("{rel}:#1: {}", l.trim()))
+        .collect();
+    if hits.is_empty() {
+        "(no matches)".to_string()
+    } else {
+        hits.join("\n")
+    }
+}
+
+/// ripgrep-style literal/regex search; model text only. Also serves notebook files
+/// (feature-gated): a doc-scoped `opts.path` like `<doc>/<file>` is probed against the agent's
+/// on-disk notebook before falling through to the corpus grep below.
+pub fn grep(root: &std::path::Path, idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
+    #[cfg(feature = "notebook")]
+    if let Some(p) = opts.path.as_deref() {
+        if looks_like_notebook_path(p) {
+            if let Ok((rel, body)) = crate::notebook::read_note(root, idx, p) {
+                trace.log("grep", json!({ "notebook": p, "pattern": pattern }), json!({ "notebook": rel }));
+                return grep_notebook_body(&rel, &body, pattern, opts);
+            }
+        }
+    }
     match crate::grep::grep(idx, pattern, opts) {
         Ok(hits) => {
             trace.log(
@@ -1405,15 +1443,42 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 
     #[test]
     fn grep_and_glob_render() {
-        let (_d, i) = idx();
+        let (d, i) = idx();
         let t = TraceLog::disabled();
-        assert!(grep(&i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
+        assert!(grep(d.path(), &i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
         assert_eq!(
-            grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
+            grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
             "(no matches)"
         );
         assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
+    }
+
+    #[test]
+    fn grep_matches_lines_in_a_notebook_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        // The notebook resolves a note's doc-scoped path against an INDEXED document (same
+        // validation `note`/`ls` use), so register the doc before writing a note under it.
+        let doc = "some_std.docx";
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from(doc),
+            location: "p.1".into(),
+            file_type: "docx".into(),
+            text: "placeholder".into(),
+        }])
+        .unwrap();
+        crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n80\n", false);
+        let opts = crate::grep::GrepOpts {
+            path: Some("some_std.docx/sizes.csp".into()),
+            ..Default::default()
+        };
+        let out = grep(dir.path(), &idx, "63", &opts, &TraceLog::disabled());
+        assert!(out.contains("63"), "notebook grep should find the line; got: {out}");
+        assert!(!out.contains("no document indexed"), "must not error on a notebook path");
+        // a non-matching pattern still renders "(no matches)", not an index error
+        let none = grep(dir.path(), &idx, "nomatchzzz", &opts, &TraceLog::disabled());
+        assert_eq!(none, "(no matches)");
     }
 
     // ── graph tool tests ────────────────────────────────────────────────────

@@ -50,13 +50,15 @@ pub fn run_read(
 }
 
 /// Run a ripgrep-style exact/regex search over the extracted text; one line per match `path:#n: line`.
+/// `root` is the corpus/notebook root (feature-gated: a doc-scoped notebook path is served from there).
 pub fn run_grep(
+    root: &std::path::Path,
     idx: &DocIndex,
     pattern: &str,
     opts: glossa::grep::GrepOpts,
     trace: &TraceLog,
 ) -> (String, Vec<String>) {
-    (glossa::tools::grep(idx, pattern, &opts, trace), Vec::new())
+    (glossa::tools::grep(root, idx, pattern, &opts, trace), Vec::new())
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
@@ -102,6 +104,7 @@ pub fn exec(
         }
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
             let usize_arg = |k: &str| args.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
             let bool_arg = |k: &str| args.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
             let context = usize_arg("context");
@@ -114,11 +117,7 @@ pub fn exec(
                     .get("glob")
                     .and_then(|v| v.as_str())
                     .map(String::from)
-                    .or_else(|| {
-                        args.get("path")
-                            .and_then(|v| v.as_str())
-                            .map(glossa::grep::path_to_glob)
-                    }),
+                    .or_else(|| path_arg.as_deref().map(glossa::grep::path_to_glob)),
                 file_type: args
                     .get("file_type")
                     .and_then(|v| v.as_str())
@@ -132,8 +131,9 @@ pub fn exec(
                 max_count: usize_arg("max_count"),
                 multiline: bool_arg("multiline"),
                 line_cap: None,
+                path: path_arg,
             };
-            let (body, titles) = run_grep(idx, pattern, opts.with_default_context(), trace);
+            let (body, titles) = run_grep(root, idx, pattern, opts.with_default_context(), trace);
             (body, titles, Vec::new())
         }
         "glossary" => {

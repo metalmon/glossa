@@ -36,6 +36,11 @@ pub struct GrepOpts {
     /// A match line keeps a window around its first match; a context line keeps its head.
     /// `None` = verbatim (core default).
     pub line_cap: Option<usize>,
+    /// The grep target path as the model passed it, before any `path_to_glob` conversion
+    /// (feature-gated notebook dispatch only — `grep()` in this module never reads it).
+    /// `crate::tools::grep` probes this for a doc-scoped notebook path (`<doc>/<file>`)
+    /// before falling through to the corpus grep below.
+    pub path: Option<String>,
 }
 
 impl GrepOpts {
@@ -127,7 +132,7 @@ impl GrepHit {
 /// in word boundaries. Case folding is **smart-case** by default — case-insensitive unless the
 /// pattern contains an uppercase letter — so a lowercase query matches mixed-case text; `-i`
 /// forces folding unconditionally.
-fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
+pub(crate) fn build_matcher(pattern: &str, opts: &GrepOpts) -> anyhow::Result<regex::Regex> {
     let mut body = if opts.fixed {
         regex::escape(pattern)
     } else {
@@ -203,7 +208,7 @@ fn normalize_pattern_spaces(pattern: &str, fixed: bool) -> Option<String> {
 /// intent under `fixed`, then make literal spaces whitespace-tolerant. Both the matcher and
 /// the trigram prefilter see the SAME prepared pattern, so they stay consistent (the `\s+`
 /// links become `Any` in the plan and the word literals still prefilter).
-fn prepare(pattern: &str, opts: &GrepOpts) -> (String, GrepOpts) {
+pub(crate) fn prepare(pattern: &str, opts: &GrepOpts) -> (String, GrepOpts) {
     let mut o = honor_regex_intent(pattern, opts);
     match normalize_pattern_spaces(pattern, o.fixed) {
         Some(p) => {

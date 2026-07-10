@@ -961,10 +961,15 @@ impl GlossaServer {
             max_count: a.max_count,
             multiline: a.multiline.unwrap_or(false),
             line_cap: None,
+            path: a.path,
         };
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::grep(&idx, &a.pattern, &opts.with_default_context(), &self.trace),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(
+            &self.root,
+            &idx,
+            &a.pattern,
+            &opts.with_default_context(),
+            &self.trace,
+        ))]))
     }
 
     #[tool(

@@ -684,6 +684,7 @@ fn main() -> anyhow::Result<()> {
                 max_count,
                 multiline,
                 line_cap: None,
+                path: None,
             };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
                 println!("{}", h.display_line());
