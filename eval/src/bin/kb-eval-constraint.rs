@@ -752,12 +752,14 @@ fn run_sop_conversation(
     // how the SOP deploys in prod (one agent per step) and keeps a step from being polluted by
     // the whole run's accumulated history. `sop_advance` is an intra-step progress signal
     // (Materialize's loop), NOT a transition. One episode_id throughout so feedback/scoring stay
-    // unified. Dedup OFF (notebook writes don't invalidate cached reads yet).
+    // unified. Dedup ON: it is now notebook-aware (note/sed/del invalidate cat/ls/glob), which kills
+    // the identical-read thrash that otherwise burns most of a weak model's round budget.
     let policy = EpisodePolicy {
         stop_on_done: true,
-        dedup_readonly: false,
+        dedup_readonly: true,
     };
     let mut total_rounds = 0usize;
+    let mut total_deduped = 0usize;
     let mut episode_id = Some(eid_ret);
     let mut sop_done = false;
     // Linear advance increments the step each iteration; the bound is a backstop only.
@@ -777,6 +779,7 @@ fn run_sop_conversation(
         llm_rounds_step.store(0, std::sync::atomic::Ordering::Relaxed);
         let outcome = run_episode(&mut chat, &prompt, &exec, SOP_MAX_LLM_ROUNDS_PER_STEP, policy)?;
         total_rounds += outcome.rounds;
+        total_deduped += outcome.deduped;
         if outcome.episode_id.is_some() {
             episode_id = outcome.episode_id.clone();
         }
@@ -791,8 +794,8 @@ fn run_sop_conversation(
             });
         }
         eprintln!(
-            "  [sop] step {cur} finished (subagent done={} rounds={}) → next step",
-            outcome.done, outcome.rounds
+            "  [sop] step {cur} finished (subagent done={} rounds={} deduped={}) → next step",
+            outcome.done, outcome.rounds, outcome.deduped
         );
         let next = cur + 1;
         if sop_def.steps.iter().any(|s| s.number == next) {
@@ -805,10 +808,11 @@ fn run_sop_conversation(
     }
     let run = run.lock().unwrap();
     eprintln!(
-        "[sop] run {:?} — {} step-subagents executed (llm_rounds={})",
+        "[sop] run {:?} — {} step-subagents executed (llm_rounds={}, deduped={} tool calls skipped)",
         run.status,
         run.step_results.len(),
-        total_rounds
+        total_rounds,
+        total_deduped
     );
     Ok(EpisodeOutcome {
         answer: String::new(),
@@ -816,6 +820,7 @@ fn run_sop_conversation(
         surfaced_titles: vec![],
         done: sop_done,
         rounds: total_rounds,
+        deduped: total_deduped,
     })
 }
 
@@ -1933,6 +1938,7 @@ mod tests {
             surfaced_titles: vec![],
             done: true,
             rounds: 49,
+            deduped: 0,
         };
         assert_eq!(
             episode_id_for_report(fallback, Some(&outcome)),

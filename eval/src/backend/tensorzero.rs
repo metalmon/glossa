@@ -24,6 +24,8 @@ pub struct EpisodeOutcome {
     pub done: bool,
     /// Rounds actually consumed (model turns).
     pub rounds: usize,
+    /// Tool calls skipped by the dedup guard (identical to a still-current prior call this episode).
+    pub deduped: usize,
 }
 
 /// A single TensorZero `/inference` turn result.
@@ -63,19 +65,24 @@ impl EpisodePolicy {
 /// after an index rebuild. Corpus reads over the static KB never go stale, so they dedup once forever.
 #[derive(PartialEq, Clone, Copy)]
 enum ToolKind {
-    Corpus,       // search/read/grep/glob — static KB; dedup once, never invalidate
-    GraphRead,    // glossary/neighbors/resolve — invalidated by any graph mutation
-    GraphMutate,  // graph_upsert/delete/update/generalize — invalidates graph reads + graph mutates
-    CorpusMutate, // index/reindex/purge — invalidates everything
-    Control,      // done — never deduped
+    Corpus,         // search/read/grep — static KB index; dedup once, never invalidate
+    NotebookRead,   // cat/ls/glob — reflect notebook state; invalidated by any notebook write
+    GraphRead,      // glossary/neighbors/resolve/graph_stats — invalidated by any graph mutation
+    NotebookMutate, // note/sed/del — invalidates notebook reads
+    GraphMutate,    // graph_upsert/delete/update/generalize — invalidates graph reads
+    CorpusMutate,   // index/reindex/purge — invalidates everything
+    Control,        // done/sop_advance/get_task — never deduped
 }
 
 fn tool_kind(name: &str) -> ToolKind {
     match name {
-        // `done` ends the episode; `sop_advance` transitions the SOP step — both
-        // are control signals: always executed, never deduped (an identical
-        // `{"remaining": 0}` on two different steps is two real transitions).
+        // `done` ends the episode; `sop_advance` is an intra-step progress signal; `get_task`
+        // returns the (static) task — control signals: always executed, never deduped.
         "done" | "sop_advance" | "get_task" => ToolKind::Control,
+        // Notebook I/O: cat/ls/glob reflect the on-disk notebook (workbook + .csp), which
+        // note/sed/del mutate — so a cached notebook read goes stale on any notebook write.
+        "cat" | "ls" | "glob" => ToolKind::NotebookRead,
+        "note" | "sed" | "del" => ToolKind::NotebookMutate,
         "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => {
             ToolKind::GraphMutate
         }
@@ -136,6 +143,7 @@ where
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     let mut rounds: usize = 0;
+    let mut deduped: usize = 0;
     for _ in 0..max_rounds {
         rounds += 1;
         let turn = chat(&messages, episode_id.as_deref())?;
@@ -183,6 +191,7 @@ where
                     surfaced_titles,
                     done: false,
                     rounds,
+                    deduped,
                 });
             }
             // Narrate-then-stop: the model described its next action but emitted no tool call. Don't
@@ -221,6 +230,7 @@ where
                     surfaced_titles,
                     done: true,
                     rounds,
+                    deduped,
                 });
             }
         }
@@ -273,9 +283,10 @@ where
         let merged: Vec<Value> = preserved.into_iter().chain(tool_call_blocks).collect();
         messages.push(json!({ "role": "assistant", "content": merged }));
 
-        // Dedup: skip a call whose (name,args) is still "current" in `seen`; `done`/control is never
-        // deduped. Then invalidate `seen` for the next turn — a graph mutation makes prior graph
-        // reads + graph mutates stale (corpus reads survive); an index rebuild makes everything stale.
+        // Dedup: skip a READ-ONLY call whose (name,args) is still "current" in `seen`; mutations and
+        // control always run. Then invalidate `seen` for the next turn by what the executed call
+        // changed — a notebook write (note/sed/del) makes cached notebook reads (cat/ls/glob) stale;
+        // a graph mutation makes graph reads stale; an index rebuild makes everything stale.
         let run_flags: Vec<bool> = calls
             .iter()
             .map(|(_, name, args)| {
@@ -284,6 +295,7 @@ where
                     && seen.contains(&(name.clone(), args.to_string())))
             })
             .collect();
+        deduped += run_flags.iter().filter(|&&ran| !ran).count();
         if policy.dedup_readonly {
             for ((_, name, args), &ran) in calls.iter().zip(&run_flags) {
                 if !ran {
@@ -291,7 +303,12 @@ where
                 }
                 match tool_kind(name) {
                     ToolKind::CorpusMutate => seen.clear(),
-                    ToolKind::GraphMutate => seen.retain(|(n, _)| tool_kind(n) == ToolKind::Corpus),
+                    ToolKind::NotebookMutate => {
+                        seen.retain(|(n, _)| tool_kind(n) != ToolKind::NotebookRead)
+                    }
+                    ToolKind::GraphMutate => seen.retain(|(n, _)| {
+                        matches!(tool_kind(n), ToolKind::Corpus | ToolKind::NotebookRead)
+                    }),
                     _ => {}
                 }
                 seen.insert((name.clone(), args.to_string()));
@@ -355,6 +372,7 @@ where
         surfaced_titles,
         done: false,
         rounds,
+        deduped,
     })
 }
 
@@ -717,6 +735,39 @@ mod tests {
         let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: yes");
+    }
+
+    #[test]
+    fn notebook_dedup_invalidates_cat_after_note() {
+        use std::cell::RefCell;
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        // cat, cat(dup→skip), note(mutation), cat(must re-run: note invalidated it), done.
+        let chat = |_: &[Value], _: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            let block = match *r {
+                1 | 2 | 4 => json!({ "type": "tool_call", "id": "c", "name": "cat", "arguments": { "path": "wb.md" } }),
+                3 => json!({ "type": "tool_call", "id": "n", "name": "note", "arguments": { "file": "wb.md", "content": "x" } }),
+                _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
+            };
+            Ok(TzTurn { content: vec![block], episode_id: "ep".into() })
+        };
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_c = Arc::clone(&calls);
+        let exec = move |name: &str, _args: &Value| {
+            calls_c.lock().unwrap().push(name.to_string());
+            ("ok".to_string(), Vec::new(), Vec::new())
+        };
+        let policy = EpisodePolicy { stop_on_done: true, dedup_readonly: true };
+        let out = run_episode(chat, "q", exec, 8, policy).unwrap();
+        assert!(out.done);
+        let executed = calls.lock().unwrap().clone();
+        let cats = executed.iter().filter(|n| n.as_str() == "cat").count();
+        let notes = executed.iter().filter(|n| n.as_str() == "note").count();
+        // round-2 cat deduped; round-4 cat re-runs because `note` invalidated the notebook read.
+        assert_eq!(cats, 2, "cat should run r1 and r4 (post-note), skip r2; got {executed:?}");
+        assert_eq!(notes, 1);
     }
 
     #[test]
