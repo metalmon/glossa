@@ -66,9 +66,9 @@ impl EpisodePolicy {
 #[derive(PartialEq, Clone, Copy)]
 enum ToolKind {
     Corpus,         // search/read/grep — static KB index; dedup once, never invalidate
-    NotebookRead,   // cat/ls/glob — reflect notebook state; invalidated by any notebook write
+    NotebookRead,   // ls/glob — reflect notebook state; invalidated by any notebook write
     GraphRead,      // glossary/neighbors/resolve/graph_stats — invalidated by any graph mutation
-    NotebookMutate, // note/sed/del — invalidates notebook reads
+    NotebookMutate, // note/del — invalidates notebook reads
     GraphMutate,    // graph_upsert/delete/update/generalize — invalidates graph reads
     CorpusMutate,   // index/reindex/purge — invalidates everything
     Control,        // done/sop_advance/get_task — never deduped
@@ -79,10 +79,10 @@ fn tool_kind(name: &str) -> ToolKind {
         // `done` ends the episode; `sop_advance` is an intra-step progress signal; `get_task`
         // returns the (static) task — control signals: always executed, never deduped.
         "done" | "sop_advance" | "get_task" => ToolKind::Control,
-        // Notebook I/O: cat/ls/glob reflect the on-disk notebook (workbook + .csp), which
-        // note/sed/del mutate — so a cached notebook read goes stale on any notebook write.
-        "cat" | "ls" | "glob" => ToolKind::NotebookRead,
-        "note" | "sed" | "del" => ToolKind::NotebookMutate,
+        // Notebook I/O: ls/glob reflect the on-disk notebook (workbook + .csp), which
+        // note/del mutate — so a cached notebook read goes stale on any notebook write.
+        "ls" | "glob" => ToolKind::NotebookRead,
+        "note" | "del" => ToolKind::NotebookMutate,
         "graph_upsert" | "graph_delete" | "graph_update" | "graph_generalize" => {
             ToolKind::GraphMutate
         }
@@ -285,7 +285,7 @@ where
 
         // Dedup: skip a READ-ONLY call whose (name,args) is still "current" in `seen`; mutations and
         // control always run. Then invalidate `seen` for the next turn by what the executed call
-        // changed — a notebook write (note/sed/del) makes cached notebook reads (cat/ls/glob) stale;
+        // changed — a notebook write (note/del) makes cached notebook reads (ls/glob) stale;
         // a graph mutation makes graph reads stale; an index rebuild makes everything stale.
         let run_flags: Vec<bool> = calls
             .iter()
@@ -745,16 +745,16 @@ mod tests {
     }
 
     #[test]
-    fn notebook_dedup_invalidates_cat_after_note() {
+    fn notebook_dedup_invalidates_ls_after_note() {
         use std::cell::RefCell;
         use std::sync::{Arc, Mutex};
         let round = RefCell::new(0usize);
-        // cat, cat(dup→skip), note(mutation), cat(must re-run: note invalidated it), done.
+        // ls, ls(dup→skip), note(mutation), ls(must re-run: note invalidated it), done.
         let chat = |_: &[Value], _: Option<&str>| {
             let mut r = round.borrow_mut();
             *r += 1;
             let block = match *r {
-                1 | 2 | 4 => json!({ "type": "tool_call", "id": "c", "name": "cat", "arguments": { "path": "wb.md" } }),
+                1 | 2 | 4 => json!({ "type": "tool_call", "id": "c", "name": "ls", "arguments": { "path": "wb.md" } }),
                 3 => json!({ "type": "tool_call", "id": "n", "name": "note", "arguments": { "file": "wb.md", "content": "x" } }),
                 _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
             };
@@ -770,10 +770,10 @@ mod tests {
         let out = run_episode(chat, "q", exec, 8, policy).unwrap();
         assert!(out.done);
         let executed = calls.lock().unwrap().clone();
-        let cats = executed.iter().filter(|n| n.as_str() == "cat").count();
+        let lss = executed.iter().filter(|n| n.as_str() == "ls").count();
         let notes = executed.iter().filter(|n| n.as_str() == "note").count();
-        // round-2 cat deduped; round-4 cat re-runs because `note` invalidated the notebook read.
-        assert_eq!(cats, 2, "cat should run r1 and r4 (post-note), skip r2; got {executed:?}");
+        // round-2 ls deduped; round-4 ls re-runs because `note` invalidated the notebook read.
+        assert_eq!(lss, 2, "ls should run r1 and r4 (post-note), skip r2; got {executed:?}");
         assert_eq!(notes, 1);
     }
 

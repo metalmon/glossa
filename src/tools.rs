@@ -348,11 +348,6 @@ pub fn note(
 }
 
 #[cfg(feature = "notebook")]
-pub fn cat_note(root: &std::path::Path, idx: &crate::index::store::DocIndex, path: &str) -> String {
-    crate::notebook::cat(root, idx, path)
-}
-
-#[cfg(feature = "notebook")]
 pub fn ls_notes(
     root: &std::path::Path,
     idx: &crate::index::store::DocIndex,
@@ -364,18 +359,6 @@ pub fn ls_notes(
 #[cfg(feature = "notebook")]
 pub fn del_note(root: &std::path::Path, idx: &crate::index::store::DocIndex, path: &str) -> String {
     crate::notebook::del(root, idx, path)
-}
-
-#[cfg(feature = "notebook")]
-pub fn sed_note(
-    root: &std::path::Path,
-    idx: &crate::index::store::DocIndex,
-    path: &str,
-    old: &str,
-    new: &str,
-    all: bool,
-) -> String {
-    crate::notebook::sed(root, idx, path, old, new, all)
 }
 
 /// Compile agent `.csp` limit tables for `doc` into the constraint graph (`kb graph build`).

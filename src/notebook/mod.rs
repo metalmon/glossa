@@ -187,14 +187,6 @@ pub fn note(
     }
 }
 
-/// Read a note by notebook path (from `ls`).
-pub fn cat(root: &Path, idx: &DocIndex, path: &str) -> String {
-    match read_note(root, idx, path) {
-        Ok((rel, body)) => format!("{rel}\n{body}"),
-        Err(e) => format!("REJECTED — {e}"),
-    }
-}
-
 /// List notes, optionally filtered by document.
 pub fn ls(root: &Path, idx: &DocIndex, doc: Option<&str>) -> String {
     match list_note_paths(root, idx, doc) {
@@ -216,17 +208,6 @@ pub fn ls(root: &Path, idx: &DocIndex, doc: Option<&str>) -> String {
 pub fn del(root: &Path, idx: &DocIndex, path: &str) -> String {
     match with_notebook_write_lock(root, || delete_note(root, idx, path)) {
         Ok(rel) => format!("Deleted {rel}"),
-        Err(e) => format!("REJECTED — {e}"),
-    }
-}
-
-/// Literal substring replace inside a note (`all` = every occurrence).
-pub fn sed(root: &Path, idx: &DocIndex, path: &str, old: &str, new: &str, all: bool) -> String {
-    match with_notebook_write_lock(root, || patch_note(root, idx, path, old, new, all)) {
-        Ok((rel, n)) => format!(
-            "Patched {rel} ({n} replacement{})",
-            if n == 1 { "" } else { "s" }
-        ),
         Err(e) => format!("REJECTED — {e}"),
     }
 }
@@ -410,42 +391,6 @@ fn delete_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<String
     Ok(rel_path)
 }
 
-fn patch_note(
-    root: &Path,
-    idx: &DocIndex,
-    path: &str,
-    old: &str,
-    new: &str,
-    all: bool,
-) -> anyhow::Result<(String, usize)> {
-    let (rel_path, body) = read_note(root, idx, path)?;
-    if old.is_empty() {
-        anyhow::bail!("old must not be empty");
-    }
-    let (patched, n) = if all {
-        let n = body.matches(old).count();
-        (body.replace(old, new), n)
-    } else if let Some(pos) = body.find(old) {
-        let mut out = String::with_capacity(body.len() - old.len() + new.len());
-        out.push_str(&body[..pos]);
-        out.push_str(new);
-        out.push_str(&body[pos + old.len()..]);
-        (out, 1)
-    } else {
-        (body, 0)
-    };
-    if n == 0 {
-        anyhow::bail!("pattern not found in {rel_path}; cat(path) the note first");
-    }
-    // A .csp must stay compiler-readable after the patch, same contract as note().
-    if rel_path.to_ascii_lowercase().ends_with(".csp") {
-        validate_csp(&patched)?;
-    }
-    let NotePath { abs_path, .. } = resolve_note_by_path(root, idx, path)?;
-    std::fs::write(&abs_path, &patched)?;
-    Ok((rel_path, n))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn note_then_ls_cat_sed_del() {
+    fn note_then_ls_read_del() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
         note(
@@ -480,13 +425,10 @@ mod tests {
         );
         let listing = ls(dir.path(), &idx, Some("doc.pdf"));
         assert!(listing.contains("doc.pdf/parameters.md"));
-        let body = cat(dir.path(), &idx, "doc.pdf/parameters.md");
+        let (_, body) = read_note(dir.path(), &idx, "doc.pdf/parameters.md").unwrap();
         assert!(body.contains("A\nB"));
-        let msg = sed(dir.path(), &idx, "doc.pdf/parameters.md", "B", "C", false);
-        assert!(msg.contains("Patched"));
-        assert!(cat(dir.path(), &idx, "doc.pdf/parameters.md").contains("C"));
         del(dir.path(), &idx, "doc.pdf/parameters.md");
-        assert!(cat(dir.path(), &idx, "doc.pdf/parameters.md").starts_with("REJECTED"));
+        assert!(read_note(dir.path(), &idx, "doc.pdf/parameters.md").is_err());
     }
 
     #[test]
@@ -554,30 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn sed_keeps_csp_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(
-            dir.path(),
-            &idx,
-            "doc.pdf",
-            "t.csp",
-            &format!("h{TAB}v\n1{TAB}2\n"),
-            false,
-        );
-        let msg = sed(
-            dir.path(),
-            &idx,
-            "doc.pdf/t.csp",
-            &format!("1{TAB}2"),
-            &format!("1{TAB}2{TAB}3"),
-            false,
-        );
-        assert!(msg.contains("REJECTED"), "{msg}");
-        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("1{TAB}2")));
-    }
-
-    #[test]
     fn distinct_mirrors_for_same_stem_different_ext() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
@@ -613,10 +531,8 @@ mod tests {
             .path()
             .join(".glossa/notes/doc.docx/parameters.md")
             .is_file());
-        assert_eq!(
-            cat(dir.path(), &idx, "doc.pdf/parameters.md"),
-            "doc.pdf/parameters.md\npdf\n"
-        );
+        let (rel, body) = read_note(dir.path(), &idx, "doc.pdf/parameters.md").unwrap();
+        assert_eq!((rel.as_str(), body.as_str()), ("doc.pdf/parameters.md", "pdf\n"));
     }
 
     #[test]
@@ -674,7 +590,7 @@ mod tests {
         );
         assert!(msg.contains("Appended 1 row"), "{msg}");
         assert!(msg.contains("now 4 data rows"), "{msg}");
-        let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
+        let (_, body) = read_note(dir.path(), &idx, "doc.pdf/t.csp").unwrap();
         assert_eq!(
             body.matches(&format!("h{TAB}v")).count(),
             1,
@@ -706,7 +622,7 @@ mod tests {
         assert!(msg.contains("Appended 0 rows"), "{msg}");
         assert!(msg.contains("now 2 data rows"), "{msg}");
         assert!(msg.contains("2 duplicate rows ignored"), "{msg}");
-        let body = cat(dir.path(), &idx, "doc.pdf/t.csp");
+        let (_, body) = read_note(dir.path(), &idx, "doc.pdf/t.csp").unwrap();
         assert_eq!(body.matches(&format!("1{TAB}2")).count(), 1, "{body}");
     }
 
@@ -748,8 +664,9 @@ mod tests {
         );
         assert!(msg.contains("REJECTED"), "{msg}");
         // the file keeps its pre-append content
-        assert!(cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("1{TAB}2")));
-        assert!(!cat(dir.path(), &idx, "doc.pdf/t.csp").contains(&format!("3{TAB}4{TAB}5")));
+        let (_, body) = read_note(dir.path(), &idx, "doc.pdf/t.csp").unwrap();
+        assert!(body.contains(&format!("1{TAB}2")));
+        assert!(!body.contains(&format!("3{TAB}4{TAB}5")));
     }
 
     #[test]
@@ -760,7 +677,7 @@ mod tests {
         let msg = note(dir.path(), &idx, "doc.pdf", "parameters.md", "C\n", true);
         assert!(msg.contains("Appended"), "{msg}");
         assert!(msg.contains("now 3 lines"), "{msg}");
-        let body = cat(dir.path(), &idx, "doc.pdf/parameters.md");
+        let (_, body) = read_note(dir.path(), &idx, "doc.pdf/parameters.md").unwrap();
         assert!(body.contains("A\nB\nC"), "{body}");
     }
 

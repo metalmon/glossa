@@ -48,8 +48,8 @@ pub struct GlossaServer {
 }
 
 #[allow(dead_code)] // read tools stay enabled for Reader; listed for profile documentation
-const NOTEBOOK_READ_TOOLS: &[&str] = &["ls", "cat"];
-const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "sed", "del"];
+const NOTEBOOK_READ_TOOLS: &[&str] = &["ls"];
+const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "del"];
 const EDITOR_TOOLS: &[&str] = &[
     "index",
     "reindex",
@@ -450,21 +450,6 @@ struct LsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SedArgs {
-    #[schemars(
-        description = "Notebook path from ls (<document>/<file>; document path includes extension)"
-    )]
-    path: String,
-    #[schemars(description = "Literal substring to find (not regex)")]
-    old: String,
-    #[schemars(description = "Replacement text")]
-    new: String,
-    #[serde(default)]
-    #[schemars(description = "Replace all occurrences (default: first only)")]
-    all: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct GrepArgs {
     #[schemars(
         description = "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window."
@@ -810,7 +795,7 @@ impl GlossaServer {
     #[cfg_attr(not(feature = "constraint"), allow(dead_code))]
     #[cfg_attr(not(feature = "constraint"), allow(unused_variables))]
     #[tool(
-        description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with cat/sed/note, then call again."
+        description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with read/note, then call again."
     )]
     async fn graph_build(
         &self,
@@ -985,7 +970,7 @@ impl GlossaServer {
 
     #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
     #[tool(
-        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
+        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/read/del with paths from ls afterward."
     )]
     async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "notebook")]
@@ -1015,33 +1000,7 @@ impl GlossaServer {
 
     #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
     #[tool(
-        description = "Read a notebook note by path (from ls). Not for indexed corpus documents — use read(path, n)."
-    )]
-    async fn cat(
-        &self,
-        Parameters(a): Parameters<NotebookPathArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        #[cfg(feature = "notebook")]
-        {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-            let msg = crate::tools::cat_note(&self.root, &idx, &a.path);
-            return Ok(CallToolResult::success(vec![Content::text(msg)]));
-        }
-        #[cfg(not(feature = "notebook"))]
-        {
-            Err(McpError::internal_error(
-                String::from(
-                    "notebook feature is not enabled. Build glossa with --features notebook",
-                ),
-                None,
-            ))
-        }
-    }
-
-    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
-    #[tool(
-        description = "List notebook notes. Optional doc filter. Paths in the output are arguments for cat/sed/del."
+        description = "List notebook notes. Optional doc filter. Paths in the output are arguments for read/del."
     )]
     async fn ls(&self, Parameters(a): Parameters<LsArgs>) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "notebook")]
@@ -1073,36 +1032,6 @@ impl GlossaServer {
             let idx =
                 crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
             let msg = crate::tools::del_note(&self.root, &idx, &a.path);
-            return Ok(CallToolResult::success(vec![Content::text(msg)]));
-        }
-        #[cfg(not(feature = "notebook"))]
-        {
-            Err(McpError::internal_error(
-                String::from(
-                    "notebook feature is not enabled. Build glossa with --features notebook",
-                ),
-                None,
-            ))
-        }
-    }
-
-    #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
-    #[tool(
-        description = "Patch a notebook note: literal substring replace. Use cat(path) first if unsure of the exact old text."
-    )]
-    async fn sed(&self, Parameters(a): Parameters<SedArgs>) -> Result<CallToolResult, McpError> {
-        #[cfg(feature = "notebook")]
-        {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-            let msg = crate::tools::sed_note(
-                &self.root,
-                &idx,
-                &a.path,
-                &a.old,
-                &a.new,
-                a.all.unwrap_or(false),
-            );
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
         #[cfg(not(feature = "notebook"))]
@@ -1446,11 +1375,9 @@ mod tests {
         let root = std::path::PathBuf::from(".");
         let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
-        assert!(reader.contains(&"ls".to_string()) && reader.contains(&"cat".to_string()));
+        assert!(reader.contains(&"ls".to_string()));
         assert!(
-            !reader.contains(&"note".to_string())
-                && !reader.contains(&"sed".to_string())
-                && !reader.contains(&"del".to_string())
+            !reader.contains(&"note".to_string()) && !reader.contains(&"del".to_string())
         );
         assert!(
             !reader.contains(&"index".to_string())
@@ -1460,11 +1387,7 @@ mod tests {
         assert!(!reader.contains(&"write".to_string()));
 
         let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
-        assert!(
-            editor.contains(&"note".to_string())
-                && editor.contains(&"ls".to_string())
-                && editor.contains(&"cat".to_string())
-        );
+        assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(
             editor.contains(&"graph_generalize".to_string()),
@@ -1491,7 +1414,7 @@ mod tests {
 
         let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
-        assert!(full.contains(&"note".to_string()) && full.contains(&"sed".to_string()));
+        assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
         // resolve is a universally available tool — present in EVERY profile (not gated).
         for prof in [&reader, &editor, &full] {

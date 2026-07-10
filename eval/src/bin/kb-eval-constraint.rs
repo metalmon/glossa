@@ -322,24 +322,11 @@ fn exec_notebook(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
         ),
-        "cat" => glossa::tools::cat_note(
-            agent_g_dir,
-            idx,
-            args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-        ),
         "ls" => glossa::tools::ls_notes(agent_g_dir, idx, args.get("doc").and_then(|v| v.as_str())),
         "del" => glossa::tools::del_note(
             agent_g_dir,
             idx,
             args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-        ),
-        "sed" => glossa::tools::sed_note(
-            agent_g_dir,
-            idx,
-            args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-            args.get("old").and_then(|v| v.as_str()).unwrap_or(""),
-            args.get("new").and_then(|v| v.as_str()).unwrap_or(""),
-            args.get("all").and_then(|v| v.as_bool()).unwrap_or(false),
         ),
         other => format!("unknown notebook tool: {other}"),
     }
@@ -506,7 +493,7 @@ fn make_exec(
                     &trace_kb,
                 )
             }
-            "note" | "cat" | "ls" | "del" | "sed" => (
+            "note" | "ls" | "del" => (
                 exec_notebook(&agent_g_dir, &idx_kb, name, args),
                 vec![],
                 vec![],
@@ -753,7 +740,7 @@ fn run_sop_conversation(
     // how the SOP deploys in prod (one agent per step) and keeps a step from being polluted by
     // the whole run's accumulated history. `sop_advance` is an intra-step progress signal
     // (Materialize's loop), NOT a transition. One episode_id throughout so feedback/scoring stay
-    // unified. Dedup ON: it is now notebook-aware (note/sed/del invalidate cat/ls/glob), which kills
+    // unified. Dedup ON: it is now notebook-aware (note/del invalidate ls/glob), which kills
     // the identical-read thrash that otherwise burns most of a weak model's round budget.
     let policy = EpisodePolicy {
         stop_on_done: true,
@@ -1483,7 +1470,7 @@ fn main() -> Result<()> {
                         &trace_kb,
                     )
                 }
-                "note" | "cat" | "ls" | "del" | "sed" => {
+                "note" | "ls" | "del" => {
                     let idx_agent = DocIndex::open_or_create(&agent_g_dir_clone).unwrap();
                     (
                         exec_notebook(&agent_g_dir_clone, &idx_agent, name, args),

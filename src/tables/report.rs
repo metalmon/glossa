@@ -2,7 +2,7 @@
 
 use crate::tables::compile::CompileReport;
 
-const FIX_HINT: &str = "fix: cat(path) → sed/note → graph_build again";
+const FIX_HINT: &str = "fix: read(path, n) → note → graph_build again";
 
 /// Format `tables_to_graph` result for the `graph_build` agent tool.
 pub fn format_graph_build_output(result: anyhow::Result<CompileReport>) -> String {
