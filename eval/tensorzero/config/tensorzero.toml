@@ -322,7 +322,7 @@ extra_body = [
 [functions.answer_hotpot]
 type = "chat"
 # >>> GENERATED TOOL LIST
-tools = ["cat", "constraint_solve", "get_ontology", "glob", "glossary", "grep", "ls", "neighbors", "read", "resolve", "search"]
+tools = ["constraint_solve", "get_ontology", "glob", "glossary", "grep", "ls", "neighbors", "read", "resolve", "search"]
 # <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
@@ -366,10 +366,6 @@ extra_body = [
 
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
-[tools.cat]
-description = "Read a notebook note by path (from ls). Not for indexed corpus documents — use read(path, n)."
-parameters = "tools/cat.json"
-
 [tools.constraint_solve]
 description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels."
 parameters = "tools/constraint_solve.json"
@@ -391,7 +387,7 @@ description = "Resolve a concept (a symptom, error, component or task in a few w
 parameters = "tools/glossary.json"
 
 [tools.graph_build]
-description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with cat/sed/note, then call again."
+description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with read/note, then call again."
 parameters = "tools/graph_build.json"
 
 [tools.graph_delete]
@@ -423,7 +419,7 @@ description = "Build/update the index + structural graph for the knowledge base.
 parameters = "tools/index.json"
 
 [tools.ls]
-description = "List notebook notes. Optional doc filter. Paths in the output are arguments for cat/sed/del."
+description = "List notebook notes. Optional doc filter. Paths in the output are arguments for read/del."
 parameters = "tools/ls.json"
 
 [tools.neighbors]
@@ -431,7 +427,7 @@ description = "Broaden a `glossary` hit — list OTHER solved cases linked to th
 parameters = "tools/neighbors.json"
 
 [tools.note]
-description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/cat/sed/del with paths from ls afterward."
+description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/read/del with paths from ls afterward."
 parameters = "tools/note.json"
 
 [tools.purge]
@@ -454,10 +450,6 @@ parameters = "tools/resolve.json"
 description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
 parameters = "tools/search.json"
 
-[tools.sed]
-description = "Patch a notebook note: literal substring replace. Use cat(path) first if unsure of the exact old text."
-parameters = "tools/sed.json"
-
 [tools.done]
 description = "Signal that the reasoning graph for this case is complete — the chain is written with a MENTIONS anchor, or `glossary` showed it already exists. Calling `done` ends the episode. Give a one-line `note`."
 parameters = "tools/done.json"
@@ -469,7 +461,7 @@ parameters = "tools/done.json"
 # kb-eval-constraint compiles the tables to a graph after the episode.
 [functions.constraint_validate]
 type = "chat"
-tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
+tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "done"]
 parallel_tool_calls = true
 
 # Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)
@@ -509,7 +501,7 @@ extra_body = [
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["cat", "constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "sed", "done"]
+tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 

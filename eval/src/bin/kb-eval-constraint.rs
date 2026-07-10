@@ -740,11 +740,12 @@ fn run_sop_conversation(
     // how the SOP deploys in prod (one agent per step) and keeps a step from being polluted by
     // the whole run's accumulated history. `sop_advance` is an intra-step progress signal
     // (Materialize's loop), NOT a transition. One episode_id throughout so feedback/scoring stay
-    // unified. Dedup ON: it is now notebook-aware (note/del invalidate ls/glob), which kills
-    // the identical-read thrash that otherwise burns most of a weak model's round budget.
+    // unified. Dedup OFF: the current dedup key is not path-aware across the unified
+    // read/grep-over-notebook surface, so it would wrongly collapse distinct reads/greps
+    // against different notebook paths. Re-enable once dedup is made path-aware.
     let policy = EpisodePolicy {
         stop_on_done: true,
-        dedup_readonly: true,
+        dedup_readonly: false,
     };
     let mut total_rounds = 0usize;
     let mut total_deduped = 0usize;
