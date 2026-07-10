@@ -454,8 +454,11 @@ mod tests {
         assert!(steps[4].title.contains("Validate"));
 
         let mat = &steps[1];
-        assert_eq!(mat.routing.when.as_deref(), Some("$.steps.2.remaining > 0"));
-        assert_eq!(mat.routing.next, Some(2));
+        // Per-step subagent runtime is linear: `done` drives step transitions and the driver
+        // advances step→step, so Materialize carries no `when`/`next` routing (sop_advance is
+        // now an intra-step progress signal, not a transition).
+        assert_eq!(mat.routing.when, None, "Materialize has no routing under per-step subagents");
+        assert_eq!(mat.routing.next, None);
         assert!(
             mat.suggested_tools.contains(&"graph_build".to_string()),
             "step 2 must include graph_build for incremental compile"
