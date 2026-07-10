@@ -494,6 +494,10 @@ system_template = "constraint_validate/system.minijinja"
 max_tokens = 2048
 temperature = 1.0
 top_p = 0.95
+# Anti-loop: qwen4b degenerated into re-writing the same note ×23 (v41). Add presence_penalty
+# (the coding preset's main anti-repetition lever); temperature left at 1.0 for now to isolate
+# this one variable.
+presence_penalty = 1.5
 extra_body = [
   { pointer = "/top_k", value = 40 },
   { pointer = "/min_p", value = 0.1 },
