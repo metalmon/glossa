@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::notebook::{mirror_dir_for_doc, notes_root};
-use crate::tables::csp::parse_csp;
+use crate::tables::csp::{parse_csp, CspTable};
 
 fn csp_files(dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut files: Vec<_> = std::fs::read_dir(dir)?
@@ -61,6 +61,35 @@ pub fn csp_column_values(
     Ok(out)
 }
 
+/// Per-file agent tables: `(filename, parsed table)` for every `.csp` in the
+/// document's notes mirror. Files that fail to parse are skipped. Unlike
+/// `csp_column_values` (which unions columns across files), this keeps each file
+/// as its own table — needed to match a multi-column table against a reference
+/// relation without collapsing combination rows.
+pub fn csp_tables_per_file(
+    root: &Path,
+    doc: &str,
+) -> anyhow::Result<Vec<(String, CspTable)>> {
+    let tables_dir = notes_root(root).join(mirror_dir_for_doc(doc));
+    let mut out = Vec::new();
+    if !tables_dir.is_dir() {
+        return Ok(out);
+    }
+    for path in csp_files(&tables_dir)? {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let text = std::fs::read_to_string(&path)?;
+        let Ok(rel) = parse_csp(&text) else {
+            continue;
+        };
+        out.push((name, rel));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +136,22 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(count_csp_files(dir.path(), "no/such.pdf"), 0);
+    }
+
+    #[test]
+    fn tables_per_file_keeps_files_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // A multi-column combination table and a flat table.
+        std::fs::write(mirror.join("height.csp"), "h\tD\n0,6\t125\n0,6\t150\n").unwrap();
+        std::fs::write(mirror.join("grit.csp"), "Зернистость\nF16\nF20\n").unwrap();
+        let tables = csp_tables_per_file(dir.path(), doc).unwrap();
+        assert_eq!(tables.len(), 2);
+        let height = tables.iter().find(|(f, _)| f == "height.csp").unwrap();
+        assert_eq!(height.1.headers, vec!["h", "D"]);
+        assert_eq!(height.1.rows.len(), 2);
+        assert_eq!(height.1.rows[0], vec!["0,6", "125"]);
     }
 }
