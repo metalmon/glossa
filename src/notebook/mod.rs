@@ -392,7 +392,7 @@ fn split_cells(line: &str) -> Vec<String> {
     parse_csp_row(line.trim_end_matches('\r'), CSP_DELIMITER)
 }
 
-fn read_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<(String, String)> {
+pub fn read_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<(String, String)> {
     let NotePath { rel_path, abs_path } = resolve_note_by_path(root, idx, path)?;
     if !abs_path.is_file() {
         anyhow::bail!("no such note at {rel_path}; use note(doc, file, content) to create");

@@ -35,15 +35,17 @@ fn parse_n(v: &Value) -> Option<u64> {
 }
 
 /// Read a chunk OR a reasoning node: full text + the chunk's images (for the vision model). `graph`
-/// makes `read` omnivorous — a node id resolves to the node + its evidence chunks.
+/// makes `read` omnivorous — a node id resolves to the node + its evidence chunks. `root` is the
+/// corpus/notebook root (feature-gated: a doc-scoped notebook path is served from there).
 pub fn run_read(
+    root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     path: &str,
     n: u64,
     trace: &TraceLog,
 ) -> (String, Vec<glossa::read::DocImage>) {
-    let out = glossa::tools::read(idx, graph, path, n, trace);
+    let out = glossa::tools::read(root, idx, graph, path, n, trace);
     (out.text, out.images)
 }
 
@@ -58,9 +60,11 @@ pub fn run_grep(
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
+/// `root` is the corpus/notebook root, threaded through to `read` for notebook-file serving.
 pub fn exec(
     name: &str,
     args: &Value,
+    root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
@@ -93,7 +97,7 @@ pub fn exec(
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let n = args.get("n").and_then(parse_n).unwrap_or(0);
-            let (text, imgs) = run_read(idx, graph, path, n, trace);
+            let (text, imgs) = run_read(root, idx, graph, path, n, trace);
             (text, Vec::new(), imgs)
         }
         "grep" => {
@@ -205,6 +209,7 @@ mod tests {
         let out = exec(
             "read",
             &json!({"path": "d.pdf", "n": 7}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -216,6 +221,7 @@ mod tests {
         let out2 = exec(
             "read",
             &json!({"path": "d.pdf", "n": "p.7"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -240,6 +246,7 @@ mod tests {
         let out = exec(
             "grep",
             &json!({"pattern": "maxTsdr"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -273,6 +280,7 @@ mod tests {
         let out = exec(
             "grep",
             &json!({"pattern": "Зернистость", "path": "a.pdf#1"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -306,6 +314,7 @@ mod tests {
         let g = exec(
             "glob",
             &json!({"pattern": "*АБАК*"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -316,6 +325,7 @@ mod tests {
         let s = exec(
             "search",
             &json!({"query": "замена", "glob": "*АБАК*"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -342,6 +352,7 @@ mod tests {
         let result = exec(
             "glossary",
             &json!({"name": "zzz-nomatch"}),
+            dir.path(),
             &idx,
             Some(&g),
             &glossa::tools::ChainSpec::default(),
@@ -354,6 +365,7 @@ mod tests {
         let result_no_graph = exec(
             "glossary",
             &json!({"name": "zzz-nomatch"}),
+            dir.path(),
             &idx,
             None,
             &glossa::tools::ChainSpec::default(),
@@ -381,6 +393,7 @@ mod tests {
         let eval_out = exec(
             "neighbors",
             &json!({"path": path, "n": 1}),
+            dir.path(),
             &idx,
             Some(&g),
             &glossa::tools::ChainSpec::default(),

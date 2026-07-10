@@ -499,6 +499,7 @@ fn make_exec(
                 kb_eval::backend::glossa_tools::exec(
                     name,
                     args,
+                    &agent_g_dir,
                     &idx_kb,
                     Some(&g),
                     &spec_kb,
@@ -1475,6 +1476,7 @@ fn main() -> Result<()> {
                     kb_eval::backend::glossa_tools::exec(
                         name,
                         args,
+                        &agent_g_dir_clone,
                         &idx_kb,
                         Some(&g),
                         &spec_kb,

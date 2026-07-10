@@ -178,16 +178,38 @@ pub fn format_chunk_body(ord: u64, body: &str) -> String {
     }
 }
 
+/// A notebook file is addressed doc-scoped as `<doc>/<file>`: it has a path separator and a
+/// note-file suffix. Corpus paths (a bare doc, a search result) don't match, so they skip the
+/// notebook probe entirely.
+#[cfg(feature = "notebook")]
+pub fn looks_like_notebook_path(path: &str) -> bool {
+    path.contains('/')
+        && matches!(
+            std::path::Path::new(path).extension().and_then(|e| e.to_str()),
+            Some("csp" | "md" | "txt" | "json")
+        )
+}
+
 /// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
 /// (empty if the source file is absent — body still comes from the index). No truncation. Omnivorous:
 /// if `path` is a graph NODE id, returns that node + its (1-hop) evidence chunks (see `read_node`).
+/// Also serves notebook files (feature-gated): a doc-scoped path like `<doc>/<file>` is probed
+/// against the agent's on-disk notebook before falling through to the corpus read below.
 pub fn read(
+    root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&crate::graph::store::GraphStore>,
     path: &str,
     n: u64,
     trace: &TraceLog,
 ) -> ReadOut {
+    #[cfg(feature = "notebook")]
+    if looks_like_notebook_path(path) {
+        if let Ok((rel, body)) = crate::notebook::read_note(root, idx, path) {
+            trace.log("read", json!({ "notebook": path }), json!({ "notebook": rel }));
+            return ReadOut { text: format!("{rel}\n{body}"), images: Vec::new() };
+        }
+    }
     // Omnivorous: a REASONING node id off a glossary line reads as the node + its evidence. A
     // structural node id IS a document path (e.g. a Document's id is its path), so it falls through
     // to the normal document read below.
@@ -839,7 +861,7 @@ mod tests {
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "d.pdf", 2, &t);
+        let out = read(d.path(), &i, None, "d.pdf", 2, &t);
         assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
         assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
         assert!(
@@ -847,6 +869,29 @@ mod tests {
             "footer: {}",
             out.text
         );
+    }
+
+    #[test]
+    fn read_serves_notebook_file_by_doc_scoped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        // The notebook resolves a note's doc-scoped path against an INDEXED document (same
+        // validation `note`/`ls` use), so register the doc before writing a note under it.
+        let doc = "some_std.docx";
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from(doc),
+            location: "p.1".into(),
+            file_type: "docx".into(),
+            text: "placeholder".into(),
+        }])
+        .unwrap();
+        // create a notebook file under the doc's mirror
+        crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n", false);
+        let out = read(dir.path(), &idx, None, "some_std.docx/sizes.csp", 1, &TraceLog::disabled());
+        assert!(out.text.contains("50") && out.text.contains("63"), "got: {}", out.text);
+        // a non-notebook, non-corpus path still errors as before
+        let miss = read(dir.path(), &idx, None, "no/such/thing", 1, &TraceLog::disabled());
+        assert!(miss.text.contains("no document indexed") || miss.text.contains("not found"), "got: {}", miss.text);
     }
 
     fn prov() -> Provenance {
@@ -1194,7 +1239,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
-        let out = read(&i, Some(&g), "res:fix", 1, &t).text;
+        let out = read(_d.path(), &i, Some(&g), "res:fix", 1, &t).text;
         assert!(
             out.contains("[Resolution]") && out.contains("Изменить maxTsdr"),
             "node header: {out}"
@@ -1208,7 +1253,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "evidence body: {out}"
         );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(&i, Some(&g), "АБАК.pdf", 7, &t).text;
+        let doc = read(_d.path(), &i, Some(&g), "АБАК.pdf", 7, &t).text;
         assert!(
             doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
             "doc read unchanged: {doc}"
@@ -1247,16 +1292,16 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "d.md", 1, &t);
+        let out = read(d.path(), &i, None, "d.md", 1, &t);
         assert!(out.text.contains(&big), "full body, no cap"); // not truncated
         assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
         assert!(out.text.contains("‹ start of document · next #2 ›")); // unified footer (MCP wording)
                                                                        // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
                                                                        // #2 = "second") instead of an error the model loops on.
-        let oor = read(&i, None, "d.md", 99, &t).text;
+        let oor = read(d.path(), &i, None, "d.md", 99, &t).text;
         assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
-        assert!(read(&i, None, "nope.md", 1, &t)
+        assert!(read(d.path(), &i, None, "nope.md", 1, &t)
             .text
             .contains("no document indexed at nope.md"));
     }
@@ -1274,14 +1319,14 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
+        let out = read(d.path(), &i, None, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
         assert!(
             out.text.contains("safety body"),
             "resolved despite collapsed double space: {}",
             out.text
         );
         // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
-        let out2 = read(&i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
+        let out2 = read(d.path(), &i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
         assert!(
             out2.text.contains("safety body"),
             "resolved despite doubled backslash: {}",
@@ -1301,7 +1346,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
+        let out = read(d.path(), &i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
         assert!(
             out.text.contains("body text"),
             "strip spurious prefix: {}",
@@ -1321,7 +1366,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
+        let out = read(d.path(), &i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
         assert!(out.contains("did you mean"), "hint on miss: {out}");
         assert!(out.contains("Методика"), "suggest real path: {out}");
     }
@@ -1354,7 +1399,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         })
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, Some(&g), "sym:test", 1, &t).text;
+        let out = read(d.path(), &i, Some(&g), "sym:test", 1, &t).text;
         assert!(out.contains("evidence body"), "reasoning node read: {out}");
     }
 

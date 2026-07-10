@@ -658,7 +658,7 @@ impl GlossaServer {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
-        let out = crate::tools::read(&idx, g.as_ref(), &a.path, a.n as u64, &self.trace);
+        let out = crate::tools::read(&self.root, &idx, g.as_ref(), &a.path, a.n as u64, &self.trace);
         let mut content = vec![Content::text(out.text)];
         if a.include_images.unwrap_or(true) {
             for img in out.images {

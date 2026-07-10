@@ -506,8 +506,15 @@ impl AgentBackend for TensorZeroBackend {
         );
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
-            let r =
-                crate::backend::glossa_tools::exec(name, args, &idx, graph.as_ref(), &spec, &trace);
+            let r = crate::backend::glossa_tools::exec(
+                name,
+                args,
+                work,
+                &idx,
+                graph.as_ref(),
+                &spec,
+                &trace,
+            );
             prof!("[prof] tool {name} {}ms", t.elapsed().as_millis());
             r
         };

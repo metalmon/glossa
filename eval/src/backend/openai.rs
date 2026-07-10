@@ -72,7 +72,7 @@ impl AgentBackend for OpenAiBackend {
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, &idx, graph.as_ref(), &spec, &trace)
+            execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace)
         };
 
         let messages = vec![
@@ -190,12 +190,13 @@ fn parse_tool_args(call: &Value) -> Value {
 fn execute_tool(
     name: &str,
     args: &Value,
+    root: &Path,
     idx: &glossa::index::store::DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
 ) -> String {
-    crate::backend::glossa_tools::exec(name, args, idx, graph, spec, trace).0
+    crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace).0
 }
 
 #[cfg(test)]
