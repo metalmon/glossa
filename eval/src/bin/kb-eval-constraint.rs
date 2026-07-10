@@ -621,12 +621,8 @@ fn parse_reported_remaining(answer: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// Step 2 may visit ~10× (one per .csp); steps 3–5 add visits; compile fix-loop retries.
-const SOP_EVAL_MAX_STEP_VISITS: u32 = 32;
-/// Step number for full compile (used by stuck-recovery escape hatch).
-const SOP_COMPILE_STEP: u32 = 3;
-/// Abort when the agent burns this many LLM turns on one SOP step without calling
-/// `sop_advance` (typical stall: re-read / re-grep with no graph progress).
+/// Per-step subagent round budget: each SOP step runs at most this many LLM turns before its
+/// episode is cut and the driver advances to the next step.
 const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 75;
 
 /// TensorZero may assign a different episode id on the first `/inference` response than
@@ -639,26 +635,6 @@ fn episode_id_for_report(fallback: &str, outcome: Option<&EpisodeOutcome>) -> St
         .to_string()
 }
 
-/// Step 2 advanced 3+ times reporting the same positive `remaining` — no progress.
-fn step2_advance_stuck(results: &[kb_eval::sop::types::SopStepResult]) -> Option<usize> {
-    let reps: Vec<Option<usize>> = results
-        .iter()
-        .filter(|r| r.step_number == 2)
-        .map(|r| parse_reported_remaining(&r.output))
-        .collect();
-    if reps.len() < 3 {
-        return None;
-    }
-    let last = reps[reps.len() - 1]?;
-    if last == 0 {
-        return None;
-    }
-    if reps[reps.len() - 3..].iter().all(|r| *r == Some(last)) {
-        Some(last)
-    } else {
-        None
-    }
-}
 
 /// SOP-driven discovery, run exactly as it will run under zeroclaw: ONE
 /// continuous agent conversation. The agent does a step's work with the tools,
@@ -687,18 +663,16 @@ fn run_sop_conversation(
     variant: Option<&str>,
 ) -> Result<EpisodeOutcome> {
     use kb_eval::sop;
-    use sop::route::{resolve_next, NextStep, RouteCtx};
     use sop::types::{SopRunStatus, SopStepResult, SopStepStatus};
     let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     let n_steps = sop_def.steps.len();
     eprintln!(
-        "[sop] loaded '{}' ({} steps, continuous conversation) from {}",
+        "[sop] loaded '{}' ({} steps, per-step subagents) from {}",
         sop_def.name,
         n_steps,
         sop_dir.display()
     );
-    let max_visits = SOP_EVAL_MAX_STEP_VISITS;
 
     let get_task_tool = sop::prompt::load_get_task_tool(sop_dir)?;
     let sop_advance_tool = sop::prompt::load_sop_advance_tool(sop_dir)?;
@@ -709,117 +683,50 @@ fn run_sop_conversation(
 
     // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Arc::new(std::sync::Mutex::new(sop::driver::minimal_run(&sop_def)));
-    let first_prompt = {
-        let run = run.lock().unwrap();
-        sop::prompt::format_step_context(&sop_def, &run, &sop_def.steps[0])
-    };
 
     let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
     let llm_rounds_step_exec = std::sync::Arc::clone(&llm_rounds_step);
 
     let exec = {
         let run = std::sync::Arc::clone(&run);
-        let sop_def = sop_def.clone();
         move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
             if name != "sop_advance" {
                 return normal_exec(name, args);
             }
+            // Intra-step progress signal (e.g. Materialize's table-by-table loop). It does NOT
+            // change the step — step transitions happen on `done` (driver loop below). Reset the
+            // per-step round counter so a step that keeps making progress isn't cut by the cap.
             llm_rounds_step_exec.store(0, std::sync::atomic::Ordering::Relaxed);
             let output = args
                 .get("output")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}")
                 .to_string();
-            let status = match args.get("status").and_then(|v| v.as_str()) {
-                Some("failed") => SopStepStatus::Failed,
-                Some("skipped") => SopStepStatus::Skipped,
-                _ => SopStepStatus::Completed,
-            };
-            let mut run = run.lock().unwrap();
-            let cur = run.current_step;
-            run.step_results.push(SopStepResult {
-                step_number: cur,
-                status,
-                output: output.clone(),
-                started_at: String::new(),
-                completed_at: None,
-            });
             let reported = parse_reported_remaining(&output)
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".into());
-            eprintln!("  [sop] step {cur} advanced → agent reports {reported} remaining");
-            if let Some(stuck_at) = step2_advance_stuck(&run.step_results) {
-                eprintln!(
-                    "  [sop] step 2 stuck at remaining={stuck_at} (3× sop_advance, no progress) — forcing step {SOP_COMPILE_STEP}"
-                );
-                run.current_step = SOP_COMPILE_STEP;
-                let msg = sop_def
-                    .steps
-                    .iter()
-                    .find(|s| s.number == SOP_COMPILE_STEP)
-                    .map(|s| sop::prompt::format_sop_advance_reply(&sop_def, &run, s))
-                    .unwrap_or_else(|| "SOP complete. Call `done` to finish.".into());
-                return (msg, vec![], vec![]);
-            }
-            // Route on the agent's payload — identical engine to zeroclaw.
-            let run_data = sop::rundata::RunData::from_step_results(&run.step_results);
-            let next = {
-                let ctx = RouteCtx {
-                    sop: &sop_def,
-                    run: &run,
-                    run_data: &run_data,
-                    last_status: status,
-                    max_step_visits: max_visits,
-                };
-                resolve_next(&ctx)
-            };
-            let msg = match next {
-                NextStep::Step(n) | NextStep::Wait(n) => {
-                    run.current_step = n;
-                    match sop_def.steps.iter().find(|s| s.number == n) {
-                        Some(s) => sop::prompt::format_sop_advance_reply(&sop_def, &run, s),
-                        None => {
-                            run.status = SopRunStatus::Completed;
-                            "SOP complete. Call `done` to finish.".into()
-                        }
-                    }
-                }
-                NextStep::Retry => sop_def
-                    .steps
-                    .iter()
-                    .find(|s| s.number == cur)
-                    .map(|s| sop::prompt::format_sop_advance_reply(&sop_def, &run, s))
-                    .unwrap_or_else(|| "SOP complete. Call `done`.".into()),
-                NextStep::Complete => {
-                    run.status = SopRunStatus::Completed;
-                    "SOP complete — every step is done. Call `done` to finish.".into()
-                }
-                NextStep::Fail(r) => {
-                    run.status = SopRunStatus::Failed;
-                    format!("SOP failed: {r}. Call `done` to finish.")
-                }
-            };
+            let cur = run.lock().unwrap().current_step;
+            eprintln!("  [sop] step {cur} progress → agent reports {reported} remaining");
+            let msg = format!(
+                "Progress recorded ({reported} remaining for this step). Keep working on this \
+                 step; when it is fully complete, call `done` to finish the step and move on."
+            );
             (msg, vec![], vec![])
         }
     };
 
     let eid = kb_eval::tz::backdated_episode_id(30);
+    let eid_ret = eid.clone();
     let run_log = std::sync::Arc::clone(&run);
     let llm_rounds_step_chat = std::sync::Arc::clone(&llm_rounds_step);
     let llm_rounds_total_chat = std::sync::Arc::clone(&llm_rounds_total);
-    let chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
-        let since_advance =
+    let mut chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
+        let since_step =
             llm_rounds_step_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let total = llm_rounds_total_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if total.is_multiple_of(10) {
             let step = run_log.lock().unwrap().current_step;
-            eprintln!("  [sop] LLM round {total} step {step} ({since_advance} since sop_advance)");
-        }
-        if since_advance > SOP_MAX_LLM_ROUNDS_PER_STEP {
-            let step = run_log.lock().unwrap().current_step;
-            anyhow::bail!(
-                "SOP step {step} exceeded {SOP_MAX_LLM_ROUNDS_PER_STEP} LLM rounds without sop_advance — aborting (partial graph kept for validation)"
-            );
+            eprintln!("  [sop] LLM round {total} step {step} ({since_step} in step)");
         }
         let e = ep.unwrap_or(&eid);
         let turn = kb_eval::tz::infer(
@@ -839,24 +746,77 @@ fn run_sop_conversation(
         })
     };
 
-    // One continuous episode over the whole SOP (round budget covers all steps).
-    // Dedup is temporarily OFF: it caches notebook-dependent reads (e.g. graph_stats,
-    // cat) with no invalidation on note/sed/del, replaying stale output mid-run.
-    // Re-enable once dedup is notebook-aware.
+    // Each SOP step runs as its OWN subagent (a fresh conversation): the step does its work
+    // and calls `done`, which finishes that subagent and advances the driver to the next step —
+    // a brand-new conversation seeded only with that step's context (its SOP body). This mirrors
+    // how the SOP deploys in prod (one agent per step) and keeps a step from being polluted by
+    // the whole run's accumulated history. `sop_advance` is an intra-step progress signal
+    // (Materialize's loop), NOT a transition. One episode_id throughout so feedback/scoring stay
+    // unified. Dedup OFF (notebook writes don't invalidate cached reads yet).
     let policy = EpisodePolicy {
         stop_on_done: true,
         dedup_readonly: false,
     };
-    let outcome = run_episode(chat, &first_prompt, exec, 250, policy)?;
+    let mut total_rounds = 0usize;
+    let mut episode_id = Some(eid_ret);
+    let mut sop_done = false;
+    // Linear advance increments the step each iteration; the bound is a backstop only.
+    for _ in 0..(sop_def.steps.len() + 2) {
+        let cur = run.lock().unwrap().current_step;
+        let step = match sop_def.steps.iter().find(|s| s.number == cur) {
+            Some(s) => s.clone(),
+            None => {
+                sop_done = true;
+                break;
+            }
+        };
+        let prompt = {
+            let run = run.lock().unwrap();
+            sop::prompt::format_step_context(&sop_def, &run, &step)
+        };
+        llm_rounds_step.store(0, std::sync::atomic::Ordering::Relaxed);
+        let outcome = run_episode(&mut chat, &prompt, &exec, SOP_MAX_LLM_ROUNDS_PER_STEP, policy)?;
+        total_rounds += outcome.rounds;
+        if outcome.episode_id.is_some() {
+            episode_id = outcome.episode_id.clone();
+        }
+        {
+            let mut run = run.lock().unwrap();
+            run.step_results.push(SopStepResult {
+                step_number: cur,
+                status: SopStepStatus::Completed,
+                output: outcome.answer.clone(),
+                started_at: String::new(),
+                completed_at: None,
+            });
+        }
+        eprintln!(
+            "  [sop] step {cur} finished (subagent done={} rounds={}) → next step",
+            outcome.done, outcome.rounds
+        );
+        let next = cur + 1;
+        if sop_def.steps.iter().any(|s| s.number == next) {
+            run.lock().unwrap().current_step = next;
+        } else {
+            run.lock().unwrap().status = SopRunStatus::Completed;
+            sop_done = true;
+            break;
+        }
+    }
     let run = run.lock().unwrap();
     eprintln!(
-        "[sop] run {:?} after {} step-transitions (episode done={} llm_rounds={})",
+        "[sop] run {:?} — {} step-subagents executed (llm_rounds={})",
         run.status,
         run.step_results.len(),
-        outcome.done,
-        outcome.rounds
+        total_rounds
     );
-    Ok(outcome)
+    Ok(EpisodeOutcome {
+        answer: String::new(),
+        episode_id,
+        surfaced_titles: vec![],
+        done: sop_done,
+        rounds: total_rounds,
+    })
 }
 
 fn solve_csp(
@@ -1962,22 +1922,6 @@ mod tests {
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
         assert_eq!(compile.number, 3);
-    }
-
-    #[test]
-    fn step2_advance_stuck_detects_flat_remaining() {
-        use kb_eval::sop::types::{SopStepResult, SopStepStatus};
-        let mk = |n: usize| SopStepResult {
-            step_number: 2,
-            status: SopStepStatus::Completed,
-            output: format!(r#"{{"remaining": {n}}}"#),
-            started_at: String::new(),
-            completed_at: None,
-        };
-        assert_eq!(step2_advance_stuck(&[mk(7), mk(7)]), None);
-        assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(7)]), Some(7));
-        assert_eq!(step2_advance_stuck(&[mk(7), mk(7), mk(6)]), None);
-        assert_eq!(step2_advance_stuck(&[mk(0), mk(0), mk(0)]), None);
     }
 
     #[test]
