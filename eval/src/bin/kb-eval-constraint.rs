@@ -2537,8 +2537,8 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
-        // Single fan-out step (find+build) collapsed Discovery+Build back into one, so
-        // Compile is step 2 in the 4-step SOP.
+        // Single fan-out step (find+build) is step 1, so Compile is step 2.
+        // (Coverage + Validate are disabled for now.)
         assert_eq!(compile.number, 2);
     }
 
