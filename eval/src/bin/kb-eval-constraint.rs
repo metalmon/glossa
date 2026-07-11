@@ -2529,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_step_number_is_three_in_five_step_sop() {
+    fn compile_step_number_is_two_in_four_step_sop() {
         use kb_eval::sop::{load_sop, types::SopExecutionMode};
         let sop = load_sop(&default_eval_sop_dir(), SopExecutionMode::Auto).expect("load sop");
         let compile = sop
@@ -2537,9 +2537,9 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
-        // Fan-out restructure split the single Build step into Discovery + Build, so
-        // Compile moved from step 2 (4-step SOP) to step 3 (5-step SOP).
-        assert_eq!(compile.number, 3);
+        // Single fan-out step (find+build) collapsed Discovery+Build back into one, so
+        // Compile is step 2 in the 4-step SOP.
+        assert_eq!(compile.number, 2);
     }
 
     #[test]
