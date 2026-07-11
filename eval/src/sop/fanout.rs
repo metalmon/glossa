@@ -1,5 +1,7 @@
 //! Split a fan-out SOP step body into role sections and compose per-role prompts.
 
+use crate::constraint_gepa_sop::strip_gepa_anchor_lines;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RoleSections {
     pub shared: String,
@@ -39,6 +41,16 @@ pub fn split_role_sections(body: &str) -> RoleSections {
     out
 }
 
+pub fn format_orchestrator_prompt(step_body: &str) -> String {
+    let s = split_role_sections(&strip_gepa_anchor_lines(step_body));
+    format!("{}\n\n{}\n", s.shared, s.orchestrator)
+}
+
+pub fn format_worker_prompt(step_body: &str, task: &str) -> String {
+    let s = split_role_sections(&strip_gepa_anchor_lines(step_body));
+    format!("{}\n\n{}\n\nТвоя задача:\n{}\n", s.shared, s.worker, task)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +80,20 @@ worker B";
         let s = split_role_sections("just shared text");
         assert_eq!(s.shared.trim(), "just shared text");
         assert!(s.orchestrator.is_empty() && s.worker.is_empty());
+    }
+
+    #[test]
+    fn builds_role_prompts() {
+        let body = "{# SHARED #}\nBoth read this.\n{# ORCHESTRATOR #}\nDecompose and spawn.\n{# WORKER #}\nBuild one table.";
+        let orch = format_orchestrator_prompt(body);
+        assert!(orch.contains("Both read this."));
+        assert!(orch.contains("Decompose and spawn."));
+        assert!(!orch.contains("Build one table."));
+
+        let w = format_worker_prompt(body, "Собери поле «высота»");
+        assert!(w.contains("Both read this."));
+        assert!(w.contains("Build one table."));
+        assert!(w.contains("Собери поле «высота»"));
+        assert!(!w.contains("Decompose and spawn."));
     }
 }
