@@ -1179,6 +1179,142 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
     out
 }
 
+#[derive(Debug)]
+struct RelationCoverage {
+    ref_name: String,
+    params: Vec<String>,
+    agent_file: Option<String>,
+    rows_hit: usize,
+    rows_total: usize,
+}
+
+#[derive(Debug)]
+struct RelationReport {
+    tables: Vec<RelationCoverage>,
+}
+
+impl RelationReport {
+    fn rows_hit(&self) -> usize {
+        self.tables.iter().map(|t| t.rows_hit).sum()
+    }
+    fn rows_total(&self) -> usize {
+        self.tables.iter().map(|t| t.rows_total).sum()
+    }
+    fn tables_covered(&self, threshold: f64) -> usize {
+        self.tables
+            .iter()
+            .filter(|t| t.rows_total > 0 && t.rows_hit as f64 / t.rows_total as f64 >= threshold)
+            .count()
+    }
+}
+
+/// Relational (combination-row) coverage: for each dependent reference table,
+/// find the agent `.csp` whose columns best cover the reference parameters (by
+/// value overlap), map each reference parameter to an agent column, then count
+/// how many reference tuples appear as agent rows (values compared via
+/// `norm_value`). Complements `compare_tables_by_domain`, which only scores
+/// per-parameter domains.
+fn compare_relations(
+    agent_g_dir: &std::path::Path,
+    src_doc: &str,
+    ref_tables: &[RefTable],
+) -> RelationReport {
+    let agent_raw =
+        glossa::tables::csp_tables_per_file(agent_g_dir, src_doc).unwrap_or_default();
+    struct AgentTbl {
+        file: String,
+        rows: Vec<Vec<String>>,
+        col_vals: Vec<BTreeSet<String>>,
+    }
+    let agent: Vec<AgentTbl> = agent_raw
+        .into_iter()
+        .map(|(file, t)| {
+            let col_vals: Vec<BTreeSet<String>> = (0..t.headers.len())
+                .map(|i| {
+                    t.rows
+                        .iter()
+                        .filter_map(|r| r.get(i))
+                        .filter(|c| !c.is_empty())
+                        .map(|c| norm_value(c))
+                        .collect()
+                })
+                .collect();
+            AgentTbl { file, rows: t.rows, col_vals }
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for rt in ref_tables {
+        // Reference per-parameter normalized value sets.
+        let ref_col_vals: Vec<BTreeSet<String>> = (0..rt.params.len())
+            .map(|pi| rt.rows.iter().filter_map(|r| r.get(pi)).map(|c| norm_value(c)).collect())
+            .collect();
+
+        // Pick the agent table that maps the most reference params to distinct columns.
+        let mut best: Option<(usize, Vec<usize>, usize)> = None;
+        for (ai, at) in agent.iter().enumerate() {
+            let mut mapping = vec![usize::MAX; rt.params.len()];
+            let mut used = vec![false; at.col_vals.len()];
+            let mut score = 0usize;
+            for (pi, rv) in ref_col_vals.iter().enumerate() {
+                let mut bestcol: Option<(usize, usize)> = None;
+                for (ci, cv) in at.col_vals.iter().enumerate() {
+                    if used[ci] {
+                        continue;
+                    }
+                    let overlap = rv.iter().filter(|v| cv.contains(*v)).count();
+                    if overlap > 0 && bestcol.is_none_or(|(_, o)| overlap > o) {
+                        bestcol = Some((ci, overlap));
+                    }
+                }
+                if let Some((ci, _)) = bestcol {
+                    mapping[pi] = ci;
+                    used[ci] = true;
+                    score += 1;
+                }
+            }
+            if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
+                best = Some((ai, mapping, score));
+            }
+        }
+
+        let (agent_file, rows_hit) = match best {
+            Some((ai, mapping, score)) if score == rt.params.len() => {
+                let at = &agent[ai];
+                let agent_tuples: BTreeSet<Vec<String>> = at
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        mapping
+                            .iter()
+                            .map(|&ci| r.get(ci).map(|c| norm_value(c)).unwrap_or_default())
+                            .collect()
+                    })
+                    .collect();
+                let hit = rt
+                    .rows
+                    .iter()
+                    .filter(|rr| {
+                        let key: Vec<String> = rr.iter().map(|c| norm_value(c)).collect();
+                        agent_tuples.contains(&key)
+                    })
+                    .count();
+                (Some(at.file.clone()), hit)
+            }
+            _ => (None, 0),
+        };
+
+        out.push(RelationCoverage {
+            ref_name: rt.name.clone(),
+            params: rt.params.clone(),
+            agent_file,
+            rows_hit,
+            rows_total: rt.rows.len(),
+        });
+    }
+    RelationReport { tables: out }
+}
+
 /// Tables-only comparison, by domain: a reference parameter is identified among
 /// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
 /// as `compare_graphs`' field/literal coverage — synonyms don't matter).
@@ -2034,6 +2170,32 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let dst = export_agent_notes(dir.path(), doc, out.path()).unwrap();
         assert!(dst.join("t.csp").exists());
+    }
+
+    #[test]
+    fn relations_score_row_recall() {
+        use glossa::notebook::{mirror_dir_for_doc, notes_root};
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Agent multi-column table with 2 of the 3 reference combinations.
+        std::fs::write(mirror.join("height.csp"), "h\tD\n0,6\t125\n0,6\t150\n").unwrap();
+
+        let refs = vec![RefTable {
+            name: "Height".into(),
+            params: vec!["D".into(), "h".into()],
+            rows: vec![
+                vec!["125".into(), "0,6".into()],
+                vec!["150".into(), "0,6".into()],
+                vec!["125".into(), "0,8".into()],
+            ],
+        }];
+        let rep = compare_relations(dir.path(), doc, &refs);
+        assert_eq!(rep.tables.len(), 1);
+        assert_eq!(rep.tables[0].agent_file.as_deref(), Some("height.csp"));
+        assert_eq!((rep.tables[0].rows_hit, rep.tables[0].rows_total), (2, 3));
+        assert_eq!(rep.tables_covered(0.8), 0); // 2/3 < 0.8
     }
 
     #[test]
