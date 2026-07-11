@@ -12,6 +12,7 @@ use super::types::{Sop, SopRun, SopStep};
 
 const SOP_ADVANCE_FILE: &str = "sop_advance.json";
 const GET_TASK_FILE: &str = "get_task.json";
+const SPAWN_FILE: &str = "spawn.json";
 
 /// Replace `{key}` placeholders (legacy; prefer trigger payload / get_task).
 pub fn substitute_placeholders(text: &str, vars: &[(&str, &str)]) -> String {
@@ -75,6 +76,10 @@ pub fn load_get_task_tool(sop_dir: &Path) -> Result<Value> {
     load_tool_json(sop_dir, GET_TASK_FILE)
 }
 
+pub fn load_spawn_tool(sop_dir: &Path) -> Result<Value> {
+    load_tool_json(sop_dir, SPAWN_FILE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +123,21 @@ mod tests {
         let out = format_step_context(&sop, &run, &step);
         assert!(!out.contains("GEPA:DISCOVER"));
         assert!(out.contains("Do work."));
+    }
+
+    #[test]
+    fn loads_spawn_tool_schema() {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/sops/gost-constraints"
+        ));
+        let t = load_spawn_tool(dir).unwrap();
+        assert_eq!(t["name"], "spawn");
+        assert!(t["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "task"));
     }
 
     #[test]
