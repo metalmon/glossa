@@ -1433,29 +1433,46 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
 }
 
 fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
+    let f1 = |p: f64, r: f64| if p + r == 0.0 { 0.0 } else { 2.0 * p * r / (p + r) };
     let mut out = String::new();
-    out.push_str(&format!(
-        "  relations: {}/{} tables, rows {}/{}\n",
-        report.tables_covered(threshold),
-        report.tables.len(),
+    let (rh, rt_, ah, at_) = (
         report.rows_hit(),
         report.rows_total(),
+        report.agent_rows_hit(),
+        report.agent_rows_total(),
+    );
+    let recall = if rt_ == 0 { 1.0 } else { rh as f64 / rt_ as f64 };
+    let precision = if at_ == 0 { 0.0 } else { ah as f64 / at_ as f64 };
+    out.push_str(&format!(
+        "  relations: {}/{} tables | recall {rh}/{rt_} ({recall:.2}) | precision {ah}/{at_} ({precision:.2}) | F1 {:.2}\n",
+        report.tables_covered(threshold),
+        report.tables.len(),
+        f1(precision, recall),
     ));
     for t in &report.tables {
-        let recall = if t.rows_total == 0 {
-            1.0
+        if t.agent_file.is_none() {
+            out.push_str(&format!("     {:<28} [{}] —\n", t.ref_name, t.params.join("×")));
+            continue;
+        }
+        let file = t.agent_file.as_deref().unwrap_or("—");
+        let recall = if t.rows_total == 0 { 1.0 } else { t.rows_hit as f64 / t.rows_total as f64 };
+        let precision = if t.agent_rows_total == 0 {
+            0.0
         } else {
-            t.rows_hit as f64 / t.rows_total as f64
+            t.agent_rows_hit as f64 / t.agent_rows_total as f64
         };
         let mark = if recall >= threshold { "  " } else { "XX" };
-        let file = t.agent_file.as_deref().unwrap_or("—");
         out.push_str(&format!(
-            "  {mark} {:<28} [{}] {:<14} {}/{}\n",
+            "  {mark} {:<28} [{}] recall {}/{} ({:.2})  precision {}/{} ({:.2})  F1 {:.2}\n",
             t.ref_name,
-            t.params.join("×"),
             file,
             t.rows_hit,
             t.rows_total,
+            recall,
+            t.agent_rows_hit,
+            t.agent_rows_total,
+            precision,
+            f1(precision, recall),
         ));
     }
     out
@@ -1468,6 +1485,8 @@ struct RelationCoverage {
     agent_file: Option<String>,
     rows_hit: usize,
     rows_total: usize,
+    agent_rows_hit: usize,
+    agent_rows_total: usize,
 }
 
 #[derive(Debug)]
@@ -1481,6 +1500,12 @@ impl RelationReport {
     }
     fn rows_total(&self) -> usize {
         self.tables.iter().map(|t| t.rows_total).sum()
+    }
+    fn agent_rows_hit(&self) -> usize {
+        self.tables.iter().map(|t| t.agent_rows_hit).sum()
+    }
+    fn agent_rows_total(&self) -> usize {
+        self.tables.iter().map(|t| t.agent_rows_total).sum()
     }
     fn tables_covered(&self, threshold: f64) -> usize {
         self.tables
@@ -1526,28 +1551,18 @@ fn max_bipartite_matching(n_left: usize, n_right: usize, adj: &[Vec<usize>]) -> 
     mapping
 }
 
-/// Relational (combination-row) coverage: for each dependent reference table,
-/// find the agent `.csp` whose columns best cover the reference parameters (by
-/// value overlap), map each reference parameter to an agent column, then count
-/// how many reference tuples appear as agent rows (values compared via
-/// `norm_value`). Complements `compare_tables_by_domain`, which only scores
-/// per-parameter domains. A table scores 0 unless ALL its reference params map
-/// to distinct agent columns (a maximum bipartite matching over value-set
-/// overlap) — partial reproduction, e.g. omitting one column of a 3-column
-/// table, gets no credit.
-fn compare_relations(
-    agent_g_dir: &std::path::Path,
-    src_doc: &str,
-    ref_tables: &[RefTable],
-) -> RelationReport {
+struct AgentTbl {
+    file: String,
+    rows: Vec<Vec<String>>,
+    col_vals: Vec<BTreeSet<String>>,
+}
+
+/// Load each agent `.csp` for `src_doc` as an `AgentTbl`, with a normalized
+/// value-set per column.
+fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentTbl> {
     let agent_raw =
         glossa::tables::csp_tables_per_file(agent_g_dir, src_doc).unwrap_or_default();
-    struct AgentTbl {
-        file: String,
-        rows: Vec<Vec<String>>,
-        col_vals: Vec<BTreeSet<String>>,
-    }
-    let agent: Vec<AgentTbl> = agent_raw
+    agent_raw
         .into_iter()
         .map(|(file, t)| {
             let col_vals: Vec<BTreeSet<String>> = (0..t.headers.len())
@@ -1562,44 +1577,61 @@ fn compare_relations(
                 .collect();
             AgentTbl { file, rows: t.rows, col_vals }
         })
-        .collect();
+        .collect()
+}
 
+/// Pure scorer for relational coverage. For each reference table, match its
+/// **discriminating** params (value-set ≥ 2) to distinct agent columns via
+/// maximum bipartite matching over value-set overlap, then measure both:
+///   - recall: reference tuples reproduced as agent rows;
+///   - precision: agent tuples (deduped, projected onto the matched columns)
+///     that are genuinely in the reference.
+/// Constant params (a single value, e.g. a fixed marking context) are ignored —
+/// they carry no combinatorial information and the compiler drops them too, so
+/// a correct 2-column table matches a 3-param reference table. If a reference
+/// table has no discriminating param, fall back to all params (so an
+/// all-constant table cannot match trivially).
+fn score_relations(ref_tables: &[RefTable], agent: &[AgentTbl]) -> RelationReport {
     let mut out = Vec::new();
     for rt in ref_tables {
-        // Reference per-parameter normalized value sets.
         let ref_col_vals: Vec<BTreeSet<String>> = (0..rt.params.len())
             .map(|pi| rt.rows.iter().filter_map(|r| r.get(pi)).map(|c| norm_value(c)).collect())
             .collect();
 
-        // Pick the agent table that maps the most reference params to distinct
-        // columns, via maximum bipartite matching (ref param × agent column,
-        // edge iff their normalized value-sets overlap) — not a greedy
-        // per-param pick, which can misassign a value-superset column to the
-        // wrong param and strand another param unmatched even though a
-        // perfect one-to-one assignment exists.
+        let discriminating: Vec<usize> =
+            (0..rt.params.len()).filter(|&pi| ref_col_vals[pi].len() >= 2).collect();
+        let required: Vec<usize> =
+            if discriminating.is_empty() { (0..rt.params.len()).collect() } else { discriminating };
+
         let mut best: Option<(usize, Vec<usize>, usize)> = None;
         for (ai, at) in agent.iter().enumerate() {
-            let adj: Vec<Vec<usize>> = ref_col_vals
+            let adj: Vec<Vec<usize>> = required
                 .iter()
-                .map(|rv| {
+                .map(|&pi| {
                     at.col_vals
                         .iter()
                         .enumerate()
-                        .filter(|(_, cv)| rv.iter().any(|v| cv.contains(v)))
+                        .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
                         .map(|(ci, _)| ci)
                         .collect()
                 })
                 .collect();
-            let mapping = max_bipartite_matching(rt.params.len(), at.col_vals.len(), &adj);
+            let mapping = max_bipartite_matching(required.len(), at.col_vals.len(), &adj);
             let score = mapping.iter().filter(|&&ci| ci != usize::MAX).count();
             if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
                 best = Some((ai, mapping, score));
             }
         }
 
-        let (agent_file, rows_hit) = match best {
-            Some((ai, mapping, score)) if score == rt.params.len() => {
+        let cov = match best {
+            Some((ai, mapping, score)) if score == required.len() => {
                 let at = &agent[ai];
+                let project_ref = |r: &[String]| -> Vec<String> {
+                    required
+                        .iter()
+                        .map(|&pi| r.get(pi).map(|c| norm_value(c)).unwrap_or_default())
+                        .collect()
+                };
                 let agent_tuples: BTreeSet<Vec<String>> = at
                     .rows
                     .iter()
@@ -1610,28 +1642,48 @@ fn compare_relations(
                             .collect()
                     })
                     .collect();
-                let hit = rt
-                    .rows
-                    .iter()
-                    .filter(|rr| {
-                        let key: Vec<String> = rr.iter().map(|c| norm_value(c)).collect();
-                        agent_tuples.contains(&key)
-                    })
-                    .count();
-                (Some(at.file.clone()), hit)
+                let rows_hit =
+                    rt.rows.iter().filter(|r| agent_tuples.contains(&project_ref(r))).count();
+                let gold_proj: BTreeSet<Vec<String>> =
+                    rt.rows.iter().map(|r| project_ref(r)).collect();
+                let agent_rows_total = agent_tuples.len();
+                let agent_rows_hit =
+                    agent_tuples.iter().filter(|t| gold_proj.contains(*t)).count();
+                RelationCoverage {
+                    ref_name: rt.name.clone(),
+                    params: rt.params.clone(),
+                    agent_file: Some(at.file.clone()),
+                    rows_hit,
+                    rows_total: rt.rows.len(),
+                    agent_rows_hit,
+                    agent_rows_total,
+                }
             }
-            _ => (None, 0),
+            _ => RelationCoverage {
+                ref_name: rt.name.clone(),
+                params: rt.params.clone(),
+                agent_file: None,
+                rows_hit: 0,
+                rows_total: rt.rows.len(),
+                agent_rows_hit: 0,
+                agent_rows_total: 0,
+            },
         };
-
-        out.push(RelationCoverage {
-            ref_name: rt.name.clone(),
-            params: rt.params.clone(),
-            agent_file,
-            rows_hit,
-            rows_total: rt.rows.len(),
-        });
+        out.push(cov);
     }
     RelationReport { tables: out }
+}
+
+/// Relational (combination-row) coverage: load the agent `.csp` tables and score
+/// them against the reference tables (see `score_relations`). Complements
+/// `compare_tables_by_domain`, which only scores per-parameter domains.
+fn compare_relations(
+    agent_g_dir: &std::path::Path,
+    src_doc: &str,
+    ref_tables: &[RefTable],
+) -> RelationReport {
+    let agent = load_agent_tables(agent_g_dir, src_doc);
+    score_relations(ref_tables, &agent)
 }
 
 /// Tables-only comparison, by domain: a reference parameter is identified among
@@ -2512,6 +2564,8 @@ mod tests {
                     agent_file: Some("height.csp".into()),
                     rows_hit: 140,
                     rows_total: 161,
+                    agent_rows_hit: 140,
+                    agent_rows_total: 150,
                 },
                 RelationCoverage {
                     ref_name: "SoundIndex".into(),
@@ -2519,13 +2573,73 @@ mod tests {
                     agent_file: None,
                     rows_hit: 0,
                     rows_total: 19,
+                    agent_rows_hit: 0,
+                    agent_rows_total: 0,
                 },
             ],
         };
         let out = format_relation_report(&rep, PARAM_COVERED_THRESHOLD);
-        assert!(out.contains("relations: 1/2 tables, rows 140/180"), "{out}");
+        assert!(out.contains("recall 140/180"), "{out}");
+        assert!(out.contains("precision 140/150"), "{out}");
         assert!(out.contains("Height"), "{out}");
         assert!(out.contains("—"), "{out}"); // missing agent table shown as —
+    }
+
+    #[test]
+    fn constant_gold_param_is_dropped_from_match() {
+        // Gold table (D, h, тип) where тип is constant → agent (D, h) must still match.
+        let rt = RefTable {
+            name: "Height".into(),
+            params: vec!["D".into(), "h".into(), "тип".into()],
+            rows: vec![
+                vec!["125".into(), "0,6".into(), "41".into()],
+                vec!["150".into(), "0,6".into(), "41".into()],
+                vec!["125".into(), "0,8".into(), "41".into()],
+            ],
+        };
+        // Build col_vals via norm_value, exactly as load_agent_tables does, so the
+        // agent side is normalized the same way as the reference side.
+        let rows = vec![
+            vec!["125".to_string(), "0,6".to_string()],
+            vec!["150".to_string(), "0,6".to_string()],
+            vec!["125".to_string(), "0,8".to_string()],
+        ];
+        let col_vals: Vec<BTreeSet<String>> = (0..2)
+            .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+            .collect();
+        let agent = vec![AgentTbl { file: "D_h.csp".into(), rows, col_vals }];
+        let rep = score_relations(&[rt], &agent);
+        let t = &rep.tables[0];
+        assert_eq!(t.agent_file.as_deref(), Some("D_h.csp"), "matched despite constant тип");
+        assert_eq!(t.rows_hit, 3, "all 3 gold rows covered on (D,h)");
+        assert_eq!(t.rows_total, 3);
+    }
+
+    #[test]
+    fn precision_counts_spurious_agent_rows() {
+        // Agent reproduces both gold pairs plus 1 spurious pair → recall 1.0, precision 2/3.
+        let rt = RefTable {
+            name: "Grit".into(),
+            params: vec!["F".into(), "K".into()],
+            rows: vec![vec!["F30".into(), "1".into()], vec!["F30".into(), "2".into()]],
+        };
+        let agent = vec![AgentTbl {
+            file: "F_K.csp".into(),
+            rows: vec![
+                vec!["F30".into(), "1".into()],
+                vec!["F30".into(), "2".into()],
+                vec!["F30".into(), "9".into()], // spurious
+            ],
+            col_vals: vec![
+                ["F30"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "9"].iter().map(|s| s.to_string()).collect(),
+            ],
+        }];
+        let t = &score_relations(&[rt], &agent).tables[0];
+        assert_eq!(t.rows_hit, 2);
+        assert_eq!(t.rows_total, 2);
+        assert_eq!(t.agent_rows_hit, 2, "2 agent pairs are in gold");
+        assert_eq!(t.agent_rows_total, 3, "3 distinct agent pairs");
     }
 
     #[test]
