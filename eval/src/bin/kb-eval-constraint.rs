@@ -2490,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_step_number_is_three_in_five_step_sop() {
+    fn compile_step_number_is_two_in_four_step_sop() {
         use kb_eval::sop::{load_sop, types::SopExecutionMode};
         let sop = load_sop(&default_eval_sop_dir(), SopExecutionMode::Auto).expect("load sop");
         let compile = sop
@@ -2498,7 +2498,9 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
-        assert_eq!(compile.number, 3);
+        // Fan-out restructure collapsed Discover+Materialize into one step, so
+        // Compile moved from step 3 (5-step SOP) to step 2 (4-step SOP).
+        assert_eq!(compile.number, 2);
     }
 
     #[test]
