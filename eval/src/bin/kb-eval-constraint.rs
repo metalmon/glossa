@@ -130,7 +130,17 @@ fn cell_to_string(v: &Value) -> Option<String> {
     }
 }
 
-type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>);
+#[derive(Clone, Debug)]
+struct RefTable {
+    /// Gold file stem (for reporting).
+    name: String,
+    /// Columns that vary in this file (≥2 distinct values), name-sorted.
+    params: Vec<String>,
+    /// Deduped rows projected onto `params` (same order).
+    rows: Vec<Vec<String>>,
+}
+
+type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>, Vec<RefTable>);
 
 /// Load the reference tables. The JSON is produced by `convert-xlsx`, which cuts
 /// MDM UID columns and keys every column by its human-readable name — so this is
@@ -139,6 +149,7 @@ type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>);
 fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
     let mut col_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut all_rows: Vec<BTreeMap<String, String>> = Vec::new();
+    let mut ref_tables: Vec<RefTable> = Vec::new();
 
     for entry in std::fs::read_dir(val_dir)? {
         let path = entry?.path();
@@ -152,6 +163,10 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
         let data: Value = serde_json::from_reader(std::fs::File::open(&path)?)?;
         let tables = data["tables"].as_array().context("no tables array")?;
 
+        // Per-file accumulation so we can recover relational (multi-column) tables.
+        let mut file_cols: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut file_rows: Vec<BTreeMap<String, String>> = Vec::new();
+
         for tbl in tables {
             let rows = tbl["rows"].as_array().context("no rows array")?;
             for row in rows {
@@ -162,12 +177,35 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
                         continue;
                     };
                     clean.insert(name.clone(), val.clone());
-                    col_map.entry(name.clone()).or_default().insert(val);
+                    col_map.entry(name.clone()).or_default().insert(val.clone());
+                    file_cols.entry(name.clone()).or_default().insert(val);
                 }
                 if !clean.is_empty() {
-                    all_rows.push(clean);
+                    all_rows.push(clean.clone());
+                    file_rows.push(clean);
                 }
             }
+        }
+
+        // A dependent table = ≥2 columns that each vary (≥2 distinct values).
+        let params: Vec<String> = file_cols
+            .iter()
+            .filter(|(_, vals)| vals.len() >= 2)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if params.len() >= 2 {
+            let mut seen: BTreeSet<Vec<String>> = BTreeSet::new();
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for r in &file_rows {
+                let tuple: Vec<String> = params
+                    .iter()
+                    .map(|p| r.get(p).cloned().unwrap_or_default())
+                    .collect();
+                if tuple.iter().all(|c| !c.is_empty()) && seen.insert(tuple.clone()) {
+                    rows.push(tuple);
+                }
+            }
+            ref_tables.push(RefTable { name: stem, params, rows });
         }
     }
 
@@ -183,7 +221,7 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
             valid: vals.into_iter().collect(),
         })
         .collect();
-    Ok((cols, all_rows))
+    Ok((cols, all_rows, ref_tables))
 }
 
 // ── Reference graph ──
@@ -1276,7 +1314,7 @@ fn main() -> Result<()> {
     drop(idx_kb);
     let kb_docs_list = kb_docs.join(", ");
 
-    let (cols, rows) = load_validation_data(&cli.val_dir).context("load validation tables")?;
+    let (cols, rows, ref_tables) = load_validation_data(&cli.val_dir).context("load validation tables")?;
     eprintln!(
         "Loaded {}: {} columns, {} valid rows",
         cli.val_dir.display(),
@@ -1906,6 +1944,37 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_validation_extracts_relational_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        // Dependent table: h varies with D (2 varying columns) + a constant metadata column.
+        std::fs::write(
+            dir.path().join("Height.json"),
+            r#"{"tables":[{"rows":[
+                {"h":"0,6","D":125,"Doc":"G"},
+                {"h":"0,6","D":150,"Doc":"G"},
+                {"h":"0,8","D":125,"Doc":"G"}
+            ]}]}"#,
+        ).unwrap();
+        // Flat table: one varying column.
+        std::fs::write(
+            dir.path().join("Grit.json"),
+            r#"{"tables":[{"rows":[{"Grit":"F16"},{"Grit":"F20"}]}]}"#,
+        ).unwrap();
+        // Metadata file (underscore) is ignored.
+        std::fs::write(dir.path().join("_meta.json"), r#"{"tables":[{"rows":[{"x":"1"}]}]}"#).unwrap();
+
+        let (_cols, _rows, refs) = load_validation_data(dir.path()).unwrap();
+        assert_eq!(refs.len(), 1, "only the dependent table is relational");
+        let h = &refs[0];
+        assert_eq!(h.name, "Height");
+        assert_eq!(h.params, vec!["D".to_string(), "h".to_string()]); // name-sorted
+        // rows projected to (D, h), deduped: (125,0,6) (150,0,6) (125,0,8)
+        assert_eq!(h.rows.len(), 3);
+        assert!(h.rows.contains(&vec!["125".to_string(), "0,6".to_string()]));
+        assert!(h.rows.contains(&vec!["150".to_string(), "0,6".to_string()]));
+    }
 
     #[test]
     fn compile_step_number_is_three_in_five_step_sop() {
