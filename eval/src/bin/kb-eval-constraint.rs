@@ -975,6 +975,7 @@ fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
 fn worker_receipt(
     before: &std::collections::BTreeMap<String, usize>,
     after: &std::collections::BTreeMap<String, usize>,
+    edges_added: usize,
     done: bool,
 ) -> String {
     let mut written: Vec<String> = Vec::new();
@@ -983,10 +984,13 @@ fn worker_receipt(
             written.push(format!("{file}: {rows} rows"));
         }
     }
-    if written.is_empty() {
-        return format!("worker FAILED (done={done}): no .csp rows written");
+    if !written.is_empty() {
+        return format!("worker ok (done={done}): {}", written.join("; "));
     }
-    format!("worker ok (done={done}): {}", written.join("; "))
+    if edges_added > 0 {
+        return format!("worker ok (done={done}): +{edges_added} MENTIONS/graph edges");
+    }
+    format!("worker FAILED (done={done}): no .csp rows and no graph edges written")
 }
 
 /// Run ONE focused worker episode and return a one-line receipt.
@@ -1051,6 +1055,9 @@ fn run_worker(
     };
 
     let before = snapshot(agent_g_dir);
+    let edges_before = GraphStore::open(agent_g_dir)
+        .and_then(|g| g.edge_count())
+        .unwrap_or(0);
     let outcome = run_episode(
         worker_chat,
         worker_prompt,
@@ -1062,7 +1069,15 @@ fn run_worker(
         },
     );
     let after = snapshot(agent_g_dir);
-    worker_receipt(&before, &after, outcome.map(|o| o.done).unwrap_or(false))
+    let edges_after = GraphStore::open(agent_g_dir)
+        .and_then(|g| g.edge_count())
+        .unwrap_or(0);
+    worker_receipt(
+        &before,
+        &after,
+        edges_after.saturating_sub(edges_before) as usize,
+        outcome.map(|o| o.done).unwrap_or(false),
+    )
 }
 
 fn solve_csp(
@@ -2404,18 +2419,21 @@ mod tests {
     }
 
     #[test]
-    fn worker_receipt_names_written_files() {
+    fn worker_receipt_reports_csp_or_edges() {
         use std::collections::BTreeMap;
-        let before: BTreeMap<String, usize> = BTreeMap::new();
-        let mut after: BTreeMap<String, usize> = BTreeMap::new();
-        after.insert("height.csp".into(), 161);
-        let r = worker_receipt(&before, &after, true);
-        assert!(r.contains("height.csp"), "{r}");
-        assert!(r.contains("161"), "{r}");
-
-        // No new/changed file + done=false → a clear failure receipt.
-        let none = worker_receipt(&before, &before, false);
-        assert!(none.to_lowercase().contains("fail") || none.contains("0"), "{none}");
+        let empty: BTreeMap<String, usize> = BTreeMap::new();
+        let mut with_csp: BTreeMap<String, usize> = BTreeMap::new();
+        with_csp.insert("height.csp".into(), 161);
+        // Build worker: .csp rows grew.
+        let r = worker_receipt(&empty, &with_csp, 0, true);
+        assert!(r.contains("height.csp") && r.contains("161"), "{r}");
+        // Research worker: no .csp, but graph edges added → success, not FAILED.
+        let r2 = worker_receipt(&empty, &empty, 5, true);
+        assert!(r2.contains("5") && r2.to_lowercase().contains("edge"), "{r2}");
+        assert!(!r2.to_lowercase().contains("fail"), "{r2}");
+        // Nothing written at all → FAILED.
+        let r3 = worker_receipt(&empty, &empty, 0, false);
+        assert!(r3.to_lowercase().contains("fail"), "{r3}");
     }
 
     #[test]
