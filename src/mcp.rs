@@ -304,18 +304,18 @@ struct SearchArgs {
     limit: Option<usize>,
     #[serde(default)]
     #[schemars(
-        description = "only documents whose path matches this ripgrep -g glob, e.g. *.pdf, **/*, *.{pdf,md}"
+        description = "only documents whose path matches this ripgrep -g glob, e.g. **/* (all) or *<name-fragment>*"
     )]
     glob: Option<String>,
     #[serde(default)]
-    #[schemars(description = "only this file type, e.g. pdf (-t)")]
+    #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GlobArgs {
     #[schemars(
-        description = "ripgrep -g glob over document paths, e.g. *, **/*, *.pdf, *.{pdf,htm}, *АБАК*"
+        description = "ripgrep -g glob over document paths, e.g. * or **/* (all documents), or *<name-fragment>* to find a file by name"
     )]
     pattern: String,
 }
@@ -473,11 +473,11 @@ struct GrepArgs {
     word: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*"
+        description = "only files whose path matches this ripgrep -g glob, e.g. **/* (all) or *<name-fragment>*"
     )]
     glob: Option<String>,
     #[serde(default)]
-    #[schemars(description = "only this file type, e.g. pdf (-t)")]
+    #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -958,7 +958,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; for PDFs every page 1..N is addressable (blank pages return empty text)."
+        description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text)."
     )]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();

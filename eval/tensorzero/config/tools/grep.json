@@ -41,7 +41,7 @@
     },
     "file_type": {
       "default": null,
-      "description": "only this file type, e.g. pdf (-t)",
+      "description": "restrict to a single file type (-t)",
       "type": [
         "string",
         "null"
@@ -57,7 +57,7 @@
     },
     "glob": {
       "default": null,
-      "description": "only files whose path matches this ripgrep -g glob, e.g. *.pdf, **/*",
+      "description": "only files whose path matches this ripgrep -g glob, e.g. **/* (all) or *<name-fragment>*",
       "type": [
         "string",
         "null"
