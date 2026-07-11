@@ -253,8 +253,39 @@ pub struct WriteOutcome {
     pub mode: WriteMode,
 }
 
+/// Reject a `.csp` that abbreviates its rows with an ellipsis / "and so on"
+/// placeholder instead of enumerating every value. The compiled table is read
+/// by a solver, not a human: `...` is not "the remaining values", it silently
+/// truncates the domain. The model knows this when asked — this guard catches
+/// the occasional lapse at write time and tells it to expand the rows.
+fn reject_placeholder_rows(content: &str) -> anyhow::Result<()> {
+    for (li, line) in content.lines().enumerate() {
+        for cell in line.split('\t') {
+            let c = cell.trim();
+            let lc = c.to_lowercase();
+            let is_placeholder = c.contains("...")
+                || c.contains('…')
+                || lc.contains("и т.д")
+                || lc.contains("и т. д")
+                || lc.contains("так далее")
+                || lc == "etc"
+                || lc == "etc.";
+            if is_placeholder {
+                anyhow::bail!(
+                    "placeholder «{c}» on line {} — write out every row explicitly, \
+                     no «...» / «и т.д.» / «etc» (the solver reads the full value set, \
+                     not a sample)",
+                    li + 1
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate `.csp` content as the compiler will read it; rejects before anything is written.
 fn validate_csp(content: &str) -> anyhow::Result<TableEcho> {
+    reject_placeholder_rows(content)?;
     let mut rel = parse_csp(content)?;
     // Forgive a trailing TAB in the header (empty last column) — a slip, not a column;
     // only trailing, a middle empty header stays rejected below.
@@ -286,6 +317,9 @@ fn write_note(
 ) -> anyhow::Result<WriteOutcome> {
     let NotePath { rel_path, abs_path } = resolve_note_by_document(root, idx, doc, file)?;
     let is_csp = rel_path.to_ascii_lowercase().ends_with(".csp");
+    if is_csp {
+        reject_placeholder_rows(content)?;
+    }
     let existing = if abs_path.is_file() {
         Some(std::fs::read_to_string(&abs_path)?)
     } else {
@@ -493,6 +527,43 @@ mod tests {
         assert!(msg.contains("REJECTED"), "{msg}");
         assert!(msg.contains("empty header cell in column 2"), "{msg}");
         assert!(!dir.path().join(".glossa/notes/doc.pdf/t.csp").exists());
+    }
+
+    #[test]
+    fn ellipsis_placeholder_csp_rejected_before_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "t.csp",
+            &format!("k{TAB}v\n1{TAB}2\n...{TAB}\n"),
+            false,
+        );
+        assert!(msg.contains("REJECTED"), "{msg}");
+        assert!(msg.contains("placeholder"), "{msg}");
+        assert!(
+            !dir.path().join(".glossa/notes/doc.pdf/t.csp").exists(),
+            "must not write a truncated table"
+        );
+    }
+
+    #[test]
+    fn hyphen_range_value_is_not_a_placeholder() {
+        // Gold values like `23-25` (a hyphen range) must NOT trip the ellipsis guard.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "t.csp",
+            &format!("k{TAB}v\nB{TAB}23-25\nBF{TAB}25-27\n"),
+            false,
+        );
+        assert!(!msg.contains("REJECTED"), "{msg}");
+        assert!(dir.path().join(".glossa/notes/doc.pdf/t.csp").is_file());
     }
 
     #[test]
