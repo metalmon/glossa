@@ -439,39 +439,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_gost_constraints_five_steps_with_materialize_loop() {
+    fn parse_gost_constraints_four_steps_with_fanout_build() {
         let md = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
         )
         .expect("read gost-constraints SOP.md");
         let steps = parse_steps(&md);
 
-        assert_eq!(steps.len(), 5, "expected 5 macro steps");
-        assert!(steps[0].title.contains("Discover"));
-        assert!(steps[1].title.contains("Materialize"));
-        assert!(steps[2].title.contains("Compile"));
-        assert!(steps[3].title.contains("Coverage"));
-        assert!(steps[4].title.contains("Validate"));
+        assert_eq!(steps.len(), 4, "expected 4 macro steps");
+        assert!(steps[0].title.contains("Собери"));
+        assert!(steps[1].title.contains("Compile"));
+        assert!(steps[2].title.contains("Coverage"));
+        assert!(steps[3].title.contains("Validate"));
 
-        let mat = &steps[1];
-        // Per-step subagent runtime is linear: `done` drives step transitions and the driver
-        // advances step→step, so Materialize carries no `when`/`next` routing (sop_advance is
-        // now an intra-step progress signal, not a transition).
-        assert_eq!(mat.routing.when, None, "Materialize has no routing under per-step subagents");
-        assert_eq!(mat.routing.next, None);
+        let build = &steps[0];
+        // The former Discover+Materialize pair collapsed into one fan-out step: orchestrator
+        // spawns per-field workers, workers build the .csp tables. No routing, no corpus/graph
+        // tools at the orchestrator level.
+        assert_eq!(build.routing.when, None, "Build has no routing under per-step subagents");
+        assert_eq!(build.routing.next, None);
+        assert!(build.suggested_tools.contains(&"spawn".to_string()));
         assert!(
-            mat.suggested_tools.contains(&"graph_build".to_string()),
-            "step 2 must include graph_build for incremental compile"
-        );
-        assert!(
-            !mat.suggested_tools.contains(&"grep".to_string()),
-            "step 2 must not list corpus tools"
+            !build.suggested_tools.contains(&"graph_build".to_string()),
+            "step 1 must not list graph_build"
         );
 
-        let cov = &steps[3];
+        let cov = &steps[2];
         assert!(cov.suggested_tools.contains(&"graph_stats".to_string()));
 
-        let val = &steps[4];
+        let val = &steps[3];
         assert!(val.suggested_tools.contains(&"constraint_solve".to_string()));
     }
 }
