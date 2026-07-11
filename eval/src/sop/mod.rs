@@ -10,6 +10,7 @@
 
 pub mod condition;
 pub mod driver;
+pub mod fanout;
 pub mod parse;
 pub mod prompt;
 pub mod route;
