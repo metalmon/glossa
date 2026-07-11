@@ -484,11 +484,11 @@ type = "chat_completion"
 model = "qwen"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 2048
-temperature = 1.0
+temperature = 0.3
 top_p = 0.95
-# Anti-loop: qwen4b degenerated into re-writing the same note ×23 (v41). Add presence_penalty
-# (the coding preset's main anti-repetition lever); temperature left at 1.0 for now to isolate
-# this one variable.
+# Lowered temp 1.0 → 0.3: worker .csp FORMAT was erratic run-to-run (name-as-column,
+# horizontal rows, naming drift) — high temperature. Structured output wants determinism.
+# presence_penalty kept (anti-loop; qwen4b once re-wrote the same note ×23).
 presence_penalty = 1.5
 extra_body = [
   { pointer = "/top_k", value = 40 },
