@@ -862,6 +862,103 @@ fn run_sop_conversation(
     })
 }
 
+const WORKER_MAX_ROUNDS: usize = 40;
+
+/// One-line receipt: files whose row count grew during the worker episode.
+fn worker_receipt(
+    before: &std::collections::BTreeMap<String, usize>,
+    after: &std::collections::BTreeMap<String, usize>,
+    done: bool,
+) -> String {
+    let mut written: Vec<String> = Vec::new();
+    for (file, rows) in after {
+        if before.get(file).copied().unwrap_or(0) < *rows {
+            written.push(format!("{file}: {rows} rows"));
+        }
+    }
+    if written.is_empty() {
+        return format!("worker FAILED (done={done}): no .csp rows written");
+    }
+    format!("worker ok (done={done}): {}", written.join("; "))
+}
+
+/// Run ONE focused worker episode and return a one-line receipt.
+///
+/// A worker neither spawns nor advances SOP steps: its tool set is the plain
+/// dispatch (`make_exec`) plus `get_task` ONLY (no `spawn`, no `sop_advance`).
+/// It builds its table(s) on disk and calls `done`. We snapshot per-file `.csp`
+/// row counts before and after the episode; the receipt names the files that
+/// gained rows. Infer errors are non-fatal — an episode error is treated as
+/// `done=false` so the caller (the spawn arm) always gets a receipt.
+#[allow(clippy::too_many_arguments)]
+fn run_worker(
+    sop_dir: &std::path::Path,
+    agent_g_dir: &std::path::Path,
+    src_doc: &str,
+    gateway: &str,
+    tags: &Value,
+    variant: Option<&str>,
+    worker_prompt: &str,
+) -> String {
+    // Worker tool set: get_task only (mirrors run_sop_conversation's chat, minus
+    // sop_advance/spawn). Setup failure short-circuits to a clear receipt.
+    let get_task_tool = match kb_eval::sop::prompt::load_get_task_tool(sop_dir) {
+        Ok(t) => t,
+        Err(e) => return format!("worker FAILED (setup): load get_task tool: {e}"),
+    };
+    let eval_tools = [get_task_tool];
+
+    // Plain tool dispatch — already handles search/read/grep/note/ls/del/done.
+    let worker_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
+
+    let eid = kb_eval::tz::backdated_episode_id(30);
+    // No timeout in the signature; use the crate default (cli.timeout_secs = 60).
+    let timeout = Duration::from_secs(60);
+    let worker_chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
+        let e = ep.unwrap_or(&eid);
+        let turn = kb_eval::tz::infer(
+            gateway,
+            "constraint_validate",
+            e,
+            messages,
+            tags,
+            timeout,
+            variant,
+            None,
+            Some(&eval_tools),
+        )?;
+        Ok(TzTurn {
+            content: turn.content,
+            episode_id: turn.episode_id,
+        })
+    };
+
+    let snapshot = |dir: &std::path::Path| -> std::collections::BTreeMap<String, usize> {
+        glossa::tables::csp_tables_per_file(dir, src_doc)
+            .map(|files| {
+                files
+                    .into_iter()
+                    .map(|(name, table)| (name, table.rows.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let before = snapshot(agent_g_dir);
+    let outcome = run_episode(
+        worker_chat,
+        worker_prompt,
+        &worker_exec,
+        WORKER_MAX_ROUNDS,
+        EpisodePolicy {
+            stop_on_done: true,
+            dedup_readonly: false,
+        },
+    );
+    let after = snapshot(agent_g_dir);
+    worker_receipt(&before, &after, outcome.map(|o| o.done).unwrap_or(false))
+}
+
 fn solve_csp(
     dir: &std::path::Path,
     g: &GraphStore,
@@ -2186,6 +2283,21 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_receipt_names_written_files() {
+        use std::collections::BTreeMap;
+        let before: BTreeMap<String, usize> = BTreeMap::new();
+        let mut after: BTreeMap<String, usize> = BTreeMap::new();
+        after.insert("height.csp".into(), 161);
+        let r = worker_receipt(&before, &after, true);
+        assert!(r.contains("height.csp"), "{r}");
+        assert!(r.contains("161"), "{r}");
+
+        // No new/changed file + done=false → a clear failure receipt.
+        let none = worker_receipt(&before, &before, false);
+        assert!(none.to_lowercase().contains("fail") || none.contains("0"), "{none}");
+    }
 
     #[test]
     fn norm_value_strips_trailing_separators() {
