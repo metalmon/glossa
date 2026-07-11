@@ -954,6 +954,13 @@ fn norm_value(s: &str) -> String {
         Some(p) if s.trim_end().ends_with(']') => s[..p].trim_end().to_string(),
         _ => s.to_string(),
     };
+    // Defensive: drop trailing list-separator punctuation an agent may copy from a
+    // source that lists values inline ("50; 63; 80"). A value never legitimately
+    // ends in ';' or ','; the decimal comma is always internal ("0,6"). Gold values
+    // carry no trailing separators, so this only pulls a dirty agent value toward
+    // its clean match — recall is monotonic (never reduced), and it cannot merge two
+    // genuinely distinct values (those differ before the trailing separator).
+    let stripped = stripped.trim_end_matches([';', ',', ' ']).to_string();
     glossa_constraint::solver::canon_scalar(&stripped)
 }
 
@@ -2153,6 +2160,20 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn norm_value_strips_trailing_separators() {
+        // A trailing list-separator the agent copied from an inline source list
+        // must normalize to the same value as the clean form.
+        assert_eq!(norm_value("50;"), norm_value("50"));
+        assert_eq!(norm_value("0,6;"), norm_value("0,6"));
+        assert_eq!(norm_value("F24,"), norm_value("F24"));
+        assert_eq!(norm_value("80 "), norm_value("80"));
+        // The internal decimal comma is preserved (not a trailing separator).
+        assert_ne!(norm_value("0,6"), norm_value("06"));
+        // Distinct values stay distinct — they differ before any trailing char.
+        assert_ne!(norm_value("50;"), norm_value("60;"));
+    }
 
     #[test]
     fn load_validation_extracts_relational_tables() {
