@@ -1179,6 +1179,35 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
     out
 }
 
+fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  relations: {}/{} tables, rows {}/{}\n",
+        report.tables_covered(threshold),
+        report.tables.len(),
+        report.rows_hit(),
+        report.rows_total(),
+    ));
+    for t in &report.tables {
+        let recall = if t.rows_total == 0 {
+            1.0
+        } else {
+            t.rows_hit as f64 / t.rows_total as f64
+        };
+        let mark = if recall >= threshold { "  " } else { "XX" };
+        let file = t.agent_file.as_deref().unwrap_or("—");
+        out.push_str(&format!(
+            "  {mark} {:<28} [{}] {:<14} {}/{}\n",
+            t.ref_name,
+            t.params.join("×"),
+            file,
+            t.rows_hit,
+            t.rows_total,
+        ));
+    }
+    out
+}
+
 #[derive(Debug)]
 struct RelationCoverage {
     ref_name: String,
@@ -1832,6 +1861,8 @@ fn main() -> Result<()> {
                 println!("EPISODE ERROR: {e}");
             }
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
+            let rel_report = compare_relations(&agent_g_dir, &src_doc, &ref_tables);
+            print!("{}", format_relation_report(&rel_report, PARAM_COVERED_THRESHOLD));
             print!("{}", format_param_table(&report, PARAM_COVERED_THRESHOLD));
             println!(
                 "TABLES episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
@@ -2110,6 +2141,32 @@ mod tests {
         assert_eq!(h.rows.len(), 3);
         assert!(h.rows.contains(&vec!["125".to_string(), "0,6".to_string()]));
         assert!(h.rows.contains(&vec!["150".to_string(), "0,6".to_string()]));
+    }
+
+    #[test]
+    fn relation_report_formats_summary() {
+        let rep = RelationReport {
+            tables: vec![
+                RelationCoverage {
+                    ref_name: "Height".into(),
+                    params: vec!["D".into(), "h".into()],
+                    agent_file: Some("height.csp".into()),
+                    rows_hit: 140,
+                    rows_total: 161,
+                },
+                RelationCoverage {
+                    ref_name: "SoundIndex".into(),
+                    params: vec!["ЗИ".into(), "Связка".into()],
+                    agent_file: None,
+                    rows_hit: 0,
+                    rows_total: 19,
+                },
+            ],
+        };
+        let out = format_relation_report(&rep, PARAM_COVERED_THRESHOLD);
+        assert!(out.contains("relations: 1/2 tables, rows 140/180"), "{out}");
+        assert!(out.contains("Height"), "{out}");
+        assert!(out.contains("—"), "{out}"); // missing agent table shown as —
     }
 
     #[test]
