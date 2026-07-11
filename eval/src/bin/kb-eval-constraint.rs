@@ -2396,6 +2396,7 @@ mod tests {
             sop_dir: None,
             variant: None,
             keep_agent_dir: None,
+            score_only: false,
             export_notes: false,
             export_notes_dir: None,
             tables_only: true,
