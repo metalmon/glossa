@@ -77,6 +77,12 @@ struct Cli {
     /// Keep the agent workspace directory after the run (for inspecting notebook files).
     #[arg(long)]
     keep_agent_dir: Option<PathBuf>,
+    /// Re-score an existing --keep-agent-dir (its `.csp` notes) WITHOUT running the
+    /// agent — fast metric-only iteration after a norm/metric change. Requires
+    /// --keep-agent-dir to already exist with a `.glossa` store; skips the wipe/reseed
+    /// so the prior run's notes are preserved.
+    #[arg(long)]
+    score_only: bool,
     /// Export agent notebook files after the episode (also auto-enabled when --tag run=… is set).
     #[arg(long)]
     export_notes: bool,
@@ -1687,10 +1693,19 @@ fn main() -> Result<()> {
         // including the Document/Section nodes) so index and graph share ONE store, as
         // in prod and the glossa kb-train eval. Runs stay isolated and the shared KB
         // is never mutated; wipe any prior `.glossa` first (keep-agent-dir reuse).
-        wipe_agent_glossa(&agent_g_dir).context("wipe prior agent store")?;
-        copy_dir_all(&cli.kb.join(".glossa"), &agent_g_dir.join(".glossa"))
-            .context("seed agent store from KB")?;
-        std::fs::write(&ont_path, &ontology_toml).unwrap();
+        if cli.score_only {
+            anyhow::ensure!(
+                cli.keep_agent_dir.is_some() && agent_g_dir.join(".glossa").is_dir(),
+                "--score-only requires an existing --keep-agent-dir with a .glossa store to score"
+            );
+        } else {
+            // Seed a fresh per-run store from the KB. Skipped for --score-only so the
+            // prior run's notes (.csp) survive to be re-scored.
+            wipe_agent_glossa(&agent_g_dir).context("wipe prior agent store")?;
+            copy_dir_all(&cli.kb.join(".glossa"), &agent_g_dir.join(".glossa"))
+                .context("seed agent store from KB")?;
+            std::fs::write(&ont_path, &ontology_toml).unwrap();
+        }
         let _agent_init = GraphStore::open(&agent_g_dir).unwrap();
 
         let eval_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1833,7 +1848,18 @@ fn main() -> Result<()> {
         let t1 = std::time::Instant::now();
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
         // fields with hundreds of literals + solve + done needs room to work.
-        let outcome = if let Some(sop_dir) = cli.sop_dir.clone() {
+        let outcome = if cli.score_only {
+            // No run — score the existing notes. Zero outcome; downstream reads
+            // done/rounds via unwrap_or so this flows straight into the report.
+            Ok(EpisodeOutcome {
+                answer: String::new(),
+                episode_id: None,
+                surfaced_titles: vec![],
+                done: false,
+                rounds: 0,
+                deduped: 0,
+            })
+        } else if let Some(sop_dir) = cli.sop_dir.clone() {
             run_sop_conversation(
                 &sop_dir,
                 &agent_g_dir,
