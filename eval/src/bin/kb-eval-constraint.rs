@@ -205,7 +205,12 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
                     rows.push(tuple);
                 }
             }
-            ref_tables.push(RefTable { name: stem, params, rows });
+            // Skip tables where every row is missing at least one projected cell
+            // (rows ends up empty) — an empty table would otherwise render as
+            // spuriously "covered" downstream.
+            if !rows.is_empty() {
+                ref_tables.push(RefTable { name: stem, params, rows });
+            }
         }
     }
 
@@ -1237,12 +1242,51 @@ impl RelationReport {
     }
 }
 
+/// Kuhn's augmenting-path step: try to find an augmenting path from left-node
+/// `u`, reassigning existing matches along the way. `match_right[v]` holds the
+/// left-node currently matched to right-node `v` (`usize::MAX` if free).
+fn try_kuhn(u: usize, adj: &[Vec<usize>], visited: &mut [bool], match_right: &mut [usize]) -> bool {
+    for &v in &adj[u] {
+        if visited[v] {
+            continue;
+        }
+        visited[v] = true;
+        if match_right[v] == usize::MAX || try_kuhn(match_right[v], adj, visited, match_right) {
+            match_right[v] = u;
+            return true;
+        }
+    }
+    false
+}
+
+/// Maximum bipartite matching (Kuhn's algorithm) between `n_left` left nodes
+/// and `n_right` right nodes. `adj[u]` lists the right-node indices `u` may
+/// match to. Returns `mapping[u]` = its matched right-node index, or
+/// `usize::MAX` if `u` has no match in the maximum matching found.
+fn max_bipartite_matching(n_left: usize, n_right: usize, adj: &[Vec<usize>]) -> Vec<usize> {
+    let mut match_right: Vec<usize> = vec![usize::MAX; n_right];
+    for u in 0..n_left {
+        let mut visited = vec![false; n_right];
+        try_kuhn(u, adj, &mut visited, &mut match_right);
+    }
+    let mut mapping = vec![usize::MAX; n_left];
+    for (v, &u) in match_right.iter().enumerate() {
+        if u != usize::MAX {
+            mapping[u] = v;
+        }
+    }
+    mapping
+}
+
 /// Relational (combination-row) coverage: for each dependent reference table,
 /// find the agent `.csp` whose columns best cover the reference parameters (by
 /// value overlap), map each reference parameter to an agent column, then count
 /// how many reference tuples appear as agent rows (values compared via
 /// `norm_value`). Complements `compare_tables_by_domain`, which only scores
-/// per-parameter domains.
+/// per-parameter domains. A table scores 0 unless ALL its reference params map
+/// to distinct agent columns (a maximum bipartite matching over value-set
+/// overlap) — partial reproduction, e.g. omitting one column of a 3-column
+/// table, gets no credit.
 fn compare_relations(
     agent_g_dir: &std::path::Path,
     src_doc: &str,
@@ -1279,29 +1323,27 @@ fn compare_relations(
             .map(|pi| rt.rows.iter().filter_map(|r| r.get(pi)).map(|c| norm_value(c)).collect())
             .collect();
 
-        // Pick the agent table that maps the most reference params to distinct columns.
+        // Pick the agent table that maps the most reference params to distinct
+        // columns, via maximum bipartite matching (ref param × agent column,
+        // edge iff their normalized value-sets overlap) — not a greedy
+        // per-param pick, which can misassign a value-superset column to the
+        // wrong param and strand another param unmatched even though a
+        // perfect one-to-one assignment exists.
         let mut best: Option<(usize, Vec<usize>, usize)> = None;
         for (ai, at) in agent.iter().enumerate() {
-            let mut mapping = vec![usize::MAX; rt.params.len()];
-            let mut used = vec![false; at.col_vals.len()];
-            let mut score = 0usize;
-            for (pi, rv) in ref_col_vals.iter().enumerate() {
-                let mut bestcol: Option<(usize, usize)> = None;
-                for (ci, cv) in at.col_vals.iter().enumerate() {
-                    if used[ci] {
-                        continue;
-                    }
-                    let overlap = rv.iter().filter(|v| cv.contains(*v)).count();
-                    if overlap > 0 && bestcol.is_none_or(|(_, o)| overlap > o) {
-                        bestcol = Some((ci, overlap));
-                    }
-                }
-                if let Some((ci, _)) = bestcol {
-                    mapping[pi] = ci;
-                    used[ci] = true;
-                    score += 1;
-                }
-            }
+            let adj: Vec<Vec<usize>> = ref_col_vals
+                .iter()
+                .map(|rv| {
+                    at.col_vals
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, cv)| rv.iter().any(|v| cv.contains(v)))
+                        .map(|(ci, _)| ci)
+                        .collect()
+                })
+                .collect();
+            let mapping = max_bipartite_matching(rt.params.len(), at.col_vals.len(), &adj);
+            let score = mapping.iter().filter(|&&ci| ci != usize::MAX).count();
             if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
                 best = Some((ai, mapping, score));
             }
@@ -2253,6 +2295,43 @@ mod tests {
         assert_eq!(rep.tables[0].agent_file.as_deref(), Some("height.csp"));
         assert_eq!((rep.tables[0].rows_hit, rep.tables[0].rows_total), (2, 3));
         assert_eq!(rep.tables_covered(0.8), 0); // 2/3 < 0.8
+    }
+
+    /// A perfect one-to-one assignment exists ("AllVals" -> B, "Narrow" -> A),
+    /// but greedy per-param assignment (processing A before B, in name-sorted
+    /// order) claims the value-superset column "AllVals" for A first — because
+    /// it ties "Narrow" on overlap count and is encountered first — leaving B
+    /// unmatched (only "AllVals" overlaps B, and it's already used). Maximum
+    /// bipartite matching finds the reassignment that satisfies both params.
+    #[test]
+    fn relations_max_matching_beats_greedy() {
+        use glossa::notebook::{mirror_dir_for_doc, notes_root};
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "kb-gost/test.pdf";
+        let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&mirror).unwrap();
+        // Column 0 ("AllVals") is a value superset {1,2,3,4}; column 1 ("Narrow")
+        // is {1,2} only. Row 3 (AllVals=3, Narrow=1) reproduces the ref tuple
+        // ("1","3") under the correct mapping A->Narrow, B->AllVals.
+        std::fs::write(
+            mirror.join("pair.csp"),
+            "AllVals\tNarrow\n1\t1\n2\t2\n3\t1\n4\t2\n",
+        )
+        .unwrap();
+
+        let refs = vec![RefTable {
+            name: "AB".into(),
+            params: vec!["A".into(), "B".into()],
+            rows: vec![vec!["1".into(), "3".into()]],
+        }];
+        let rep = compare_relations(dir.path(), doc, &refs);
+        assert_eq!(rep.tables.len(), 1);
+        assert_eq!(
+            rep.tables[0].agent_file.as_deref(),
+            Some("pair.csp"),
+            "a valid one-to-one column assignment exists and should be found"
+        );
+        assert_eq!(rep.tables[0].rows_hit, 1);
     }
 
     #[test]
