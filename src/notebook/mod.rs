@@ -117,6 +117,16 @@ pub fn csp_tutor_hints(table: &CspTable) -> Vec<String> {
 
 fn normalize_csp_content(content: &str) -> anyhow::Result<(String, usize)> {
     let mut table = parse_csp(content)?;
+    // Forgive a trailing TAB in the header (a slip that appends an empty last column),
+    // mirroring how data rows already forgive trailing empty cells. Only TRAILING — a
+    // middle empty header is a real misalignment and stays rejected below.
+    while table.headers.len() > 1 && table.headers.last().is_some_and(|h| h.is_empty()) {
+        table.headers.pop();
+        let w = table.headers.len();
+        for row in &mut table.rows {
+            row.truncate(w);
+        }
+    }
     for (i, h) in table.headers.iter().enumerate() {
         if h.is_empty() {
             anyhow::bail!("empty header cell in column {}", i + 1);
@@ -245,7 +255,16 @@ pub struct WriteOutcome {
 
 /// Validate `.csp` content as the compiler will read it; rejects before anything is written.
 fn validate_csp(content: &str) -> anyhow::Result<TableEcho> {
-    let rel = parse_csp(content)?;
+    let mut rel = parse_csp(content)?;
+    // Forgive a trailing TAB in the header (empty last column) — a slip, not a column;
+    // only trailing, a middle empty header stays rejected below.
+    while rel.headers.len() > 1 && rel.headers.last().is_some_and(|h| h.is_empty()) {
+        rel.headers.pop();
+        let w = rel.headers.len();
+        for row in &mut rel.rows {
+            row.truncate(w);
+        }
+    }
     for (i, h) in rel.headers.iter().enumerate() {
         if h.is_empty() {
             anyhow::bail!("empty header cell in column {}", i + 1);
