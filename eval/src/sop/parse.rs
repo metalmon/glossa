@@ -439,35 +439,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_gost_constraints_four_steps_with_fanout_build() {
+    fn parse_gost_constraints_five_steps_with_fanout_discovery_and_build() {
         let md = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
         )
         .expect("read gost-constraints SOP.md");
         let steps = parse_steps(&md);
 
-        assert_eq!(steps.len(), 4, "expected 4 macro steps");
-        assert!(steps[0].title.contains("Собери"));
-        assert!(steps[1].title.contains("Compile"));
-        assert!(steps[2].title.contains("Coverage"));
-        assert!(steps[3].title.contains("Validate"));
+        assert_eq!(steps.len(), 5, "expected 5 macro steps");
+        assert!(steps[0].title.contains("Discovery"));
+        assert!(steps[1].title.contains("Build"));
+        assert!(steps[2].title.contains("Compile"));
+        assert!(steps[3].title.contains("Coverage"));
+        assert!(steps[4].title.contains("Validate"));
 
-        let build = &steps[0];
-        // The former Discover+Materialize pair collapsed into one fan-out step: orchestrator
-        // spawns per-field workers, workers build the .csp tables. No routing, no corpus/graph
-        // tools at the orchestrator level.
+        // Discovery and Build are both fan-out steps: orchestrator spawns per-field workers.
+        // No routing, no corpus/graph tools at the orchestrator level.
+        let discovery = &steps[0];
+        assert_eq!(
+            discovery.routing.when, None,
+            "Discovery has no routing under per-step subagents"
+        );
+        assert_eq!(discovery.routing.next, None);
+        assert!(discovery.suggested_tools.contains(&"spawn".to_string()));
+        assert!(
+            !discovery.suggested_tools.contains(&"graph_build".to_string()),
+            "step 1 must not list graph_build"
+        );
+
+        let build = &steps[1];
         assert_eq!(build.routing.when, None, "Build has no routing under per-step subagents");
         assert_eq!(build.routing.next, None);
         assert!(build.suggested_tools.contains(&"spawn".to_string()));
         assert!(
             !build.suggested_tools.contains(&"graph_build".to_string()),
-            "step 1 must not list graph_build"
+            "step 2 must not list graph_build"
         );
 
-        let cov = &steps[2];
+        let cov = &steps[3];
         assert!(cov.suggested_tools.contains(&"graph_stats".to_string()));
 
-        let val = &steps[3];
+        let val = &steps[4];
         assert!(val.suggested_tools.contains(&"constraint_solve".to_string()));
     }
 }
