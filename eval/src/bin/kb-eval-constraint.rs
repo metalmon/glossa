@@ -713,7 +713,9 @@ fn run_sop_conversation(
 
     let get_task_tool = sop::prompt::load_get_task_tool(sop_dir)?;
     let sop_advance_tool = sop::prompt::load_sop_advance_tool(sop_dir)?;
-    let eval_tools = [get_task_tool, sop_advance_tool];
+    let spawn_tool = sop::prompt::load_spawn_tool(sop_dir)?;
+    // `get_task_tool`/`spawn_tool` stay in scope for the fan-out orchestrator's tool set below.
+    let eval_tools = [get_task_tool.clone(), sop_advance_tool];
 
     let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let llm_rounds_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -810,12 +812,99 @@ fn run_sop_conversation(
                 break;
             }
         };
-        let prompt = {
-            let run = run.lock().unwrap();
-            sop::prompt::format_step_context(&sop_def, &run, &step)
-        };
         llm_rounds_step.store(0, std::sync::atomic::Ordering::Relaxed);
-        let outcome = run_episode(&mut chat, &prompt, &exec, SOP_MAX_LLM_ROUNDS_PER_STEP, policy)?;
+        // Fan-out step: an orchestrator agent decomposes the step and `spawn`s worker
+        // sub-episodes (one focused table each). Detected by the ORCHESTRATOR role marker.
+        let outcome = if step.body.contains("{# ORCHESTRATOR #}") {
+            use std::sync::atomic::Ordering::Relaxed;
+            let orch_prompt = sop::fanout::format_orchestrator_prompt(&step.body);
+            // Orchestrator tool set: get_task (read the source) + spawn (launch workers).
+            let orch_tools = [get_task_tool.clone(), spawn_tool.clone()];
+            let orch_eid = kb_eval::tz::backdated_episode_id(30);
+            let orch_chat = {
+                let gw = gateway.to_string();
+                let tags = tags.clone();
+                let variant_s = variant.map(|s| s.to_string());
+                let rounds_step = std::sync::Arc::clone(&llm_rounds_step);
+                let rounds_total = std::sync::Arc::clone(&llm_rounds_total);
+                let run_log = std::sync::Arc::clone(&run);
+                move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
+                    let since_step = rounds_step.fetch_add(1, Relaxed) + 1;
+                    let total = rounds_total.fetch_add(1, Relaxed) + 1;
+                    if total.is_multiple_of(10) {
+                        let s = run_log.lock().unwrap().current_step;
+                        eprintln!("  [sop] LLM round {total} step {s} ({since_step} in step, orch)");
+                    }
+                    let e = ep.unwrap_or(&orch_eid);
+                    let turn = kb_eval::tz::infer(
+                        &gw,
+                        "constraint_validate",
+                        e,
+                        messages,
+                        &tags,
+                        timeout,
+                        variant_s.as_deref(),
+                        None,
+                        Some(&orch_tools),
+                    )?;
+                    Ok(TzTurn {
+                        content: turn.content,
+                        episode_id: turn.episode_id,
+                    })
+                }
+            };
+            // Spawn-intercepting exec: `spawn` runs a nested worker episode (via run_worker)
+            // and returns its receipt; every other tool falls through to the normal dispatch.
+            // A per-step counter (Arc<AtomicUsize>, since exec is Fn + Sync) backstops runaway
+            // fan-out at WORKER_CAP_PER_STEP.
+            let spawn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let orch_exec = {
+                let sopd = sop_dir.to_path_buf();
+                let agent = agent_g_dir.to_path_buf();
+                let doc = src_doc.to_string();
+                let gw = gateway.to_string();
+                let tags = tags.clone();
+                let variant_s = variant.map(|s| s.to_string());
+                let step_body = step.body.clone();
+                let normal = make_exec(agent.clone(), doc.clone());
+                let count = std::sync::Arc::clone(&spawn_count);
+                move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+                    if name == "spawn" {
+                        let n = count.fetch_add(1, Relaxed) + 1;
+                        if let Some(msg) = spawn_capped(n, WORKER_CAP_PER_STEP) {
+                            return (msg.to_string(), vec![], vec![]);
+                        }
+                        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                        let wp = sop::fanout::format_worker_prompt(&step_body, task);
+                        let receipt = run_worker(
+                            &sopd,
+                            &agent,
+                            &doc,
+                            &gw,
+                            &tags,
+                            variant_s.as_deref(),
+                            timeout,
+                            &wp,
+                        );
+                        return (receipt, vec![], vec![]);
+                    }
+                    normal(name, args)
+                }
+            };
+            run_episode(
+                orch_chat,
+                &orch_prompt,
+                &orch_exec,
+                SOP_MAX_LLM_ROUNDS_PER_STEP,
+                policy,
+            )?
+        } else {
+            let prompt = {
+                let run = run.lock().unwrap();
+                sop::prompt::format_step_context(&sop_def, &run, &step)
+            };
+            run_episode(&mut chat, &prompt, &exec, SOP_MAX_LLM_ROUNDS_PER_STEP, policy)?
+        };
         total_rounds += outcome.rounds;
         total_deduped += outcome.deduped;
         if outcome.episode_id.is_some() {
@@ -864,6 +953,24 @@ fn run_sop_conversation(
 
 const WORKER_MAX_ROUNDS: usize = 40;
 
+/// Per-step worker backstop: beyond this many `spawn`s in a single fan-out step,
+/// `spawn` refuses and tells the orchestrator to stop. Not a target — a runaway guard.
+const WORKER_CAP_PER_STEP: usize = 30;
+
+/// Worker-cap decision for the fan-out `spawn` arm. `count` is the post-increment
+/// spawn count for this step. Returns `None` to allow the spawn, or `Some(message)`
+/// once the count exceeds `cap` — the message tells the orchestrator to stop and `done`.
+fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
+    if count > cap {
+        Some(
+            "Worker limit reached for this step. Do not spawn more workers; \
+             call `done` to finish the step.",
+        )
+    } else {
+        None
+    }
+}
+
 /// One-line receipt: files whose row count grew during the worker episode.
 fn worker_receipt(
     before: &std::collections::BTreeMap<String, usize>,
@@ -898,6 +1005,7 @@ fn run_worker(
     gateway: &str,
     tags: &Value,
     variant: Option<&str>,
+    timeout: Duration,
     worker_prompt: &str,
 ) -> String {
     // Worker tool set: get_task only (mirrors run_sop_conversation's chat, minus
@@ -912,8 +1020,6 @@ fn run_worker(
     let worker_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
 
     let eid = kb_eval::tz::backdated_episode_id(30);
-    // No timeout in the signature; use the crate default (cli.timeout_secs = 60).
-    let timeout = Duration::from_secs(60);
     let worker_chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
         let e = ep.unwrap_or(&eid);
         let turn = kb_eval::tz::infer(
@@ -2283,6 +2389,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_capped_boundary() {
+        // At/under the cap: allowed (None). The Nth allowed spawn has count == cap.
+        assert!(spawn_capped(1, 30).is_none());
+        assert!(spawn_capped(30, 30).is_none());
+        // First spawn past the cap is refused with a stop-and-done message.
+        let over = spawn_capped(31, 30).expect("31 > 30 must be capped");
+        assert!(over.to_lowercase().contains("done"), "{over}");
+        assert!(spawn_capped(1000, 30).is_some());
+        // Degenerate cap of 0: even the first spawn is refused.
+        assert!(spawn_capped(1, 0).is_some());
+    }
 
     #[test]
     fn worker_receipt_names_written_files() {
