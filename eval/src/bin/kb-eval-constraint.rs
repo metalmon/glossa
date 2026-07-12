@@ -1554,6 +1554,7 @@ fn max_bipartite_matching(n_left: usize, n_right: usize, adj: &[Vec<usize>]) -> 
 
 struct AgentTbl {
     file: String,
+    headers: Vec<String>,
     rows: Vec<Vec<String>>,
     col_vals: Vec<BTreeSet<String>>,
 }
@@ -1566,6 +1567,7 @@ fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentT
     agent_raw
         .into_iter()
         .map(|(file, t)| {
+            let headers = t.headers.clone();
             let col_vals: Vec<BTreeSet<String>> = (0..t.headers.len())
                 .map(|i| {
                     t.rows
@@ -1576,9 +1578,19 @@ fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentT
                         .collect()
                 })
                 .collect();
-            AgentTbl { file, rows: t.rows, col_vals }
+            AgentTbl { file, headers, rows: t.rows, col_vals }
         })
         .collect()
+}
+
+/// Normalize a parameter/header name for matching: lowercase, trim, and drop a
+/// trailing short code token (e.g. "высота T" -> "высота", "диаметр D" -> "диаметр").
+fn norm_name(s: &str) -> String {
+    let s = s.trim().to_lowercase();
+    match s.rsplit_once(' ') {
+        Some((head, tail)) if tail.chars().count() <= 2 && !head.is_empty() => head.trim().to_string(),
+        _ => s,
+    }
 }
 
 /// Pure scorer for relational coverage. For each reference table, match its
@@ -1604,28 +1616,51 @@ fn score_relations(ref_tables: &[RefTable], agent: &[AgentTbl]) -> RelationRepor
         let required: Vec<usize> =
             if discriminating.is_empty() { (0..rt.params.len()).collect() } else { discriminating };
 
-        let mut best: Option<(usize, Vec<usize>, usize)> = None;
+        // Track (ai, mapping, score, name_score): `score` (match size) stays the
+        // primary ranking key so recall/precision semantics are unchanged; when
+        // two agent tables both achieve a full match, `name_score` (how many
+        // required params resolved via header-name match rather than the
+        // value-overlap fallback) breaks the tie in favor of the name-matched
+        // table.
+        let mut best: Option<(usize, Vec<usize>, usize, usize)> = None;
         for (ai, at) in agent.iter().enumerate() {
+            let mut name_score = 0usize;
             let adj: Vec<Vec<usize>> = required
                 .iter()
                 .map(|&pi| {
-                    at.col_vals
+                    let pname = norm_name(&rt.params[pi]);
+                    let by_name: Vec<usize> = at
+                        .headers
                         .iter()
                         .enumerate()
-                        .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
+                        .filter(|(_, h)| {
+                            let hn = norm_name(h);
+                            !hn.is_empty() && (hn.contains(&pname) || pname.contains(&hn))
+                        })
                         .map(|(ci, _)| ci)
-                        .collect()
+                        .collect();
+                    if !by_name.is_empty() {
+                        name_score += 1;
+                        by_name
+                    } else {
+                        at.col_vals
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
+                            .map(|(ci, _)| ci)
+                            .collect()
+                    }
                 })
                 .collect();
             let mapping = max_bipartite_matching(required.len(), at.col_vals.len(), &adj);
             let score = mapping.iter().filter(|&&ci| ci != usize::MAX).count();
-            if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
-                best = Some((ai, mapping, score));
+            if best.as_ref().is_none_or(|(_, _, s, ns)| (score, name_score) > (*s, *ns)) {
+                best = Some((ai, mapping, score, name_score));
             }
         }
 
         let cov = match best {
-            Some((ai, mapping, score)) if score == required.len() => {
+            Some((ai, mapping, score, _)) if score == required.len() => {
                 let at = &agent[ai];
                 let project_ref = |r: &[String]| -> Vec<String> {
                     required
@@ -2622,7 +2657,12 @@ mod tests {
         let col_vals: Vec<BTreeSet<String>> = (0..2)
             .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
             .collect();
-        let agent = vec![AgentTbl { file: "D_h.csp".into(), rows, col_vals }];
+        let agent = vec![AgentTbl {
+            file: "D_h.csp".into(),
+            headers: vec!["col1".into(), "col2".into()],
+            rows,
+            col_vals,
+        }];
         let rep = score_relations(&[rt], &agent);
         let t = &rep.tables[0];
         assert_eq!(t.agent_file.as_deref(), Some("D_h.csp"), "matched despite constant тип");
@@ -2640,6 +2680,7 @@ mod tests {
         };
         let agent = vec![AgentTbl {
             file: "F_K.csp".into(),
+            headers: vec!["col1".into(), "col2".into()],
             rows: vec![
                 vec!["F30".into(), "1".into()],
                 vec!["F30".into(), "2".into()],
@@ -2655,6 +2696,31 @@ mod tests {
         assert_eq!(t.rows_total, 2);
         assert_eq!(t.agent_rows_hit, 2, "2 agent pairs are in gold");
         assert_eq!(t.agent_rows_total, 3, "3 distinct agent pairs");
+    }
+
+    #[test]
+    fn binds_by_header_name_not_value_overlap() {
+        // Two agent tables keyed by D; height and bore share values (10, 13, 16).
+        // Height must bind to the "высота" table, not the "посадочное" one.
+        let rt = RefTable {
+            name: "Высота".into(),
+            params: vec!["Наружный диаметр".into(), "Высота".into()],
+            rows: vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]],
+        };
+        let mk = |file: &str, h1: &str, h2: &str, rows: Vec<Vec<String>>| {
+            let col_vals = (0..2)
+                .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+                .collect();
+            AgentTbl { file: file.into(), headers: vec![h1.into(), h2.into()], rows, col_vals }
+        };
+        let agent = vec![
+            mk("D_H.csp", "наружный диаметр", "диаметр посадочного отверстия",
+               vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]]),
+            mk("D_T.csp", "наружный диаметр", "высота T",
+               vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]]),
+        ];
+        let t = &score_relations(&[rt], &agent).tables[0];
+        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by name to высota table");
     }
 
     #[test]
