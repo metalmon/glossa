@@ -1612,7 +1612,8 @@ fn norm_name(s: &str) -> String {
 
 /// Pure scorer for relational coverage. For each reference table, match its
 /// **discriminating** params (value-set ≥ 2) to distinct agent columns via
-/// maximum bipartite matching over value-set overlap, then measure both:
+/// maximum bipartite matching — adjacency is bound by manifest POSITION
+/// (`canon_order`/`agent_order`) with a value-overlap fallback — then measure:
 ///   - recall: reference tuples reproduced as agent rows;
 ///   - precision: agent tuples (deduped, projected onto the matched columns)
 ///     that are genuinely in the reference.
@@ -1621,7 +1622,12 @@ fn norm_name(s: &str) -> String {
 /// a correct 2-column table matches a 3-param reference table. If a reference
 /// table has no discriminating param, fall back to all params (so an
 /// all-constant table cannot match trivially).
-fn score_relations(ref_tables: &[RefTable], agent: &[AgentTbl]) -> RelationReport {
+fn score_relations(
+    ref_tables: &[RefTable],
+    agent: &[AgentTbl],
+    canon_order: &[String],
+    agent_order: &[String],
+) -> RelationReport {
     let mut out = Vec::new();
     for rt in ref_tables {
         let ref_col_vals: Vec<BTreeSet<String>> = (0..rt.params.len())
@@ -1633,32 +1639,44 @@ fn score_relations(ref_tables: &[RefTable], agent: &[AgentTbl]) -> RelationRepor
         let required: Vec<usize> =
             if discriminating.is_empty() { (0..rt.params.len()).collect() } else { discriminating };
 
-        // Track (ai, mapping, score, name_score): `score` (match size) stays the
-        // primary ranking key so recall/precision semantics are unchanged; when
-        // two agent tables both achieve a full match, `name_score` (how many
-        // required params resolved via header-name match rather than the
-        // value-overlap fallback) breaks the tie in favor of the name-matched
-        // table.
+        // Positional binding via the two schema.toml manifests. A gold param maps
+        // to its position in the reference order (`canon_order`); the agent field
+        // at that SAME position (`agent_order`) names the agent column. Position
+        // bridges reference↔agent — each side uses only its own naming, the agent
+        // never has to know reference names. When no manifest position resolves a
+        // param (missing manifest, out-of-range, or the agent's own header does
+        // not match its own manifest field), fall back to value overlap. `score`
+        // (match size) is the primary ranking key so recall/precision semantics
+        // are unchanged; `pos_score` (params resolved positionally) breaks ties in
+        // favor of the positionally-bound table.
         let mut best: Option<(usize, Vec<usize>, usize, usize)> = None;
         for (ai, at) in agent.iter().enumerate() {
-            let mut name_score = 0usize;
+            let mut pos_score = 0usize;
             let adj: Vec<Vec<usize>> = required
                 .iter()
                 .map(|&pi| {
-                    let pname = norm_name(&rt.params[pi]);
-                    let by_name: Vec<usize> = at
-                        .headers
+                    let by_pos: Vec<usize> = canon_order
                         .iter()
-                        .enumerate()
-                        .filter(|(_, h)| {
-                            let hn = norm_name(h);
-                            !hn.is_empty() && (hn.contains(&pname) || pname.contains(&hn))
+                        .position(|n| n == &rt.params[pi])
+                        .and_then(|cpos| agent_order.get(cpos))
+                        .map(|afield| {
+                            let an = norm_name(afield);
+                            at.headers
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, h)| {
+                                    let hn = norm_name(h);
+                                    hn == an
+                                        || (an.chars().count() > 1 && hn.contains(&an))
+                                        || (hn.chars().count() > 1 && an.contains(&hn))
+                                })
+                                .map(|(ci, _)| ci)
+                                .collect::<Vec<usize>>()
                         })
-                        .map(|(ci, _)| ci)
-                        .collect();
-                    if !by_name.is_empty() {
-                        name_score += 1;
-                        by_name
+                        .unwrap_or_default();
+                    if !by_pos.is_empty() {
+                        pos_score += 1;
+                        by_pos
                     } else {
                         at.col_vals
                             .iter()
@@ -1671,8 +1689,8 @@ fn score_relations(ref_tables: &[RefTable], agent: &[AgentTbl]) -> RelationRepor
                 .collect();
             let mapping = max_bipartite_matching(required.len(), at.col_vals.len(), &adj);
             let score = mapping.iter().filter(|&&ci| ci != usize::MAX).count();
-            if best.as_ref().is_none_or(|(_, _, s, ns)| (score, name_score) > (*s, *ns)) {
-                best = Some((ai, mapping, score, name_score));
+            if best.as_ref().is_none_or(|(_, _, s, ps)| (score, pos_score) > (*s, *ps)) {
+                best = Some((ai, mapping, score, pos_score));
             }
         }
 
@@ -1734,9 +1752,13 @@ fn compare_relations(
     agent_g_dir: &std::path::Path,
     src_doc: &str,
     ref_tables: &[RefTable],
+    canon_order: &[String],
 ) -> RelationReport {
     let agent = load_agent_tables(agent_g_dir, src_doc);
-    score_relations(ref_tables, &agent)
+    let agent_order = glossa::tables::read_schema_order(
+        &agent_g_dir.join(".glossa/notes").join(src_doc).join("schema.toml"),
+    );
+    score_relations(ref_tables, &agent, canon_order, &agent_order)
 }
 
 /// Tables-only comparison, by domain: a reference parameter is identified among
@@ -2277,7 +2299,7 @@ fn main() -> Result<()> {
                 println!("EPISODE ERROR: {e}");
             }
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
-            let rel_report = compare_relations(&agent_g_dir, &src_doc, &ref_tables);
+            let rel_report = compare_relations(&agent_g_dir, &src_doc, &ref_tables, &canon_order);
             print!("{}", format_relation_report(&rel_report, PARAM_COVERED_THRESHOLD));
             let agent_order = glossa::tables::read_schema_order(
                 &agent_g_dir.join(".glossa/notes").join(&src_doc).join("schema.toml"),
@@ -2705,7 +2727,8 @@ mod tests {
             rows,
             col_vals,
         }];
-        let rep = score_relations(&[rt], &agent);
+        // Empty manifests → value-overlap fallback (the constant-param path).
+        let rep = score_relations(&[rt], &agent, &[], &[]);
         let t = &rep.tables[0];
         assert_eq!(t.agent_file.as_deref(), Some("D_h.csp"), "matched despite constant тип");
         assert_eq!(t.rows_hit, 3, "all 3 gold rows covered on (D,h)");
@@ -2733,7 +2756,7 @@ mod tests {
                 ["1", "2", "9"].iter().map(|s| s.to_string()).collect(),
             ],
         }];
-        let t = &score_relations(&[rt], &agent).tables[0];
+        let t = &score_relations(&[rt], &agent, &[], &[]).tables[0];
         assert_eq!(t.rows_hit, 2);
         assert_eq!(t.rows_total, 2);
         assert_eq!(t.agent_rows_hit, 2, "2 agent pairs are in gold");
@@ -2741,28 +2764,33 @@ mod tests {
     }
 
     #[test]
-    fn binds_by_header_name_not_value_overlap() {
-        // Two agent tables keyed by D; height and bore share values (10, 13, 16).
-        // Height must bind to the "высота" table, not the "посадочное" one.
+    fn binds_by_manifest_position_not_values() {
+        // Height and bore share values (10, 13); the agent uses short codes T/H
+        // that do NOT match the reference names. Position — the gold param's index
+        // in canon_order, then the agent field at that index in agent_order — must
+        // bind Высота to the D_T (height) table, not the value-overlapping D_H one.
         let rt = RefTable {
             name: "Высота".into(),
             params: vec!["Наружный диаметр".into(), "Высота".into()],
             rows: vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]],
         };
-        let mk = |file: &str, h1: &str, h2: &str, rows: Vec<Vec<String>>| {
-            let col_vals = (0..2)
+        let mk = |file: &str, h2: &str| {
+            let rows: Vec<Vec<String>> =
+                vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]];
+            let col_vals: Vec<BTreeSet<String>> = (0..2)
                 .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
                 .collect();
-            AgentTbl { file: file.into(), headers: vec![h1.into(), h2.into()], rows, col_vals }
+            AgentTbl { file: file.into(), headers: vec!["D".into(), h2.to_string()], rows, col_vals }
         };
-        let agent = vec![
-            mk("D_H.csp", "наружный диаметр", "диаметр посадочного отверстия",
-               vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]]),
-            mk("D_T.csp", "наружный диаметр", "высота T",
-               vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]]),
-        ];
-        let t = &score_relations(&[rt], &agent).tables[0];
-        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by name to высota table");
+        let agent = vec![mk("D_H.csp", "H"), mk("D_T.csp", "T")];
+        let canon = vec!["Наружный диаметр".to_string(), "Высота".into()];
+        let agent_order = vec!["D".to_string(), "T".into()];
+        let t = &score_relations(&[rt], &agent, &canon, &agent_order).tables[0];
+        assert_eq!(
+            t.agent_file.as_deref(),
+            Some("D_T.csp"),
+            "bound by position to the T (height) table despite value overlap with H"
+        );
     }
 
     #[test]
@@ -2846,7 +2874,7 @@ mod tests {
                 vec!["125".into(), "0,8".into()],
             ],
         }];
-        let rep = compare_relations(dir.path(), doc, &refs);
+        let rep = compare_relations(dir.path(), doc, &refs, &[]);
         assert_eq!(rep.tables.len(), 1);
         assert_eq!(rep.tables[0].agent_file.as_deref(), Some("height.csp"));
         assert_eq!((rep.tables[0].rows_hit, rep.tables[0].rows_total), (2, 3));
@@ -2880,7 +2908,7 @@ mod tests {
             params: vec!["A".into(), "B".into()],
             rows: vec![vec!["1".into(), "3".into()]],
         }];
-        let rep = compare_relations(dir.path(), doc, &refs);
+        let rep = compare_relations(dir.path(), doc, &refs, &[]);
         assert_eq!(rep.tables.len(), 1);
         assert_eq!(
             rep.tables[0].agent_file.as_deref(),
