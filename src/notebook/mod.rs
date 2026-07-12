@@ -191,6 +191,13 @@ pub fn note(
             for hint in &o.tutor_hints {
                 msg.push_str(&format!("\n  · {hint}"));
             }
+            if !o.schema_missing.is_empty() {
+                msg.push_str(&format!(
+                    "\n  · schema.toml: {} file(s) in [order].files not found in the notebook: {} — create them or fix the names",
+                    o.schema_missing.len(),
+                    o.schema_missing.join(", ")
+                ));
+            }
             msg
         }
         Err(e) => format!("REJECTED — {e}"),
@@ -251,6 +258,9 @@ pub struct WriteOutcome {
     /// Optional soft observations on table shape (`.csp` only).
     pub tutor_hints: Vec<String>,
     pub mode: WriteMode,
+    /// For `schema.toml`: files listed in `[order].files` that do not exist in the
+    /// document's notebook (so the agent can create or rename them).
+    pub schema_missing: Vec<String>,
 }
 
 /// Reject a `.csp` that abbreviates its rows with an ellipsis / "and so on"
@@ -412,12 +422,38 @@ fn write_note(
     }
     std::fs::write(&abs_path, &full)?;
     let lines = full.lines().count();
+    // For `schema.toml`, flag any file listed in `[order].files` that is not yet
+    // in the document's notebook — so the agent gets actionable feedback.
+    let schema_missing = if abs_path.file_name().and_then(|n| n.to_str()) == Some("schema.toml") {
+        #[derive(serde::Deserialize)]
+        struct S {
+            order: Option<O>,
+        }
+        #[derive(serde::Deserialize)]
+        struct O {
+            #[serde(default)]
+            files: Vec<String>,
+        }
+        let files = toml::from_str::<S>(&full)
+            .ok()
+            .and_then(|s| s.order)
+            .map(|o| o.files)
+            .unwrap_or_default();
+        let dir = abs_path.parent();
+        files
+            .into_iter()
+            .filter(|f| dir.map(|d| !d.join(f).is_file()).unwrap_or(true))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(WriteOutcome {
         rel_path,
         lines,
         table,
         tutor_hints,
         mode,
+        schema_missing,
     })
 }
 
@@ -564,6 +600,25 @@ mod tests {
         );
         assert!(!msg.contains("REJECTED"), "{msg}");
         assert!(dir.path().join(".glossa/notes/doc.pdf/t.csp").is_file());
+    }
+
+    #[test]
+    fn schema_toml_flags_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        // a.csp exists; missing.csp does not.
+        note(dir.path(), &idx, "doc.pdf", "a.csp", "k\n1\n", false);
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "schema.toml",
+            "[order]\nfiles = [\"a.csp\", \"missing.csp\"]\n",
+            false,
+        );
+        assert!(msg.contains("missing.csp"), "flags the absent file: {msg}");
+        assert!(msg.contains("1 file(s)"), "only one missing: {msg}");
+        assert!(!msg.contains("REJECTED"), "feedback, not rejection: {msg}");
     }
 
     #[test]

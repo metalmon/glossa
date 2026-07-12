@@ -30,17 +30,23 @@ pub struct SchemaOrder {
     pub files: Vec<String>,
 }
 
-/// Read the `[order]` section. Returns an empty `SchemaOrder` on a
-/// missing/unreadable file, invalid TOML, or a missing `[order]` section.
-pub fn read_schema_order(path: &Path) -> SchemaOrder {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return SchemaOrder::default();
-    };
-    match toml::from_str::<SchemaFile>(&text) {
+/// Parse the `[order]` section from TOML text. Empty on invalid TOML or a
+/// missing `[order]` section.
+pub fn parse_schema_order(text: &str) -> SchemaOrder {
+    match toml::from_str::<SchemaFile>(text) {
         Ok(s) => {
             let o = s.order.unwrap_or_default();
             SchemaOrder { params: o.params, files: o.files }
         }
+        Err(_) => SchemaOrder::default(),
+    }
+}
+
+/// Read the `[order]` section from a file. Returns an empty `SchemaOrder` on a
+/// missing/unreadable file, invalid TOML, or a missing `[order]` section.
+pub fn read_schema_order(path: &Path) -> SchemaOrder {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_schema_order(&text),
         Err(_) => SchemaOrder::default(),
     }
 }
