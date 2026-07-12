@@ -2806,9 +2806,9 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
-        // Single fan-out step (find+build) is step 1, so Compile is step 2.
+        // Research is step 1, fan-out (find+build) is step 2, so Compile is step 3.
         // (Coverage + Validate are disabled for now.)
-        assert_eq!(compile.number, 2);
+        assert_eq!(compile.number, 3);
     }
 
     #[test]
