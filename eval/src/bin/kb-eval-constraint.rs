@@ -232,7 +232,7 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
             valid: vals.into_iter().collect(),
         })
         .collect();
-    let canon_order = glossa::tables::read_schema_order(&val_dir.join("schema.toml"));
+    let canon_order = glossa::tables::read_schema_order(&val_dir.join("schema.toml")).params;
     Ok((cols, all_rows, ref_tables, canon_order))
 }
 
@@ -1609,7 +1609,8 @@ fn score_relations(
     ref_tables: &[RefTable],
     agent: &[AgentTbl],
     canon_order: &[String],
-    agent_order: &[String],
+    agent_params: &[String],
+    agent_files: &[String],
 ) -> RelationReport {
     let mut out = Vec::new();
     for rt in ref_tables {
@@ -1641,20 +1642,44 @@ fn score_relations(
                     let by_pos: Vec<usize> = canon_order
                         .iter()
                         .position(|n| n == &rt.params[pi])
-                        .and_then(|cpos| agent_order.get(cpos))
-                        .map(|afield| {
-                            let an = norm_name(afield);
-                            at.headers
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, h)| {
-                                    let hn = norm_name(h);
-                                    hn == an
-                                        || (an.chars().count() > 1 && hn.contains(&an))
-                                        || (hn.chars().count() > 1 && an.contains(&hn))
-                                })
-                                .map(|(ci, _)| ci)
-                                .collect::<Vec<usize>>()
+                        .map(|cpos| {
+                            // 1) File path (preferred): the agent field at this
+                            // position names a `.csp` file; if it is THIS file,
+                            // match the param to its value-overlapping columns
+                            // within — no header name needed (fixes code≠header).
+                            if agent_files.get(cpos).is_some_and(|f| f == &at.file) {
+                                let cols: Vec<usize> = at
+                                    .col_vals
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
+                                    .map(|(ci, _)| ci)
+                                    .collect();
+                                if !cols.is_empty() {
+                                    return cols;
+                                }
+                            }
+                            // 2) Field-name path: the agent field name at this
+                            // position matches an agent header (agent-internal).
+                            if let Some(afield) = agent_params.get(cpos) {
+                                let an = norm_name(afield);
+                                let cols: Vec<usize> = at
+                                    .headers
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, h)| {
+                                        let hn = norm_name(h);
+                                        hn == an
+                                            || (an.chars().count() > 1 && hn.contains(&an))
+                                            || (hn.chars().count() > 1 && an.contains(&hn))
+                                    })
+                                    .map(|(ci, _)| ci)
+                                    .collect();
+                                if !cols.is_empty() {
+                                    return cols;
+                                }
+                            }
+                            Vec::new()
                         })
                         .unwrap_or_default();
                     if !by_pos.is_empty() {
@@ -1741,7 +1766,7 @@ fn compare_relations(
     let agent_order = glossa::tables::read_schema_order(
         &agent_g_dir.join(".glossa/notes").join(src_doc).join("schema.toml"),
     );
-    score_relations(ref_tables, &agent, canon_order, &agent_order)
+    score_relations(ref_tables, &agent, canon_order, &agent_order.params, &agent_order.files)
 }
 
 /// Tables-only comparison, by domain: a reference parameter is identified among
@@ -2686,7 +2711,7 @@ mod tests {
             col_vals,
         }];
         // Empty manifests → value-overlap fallback (the constant-param path).
-        let rep = score_relations(&[rt], &agent, &[], &[]);
+        let rep = score_relations(&[rt], &agent, &[], &[], &[]);
         let t = &rep.tables[0];
         assert_eq!(t.agent_file.as_deref(), Some("D_h.csp"), "matched despite constant тип");
         assert_eq!(t.rows_hit, 3, "all 3 gold rows covered on (D,h)");
@@ -2714,41 +2739,62 @@ mod tests {
                 ["1", "2", "9"].iter().map(|s| s.to_string()).collect(),
             ],
         }];
-        let t = &score_relations(&[rt], &agent, &[], &[]).tables[0];
+        let t = &score_relations(&[rt], &agent, &[], &[], &[]).tables[0];
         assert_eq!(t.rows_hit, 2);
         assert_eq!(t.rows_total, 2);
         assert_eq!(t.agent_rows_hit, 2, "2 agent pairs are in gold");
         assert_eq!(t.agent_rows_total, 3, "3 distinct agent pairs");
     }
 
-    #[test]
-    fn binds_by_manifest_position_not_values() {
-        // Height and bore share values (10, 13); the agent uses short codes T/H
-        // that do NOT match the reference names. Position — the gold param's index
-        // in canon_order, then the agent field at that index in agent_order — must
-        // bind Высота to the D_T (height) table, not the value-overlapping D_H one.
+    // Height and bore share values (10, 13); binding must send Высота to the D_T
+    // (height) table, not the value-overlapping D_H one. Two positional paths:
+    // field name and file name.
+    fn hbore_setup() -> (RefTable, Vec<AgentTbl>, Vec<String>) {
         let rt = RefTable {
             name: "Высота".into(),
             params: vec!["Наружный диаметр".into(), "Высота".into()],
             rows: vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]],
         };
-        let mk = |file: &str, h2: &str| {
+        let mk = |file: &str, headers: [&str; 2]| {
             let rows: Vec<Vec<String>> =
                 vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]];
             let col_vals: Vec<BTreeSet<String>> = (0..2)
                 .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
                 .collect();
-            AgentTbl { file: file.into(), headers: vec!["D".into(), h2.to_string()], rows, col_vals }
+            AgentTbl {
+                file: file.into(),
+                headers: vec![headers[0].into(), headers[1].into()],
+                rows,
+                col_vals,
+            }
         };
-        let agent = vec![mk("D_H.csp", "H"), mk("D_T.csp", "T")];
         let canon = vec!["Наружный диаметр".to_string(), "Высота".into()];
-        let agent_order = vec!["D".to_string(), "T".into()];
-        let t = &score_relations(&[rt], &agent, &canon, &agent_order).tables[0];
-        assert_eq!(
-            t.agent_file.as_deref(),
-            Some("D_T.csp"),
-            "bound by position to the T (height) table despite value overlap with H"
-        );
+        (
+            rt,
+            vec![mk("D_H.csp", ["D", "H"]), mk("D_T.csp", ["D", "T"])],
+            canon,
+        )
+    }
+
+    #[test]
+    fn binds_by_field_name_position() {
+        // Agent codes T/H match its own headers; canon position → agent field name.
+        let (rt, agent, canon) = hbore_setup();
+        let agent_params = vec!["D".to_string(), "T".into()];
+        let t = &score_relations(&[rt], &agent, &canon, &agent_params, &[]).tables[0];
+        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by field-name position");
+    }
+
+    #[test]
+    fn binds_by_file_name_position() {
+        // Headers are useless ("c1"/"c2"); the FILE at each canon position binds.
+        let (rt, mut agent, canon) = hbore_setup();
+        for at in &mut agent {
+            at.headers = vec!["c1".into(), "c2".into()];
+        }
+        let agent_files = vec!["D_T.csp".to_string(), "D_T.csp".into()];
+        let t = &score_relations(&[rt], &agent, &canon, &[], &agent_files).tables[0];
+        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by file-name position");
     }
 
     #[test]
