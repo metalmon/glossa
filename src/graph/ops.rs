@@ -151,6 +151,13 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
                     "no document '{raw}' in the base — copy the document path exactly as grep/read prints it, character for character"
                 ));
             };
+            // Chunk numbering is 1-based (grep/read/search all show `#1` for the first
+            // chunk). The model often reaches for 0-based indexing out of programming
+            // habit and writes `#0`; treat that as the first chunk instead of failing, so
+            // it doesn't loop guessing numbers. Higher out-of-range numbers still error —
+            // those are a real mistake (a number copied from another file) — but the
+            // message now states the 1-based convention.
+            let n = if n == 0 { 1 } else { n };
             return match idx.location_for_ord(&path, n) {
                 // Keep the chunk ORDINAL the agent gave (`path#3`) as the reference, not
                 // the chunk's heading location — the agent works in chunk numbers (from
@@ -158,7 +165,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
                 // back as a "mangled" ref. We still resolve to confirm the chunk exists.
                 Ok(Some(_)) => Ok(Some(crate::graph::build::section_id(&path, &n.to_string()))),
                 Ok(None) => Err(format!(
-                    "chunk #{n} does not exist in {path}; take the chunk number from a search/grep/read on THIS document — never reuse a number from another file"
+                    "chunk #{n} does not exist in {path}; chunk numbers start at #1 — take the number from a search/grep/read on THIS document, never reuse one from another file"
                 )),
                 Err(e) => Err(format!("could not resolve chunk #{n} in {path}: {e}")),
             };
@@ -1091,6 +1098,28 @@ strict = true
             out.message
         );
         assert!(out.message.contains("Written:"), "{}", out.message);
+    }
+
+    /// `<path>#0` resolves to the first chunk. The model often writes 0-based refs out of
+    /// programming habit; the tool tolerates it (numbering is 1-based) instead of erroring,
+    /// so it doesn't loop guessing chunk numbers. Out-of-range numbers still error, with a
+    /// message stating the 1-based convention.
+    #[test]
+    fn section_ref_zero_maps_to_first_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        write_doc(&idx, "case1.docx"); // single chunk, ord 1
+
+        let first = crate::graph::build::section_id("case1.docx", "1");
+        assert_eq!(
+            resolve_section_ref(&idx, "case1.docx#0").unwrap(),
+            Some(first),
+            "#0 should resolve to the first chunk (#1)"
+        );
+
+        // A genuinely out-of-range chunk still errors, and the message states the base.
+        let err = resolve_section_ref(&idx, "case1.docx#5").unwrap_err();
+        assert!(err.contains("start at #1"), "unexpected error: {err}");
     }
 
     /// graph_update renames a node in place while preserving its id and all outgoing edges.

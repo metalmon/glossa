@@ -596,9 +596,16 @@ pub fn neighbors(
     let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
         nid.to_string()
     } else if let (Some(p), Some(nn)) = (path, n) {
+        // `#0` → first chunk: numbering is 1-based, but the model often writes 0 out of
+        // programming habit. Tolerate it instead of erroring so it doesn't loop guessing.
+        let nn = if nn == 0 { 1 } else { nn };
         match idx.location_for_ord(p, nn) {
             Ok(Some(loc)) => crate::graph::build::section_id(p, &loc),
-            Ok(None) => return format!("no chunk #{nn} in {p}"),
+            Ok(None) => {
+                return format!(
+                    "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
+                )
+            }
             Err(e) => return format!("neighbors error: {e}"),
         }
     } else {
