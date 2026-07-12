@@ -446,11 +446,12 @@ mod tests {
         .expect("read gost-constraints SOP.md");
         let steps = parse_steps(&md);
 
-        // Coverage + Validate are disabled for now; Research + fan-out build + Compile remain.
-        assert_eq!(steps.len(), 3, "expected 3 macro steps");
+        // Coverage + Validate are disabled for now; Research + fan-out build + Schema + Compile remain.
+        assert_eq!(steps.len(), 4, "expected 4 macro steps");
         assert!(steps[0].title.contains("Research"));
         assert!(steps[1].title.contains("Собери таблицы"));
-        assert!(steps[2].title.contains("Compile"));
+        assert!(steps[2].title.contains("Schema"));
+        assert!(steps[3].title.contains("Compile"));
 
         // Step 2 is the single fan-out step: orchestrator spawns one worker per field.
         // No routing under per-step subagents; no graph_build at the orchestrator level.
@@ -466,8 +467,8 @@ mod tests {
             "fan-out step must not list graph_build"
         );
 
-        // Step 3 is Compile — it owns graph_build and is the terminal step now.
-        let compile = &steps[2];
+        // Step 4 is Compile — it owns graph_build and is the terminal step now.
+        let compile = &steps[3];
         assert!(compile.suggested_tools.contains(&"graph_build".to_string()));
     }
 }
