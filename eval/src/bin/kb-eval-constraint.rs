@@ -1433,6 +1433,23 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
     out
 }
 
+/// Longest-common-subsequence length between the agent's field order and the
+/// canonical order — how many fields the agent placed in the canonical sequence.
+fn order_score(agent: &[String], canon: &[String]) -> usize {
+    let (n, m) = (agent.len(), canon.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in 0..n {
+        for j in 0..m {
+            dp[i + 1][j + 1] = if agent[i] == canon[j] {
+                dp[i][j] + 1
+            } else {
+                dp[i][j + 1].max(dp[i + 1][j])
+            };
+        }
+    }
+    dp[n][m]
+}
+
 fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
     let f1 = |p: f64, r: f64| if p + r == 0.0 { 0.0 } else { 2.0 * p * r / (p + r) };
     let mut out = String::new();
@@ -2262,6 +2279,20 @@ fn main() -> Result<()> {
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
             let rel_report = compare_relations(&agent_g_dir, &src_doc, &ref_tables);
             print!("{}", format_relation_report(&rel_report, PARAM_COVERED_THRESHOLD));
+            let agent_order = glossa::tables::read_schema_order(
+                &agent_g_dir.join(".glossa/notes").join(&src_doc).join("schema.toml"),
+            );
+            if canon_order.is_empty() {
+                println!("  order: (no reference order)");
+            } else if agent_order.is_empty() {
+                println!("  order: 0/{} — agent wrote no schema.toml", canon_order.len());
+            } else {
+                println!(
+                    "  order: {}/{} fields in canonical sequence",
+                    order_score(&agent_order, &canon_order),
+                    canon_order.len()
+                );
+            }
             print!("{}", format_param_table(&report, PARAM_COVERED_THRESHOLD));
             println!(
                 "TABLES episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
@@ -2510,6 +2541,17 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_score_is_lcs_length() {
+        let canon = vec!["a".to_string(), "b".into(), "c".into(), "d".into()];
+        assert_eq!(order_score(&canon, &canon), 4);
+        // one field missing in the middle → LCS 3
+        assert_eq!(order_score(&["a".into(), "c".into(), "d".into()], &canon), 3);
+        // reordered pair → LCS 3 (a, c, d keep order; b dropped)
+        assert_eq!(order_score(&["a".into(), "c".into(), "b".into(), "d".into()], &canon), 3);
+        assert_eq!(order_score(&[], &canon), 0);
+    }
 
     #[test]
     fn spawn_capped_boundary() {
