@@ -146,7 +146,7 @@ struct RefTable {
     rows: Vec<Vec<String>>,
 }
 
-type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>, Vec<RefTable>);
+type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>, Vec<RefTable>, Vec<String>);
 
 /// Load the reference tables. The JSON is produced by `convert-xlsx`, which cuts
 /// MDM UID columns and keys every column by its human-readable name — so this is
@@ -232,7 +232,8 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
             valid: vals.into_iter().collect(),
         })
         .collect();
-    Ok((cols, all_rows, ref_tables))
+    let canon_order = glossa::tables::read_schema_order(&val_dir.join("schema.toml"));
+    Ok((cols, all_rows, ref_tables, canon_order))
 }
 
 // ── Reference graph ──
@@ -1821,7 +1822,8 @@ fn main() -> Result<()> {
     drop(idx_kb);
     let kb_docs_list = kb_docs.join(", ");
 
-    let (cols, rows, ref_tables) = load_validation_data(&cli.val_dir).context("load validation tables")?;
+    let (cols, rows, ref_tables, canon_order) =
+        load_validation_data(&cli.val_dir).context("load validation tables")?;
     eprintln!(
         "Loaded {}: {} columns, {} valid rows",
         cli.val_dir.display(),
@@ -2543,7 +2545,7 @@ mod tests {
         // Metadata file (underscore) is ignored.
         std::fs::write(dir.path().join("_meta.json"), r#"{"tables":[{"rows":[{"x":"1"}]}]}"#).unwrap();
 
-        let (_cols, _rows, refs) = load_validation_data(dir.path()).unwrap();
+        let (_cols, _rows, refs, _canon) = load_validation_data(dir.path()).unwrap();
         assert_eq!(refs.len(), 1, "only the dependent table is relational");
         let h = &refs[0];
         assert_eq!(h.name, "Height");
@@ -2552,6 +2554,19 @@ mod tests {
         assert_eq!(h.rows.len(), 3);
         assert!(h.rows.contains(&vec!["125".to_string(), "0,6".to_string()]));
         assert!(h.rows.contains(&vec!["150".to_string(), "0,6".to_string()]));
+    }
+
+    #[test]
+    fn load_validation_reads_canon_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Тип.json"),
+            r#"{"tables":[{"rows":[{"D":"1","h":"2"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("schema.toml"), "[order]\nparams = [\"Тип\", \"Высота\"]\n").unwrap();
+        let (_cols, _rows, _refs, canon) = load_validation_data(dir.path()).unwrap();
+        assert_eq!(canon, vec!["Тип".to_string(), "Высота".into()]);
     }
 
     #[test]
