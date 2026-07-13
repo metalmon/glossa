@@ -326,6 +326,15 @@ fn write_note(
     append: bool,
 ) -> anyhow::Result<WriteOutcome> {
     let NotePath { rel_path, abs_path } = resolve_note_by_document(root, idx, doc, file)?;
+    // A notebook file must carry an extension so its kind is unambiguous: a values
+    // table is `.csp`, prose is `.md`, the schema is `.toml`. Without one, a worker's
+    // table silently lands as a plain note (not a `.csp`) and is never compiled or
+    // scored — the write "succeeds" yet the work is lost. Reject early with the fix.
+    if std::path::Path::new(file).extension().is_none() {
+        anyhow::bail!(
+            "file \"{file}\" has no extension — add one so its type is clear (a values table is `.csp`, e.g. \"{file}.csp\")"
+        );
+    }
     let is_csp = rel_path.to_ascii_lowercase().ends_with(".csp");
     if is_csp {
         reject_placeholder_rows(content)?;
@@ -546,6 +555,39 @@ mod tests {
         );
         assert!(msg.contains(&format!("columns: [h{TAB}v]")), "{msg}");
         assert!(msg.contains("2 data rows"), "{msg}");
+    }
+
+    #[test]
+    fn note_without_extension_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        // A worker that writes its table to a file WITHOUT `.csp` has it saved as a
+        // plain note and never scored. Reject the write and name the fix.
+        let msg = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "Высота Т",
+            &format!("D{TAB}T\n50{TAB}0,6\n"),
+            false,
+        );
+        assert!(msg.contains("REJECTED"), "{msg}");
+        assert!(msg.contains("no extension"), "{msg}");
+        assert!(msg.contains("Высота Т.csp"), "{msg}");
+        assert!(
+            !dir.path().join(".glossa/notes/doc.pdf/Высота Т").exists(),
+            "must not save the extensionless file"
+        );
+        // The same content with `.csp` is accepted.
+        let ok = note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "Высота Т.csp",
+            &format!("D{TAB}T\n50{TAB}0,6\n"),
+            false,
+        );
+        assert!(ok.contains("data row"), "{ok}");
     }
 
     #[test]
