@@ -518,6 +518,9 @@ model = "gpt4o_mini"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 [models.gpt5_mini]
 routing = ["openrouter"]
@@ -533,6 +536,9 @@ model = "gpt5_mini"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 [models.qwen_max]
 routing = ["openrouter"]
@@ -548,6 +554,9 @@ model = "qwen_max"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 [models.sonnet5]
 routing = ["openrouter"]
@@ -563,6 +572,9 @@ model = "sonnet5"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 [models.deepseek_v32]
 routing = ["openrouter"]
@@ -578,6 +590,9 @@ model = "deepseek_v32"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 [models.opus48]
 routing = ["openrouter"]
@@ -593,6 +608,9 @@ model = "opus48"
 system_template = "constraint_validate/system.minijinja"
 max_tokens = 8192
 temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
 # (the enricher is a read+edit agent → its tool list is the Editor profile, generated from MCP.)
