@@ -496,6 +496,104 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
+# ── Ceiling / comparison models via OpenRouter ──────────────────────────────
+# Larger models to bound how high the constraint-extraction task can score and
+# to compare against local qwen4b. Minimal configs on purpose: NO Qwen-only
+# top_k/min_p (OpenAI/Anthropic reject them); reasoning left at each model's
+# default (all non-thinking by default — add a `-thinking` model or
+# reasoning.enabled=true to test thinking mode). Same system_template as qwen35.
+# Model IDs verified against the live OpenRouter catalog.
+
+[models.gpt4o_mini]
+routing = ["openrouter"]
+[models.gpt4o_mini.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "openai/gpt-4o-mini"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.gpt4o_mini]
+type = "chat_completion"
+model = "gpt4o_mini"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
+[models.gpt5_mini]
+routing = ["openrouter"]
+[models.gpt5_mini.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "openai/gpt-5-mini"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.gpt5_mini]
+type = "chat_completion"
+model = "gpt5_mini"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
+[models.qwen_max]
+routing = ["openrouter"]
+[models.qwen_max.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "qwen/qwen3-max"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.qwen_max]
+type = "chat_completion"
+model = "qwen_max"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
+[models.sonnet5]
+routing = ["openrouter"]
+[models.sonnet5.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "anthropic/claude-sonnet-5"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.sonnet5]
+type = "chat_completion"
+model = "sonnet5"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
+[models.deepseek_v32]
+routing = ["openrouter"]
+[models.deepseek_v32.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "deepseek/deepseek-v3.2"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.deepseek_v32]
+type = "chat_completion"
+model = "deepseek_v32"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
+[models.opus48]
+routing = ["openrouter"]
+[models.opus48.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "anthropic/claude-opus-4.8"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.opus48]
+type = "chat_completion"
+model = "opus48"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 4096
+temperature = 0.7
+
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
 # (the enricher is a read+edit agent → its tool list is the Editor profile, generated from MCP.)
 [functions.enrich]
