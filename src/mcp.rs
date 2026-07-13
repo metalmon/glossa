@@ -901,25 +901,39 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to also get that document's per-Field coverage: total Fields, how many have a SOURCE (an outgoing MENTIONS edge) vs still `to source`, and how many have a materialized constraint (per ontology) vs still `to value`. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
+        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass a document (its path — under `doc` OR `node`, resolved leniently) to get that document's per-Field coverage: total Fields, and for each SOURCED field WHERE its values live — its MENTIONS target section(s) `<path>#<n>` to `read` directly — plus which fields still need a source (`to source`) or values (`to value`). Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
     )]
     async fn graph_stats(
         &self,
         Parameters(a): Parameters<GraphStatsArgs>,
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
+        // Lenient doc resolution: an argument that names a DOCUMENT — whether under
+        // `doc` or `node`, and even if slightly mistyped — routes to that document's
+        // per-Field coverage (fields + their MENTIONS targets), so `graph_stats("<doc>")`
+        // works regardless of the arg key. A `node` that is a real graph-node id still
+        // gets node-inspection.
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let doc = a
+            .doc
+            .as_deref()
+            .map(|d| idx.canonical_document_path(d).unwrap_or_else(|| d.to_string()))
+            .or_else(|| a.node.as_deref().and_then(|s| idx.canonical_document_path(s)));
+        if let Some(doc) = doc {
+            let ont = Ontology::load_or_default(&self.root);
+            let mut out = crate::tools::graph_stats(&g);
+            out.push('\n');
+            out.push_str(&crate::tools::checklist_coverage_report(&g, &doc, &ont));
+            return Ok(CallToolResult::success(vec![Content::text(out)]));
+        }
         if let Some(id) = a.node.as_deref() {
             return Ok(CallToolResult::success(vec![Content::text(
                 crate::tools::node_inspect(&g, id),
             )]));
         }
-        let mut out = crate::tools::graph_stats(&g);
-        if let Some(doc) = a.doc.as_deref() {
-            let ont = Ontology::load_or_default(&self.root);
-            out.push('\n');
-            out.push_str(&crate::tools::checklist_coverage_report(&g, doc, &ont));
-        }
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::graph_stats(&g),
+        )]))
     }
 
     #[tool(

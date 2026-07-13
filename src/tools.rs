@@ -825,10 +825,24 @@ pub fn checklist_coverage_report(
                 .filter(|p| !c.unbuilt.contains(*p))
                 .cloned()
                 .collect();
+            // Each sourced field with WHERE its values live — the MENTIONS
+            // targets (`<path>#<n>`). A worker reads these directly; no `neighbors`.
+            let sourced_detail = if sourced.is_empty() {
+                "  —".to_string()
+            } else {
+                sourced
+                    .iter()
+                    .map(|p| match c.sources.get(p) {
+                        Some(t) if !t.is_empty() => format!("  «{p}» → {}", t.join(", ")),
+                        _ => format!("  «{p}»"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             format!(
                 "fields({doc}): {total} total | with source: {ns} | with values: {nv}\n\
-                 sourced: {}\nto source: {}\nvalued: {}\nto value: {}",
-                fmt(&sourced),
+                 sourced (→ где лежат значения, читай эти секции):\n{}\nto source: {}\nvalued: {}\nto value: {}",
+                sourced_detail,
                 fmt(&c.unsourced),
                 fmt(&valued),
                 fmt(&c.unbuilt),

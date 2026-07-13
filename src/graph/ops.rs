@@ -799,6 +799,10 @@ pub struct ChecklistCoverage {
     /// Parameters whose Field has no outgoing `MENTIONS` edge yet, i.e. no source
     /// located (step-2 remaining).
     pub unsourced: Vec<String>,
+    /// Per parameter label: the `MENTIONS` targets its Field(s) point to
+    /// (`<path>#<n>` section refs). Lets a worker see WHERE to read in one
+    /// doc-scoped call — no `neighbors`, no node-id, no cross-doc collision.
+    pub sources: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// `None` when the document owns no parameters yet (no Field).
@@ -830,6 +834,8 @@ pub fn checklist_coverage(
     //   sourced = a Field has an outgoing MENTIONS edge (step-2 done).
     let mut unbuilt = Vec::new();
     let mut unsourced = Vec::new();
+    let mut sources: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for p in &params {
         let ids = g.resolve(p).unwrap_or_default();
         let owned: Vec<_> = nodes
@@ -841,11 +847,22 @@ pub fn checklist_coverage(
         } else {
             field_has_values(g, ont, &owned, &nodes, &edges)
         };
-        let sourced = owned.iter().any(|n| {
-            edges
+        // The MENTIONS targets this parameter's Field(s) point to (dedup, in order).
+        let mut targets: Vec<String> = Vec::new();
+        for n in &owned {
+            for e in edges
                 .iter()
-                .any(|e| e.edge_type == "MENTIONS" && e.from == n.id)
-        });
+                .filter(|e| e.edge_type == "MENTIONS" && e.from == n.id)
+            {
+                if !targets.contains(&e.to) {
+                    targets.push(e.to.clone());
+                }
+            }
+        }
+        let sourced = !targets.is_empty();
+        if !targets.is_empty() {
+            sources.insert(p.clone(), targets);
+        }
         if !built {
             unbuilt.push(p.clone());
         }
@@ -857,6 +874,7 @@ pub fn checklist_coverage(
         params,
         unbuilt,
         unsourced,
+        sources,
     }))
 }
 
@@ -983,6 +1001,10 @@ params = ["values"]
         assert_eq!(c.unbuilt, vec!["зернистость".to_string()]);
         // высота is sourced (MENTIONS); зернистость still needs a source.
         assert_eq!(c.unsourced, vec!["зернистость".to_string()]);
+        // The MENTIONS target is surfaced per-field so a worker reads it directly
+        // (doc-scoped — no neighbors, no node-id).
+        assert_eq!(c.sources.get("высота"), Some(&vec!["sec:a1".to_string()]));
+        assert!(!c.sources.contains_key("зернистость"));
 
         // A document that owns no parameters.
         assert!(checklist_coverage(&g, "zzz.docx", &ont).unwrap().is_none());
