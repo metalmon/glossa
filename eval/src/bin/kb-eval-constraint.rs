@@ -579,19 +579,28 @@ fn make_exec(
             "graph_delete" => (exec_graph_delete(&idx_kb, &g, args), vec![], vec![]),
             "graph_update" => (exec_graph_update(&g, args), vec![], vec![]),
             "graph_stats" => {
-                // Same contract as prod MCP: node mode inspects one node; doc mode adds
-                // the per-Field graph coverage; otherwise the plain summary. No table
-                // overlay here — table progress reaches the agent via note()'s .csp echo
-                // and the sop_advance remaining-count.
-                if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
+                // Same contract as prod MCP (see mcp.rs): an arg naming a DOCUMENT —
+                // under `doc` OR `node`, resolved leniently — routes to that document's
+                // per-Field coverage (fields + their MENTIONS targets to `read`). A real
+                // node id gets node-inspection; nothing → the plain summary.
+                let doc = args
+                    .get("doc")
+                    .and_then(|v| v.as_str())
+                    .map(|d| idx_kb.canonical_document_path(d).unwrap_or_else(|| d.to_string()))
+                    .or_else(|| {
+                        args.get("node")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| idx_kb.canonical_document_path(s))
+                    });
+                if let Some(doc) = doc {
+                    let mut out = glossa::tools::graph_stats(&g);
+                    out.push('\n');
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, &doc, &ont));
+                    (out, vec![], vec![])
+                } else if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
                     (glossa::tools::node_inspect(&g, node), vec![], vec![])
                 } else {
-                    let mut out = glossa::tools::graph_stats(&g);
-                    if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
-                        out.push('\n');
-                        out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
-                    }
-                    (out, vec![], vec![])
+                    (glossa::tools::graph_stats(&g), vec![], vec![])
                 }
             }
             "graph_generalize" => {
@@ -988,7 +997,7 @@ fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
 /// short placeholder answer so the orchestrator always gets a reply.
 #[allow(clippy::too_many_arguments)]
 fn run_subagent(
-    sop_dir: &std::path::Path,
+    _sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
     src_doc: &str,
     gateway: &str,
@@ -997,13 +1006,10 @@ fn run_subagent(
     timeout: Duration,
     worker_prompt: &str,
 ) -> String {
-    // Worker tool set: get_task only (mirrors run_sop_conversation's chat, minus
-    // sop_advance/spawn). Setup failure short-circuits to a clear receipt.
-    let get_task_tool = match kb_eval::sop::prompt::load_get_task_tool(sop_dir) {
-        Ok(t) => t,
-        Err(e) => return format!("worker FAILED (setup): load get_task tool: {e}"),
-    };
-    let eval_tools = [get_task_tool];
+    // Subagents get NO `get_task` — it's an orchestrator-only stand-in for the
+    // user-provided task; the orchestrator names the document in the `delegate`
+    // task prose (as in prod). A subagent's advertised tools are the
+    // constraint_validate function set (search/read/grep/note/graph_stats/…).
 
     // Plain tool dispatch — already handles search/read/grep/note/ls/del/done.
     let worker_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
@@ -1020,7 +1026,7 @@ fn run_subagent(
             timeout,
             variant,
             None,
-            Some(&eval_tools),
+            None,
         )?;
         Ok(TzTurn {
             content: turn.content,
