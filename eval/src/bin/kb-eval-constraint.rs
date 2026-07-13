@@ -714,8 +714,8 @@ fn run_sop_conversation(
 
     let get_task_tool = sop::prompt::load_get_task_tool(sop_dir)?;
     let sop_advance_tool = sop::prompt::load_sop_advance_tool(sop_dir)?;
-    let spawn_tool = sop::prompt::load_spawn_tool(sop_dir)?;
-    // `get_task_tool`/`spawn_tool` stay in scope for the fan-out orchestrator's tool set below.
+    let delegate_tool = sop::prompt::load_delegate_tool(sop_dir)?;
+    // `get_task_tool`/`delegate_tool` stay in scope for the fan-out orchestrator's tool set below.
     let eval_tools = [get_task_tool.clone(), sop_advance_tool];
 
     let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -819,8 +819,8 @@ fn run_sop_conversation(
         let outcome = if step.body.contains("{# ORCHESTRATOR #}") {
             use std::sync::atomic::Ordering::Relaxed;
             let orch_prompt = sop::fanout::format_orchestrator_prompt(&step.body);
-            // Orchestrator tool set: get_task (read the source) + spawn (launch workers).
-            let orch_tools = [get_task_tool.clone(), spawn_tool.clone()];
+            // Orchestrator tool set: get_task (read the source) + delegate (run subagents).
+            let orch_tools = [get_task_tool.clone(), delegate_tool.clone()];
             let orch_eid = kb_eval::tz::backdated_episode_id(30);
             let orch_chat = {
                 let gw = gateway.to_string();
@@ -854,40 +854,44 @@ fn run_sop_conversation(
                     })
                 }
             };
-            // Spawn-intercepting exec: `spawn` runs a nested worker episode (via run_worker)
-            // and returns its receipt; every other tool falls through to the normal dispatch.
-            // A per-step counter (Arc<AtomicUsize>, since exec is Fn + Sync) backstops runaway
-            // fan-out at WORKER_CAP_PER_STEP.
+            // Delegate-intercepting exec: `delegate` runs a nested subagent episode (via
+            // run_subagent) and returns ITS OWN answer; every other tool falls through to the
+            // normal dispatch. A per-step counter (Arc<AtomicUsize>, since exec is Fn + Sync)
+            // backstops runaway fan-out at WORKER_CAP_PER_STEP.
             let spawn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let orch_exec = {
                 let sopd = sop_dir.to_path_buf();
-                let agent = agent_g_dir.to_path_buf();
+                let agent_dir = agent_g_dir.to_path_buf();
                 let doc = src_doc.to_string();
                 let gw = gateway.to_string();
                 let tags = tags.clone();
                 let variant_s = variant.map(|s| s.to_string());
                 let step_body = step.body.clone();
-                let normal = make_exec(agent.clone(), doc.clone());
+                let normal = make_exec(agent_dir.clone(), doc.clone());
                 let count = std::sync::Arc::clone(&spawn_count);
                 move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-                    if name == "spawn" {
+                    if name == "delegate" {
                         let n = count.fetch_add(1, Relaxed) + 1;
                         if let Some(msg) = spawn_capped(n, WORKER_CAP_PER_STEP) {
                             return (msg.to_string(), vec![], vec![]);
                         }
+                        // The orchestrator names the subagent (`researcher`/`worker`); we
+                        // run that role's prompt and return ITS OWN final answer — no
+                        // harness receipt (mirrors prod delegation).
+                        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("worker");
                         let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                        let wp = sop::fanout::format_worker_prompt(&step_body, task);
-                        let receipt = run_worker(
+                        let prompt = sop::fanout::format_agent_prompt(&step_body, agent, task);
+                        let answer = run_subagent(
                             &sopd,
-                            &agent,
+                            &agent_dir,
                             &doc,
                             &gw,
                             &tags,
                             variant_s.as_deref(),
                             timeout,
-                            &wp,
+                            &prompt,
                         );
-                        return (receipt, vec![], vec![]);
+                        return (answer, vec![], vec![]);
                     }
                     normal(name, args)
                 }
@@ -973,41 +977,17 @@ fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
 }
 
 /// One-line receipt: files whose row count grew during the worker episode.
-fn worker_receipt(
-    before: &std::collections::BTreeMap<String, usize>,
-    after: &std::collections::BTreeMap<String, usize>,
-    edges_added: usize,
-    wb_lines_added: usize,
-    done: bool,
-) -> String {
-    let mut written: Vec<String> = Vec::new();
-    for (file, rows) in after {
-        if before.get(file).copied().unwrap_or(0) < *rows {
-            written.push(format!("{file}: {rows} rows"));
-        }
-    }
-    if !written.is_empty() {
-        return format!("worker ok (done={done}): {}", written.join("; "));
-    }
-    if wb_lines_added > 0 {
-        return format!("worker ok (done={done}): +{wb_lines_added} workbook lines");
-    }
-    if edges_added > 0 {
-        return format!("worker ok (done={done}): +{edges_added} MENTIONS/graph edges");
-    }
-    format!("worker FAILED (done={done}): nothing written (.csp / workbook / edges)")
-}
 
-/// Run ONE focused worker episode and return a one-line receipt.
+/// Run ONE delegated subagent episode and return its OWN final answer.
 ///
-/// A worker neither spawns nor advances SOP steps: its tool set is the plain
-/// dispatch (`make_exec`) plus `get_task` ONLY (no `spawn`, no `sop_advance`).
-/// It builds its table(s) on disk and calls `done`. We snapshot per-file `.csp`
-/// row counts before and after the episode; the receipt names the files that
-/// gained rows. Infer errors are non-fatal — an episode error is treated as
-/// `done=false` so the caller (the spawn arm) always gets a receipt.
+/// A subagent neither delegates nor advances SOP steps: its tool set is the plain
+/// dispatch (`make_exec`) plus `get_task` ONLY (no `delegate`, no `sop_advance`).
+/// It does its work on disk and calls `done`; we return its final message (the
+/// `done` note / last content) — mirroring prod delegation, where the harness
+/// computes no receipt. Infer errors are non-fatal — a dead episode yields a
+/// short placeholder answer so the orchestrator always gets a reply.
 #[allow(clippy::too_many_arguments)]
-fn run_worker(
+fn run_subagent(
     sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
     src_doc: &str,
@@ -1048,32 +1028,6 @@ fn run_worker(
         })
     };
 
-    let snapshot = |dir: &std::path::Path| -> std::collections::BTreeMap<String, usize> {
-        glossa::tables::csp_tables_per_file(dir, src_doc)
-            .map(|files| {
-                files
-                    .into_iter()
-                    .map(|(name, table)| (name, table.rows.len()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    // A research worker writes to workbook.md (not .csp/edges); count its lines so
-    // its receipt reflects real work.
-    let wb_lines = |dir: &std::path::Path| -> usize {
-        let p = glossa::notebook::notes_root(dir)
-            .join(glossa::notebook::mirror_dir_for_doc(src_doc))
-            .join("workbook.md");
-        std::fs::read_to_string(p)
-            .map(|s| s.lines().count())
-            .unwrap_or(0)
-    };
-    let before = snapshot(agent_g_dir);
-    let edges_before = GraphStore::open(agent_g_dir)
-        .and_then(|g| g.edge_count())
-        .unwrap_or(0);
-    let wb_before = wb_lines(agent_g_dir);
     let outcome = run_episode(
         worker_chat,
         worker_prompt,
@@ -1084,18 +1038,13 @@ fn run_worker(
             dedup_readonly: false,
         },
     );
-    let after = snapshot(agent_g_dir);
-    let edges_after = GraphStore::open(agent_g_dir)
-        .and_then(|g| g.edge_count())
-        .unwrap_or(0);
-    let wb_after = wb_lines(agent_g_dir);
-    worker_receipt(
-        &before,
-        &after,
-        edges_after.saturating_sub(edges_before) as usize,
-        wb_after.saturating_sub(wb_before),
-        outcome.map(|o| o.done).unwrap_or(false),
-    )
+    // The subagent returns its OWN answer (its `done` note / last message) — as in
+    // prod delegation. No harness-computed receipt.
+    match outcome {
+        Ok(o) if !o.answer.trim().is_empty() => o.answer,
+        Ok(o) => format!("(субагент завершил без текста, done={})", o.done),
+        Err(e) => format!("(субагент прервался: {e})"),
+    }
 }
 
 fn solve_csp(
@@ -2572,28 +2521,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_receipt_reports_csp_or_edges() {
-        use std::collections::BTreeMap;
-        let empty: BTreeMap<String, usize> = BTreeMap::new();
-        let mut with_csp: BTreeMap<String, usize> = BTreeMap::new();
-        with_csp.insert("height.csp".into(), 161);
-        // Build worker: .csp rows grew.
-        let r = worker_receipt(&empty, &with_csp, 0, 0, true);
-        assert!(r.contains("height.csp") && r.contains("161"), "{r}");
-        // Research worker: no .csp, but wrote workbook lines → success, not FAILED.
-        let rw = worker_receipt(&empty, &empty, 0, 12, true);
-        assert!(rw.contains("12") && rw.to_lowercase().contains("workbook"), "{rw}");
-        assert!(!rw.to_lowercase().contains("fail"), "{rw}");
-        // Graph edges added → success, not FAILED.
-        let r2 = worker_receipt(&empty, &empty, 5, 0, true);
-        assert!(r2.contains("5") && r2.to_lowercase().contains("edge"), "{r2}");
-        assert!(!r2.to_lowercase().contains("fail"), "{r2}");
-        // Nothing written at all → FAILED.
-        let r3 = worker_receipt(&empty, &empty, 0, 0, false);
-        assert!(r3.to_lowercase().contains("fail"), "{r3}");
-    }
-
-    #[test]
     fn norm_value_strips_trailing_separators() {
         // A trailing list-separator the agent copied from an inline source list
         // must normalize to the same value as the clean form.
@@ -2798,7 +2725,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_step_number_is_two_in_four_step_sop() {
+    fn compile_step_number_is_three() {
         use kb_eval::sop::{load_sop, types::SopExecutionMode};
         let sop = load_sop(&default_eval_sop_dir(), SopExecutionMode::Auto).expect("load sop");
         let compile = sop
@@ -2806,8 +2733,7 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("Compile"))
             .expect("Compile step");
-        // Merged fan-out (links+build) is step 1, Schema is step 2, so Compile is step 3.
-        // (Coverage + Validate are disabled for now.)
+        // Fan-out Build is step 1, Schema step 2, so Compile is step 3.
         assert_eq!(compile.number, 3);
     }
 

@@ -12,7 +12,7 @@ use super::types::{Sop, SopRun, SopStep};
 
 const SOP_ADVANCE_FILE: &str = "sop_advance.json";
 const GET_TASK_FILE: &str = "get_task.json";
-const SPAWN_FILE: &str = "spawn.json";
+const DELEGATE_FILE: &str = "delegate.json";
 
 /// Replace `{key}` placeholders (legacy; prefer trigger payload / get_task).
 pub fn substitute_placeholders(text: &str, vars: &[(&str, &str)]) -> String {
@@ -76,8 +76,8 @@ pub fn load_get_task_tool(sop_dir: &Path) -> Result<Value> {
     load_tool_json(sop_dir, GET_TASK_FILE)
 }
 
-pub fn load_spawn_tool(sop_dir: &Path) -> Result<Value> {
-    load_tool_json(sop_dir, SPAWN_FILE)
+pub fn load_delegate_tool(sop_dir: &Path) -> Result<Value> {
+    load_tool_json(sop_dir, DELEGATE_FILE)
 }
 
 #[cfg(test)]
@@ -126,18 +126,22 @@ mod tests {
     }
 
     #[test]
-    fn loads_spawn_tool_schema() {
+    fn loads_delegate_tool_schema() {
         let dir = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/sops/gost-constraints"
         ));
-        let t = load_spawn_tool(dir).unwrap();
-        assert_eq!(t["name"], "spawn");
-        assert!(t["parameters"]["required"]
+        let t = load_delegate_tool(dir).unwrap();
+        assert_eq!(t["name"], "delegate");
+        let required = t["parameters"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "agent"));
+        assert!(required.iter().any(|v| v == "task"));
+        // Both subagents are named in the schema so the orchestrator knows its options.
+        let agents = t["parameters"]["properties"]["agent"]["enum"]
             .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "task"));
+            .unwrap();
+        assert!(agents.iter().any(|v| v == "researcher"));
+        assert!(agents.iter().any(|v| v == "worker"));
     }
 
     #[test]
