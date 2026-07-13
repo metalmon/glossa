@@ -550,8 +550,17 @@ pub fn glossary(
                             Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id)),
                             // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
+                                // Node ids are label-only, so the owner document is not in the id.
+                                // Always show it (`@<doc>`) — the read-anchor doc is conditional on a
+                                // MENTIONS edge and may point to a *different* doc (cross-standard
+                                // reference), so the owner is not otherwise guaranteed in the head.
+                                let owner = if node.prov.source_path.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  @{}", node.prov.source_path)
+                                };
                                 let head = format!(
-                                    "{base}{}{}",
+                                    "{base}{owner}{}{}",
                                     meta_suffix(g, &node.id),
                                     read_anchor(idx, g, &node.id),
                                 );
@@ -729,9 +738,16 @@ pub fn node_inspect(g: &crate::graph::store::GraphStore, id: &str) -> String {
     } else {
         node.aliases.join(", ")
     };
+    // Node ids are label-only, so always show the owner document — otherwise the
+    // same field label across standards is indistinguishable in the head.
+    let doc = if node.prov.source_path.is_empty() {
+        "—"
+    } else {
+        node.prov.source_path.as_str()
+    };
     let mut out = format!(
-        "node {}\ntype: {}\nlabel: {}\naliases: {}",
-        node.id, node.node_type, node.label, aliases
+        "node {}\ntype: {}\ndoc: {}\nlabel: {}\naliases: {}",
+        node.id, node.node_type, doc, node.label, aliases
     );
     let edges = g.all_edges().unwrap_or_default();
     let mut outgoing: Vec<String> = edges
