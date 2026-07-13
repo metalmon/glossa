@@ -469,7 +469,7 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen3_coder"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 extra_body = [
   { pointer = "/top_k", value = 20 },
@@ -516,7 +516,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "gpt4o_mini"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 [models.gpt5_mini]
@@ -531,7 +531,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "gpt5_mini"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 [models.qwen_max]
@@ -546,7 +546,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "qwen_max"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 [models.sonnet5]
@@ -561,7 +561,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "sonnet5"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 [models.deepseek_v32]
@@ -576,7 +576,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "deepseek_v32"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 [models.opus48]
@@ -591,7 +591,7 @@ api_key_location = "env::OPENROUTER_API_KEY"
 type = "chat_completion"
 model = "opus48"
 system_template = "constraint_validate/system.minijinja"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
