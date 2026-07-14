@@ -3,7 +3,7 @@
   "properties": {
     "doc": {
       "default": null,
-      "description": "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)",
+      "description": "document source_path: list that document's owned non-structural nodes and their MENTIONS targets (doc is scope only; ontology-independent)",
       "type": [
         "string",
         "null"

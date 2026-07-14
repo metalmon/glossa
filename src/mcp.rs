@@ -364,7 +364,7 @@ struct NameArg {
 struct GraphStatsArgs {
     #[serde(default)]
     #[schemars(
-        description = "document source_path: also report that document's per-Field coverage — which Fields still lack a source (MENTIONS edge) or values (CONSTRAINED_BY→Enum)"
+        description = "document source_path: list that document's owned non-structural nodes and their MENTIONS targets (doc is scope only; ontology-independent)"
     )]
     doc: Option<String>,
     #[serde(default)]
@@ -719,19 +719,25 @@ impl GlossaServer {
 
     #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
     async fn index(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
         let s = index_dir(&self.root, false).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "indexed: {} added, {} removed, {} unchanged",
-            s.added, s.removed, s.unchanged
+            "indexed: {} added, {} removed, {} unchanged in {}",
+            s.added,
+            s.removed,
+            s.unchanged,
+            crate::cli_fmt::format_elapsed(started.elapsed())
         ))]))
     }
 
     #[tool(description = "Rebuild the index + graph from scratch.")]
     async fn reindex(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
         let s = index_dir(&self.root, true).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "reindexed: {} files",
-            s.added
+            "reindexed: {} files in {}",
+            s.added,
+            crate::cli_fmt::format_elapsed(started.elapsed())
         ))]))
     }
 
@@ -926,7 +932,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass a document (its path — under `doc` OR `node`, resolved leniently) to get that document's per-Field coverage: total Fields, and for each SOURCED field WHERE its values live — its MENTIONS target section(s) `<path>#<n>` to `read` directly — plus which fields still need a source (`to source`) or values (`to value`). Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
+        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass a document (its path — under `doc` OR `node`, resolved leniently) to list that document's owned non-structural nodes (`source_path` scope only) with outgoing MENTIONS targets `<path>#<n>` to `read` directly. Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
     )]
     async fn graph_stats(
         &self,
@@ -935,7 +941,7 @@ impl GlossaServer {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         // Lenient doc resolution: an argument that names a DOCUMENT — whether under
         // `doc` or `node`, and even if slightly mistyped — routes to that document's
-        // per-Field coverage (fields + their MENTIONS targets), so `graph_stats("<doc>")`
+        // owned-node inventory (+ MENTIONS), so `graph_stats("<doc>")`
         // works regardless of the arg key. A `node` that is a real graph-node id still
         // gets node-inspection.
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
@@ -945,10 +951,9 @@ impl GlossaServer {
             .map(|d| idx.canonical_document_path(d).unwrap_or_else(|| d.to_string()))
             .or_else(|| a.node.as_deref().and_then(|s| idx.canonical_document_path(s)));
         if let Some(doc) = doc {
-            let ont = Ontology::load_or_default(&self.root);
             let mut out = crate::tools::graph_stats(&g);
             out.push('\n');
-            out.push_str(&crate::tools::checklist_coverage_report(&g, &doc, &ont));
+            out.push_str(&crate::tools::checklist_coverage_report(&g, &doc));
             return Ok(CallToolResult::success(vec![Content::text(out)]));
         }
         if let Some(id) = a.node.as_deref() {

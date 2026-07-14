@@ -183,19 +183,9 @@ pub fn coverage_examples_from_materialize(examples: &[MaterializeExample]) -> Ve
     examples
         .iter()
         .map(|ex| {
-            let missing: Vec<&str> = ex
-                .gold_values
-                .iter()
-                .skip(1)
-                .map(String::as_str)
-                .collect();
             let graph_stats_report = format!(
-                "checklist_coverage for {}:\n  parameter \"{}\": sourced 1/1, valued {}/{} (to value: {})\n",
-                ex.doc,
-                ex.parameter,
-                ex.gold_values.len().saturating_sub(missing.len()).max(1),
-                ex.gold_values.len(),
-                missing.join(", "),
+                "owned({}): 1 nodes\nprm:{}  [Param]  {} → {}#1\n",
+                ex.doc, ex.parameter, ex.parameter, ex.doc,
             );
             CoverageExample {
                 episode_id: ex.episode_id.clone(),

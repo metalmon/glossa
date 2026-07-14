@@ -581,7 +581,7 @@ fn make_exec(
             "graph_stats" => {
                 // Same contract as prod MCP (see mcp.rs): an arg naming a DOCUMENT —
                 // under `doc` OR `node`, resolved leniently — routes to that document's
-                // per-Field coverage (fields + their MENTIONS targets to `read`). A real
+                // owned-node inventory (+ MENTIONS targets to `read`). A real
                 // node id gets node-inspection; nothing → the plain summary.
                 let doc = args
                     .get("doc")
@@ -595,7 +595,7 @@ fn make_exec(
                 if let Some(doc) = doc {
                     let mut out = glossa::tools::graph_stats(&g);
                     out.push('\n');
-                    out.push_str(&glossa::tools::checklist_coverage_report(&g, &doc, &ont));
+                    out.push_str(&glossa::tools::checklist_coverage_report(&g, &doc));
                     (out, vec![], vec![])
                 } else if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
                     (glossa::tools::node_inspect(&g, node), vec![], vec![])
@@ -965,7 +965,7 @@ fn run_sop_conversation(
     })
 }
 
-const WORKER_MAX_ROUNDS: usize = 40;
+const WORKER_MAX_ROUNDS: usize = 80;
 
 /// Per-step worker backstop: beyond this many `spawn`s in a single fan-out step,
 /// `spawn` refuses and tells the orchestrator to stop. Not a target — a runaway guard.
@@ -2113,7 +2113,7 @@ fn main() -> Result<()> {
                         let mut out = glossa::tools::graph_stats(&g);
                         if let Some(doc) = args.get("doc").and_then(|v| v.as_str()) {
                             out.push('\n');
-                            out.push_str(&glossa::tools::checklist_coverage_report(&g, doc, &ont));
+                            out.push_str(&glossa::tools::checklist_coverage_report(&g, doc));
                         }
                         (out, vec![], vec![])
                     }

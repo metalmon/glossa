@@ -845,70 +845,27 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     out
 }
 
-/// Per-Field coverage block for `graph_stats(doc=…)`: for every Field the document
-/// owns, does it have a SOURCE (an outgoing `MENTIONS` edge — SOP step 2) and does
-/// it have VALUES (a materialized constraint per ontology — SOP step 3)? The two
-/// views sit side by side so step-2 (`to source`) and step-3 (`to value`) each read
-/// off an obvious remaining count. Formats `ops::checklist_coverage` — the same
-/// shared op the constraint-eval SOP driver reads, so an agent asking the tool and
-/// the eval's gate see ONE truth.
+/// Doc-scoped inventory for `graph_stats(doc=…)`: non-structural nodes owned by
+/// `doc` (`source_path`) with outgoing `MENTIONS` targets. Ontology-independent.
 pub fn checklist_coverage_report(
     g: &crate::graph::store::GraphStore,
     doc: &str,
-    ont: &crate::graph::ontology::Ontology,
 ) -> String {
-    match crate::graph::ops::checklist_coverage(g, doc, ont) {
-        Ok(Some(c)) => {
-            let fmt = |v: &[String]| {
-                if v.is_empty() {
-                    "—".to_string()
+    match crate::graph::ops::doc_owned_inventory(g, doc) {
+        Ok(Some(inv)) => {
+            let mut lines = vec![format!("owned({doc}): {} nodes", inv.nodes.len())];
+            for n in &inv.nodes {
+                let head = format!("{}  [{}]  {}", n.id, n.node_type, n.label);
+                if n.mentions.is_empty() {
+                    lines.push(head);
                 } else {
-                    v.iter()
-                        .map(|p| format!("«{p}»"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    lines.push(format!("{} → {}", head, n.mentions.join(", ")));
                 }
-            };
-            let sourced: Vec<String> = c
-                .params
-                .iter()
-                .filter(|p| !c.unsourced.contains(*p))
-                .cloned()
-                .collect();
-            let valued: Vec<String> = c
-                .params
-                .iter()
-                .filter(|p| !c.unbuilt.contains(*p))
-                .cloned()
-                .collect();
-            // Each sourced field with WHERE its values live — the MENTIONS
-            // targets (`<path>#<n>`). A worker reads these directly; no `neighbors`.
-            let sourced_detail = if sourced.is_empty() {
-                "  —".to_string()
-            } else {
-                sourced
-                    .iter()
-                    .map(|p| match c.sources.get(p) {
-                        Some(t) if !t.is_empty() => format!("  «{p}» → {}", t.join(", ")),
-                        _ => format!("  «{p}»"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            format!(
-                "fields({doc}): {total} total | with source: {ns} | with values: {nv}\n\
-                 sourced (→ где лежат значения, читай эти секции):\n{}\nto source: {}\nvalued: {}\nto value: {}",
-                sourced_detail,
-                fmt(&c.unsourced),
-                fmt(&valued),
-                fmt(&c.unbuilt),
-                total = c.params.len(),
-                ns = sourced.len(),
-                nv = valued.len(),
-            )
+            }
+            lines.join("\n")
         }
-        Ok(None) => format!("fields({doc}): no Field for this document yet"),
-        Err(e) => format!("fields({doc}): error: {e}"),
+        Ok(None) => format!("owned({doc}): (none)"),
+        Err(e) => format!("owned({doc}): error: {e}"),
     }
 }
 

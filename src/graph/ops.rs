@@ -7,7 +7,7 @@ use crate::graph::agent::{
     apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate,
 };
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{normalize_label, Edge, GraphStore, Node};
+use crate::graph::store::{normalize_label, GraphStore, Node};
 use crate::index::store::DocIndex;
 use serde_json::Value;
 
@@ -783,128 +783,66 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     }
 }
 
-/// Coverage of one document's parameters, scoped by ownership: a `Field`'s
-/// `source_path` is the target document (the product's GOST), so several GOSTs
-/// can share one graph without polluting each other — a same-named Field owned
-/// by another document never counts here. (Where a Field's *values* were read is
-/// recorded separately by a `MENTIONS` edge; that provenance does not affect
-/// ownership.) Shared by the MCP `graph_stats(doc=…)` tool and the constraint-eval
-/// SOP driver so both derive the SAME numbers from the same code.
+/// Doc-scoped inventory for `graph_stats(doc=…)`: every non-structural node owned by
+/// `source_path == doc`, plus outgoing `MENTIONS` targets. Ontology-independent — `doc` is
+/// only a scope filter. Shared by MCP and constraint-eval so both see the same listing.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ChecklistCoverage {
-    /// Parameter names owned by the document, in first-seen order.
-    pub params: Vec<String>,
-    /// Parameters with no materialized constraint yet (step-3 remaining).
-    pub unbuilt: Vec<String>,
-    /// Parameters whose Field has no outgoing `MENTIONS` edge yet, i.e. no source
-    /// located (step-2 remaining).
-    pub unsourced: Vec<String>,
-    /// Per parameter label: the `MENTIONS` targets its Field(s) point to
-    /// (`<path>#<n>` section refs). Lets a worker see WHERE to read in one
-    /// doc-scoped call — no `neighbors`, no node-id, no cross-doc collision.
-    pub sources: std::collections::BTreeMap<String, Vec<String>>,
+pub struct OwnedNodeView {
+    pub id: String,
+    pub node_type: String,
+    pub label: String,
+    /// Outgoing `MENTIONS` targets (`<path>#<n>`), in edge order, deduped.
+    pub mentions: Vec<String>,
 }
 
-/// `None` when the document owns no parameters yet (no Field).
-pub fn checklist_coverage(
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocOwnedInventory {
+    pub nodes: Vec<OwnedNodeView>,
+}
+
+/// `None` when the document owns no non-structural nodes yet.
+pub fn doc_owned_inventory(
     g: &GraphStore,
     doc: &str,
-    ont: &crate::graph::ontology::Ontology,
-) -> anyhow::Result<Option<ChecklistCoverage>> {
+) -> anyhow::Result<Option<DocOwnedInventory>> {
     let nodes = g.all_nodes()?;
     let edges = g.all_edges()?;
-    // The parameter set: every Field the document owns (source_path == doc).
-    let mut params: Vec<String> = Vec::new();
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for f in nodes
+    let structural: std::collections::HashSet<&str> =
+        crate::graph::STRUCTURAL_NODES.iter().copied().collect();
+    let mut owned: Vec<&Node> = nodes
         .iter()
-        .filter(|n| n.node_type == "Field" && n.prov.source_path == doc)
-    {
-        if seen.insert(normalize_label(&f.label)) {
-            params.push(f.label.clone());
-        }
-    }
-    if params.is_empty() {
+        .filter(|n| n.prov.source_path == doc && !structural.contains(n.node_type.as_str()))
+        .collect();
+    if owned.is_empty() {
         return Ok(None);
     }
-    let values_axis = !ont.constraint_types().is_empty();
-    // For each parameter, look at the Field(s) the document owns that resolve from
-    // its name. Two independent, domain-generic questions:
-    //   built   = Field has a materialized constraint per ontology (step-3 done).
-    //   sourced = a Field has an outgoing MENTIONS edge (step-2 done).
-    let mut unbuilt = Vec::new();
-    let mut unsourced = Vec::new();
-    let mut sources: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for p in &params {
-        let ids = g.resolve(p).unwrap_or_default();
-        let owned: Vec<_> = nodes
-            .iter()
-            .filter(|n| ids.contains(&n.id) && n.node_type == "Field" && n.prov.source_path == doc)
-            .collect();
-        let built = if !values_axis {
-            true
-        } else {
-            field_has_values(g, ont, &owned, &nodes, &edges)
-        };
-        // The MENTIONS targets this parameter's Field(s) point to (dedup, in order).
-        let mut targets: Vec<String> = Vec::new();
-        for n in &owned {
+    owned.sort_by(|a, b| {
+        a.node_type
+            .cmp(&b.node_type)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let views = owned
+        .into_iter()
+        .map(|n| {
+            let mut mentions = Vec::new();
             for e in edges
                 .iter()
-                .filter(|e| e.edge_type == "MENTIONS" && e.from == n.id)
+                .filter(|e| e.edge_type == crate::graph::MENTIONS && e.from == n.id)
             {
-                if !targets.contains(&e.to) {
-                    targets.push(e.to.clone());
+                if !mentions.contains(&e.to) {
+                    mentions.push(e.to.clone());
                 }
             }
-        }
-        let sourced = !targets.is_empty();
-        if !targets.is_empty() {
-            sources.insert(p.clone(), targets);
-        }
-        if !built {
-            unbuilt.push(p.clone());
-        }
-        if !sourced {
-            unsourced.push(p.clone());
-        }
-    }
-    Ok(Some(ChecklistCoverage {
-        params,
-        unbuilt,
-        unsourced,
-        sources,
-    }))
-}
-
-fn field_has_values(
-    g: &GraphStore,
-    ont: &crate::graph::ontology::Ontology,
-    owned: &[&Node],
-    _nodes: &[Node],
-    _edges: &[Edge],
-) -> bool {
-    #[cfg(feature = "constraint")]
-    {
-        owned.iter().any(|n| {
-            crate::constraint_adapter::field_has_materialized_constraints(g, &n.id, ont)
-                .unwrap_or(false)
+            OwnedNodeView {
+                id: n.id.clone(),
+                node_type: n.node_type.clone(),
+                label: n.label.clone(),
+                mentions,
+            }
         })
-    }
-    #[cfg(not(feature = "constraint"))]
-    {
-        let _ = (g, ont);
-        owned.iter().any(|n| {
-            _edges.iter().any(|e| {
-                e.edge_type == "CONSTRAINED_BY"
-                    && e.from == n.id
-                    && _nodes
-                        .iter()
-                        .any(|m| m.id == e.to && m.node_type == "Enum" && !m.aliases.is_empty())
-            })
-        })
-    }
+        .collect();
+    Ok(Some(DocOwnedInventory { nodes: views }))
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -949,25 +887,10 @@ mod tests {
         .unwrap();
     }
 
-    use crate::graph::ontology::Ontology;
-
-    fn cov_ont() -> Ontology {
-        Ontology::parse(
-            r#"
-[constraint_types.Enum]
-params = ["values"]
-"#,
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn checklist_coverage_scoped_by_ownership() {
+    fn doc_owned_inventory_scopes_by_source_path_lists_mentions() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        let ont = cov_ont();
-        // Document A owns two parameters (Field.source_path == a.docx).
-        // высота: Field + Enum with values → built. зернистость: Field, no Enum → unbuilt.
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
         cov_node(
             &g,
@@ -978,74 +901,61 @@ params = ["values"]
             "a.docx",
         );
         cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
-        // высота's source is located (MENTIONS a section); зернистость has neither
-        // source nor values.
         cov_node(&g, "sec:a1", "Section", "раздел 1", &[], "a.docx");
         cov_edge(&g, "fld:vys-a", "MENTIONS", "sec:a1");
+        cov_node(&g, "prm:h", "Param", "H", &[], "a.docx");
+        cov_edge(&g, "prm:h", "MENTIONS", "a.docx#2");
         cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "a.docx");
-
-        // Document B owns a same-named parameter — must NOT count for A.
         cov_node(&g, "fld:dia-b", "Field", "диаметр", &[], "b.docx");
-        cov_node(&g, "enum:dia-b", "Enum", "диаметр enum", &["1"], "b.docx");
-        cov_edge(&g, "fld:dia-b", "CONSTRAINED_BY", "enum:dia-b");
 
-        let c = checklist_coverage(&g, "a.docx", &ont)
+        let inv = doc_owned_inventory(&g, "a.docx")
             .unwrap()
-            .expect("A owns params");
-        let mut params = c.params.clone();
-        params.sort();
-        assert_eq!(
-            params,
-            vec!["высота".to_string(), "зернистость".to_string()]
+            .expect("A owns nodes");
+        let labels: Vec<_> = inv.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains(&"высота"));
+        assert!(labels.contains(&"зернистость"));
+        assert!(labels.contains(&"H"), "Param must appear: {labels:?}");
+        assert!(
+            labels.contains(&"высота enum"),
+            "Enum owned by doc is listed: {labels:?}"
         );
-        assert_eq!(c.unbuilt, vec!["зернистость".to_string()]);
-        // высота is sourced (MENTIONS); зернистость still needs a source.
-        assert_eq!(c.unsourced, vec!["зернистость".to_string()]);
-        // The MENTIONS target is surfaced per-field so a worker reads it directly
-        // (doc-scoped — no neighbors, no node-id).
-        assert_eq!(c.sources.get("высота"), Some(&vec!["sec:a1".to_string()]));
-        assert!(!c.sources.contains_key("зернистость"));
+        assert!(
+            !labels.contains(&"раздел 1"),
+            "Section is structural, excluded"
+        );
+        assert!(!labels.contains(&"диаметр"));
 
-        // A document that owns no parameters.
-        assert!(checklist_coverage(&g, "zzz.docx", &ont).unwrap().is_none());
+        let vys = inv
+            .nodes
+            .iter()
+            .find(|n| n.id == "fld:vys-a")
+            .expect("высота");
+        assert_eq!(vys.mentions, vec!["sec:a1".to_string()]);
+        let prm = inv.nodes.iter().find(|n| n.id == "prm:h").expect("Param");
+        assert_eq!(prm.mentions, vec!["a.docx#2".to_string()]);
+        let zer = inv
+            .nodes
+            .iter()
+            .find(|n| n.label == "зернистость")
+            .unwrap();
+        assert!(zer.mentions.is_empty());
+
+        assert!(doc_owned_inventory(&g, "zzz.docx").unwrap().is_none());
     }
 
-    #[cfg(feature = "constraint")]
     #[test]
-    fn checklist_coverage_conditional_enum_is_built() {
-        use crate::graph::ontology::Ontology;
-
+    fn doc_owned_inventory_ignores_ontology() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        let ont = Ontology::parse(
-            r#"
-[constraint_types.Enum]
-params = ["values"]
-[constraint_types.Conditional]
-params = ["condition_field", "condition_value"]
-"#,
-        )
-        .unwrap();
-        let src = "gost.pdf";
-
-        cov_node(&g, "fld:d", "Field", "D", &[], src);
-        cov_node(&g, "cond:41", "Conditional", "D type 41", &[], src);
-        cov_edge(&g, "fld:d", "CONSTRAINED_BY", "cond:41");
-        cov_node(&g, "lit:f", "Literal", "type", &[], src);
-        cov_node(&g, "lit:v", "Literal", "41", &[], src);
-        cov_edge(&g, "cond:41", "IF_FIELD", "lit:f");
-        cov_edge(&g, "cond:41", "IF_VALUE", "lit:v");
-        cov_node(&g, "enum:41", "Enum", "D41", &["50", "63"], src);
-        cov_edge(&g, "cond:41", "HAS_CONSTRAINT", "enum:41");
-
-        let c = checklist_coverage(&g, src, &ont).unwrap().expect("owns D");
-        assert_eq!(c.params, vec!["D".to_string()]);
-        assert!(
-            c.unbuilt.is_empty(),
-            "Conditional→Enum counts as built: {:?}",
-            c.unbuilt
-        );
+        cov_node(&g, "x:1", "Whatever", "X", &[], "doc.pdf");
+        cov_edge(&g, "x:1", "MENTIONS", "doc.pdf#1");
+        let inv = doc_owned_inventory(&g, "doc.pdf").unwrap().unwrap();
+        assert_eq!(inv.nodes.len(), 1);
+        assert_eq!(inv.nodes[0].node_type, "Whatever");
+        assert_eq!(inv.nodes[0].mentions, vec!["doc.pdf#1".to_string()]);
     }
+
+    use crate::graph::ontology::Ontology;
 
     const DEDUP_ONT: &str = r#"
 [entities.Symptom]
@@ -1701,10 +1611,13 @@ to = ["Enum"]
             "MENTIONS must attach to the Field, not the Enum: {:?}",
             g.outgoing(&fld).unwrap()
         );
-        let c = checklist_coverage(&g, "gost.pdf", &ont).unwrap().unwrap();
+        let c = doc_owned_inventory(&g, "gost.pdf").unwrap().unwrap();
         assert!(
-            !c.unsourced.contains(&"Тип".to_string()),
-            "Field Тип should be sourced"
+            c.nodes.iter().any(|n| {
+                n.label == "Тип" && n.node_type == "Field" && !n.mentions.is_empty()
+            }),
+            "Field Тип should list MENTIONS: {:?}",
+            c.nodes
         );
     }
 
