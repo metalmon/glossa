@@ -173,6 +173,9 @@ fn extract_pdf_page_images(
     use pdf_oxide::extractors::ImageData;
     use pdf_oxide::PdfDocument;
 
+    if max == 0 {
+        return Ok(Vec::new());
+    }
     let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
         return Ok(Vec::new());
     };
@@ -205,6 +208,7 @@ fn extract_pdf_page_images(
     Ok(out)
 }
 
+/// Rasterize one PDF page (1-based) to PNG @ 200 DPI. Empty on failure.
 pub fn render_pdf_page(path: &Path, page: u64) -> anyhow::Result<Option<DocImage>> {
     use pdf_oxide::rendering::{render_page, RenderOptions};
     use pdf_oxide::PdfDocument;
@@ -334,6 +338,7 @@ mod image_tests {
             .expect("sample PDF page 1 should render");
         assert_eq!(image.mime, "image/png");
         assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(image.bytes.len() > 100);
     }
 
     #[test]
