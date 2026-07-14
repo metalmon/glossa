@@ -15,6 +15,8 @@ pub mod image;
 pub mod links;
 pub mod markdown;
 pub mod office;
+pub mod office_chunk;
+pub mod office_table;
 pub mod pdf;
 pub mod text;
 
