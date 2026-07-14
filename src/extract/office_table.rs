@@ -38,6 +38,11 @@ fn expand_element(el: &mut Element) {
                 }
             }
         }
+        Element::TextBox(text_box) => {
+            for child in &mut text_box.content {
+                expand_element(child);
+            }
+        }
         _ => {}
     }
 }
@@ -225,25 +230,60 @@ fn markdown_cell_text(cell: &TableCell) -> String {
 }
 
 fn cell_plain(cell: &TableCell) -> String {
-    let mut out = String::new();
-    for el in &cell.content {
-        match el {
-            Element::Paragraph(p) => {
-                if !out.is_empty() {
-                    out.push(' ');
+    cell.content
+        .iter()
+        .map(element_plain)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .replace('\n', " ")
+}
+
+fn element_plain(element: &Element) -> String {
+    match element {
+        Element::Paragraph(p) => inline_plain(&p.content),
+        Element::Heading(h) => inline_plain(&h.content),
+        Element::List(list) => list
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let marker = if list.ordered {
+                    format!("{}. ", index + 1)
+                } else {
+                    "- ".to_string()
+                };
+                let mut text = item
+                    .content
+                    .iter()
+                    .map(element_plain)
+                    .filter(|text| !text.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Some(nested) = &item.nested {
+                    let nested_text = element_plain(&Element::List(nested.clone()));
+                    if !nested_text.is_empty() {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(&nested_text);
+                    }
                 }
-                out.push_str(&inline_plain(&p.content));
-            }
-            Element::Heading(h) => {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(&inline_plain(&h.content));
-            }
-            _ => {}
-        }
+                format!("{marker}{text}")
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Element::Table(table) => table_to_markdown(table),
+        Element::TextBox(text_box) => text_box
+            .content
+            .iter()
+            .map(element_plain)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
     }
-    out.trim().replace('\n', " ")
 }
 
 fn inline_plain(content: &[InlineContent]) -> String {
@@ -276,7 +316,7 @@ fn text_cell(s: &str) -> TableCell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use office_oxide::ir::Section;
+    use office_oxide::ir::{List, ListItem, Section, TextBox};
 
     #[test]
     fn expand_merged_tables_on_document_ir() {
@@ -445,5 +485,84 @@ mod tests {
         let md = table_to_markdown(&table);
         assert!(md.contains("| A | A |"), "got:\n{md}");
         assert!(md.contains("---"), "got:\n{md}");
+    }
+
+    #[test]
+    fn table_to_markdown_keeps_list_and_nested_table_cell_content() {
+        let nested_table = Table {
+            rows: vec![TableRow {
+                cells: vec![text_cell("nested value")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = Table {
+            rows: vec![TableRow {
+                cells: vec![
+                    TableCell {
+                        content: vec![Element::List(List {
+                            ordered: false,
+                            items: vec![ListItem {
+                                content: vec![Element::Paragraph(Paragraph {
+                                    content: vec![InlineContent::Text(TextSpan {
+                                        text: "bullet text".into(),
+                                        ..Default::default()
+                                    })],
+                                    ..Default::default()
+                                })],
+                                nested: None,
+                            }],
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    },
+                    TableCell {
+                        content: vec![Element::Table(nested_table)],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let md = table_to_markdown(&table);
+        assert!(md.contains("- bullet text"), "got:\n{md}");
+        assert!(md.contains("nested value"), "got:\n{md}");
+    }
+
+    #[test]
+    fn expands_tables_nested_in_text_boxes() {
+        let nested_table = Table {
+            rows: vec![TableRow {
+                cells: vec![TableCell {
+                    content: text_cell("A").content,
+                    col_span: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![Element::TextBox(TextBox {
+                    content: vec![Element::Table(nested_table)],
+                    ..Default::default()
+                })],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        expand_merged_tables(&mut ir);
+        let Element::TextBox(text_box) = &ir.sections[0].elements[0] else {
+            panic!("expected text box");
+        };
+        let Element::Table(table) = &text_box.content[0] else {
+            panic!("expected nested table");
+        };
+        assert_eq!(table.rows[0].cells.len(), 2);
+        assert!(table.rows[0].cells.iter().all(|cell| cell.col_span == 1));
     }
 }

@@ -168,6 +168,7 @@ pub(crate) fn render_elements(elements: &[Element]) -> String {
             Element::Paragraph(p) => inline_md(&p.content),
             Element::Table(t) => table_to_markdown(t),
             Element::List(list) => render_list(list, 0),
+            Element::TextBox(text_box) => render_elements(&text_box.content),
             Element::ThematicBreak => "---".to_string(),
             Element::CodeBlock(cb) => {
                 let lang = cb.language.as_deref().unwrap_or("");
@@ -194,6 +195,9 @@ fn inline_md(content: &[InlineContent]) -> String {
                     s = format!("**{s}**");
                 } else if t.italic {
                     s = format!("*{s}*");
+                }
+                if let Some(url) = &t.hyperlink {
+                    s = format!("[{s}]({url})");
                 }
                 out.push_str(&s);
             }
@@ -243,7 +247,7 @@ fn text_para(s: &str) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use office_oxide::ir::Section;
+    use office_oxide::ir::{Section, TextBox};
 
     #[test]
     fn chunk_splits_on_heading() {
@@ -426,5 +430,37 @@ mod tests {
         let md = render_elements(&els);
         assert!(md.contains("- First"), "{md}");
         assert!(md.contains("- Second"), "{md}");
+    }
+
+    #[test]
+    fn renders_text_box_content_in_elements_and_chunks() {
+        let text_box = Element::TextBox(TextBox {
+            content: vec![text_para("slide body")],
+            ..Default::default()
+        });
+        assert!(render_elements(std::slice::from_ref(&text_box)).contains("slide body"));
+
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![text_box],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let chunks = chunk_ir(Path::new("slides.pptx"), &ir, "pptx");
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("slide body"), "{:?}", chunks[0].text);
+    }
+
+    #[test]
+    fn renders_hyperlinked_text_after_emphasis() {
+        let content = vec![InlineContent::Text(TextSpan {
+            text: "linked".into(),
+            bold: true,
+            hyperlink: Some("https://example.com".into()),
+            ..Default::default()
+        })];
+
+        assert_eq!(inline_md(&content), "[**linked**](https://example.com)");
     }
 }
