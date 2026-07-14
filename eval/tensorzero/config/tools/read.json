@@ -3,7 +3,7 @@
   "properties": {
     "include_images": {
       "default": null,
-      "description": "include embedded images (default true)",
+      "description": "include embedded images (default true); ignored when page_image is true",
       "type": [
         "boolean",
         "null"
@@ -14,6 +14,14 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "page_image": {
+      "default": null,
+      "description": "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     },
     "path": {
       "description": "document path, exactly as shown in a search result",

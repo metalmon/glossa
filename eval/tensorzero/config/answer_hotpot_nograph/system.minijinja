@@ -9,4 +9,4 @@ Answer with the best the base supports — a partial answer is fine. The asker i
 
 Tools:
 - search(query): BM25 keyword search → numbered `[#n]` hits. grep(pattern): exact/regex literal match. glob(pattern): list documents by path mask.
-- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8").
+- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8"). For a messy PDF table page, call again with `page_image: true` to get a 200 DPI PNG of that page.

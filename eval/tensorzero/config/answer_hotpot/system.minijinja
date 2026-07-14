@@ -24,4 +24,4 @@ Tools:
 - glossary(name): resolve a symptom/term/component to graph nodes. A reasoning node prints its full cause → resolution chain, each hop with a `read path #n` anchor to open.
 - neighbors(node): related cases for a reasoning-node id copied from a `glossary` line (its SIMILAR cross-links); each renders a `read path #n` anchor. You may instead pass `path` + `n` for a chunk.
 - search(query): BM25 keyword search → numbered `[#n]` hits. grep(pattern): exact/regex literal match. glob(pattern): list documents by path mask.
-- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8").
+- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8"). For a messy PDF table page, call again with `page_image: true` to get a 200 DPI PNG of that page.

@@ -37,15 +37,17 @@ fn parse_n(v: &Value) -> Option<u64> {
 /// Read a chunk OR a reasoning node: full text + the chunk's images (for the vision model). `graph`
 /// makes `read` omnivorous — a node id resolves to the node + its evidence chunks. `root` is the
 /// corpus/notebook root (feature-gated: a doc-scoped notebook path is served from there).
+/// When `page_image` is true (PDF only), returns a page raster instead of chunk text/embeds.
 pub fn run_read(
     root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     path: &str,
     n: u64,
+    page_image: bool,
     trace: &TraceLog,
 ) -> (String, Vec<glossa::read::DocImage>) {
-    let out = glossa::tools::read(root, idx, graph, path, n, false, trace);
+    let out = glossa::tools::read(root, idx, graph, path, n, page_image, trace);
     (out.text, out.images)
 }
 
@@ -99,7 +101,11 @@ pub fn exec(
         "read" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let n = args.get("n").and_then(parse_n).unwrap_or(0);
-            let (text, imgs) = run_read(root, idx, graph, path, n, trace);
+            let page_image = args
+                .get("page_image")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let (text, imgs) = run_read(root, idx, graph, path, n, page_image, trace);
             (text, Vec::new(), imgs)
         }
         "grep" => {
