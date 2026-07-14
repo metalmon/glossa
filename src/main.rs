@@ -478,8 +478,10 @@ fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                // Our logs at info; silence tantivy's per-reload INFO chatter. RUST_LOG overrides.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn")),
+                // Our logs at info; silence noisy deps. RUST_LOG overrides.
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
+                }),
         )
         .with_writer(std::io::stderr)
         .try_init();
@@ -622,17 +624,26 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Index { path } => {
             let path = glossa::root::resolve_root(path);
+            let started = std::time::Instant::now();
             let stats = glossa::index::store::index_dir(&path, false)?;
             println!(
-                "indexed: {} added, {} removed, {} unchanged",
-                stats.added, stats.removed, stats.unchanged
+                "indexed: {} added, {} removed, {} unchanged in {}",
+                stats.added,
+                stats.removed,
+                stats.unchanged,
+                glossa::cli_fmt::format_elapsed(started.elapsed())
             );
             Ok(())
         }
         Cmd::Reindex { path } => {
             let path = glossa::root::resolve_root(path);
+            let started = std::time::Instant::now();
             let stats = glossa::index::store::index_dir(&path, true)?;
-            println!("reindexed: {} files", stats.added);
+            println!(
+                "reindexed: {} files in {}",
+                stats.added,
+                glossa::cli_fmt::format_elapsed(started.elapsed())
+            );
             // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
             // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
             // merges are only reported, never applied here (use `kb graph generalize --merge`).

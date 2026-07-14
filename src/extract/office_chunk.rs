@@ -1,8 +1,6 @@
 use crate::extract::office_table::table_to_markdown;
 use crate::model::Chunk;
-use office_oxide::ir::{
-    DocumentIR, Element, Heading, InlineContent, List, ListItem, Paragraph, TextSpan,
-};
+use office_oxide::ir::{DocumentIR, Element, InlineContent, List};
 use std::path::Path;
 
 pub const CHUNK_CHAR_THRESHOLD: usize = 4000;
@@ -234,20 +232,20 @@ fn render_list(list: &List, indent: usize) -> String {
     lines.join("\n")
 }
 
-fn text_para(s: &str) -> Element {
-    Element::Paragraph(Paragraph {
-        content: vec![InlineContent::Text(TextSpan {
-            text: s.to_string(),
-            ..Default::default()
-        })],
-        ..Default::default()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use office_oxide::ir::{Section, TextBox};
+    use office_oxide::ir::{Heading, ListItem, Paragraph, Section, TextBox, TextSpan};
+
+    fn text_para(s: &str) -> Element {
+        Element::Paragraph(Paragraph {
+            content: vec![InlineContent::Text(TextSpan {
+                text: s.to_string(),
+                ..Default::default()
+            })],
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn chunk_splits_on_heading() {

@@ -30,6 +30,18 @@ pub fn green(s: &str) -> String {
     paint("32", s)
 }
 
+/// Human-readable elapsed duration for CLI summaries (`1.23s`, `2m 05.1s`).
+pub fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        format!("{secs:.2}s")
+    } else {
+        let mins = (secs / 60.0).floor() as u64;
+        let rem = secs - (mins as f64) * 60.0;
+        format!("{mins}m {rem:04.1}s")
+    }
+}
+
 /// Suffix for a no-match hint: ` — did you mean: "a", "b"?` or "" when empty.
 pub fn format_did_you_mean(candidates: &[String]) -> String {
     if candidates.is_empty() {
@@ -400,6 +412,22 @@ mod tests {
             vec!["АБАК".to_string(), "ПЛК".to_string()]
         );
         assert!(query_terms("a .").is_empty());
+    }
+
+    #[test]
+    fn format_elapsed_under_a_minute() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_millis(1234)),
+            "1.23s"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_minutes() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(125)),
+            "2m 05.0s"
+        );
     }
 
     #[test]

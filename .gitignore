@@ -40,3 +40,5 @@ prof-*.jsonl
 kb-build.log
 gepa-out/gepa-long.current
 .cursor/
+
+tmp/
