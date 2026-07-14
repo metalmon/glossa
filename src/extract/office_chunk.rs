@@ -8,13 +8,22 @@ use std::path::Path;
 pub const CHUNK_CHAR_THRESHOLD: usize = 4000;
 
 pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
+    chunk_ir_with_threshold(path, ir, file_type, CHUNK_CHAR_THRESHOLD)
+}
+
+pub fn chunk_ir_with_threshold(
+    path: &Path,
+    ir: &DocumentIR,
+    file_type: &str,
+    threshold: usize,
+) -> Vec<Chunk> {
     let mut out = Vec::new();
-    let _multi_section = ir.sections.len() > 1;
 
     for section in &ir.sections {
         let section_title = section.title.as_deref();
         let mut heading_path: Vec<String> = Vec::new();
         let mut buf: Vec<Element> = Vec::new();
+        let mut glued_note_after_table = false;
 
         for el in &section.elements {
             if let Element::Heading(h) = el {
@@ -26,6 +35,7 @@ pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
                     section_title,
                     &mut out,
                 );
+                glued_note_after_table = false;
                 let title = inline_md(&h.content);
                 let level = h.level as usize;
                 heading_path.truncate(level.saturating_sub(1));
@@ -33,7 +43,57 @@ pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
                 buf.push(el.clone());
                 continue;
             }
+
+            let rendered_len = render_elements(&buf).chars().count();
+            if is_empty_paragraph(el) {
+                if rendered_len >= threshold {
+                    flush_buf(
+                        path,
+                        file_type,
+                        &mut buf,
+                        &heading_path,
+                        section_title,
+                        &mut out,
+                    );
+                    glued_note_after_table = false;
+                    continue;
+                }
+                buf.push(el.clone());
+                glued_note_after_table = false;
+                continue;
+            }
+
+            if rendered_len >= threshold {
+                let glue_caption_to_table =
+                    buf.last().is_some_and(is_nonempty_text_block) && is_table(el);
+                let glue_note_to_table = buf.last().is_some_and(is_table)
+                    && matches!(el, Element::Paragraph(_))
+                    && is_nonempty_text_block(el)
+                    && !glued_note_after_table;
+
+                if glue_caption_to_table {
+                    buf.push(el.clone());
+                    glued_note_after_table = false;
+                    continue;
+                }
+                if glue_note_to_table {
+                    buf.push(el.clone());
+                    glued_note_after_table = true;
+                    continue;
+                }
+
+                flush_buf(
+                    path,
+                    file_type,
+                    &mut buf,
+                    &heading_path,
+                    section_title,
+                    &mut out,
+                );
+            }
+
             buf.push(el.clone());
+            glued_note_after_table = false;
         }
         flush_buf(
             path,
@@ -45,6 +105,25 @@ pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
         );
     }
     out
+}
+
+fn is_empty_paragraph(el: &Element) -> bool {
+    match el {
+        Element::Paragraph(p) => inline_md(&p.content).trim().is_empty(),
+        _ => false,
+    }
+}
+
+fn is_table(el: &Element) -> bool {
+    matches!(el, Element::Table(_))
+}
+
+fn is_nonempty_text_block(el: &Element) -> bool {
+    match el {
+        Element::Paragraph(p) => !inline_md(&p.content).trim().is_empty(),
+        Element::Heading(_) => true,
+        _ => false,
+    }
 }
 
 fn flush_buf(
@@ -212,6 +291,74 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].location, "Sheet1");
         assert_eq!(chunks[1].location, "Sheet2");
+    }
+
+    #[test]
+    fn soft_split_on_empty_para_only_after_threshold() {
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    text_para(&"x".repeat(50)),
+                    text_para(""),
+                    text_para("still-same"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let chunks =
+            chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 10_000);
+        assert_eq!(chunks.len(), 1);
+
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    text_para(&"a".repeat(30)),
+                    text_para(""),
+                    text_para(&"b".repeat(5)),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let chunks = chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 20);
+        assert!(chunks.len() >= 2, "got {}", chunks.len());
+    }
+
+    #[test]
+    fn glue_caption_and_note_around_table() {
+        use office_oxide::ir::{Table, TableCell, TableRow};
+
+        let table = Element::Table(Table {
+            rows: vec![TableRow {
+                cells: vec![TableCell {
+                    content: vec![text_para("1")],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    text_para(&"p".repeat(40)),
+                    text_para("Table 1 — caption"),
+                    table,
+                    text_para("Note under"),
+                    text_para("after-glue-can-split"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let chunks = chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 30);
+        assert!(chunks.iter().any(|chunk| {
+            chunk.text.contains("Table 1 — caption")
+                && chunk.text.contains("| 1 |")
+                && chunk.text.contains("Note under")
+        }));
     }
 
     #[test]
