@@ -133,37 +133,42 @@ pub fn table_to_markdown(table: &Table) -> String {
         return String::new();
     }
 
+    let has_header = table.has_header
+        || table
+            .rows
+            .first()
+            .is_some_and(|row| row.is_header);
+
     let mut result = String::new();
 
-    let first_row = &table.rows[0];
-    result.push('|');
-    for i in 0..col_count {
-        let text = first_row
-            .cells
-            .get(i)
-            .map(markdown_cell_text)
-            .unwrap_or_default();
-        result.push(' ');
-        result.push_str(&text);
-        result.push_str(" |");
-    }
-    result.push('\n');
-
-    result.push('|');
-    for _ in 0..col_count {
-        result.push_str(" --- |");
-    }
-    result.push('\n');
-
-    for row in table.rows.iter().skip(1) {
+    if has_header {
+        let first_row = &table.rows[0];
         result.push('|');
         for i in 0..col_count {
-            let text = row.cells.get(i).map(markdown_cell_text).unwrap_or_default();
+            let text = first_row
+                .cells
+                .get(i)
+                .map(markdown_cell_text)
+                .unwrap_or_default();
             result.push(' ');
             result.push_str(&text);
             result.push_str(" |");
         }
         result.push('\n');
+
+        result.push('|');
+        for _ in 0..col_count {
+            result.push_str(" --- |");
+        }
+        result.push('\n');
+
+        for row in table.rows.iter().skip(1) {
+            append_markdown_row(&mut result, row, col_count);
+        }
+    } else {
+        for row in &table.rows {
+            append_markdown_row(&mut result, row, col_count);
+        }
     }
 
     if result.ends_with('\n') {
@@ -171,6 +176,17 @@ pub fn table_to_markdown(table: &Table) -> String {
     }
 
     result
+}
+
+fn append_markdown_row(result: &mut String, row: &TableRow, col_count: usize) {
+    result.push('|');
+    for i in 0..col_count {
+        let text = row.cells.get(i).map(markdown_cell_text).unwrap_or_default();
+        result.push(' ');
+        result.push_str(&text);
+        result.push_str(" |");
+    }
+    result.push('\n');
 }
 
 fn markdown_cell_text(cell: &TableCell) -> String {
@@ -274,5 +290,35 @@ mod tests {
         };
         let md = table_to_markdown(&table);
         assert!(md.contains("| a\\|b | c |"), "got:\n{md}");
+    }
+
+    #[test]
+    fn table_to_markdown_omits_separator_without_header_flags() {
+        let table = Table {
+            has_header: false,
+            rows: vec![
+                text_row(vec![text_cell("a", false), text_cell("b", false)], false),
+                text_row(vec![text_cell("c", false), text_cell("d", false)], false),
+            ],
+            ..Default::default()
+        };
+        let md = table_to_markdown(&table);
+        assert!(!md.contains("---"), "got:\n{md}");
+        assert!(md.contains("| a | b |"), "got:\n{md}");
+        assert!(md.contains("| c | d |"), "got:\n{md}");
+    }
+
+    #[test]
+    fn table_to_markdown_includes_separator_when_first_row_is_header() {
+        let table = Table {
+            has_header: false,
+            rows: vec![
+                text_row(vec![text_cell("h1", true), text_cell("h2", true)], true),
+                text_row(vec![text_cell("d1", false), text_cell("d2", false)], false),
+            ],
+            ..Default::default()
+        };
+        let md = table_to_markdown(&table);
+        assert!(md.contains("---"), "got:\n{md}");
     }
 }
