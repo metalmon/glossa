@@ -262,24 +262,27 @@ pub fn read(
     }
     // Try the exact path first. If the document isn't found, the model may have mangled the path
     // (e.g. collapsed a double space when copying it) — resolve it tolerantly and retry once.
-    let (path, chunk): (String, _) = match idx.read_chunk_by_ord(path, n) {
-        Ok(Some(c)) => (path.to_string(), c),
+    let (path, chunk, resolved_ord): (String, _, u64) = match idx.read_chunk_by_ord(path, n) {
+        Ok(Some(c)) => (path.to_string(), c, n),
         Ok(None) => match idx.last_chunk_ord(path) {
             // Document exists; the chunk number is out of range. Rather than return an error a
             // small model loops on (it reuses a chunk number from another doc — a 1-chunk file
             // has no #3), CLAMP to the valid range and read that chunk. Its own header shows the
             // real ordinal, so the model sees what it actually got.
-            Ok(Some(max)) => match idx.read_chunk_by_ord(path, n.clamp(1, max)) {
-                Ok(Some(c)) => (path.to_string(), c),
-                _ => return ReadOut {
-                    text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
-                    images: Vec::new(),
-                },
-            },
+            Ok(Some(max)) => {
+                let ord = n.clamp(1, max);
+                match idx.read_chunk_by_ord(path, ord) {
+                    Ok(Some(c)) => (path.to_string(), c, ord),
+                    _ => return ReadOut {
+                        text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
+                        images: Vec::new(),
+                    },
+                }
+            }
             // No exact path match — try a tolerant resolve, then retry once.
             Ok(None) => match idx.canonical_document_path(path) {
                 Some(real) => match idx.read_chunk_by_ord(&real, n) {
-                    Ok(Some(c)) => (real, c),
+                    Ok(Some(c)) => (real, c, n),
                     _ => {
                         let text = match idx.last_chunk_ord(&real) {
                             Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
@@ -312,14 +315,14 @@ pub fn read(
                 images: Vec::new(),
             };
         }
-        let images = match crate::read::render_pdf_page(&doc_path, n) {
+        let images = match crate::read::render_pdf_page(&doc_path, resolved_ord) {
             Ok(Some(img)) => vec![img],
             _ => Vec::new(),
         };
         let text = if images.is_empty() {
-            format!("page_image: failed to render {path} #{n}")
+            format!("page_image: failed to render {path} #{resolved_ord}")
         } else {
-            format!("page_image {path} #{n}")
+            format!("page_image {path} #{resolved_ord}")
         };
         return ReadOut { text, images };
     }
@@ -944,6 +947,32 @@ mod tests {
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/png");
         assert!(out.images[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn read_page_image_clamps_out_of_range_ord_to_last_page() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.pdf",
+            99,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime, "image/png");
     }
 
     #[test]
