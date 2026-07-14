@@ -239,6 +239,7 @@ pub fn read(
     graph: Option<&crate::graph::store::GraphStore>,
     path: &str,
     n: u64,
+    page_image: bool,
     trace: &TraceLog,
 ) -> ReadOut {
     #[cfg(feature = "notebook")]
@@ -298,13 +299,37 @@ pub fn read(
     };
     let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
+    let doc_path = idx.doc_file(path);
+    if page_image {
+        let ext = doc_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext != "pdf" {
+            return ReadOut {
+                text: format!("page_image is only supported for PDF (got {path})"),
+                images: Vec::new(),
+            };
+        }
+        let images = match crate::read::render_pdf_page(&doc_path, n) {
+            Ok(Some(img)) => vec![img],
+            _ => Vec::new(),
+        };
+        let text = if images.is_empty() {
+            format!("page_image: failed to render {path} #{n}")
+        } else {
+            format!("page_image {path} #{n}")
+        };
+        return ReadOut { text, images };
+    }
     let footer = match (chunk.prev, chunk.next) {
         (Some(p), Some(nx)) => format!("\n\n‹ prev #{p} · next #{nx} ›"),
         (None, Some(nx)) => format!("\n\n‹ start of document · next #{nx} ›"),
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(&idx.doc_file(path), n, 4).unwrap_or_default();
+    let images = crate::read::extract_images(&doc_path, n, 4).unwrap_or_default();
     let body = format_chunk_body(n, &chunk.body);
     ReadOut {
         text: format!("{}{}", body, footer),
@@ -894,6 +919,58 @@ mod tests {
     }
 
     #[test]
+    fn read_page_image_returns_pdf_page_png_without_chunk_body() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.pdf",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert!(!out.text.contains("glossa sample"));
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime, "image/png");
+        assert!(out.images[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn read_page_image_rejects_non_pdf_document() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("sample.md"), b"# Sample\nglossa sample\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.md",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(
+            out.text,
+            "page_image is only supported for PDF (got sample.md)"
+        );
+        assert!(out.images.is_empty());
+    }
+
+    #[test]
     fn read_empty_pdf_page_returns_success_with_label() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
@@ -919,7 +996,7 @@ mod tests {
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, None, "d.pdf", 2, &t);
+        let out = read(d.path(), &i, None, "d.pdf", 2, false, &t);
         assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
         assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
         assert!(
@@ -945,10 +1022,26 @@ mod tests {
         .unwrap();
         // create a notebook file under the doc's mirror
         crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n", false);
-        let out = read(dir.path(), &idx, None, "some_std.docx/sizes.csp", 1, &TraceLog::disabled());
+        let out = read(
+            dir.path(),
+            &idx,
+            None,
+            "some_std.docx/sizes.csp",
+            1,
+            false,
+            &TraceLog::disabled(),
+        );
         assert!(out.text.contains("50") && out.text.contains("63"), "got: {}", out.text);
         // a non-notebook, non-corpus path still errors as before
-        let miss = read(dir.path(), &idx, None, "no/such/thing", 1, &TraceLog::disabled());
+        let miss = read(
+            dir.path(),
+            &idx,
+            None,
+            "no/such/thing",
+            1,
+            false,
+            &TraceLog::disabled(),
+        );
         assert!(miss.text.contains("no document indexed") || miss.text.contains("not found"), "got: {}", miss.text);
     }
 
@@ -1297,7 +1390,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
-        let out = read(_d.path(), &i, Some(&g), "res:fix", 1, &t).text;
+        let out = read(_d.path(), &i, Some(&g), "res:fix", 1, false, &t).text;
         assert!(
             out.contains("[Resolution]") && out.contains("Изменить maxTsdr"),
             "node header: {out}"
@@ -1311,7 +1404,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "evidence body: {out}"
         );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(_d.path(), &i, Some(&g), "АБАК.pdf", 7, &t).text;
+        let doc = read(_d.path(), &i, Some(&g), "АБАК.pdf", 7, false, &t).text;
         assert!(
             doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
             "doc read unchanged: {doc}"
@@ -1350,16 +1443,16 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, None, "d.md", 1, &t);
+        let out = read(d.path(), &i, None, "d.md", 1, false, &t);
         assert!(out.text.contains(&big), "full body, no cap"); // not truncated
         assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
         assert!(out.text.contains("‹ start of document · next #2 ›")); // unified footer (MCP wording)
                                                                        // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
                                                                        // #2 = "second") instead of an error the model loops on.
-        let oor = read(d.path(), &i, None, "d.md", 99, &t).text;
+        let oor = read(d.path(), &i, None, "d.md", 99, false, &t).text;
         assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
-        assert!(read(d.path(), &i, None, "nope.md", 1, &t)
+        assert!(read(d.path(), &i, None, "nope.md", 1, false, &t)
             .text
             .contains("no document indexed at nope.md"));
     }
@@ -1377,14 +1470,30 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, None, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "dir/Safety Manual - 1_0_3.pdf",
+            1,
+            false,
+            &t,
+        ); // single space
         assert!(
             out.text.contains("safety body"),
             "resolved despite collapsed double space: {}",
             out.text
         );
         // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
-        let out2 = read(d.path(), &i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
+        let out2 = read(
+            d.path(),
+            &i,
+            None,
+            "dir\\\\Safety Manual - 1_0_3.pdf",
+            1,
+            false,
+            &t,
+        );
         assert!(
             out2.text.contains("safety body"),
             "resolved despite doubled backslash: {}",
@@ -1404,7 +1513,15 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "kb-manual\\БД ДПТК\\doc.pdf",
+            1,
+            false,
+            &t,
+        );
         assert!(
             out.text.contains("body text"),
             "strip spurious prefix: {}",
@@ -1424,7 +1541,16 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         }])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "kb-manual\\АбакПЛК 2025.pdf",
+            1,
+            false,
+            &t,
+        )
+        .text;
         assert!(out.contains("did you mean"), "hint on miss: {out}");
         assert!(out.contains("Методика"), "suggest real path: {out}");
     }
@@ -1457,7 +1583,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         })
         .unwrap();
         let t = TraceLog::disabled();
-        let out = read(d.path(), &i, Some(&g), "sym:test", 1, &t).text;
+        let out = read(d.path(), &i, Some(&g), "sym:test", 1, false, &t).text;
         assert!(out.contains("evidence body"), "reasoning node read: {out}");
     }
 

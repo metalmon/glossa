@@ -45,7 +45,7 @@ pub fn run_read(
     n: u64,
     trace: &TraceLog,
 ) -> (String, Vec<glossa::read::DocImage>) {
-    let out = glossa::tools::read(root, idx, graph, path, n, trace);
+    let out = glossa::tools::read(root, idx, graph, path, n, false, trace);
     (out.text, out.images)
 }
 

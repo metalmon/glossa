@@ -331,6 +331,11 @@ struct ReadArgs {
     #[serde(default)]
     #[schemars(description = "include embedded images (default true)")]
     include_images: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text."
+    )]
+    page_image: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -637,18 +642,38 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI PNG instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
-        let out = crate::tools::read(&self.root, &idx, g.as_ref(), &a.path, a.n as u64, &self.trace);
-        let mut content = vec![Content::text(out.text)];
-        if a.include_images.unwrap_or(true) {
+        let page_image = a.page_image.unwrap_or(false);
+        let out = crate::tools::read(
+            &self.root,
+            &idx,
+            g.as_ref(),
+            &a.path,
+            a.n as u64,
+            page_image,
+            &self.trace,
+        );
+        let mut content = Vec::new();
+        if page_image {
+            if !out.text.is_empty() {
+                content.push(Content::text(out.text));
+            }
             for img in out.images {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
                 content.push(Content::image(b64, img.mime));
+            }
+        } else {
+            content.push(Content::text(out.text));
+            if a.include_images.unwrap_or(true) {
+                for img in out.images {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+                    content.push(Content::image(b64, img.mime));
+                }
             }
         }
         Ok(CallToolResult::success(content))
@@ -1157,6 +1182,7 @@ mod tests {
                 path,
                 n: 1,
                 include_images: Some(false),
+                page_image: None,
             }))
             .await
             .unwrap();
