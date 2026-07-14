@@ -1,4 +1,5 @@
-use crate::extract::chunk::chunk_markdown;
+use crate::extract::office_chunk::chunk_ir;
+use crate::extract::office_table::expand_merged_tables;
 use crate::extract::Extractor;
 use crate::model::Chunk;
 use anyhow::anyhow;
@@ -34,8 +35,9 @@ impl Extractor for OfficeExtractor {
         let fmt = format_for(&ext).ok_or_else(|| anyhow!("unsupported office extension: {ext}"))?;
         let doc = Document::from_reader(Cursor::new(bytes.to_vec()), fmt)
             .map_err(|e| anyhow!("office parse failed for {}: {e}", path.display()))?;
-        let md = doc.to_markdown();
-        Ok(chunk_markdown(path, &md, &ext))
+        let mut ir = doc.to_ir();
+        expand_merged_tables(&mut ir);
+        Ok(chunk_ir(path, &ir, &ext))
     }
 }
 
