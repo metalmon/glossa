@@ -1,7 +1,7 @@
 # Office IR extraction, merge expand, and IR-level chunking
 
 **Date:** 2026-07-14  
-**Status:** Draft for review  
+**Status:** Implemented — unit tests; eval follow-up optional  
 **Context:** Docx tables are accurate via `office_oxide`, but headingless Office docs become one huge markdown blob; PDF standardization loses table fidelity. We keep Office formats and fix structure in our pipeline.
 
 ## Goal

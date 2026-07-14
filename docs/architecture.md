@@ -47,7 +47,7 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 | Format | Library | Notes |
 |--------|---------|-------|
 | PDF | [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | Per-page text; blank pages indexed empty; lenient parsing; scans indexed by filename if no text |
-| Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx |
+| Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
 
 Binary files are skipped silently. Extraction is streaming (no fixed size cap).
