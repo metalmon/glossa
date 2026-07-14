@@ -18,6 +18,7 @@ pub mod office;
 pub mod office_chunk;
 pub mod office_table;
 pub mod pdf;
+pub mod pdf_table;
 pub mod text;
 
 /// Extract one file's chunks into `sink`. Whole-file binary/doc formats (md/office/pdf) are read
