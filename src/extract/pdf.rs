@@ -1,4 +1,5 @@
 use crate::extract::Extractor;
+use crate::extract::pdf_table::{expand_table, table_to_markdown};
 use crate::model::Chunk;
 use std::path::Path;
 
@@ -10,84 +11,61 @@ impl Extractor for PdfExtractor {
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
-        use oxidize_pdf::parser::{ParseOptions, PdfDocument, PdfReader};
-        use oxidize_pdf::pipeline::{Element, ElementMarkdownExporter, ExportConfig};
-        use oxidize_pdf::text::ExtractionOptions;
-        use std::collections::BTreeMap;
+        use pdf_oxide::PdfDocument;
 
         // Any PDF parser can panic on a malformed file; catch it so indexing never aborts.
         let owned = bytes.to_vec();
         let path_buf = path.to_path_buf();
         let caught =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Vec<Chunk> {
-                // lenient() enables xref recovery — parses damaged-but-valid PDFs that strict mode rejects.
-                let reader = match PdfReader::new_with_options(
-                    std::io::Cursor::new(owned),
-                    ParseOptions::lenient(),
-                ) {
-                    Ok(r) => r,
+                let doc = match PdfDocument::from_bytes(owned) {
+                    Ok(doc) => doc,
                     Err(_) => return Vec::new(),
                 };
-                let doc = PdfDocument::new(reader);
+                let page_count = doc.page_count().unwrap_or(0) as u32;
+                if page_count == 0 {
+                    return Vec::new();
+                }
 
-                // Layer 1 (primary): plain layout-text reconstruction (preserve_layout rebuilds
-                // spaces+newlines). oxidize-pdf's table PARTITION — the old primary — mis-detects
-                // multi-column RU prose as tables and mangles words ("Выгр у зка", false pipe cells);
-                // the flat layout text is clean for BOTH prose and tables, so it goes first.
-                let opts = ExtractionOptions {
-                    preserve_layout: true,
-                    space_threshold: 0.3, // horizontal gap > k·char-width → insert a space
-                    newline_threshold: 10.0, // baseline (y) drop → newline
-                    merge_hyphenated: true,
-                    reconstruct_paragraphs: true,
-                    detect_columns: true, // RU technical PDFs are often multi-column
-                    include_artifacts: false, // drop headers/footers/watermarks
-                    ..Default::default()
-                };
-                if let Ok(pages) = doc.extract_text_with_options(opts) {
-                    if !pages.is_empty() {
-                        let mut out = Vec::new();
-                        for (i, page) in pages.iter().enumerate() {
-                            out.push(Chunk {
-                                doc_path: path_buf.clone(),
-                                location: format!("p.{}", i + 1),
-                                file_type: "pdf".into(),
-                                text: page.text.clone(),
-                            });
+                let mut out = Vec::with_capacity(page_count as usize);
+                let mut any_text = false;
+                for i in 0..page_count as usize {
+                    let text = doc.extract_text(i).unwrap_or_default();
+                    if !text.trim().is_empty() {
+                        any_text = true;
+                    }
+                    out.push(Chunk {
+                        doc_path: path_buf.clone(),
+                        location: format!("p.{}", i + 1),
+                        file_type: "pdf".into(),
+                        text,
+                    });
+                }
+
+                // If the text layer is empty on every page, preserve structural tables as markdown.
+                if !any_text {
+                    let mut filled = false;
+                    for i in 0..page_count as usize {
+                        let markdown = doc
+                            .extract_tables(i)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|table| table_to_markdown(&expand_table(table)))
+                            .filter(|text| !text.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if !markdown.trim().is_empty() {
+                            out[i].text = markdown;
+                            filled = true;
                         }
-                        let page_count = doc.page_count().unwrap_or(pages.len() as u32);
-                        pad_pdf_page_stubs(&mut out, &path_buf, page_count);
-                        return out;
+                    }
+                    if !filled {
+                        return Vec::new();
                     }
                 }
 
-                // Layer 2 (fallback): structural partition → per-page markdown (GFM tables), used ONLY
-                // when layout-text found nothing — a PDF that exposes structure but no flat text stream.
-                if let Ok(elements) = doc.partition() {
-                    if !elements.is_empty() {
-                        let mut by_page: BTreeMap<u32, Vec<Element>> = BTreeMap::new();
-                        for el in elements {
-                            by_page.entry(el.page()).or_default().push(el);
-                        }
-                        let exporter = ElementMarkdownExporter::new(ExportConfig::default());
-                        let mut out = Vec::new();
-                        for (page, els) in by_page {
-                            let md = exporter.export(&els);
-                            out.push(Chunk {
-                                doc_path: path_buf.clone(),
-                                location: format!("p.{}", page_label(page)),
-                                file_type: "pdf".into(),
-                                text: md,
-                            });
-                        }
-                        let page_count = doc.page_count().unwrap_or(0);
-                        pad_pdf_page_stubs(&mut out, &path_buf, page_count);
-                        if !out.is_empty() {
-                            return out;
-                        }
-                    }
-                }
-                Vec::new()
+                pad_pdf_page_stubs(&mut out, &path_buf, page_count);
+                out
             }));
 
         let out = caught.unwrap_or_default();
@@ -110,13 +88,6 @@ impl Extractor for PdfExtractor {
             text: name,
         }])
     }
-}
-
-/// Map oxidize-pdf's `Element.page()` to glossa's 1-based `p.N` convention.
-/// `do_partition_pages` tags each element with its 0-based `page_idx` (from
-/// `pages.iter().enumerate()`), so add 1 to reach glossa's 1-based pages.
-fn page_label(page: u32) -> u32 {
-    page + 1
 }
 
 /// Ensure every physical page `1..=page_count` has a chunk (blank pages get empty body).

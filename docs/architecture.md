@@ -46,7 +46,7 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 
 | Format | Library | Notes |
 |--------|---------|-------|
-| PDF | [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | Per-page text; blank pages indexed empty; lenient parsing; scans indexed by filename if no text |
+| PDF | [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | Per-page text; blank pages indexed empty; page raster for vision agents; embedded image extraction; scans indexed by filename if no text |
 | Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
 
@@ -110,7 +110,7 @@ glossa stands on:
 | Project | Role |
 |---------|------|
 | [Tantivy](https://github.com/quickwit-oss/tantivy) | BM25 index |
-| [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | PDF extraction |
+| [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | PDF text extraction, page render, embeds |
 | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | Office extraction |
 | rusqlite | Graph persistence |
 | rmcp | MCP protocol |

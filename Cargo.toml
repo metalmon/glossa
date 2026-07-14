@@ -20,8 +20,6 @@ regex = "1"
 regex-syntax = "0.8"
 globset = "0.4"
 office_oxide = "0.1"
-oxidize-pdf = "2"
-# Optional: PDF page raster + extract comparison (`cargo run --example pdf_spike --features pdf-spike -- …`)
 pdf_oxide = { version = "0.3", default-features = false, features = ["rendering"] }
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }
 serde = { version = "1", features = ["derive"] }
@@ -54,11 +52,6 @@ default = ["notebook"]
 notebook = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
-pdf-spike = []
-
-[[example]]
-name = "pdf_spike"
-required-features = ["pdf-spike"]
 
 [dev-dependencies]
 tempfile = "3"

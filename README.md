@@ -131,7 +131,7 @@ glossa is built with excellent Rust libraries:
 | Project | Role |
 |---------|------|
 | [Tantivy](https://github.com/quickwit-oss/tantivy) | BM25 full-text index |
-| [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | PDF text extraction |
+| [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | PDF text extraction, page render, embeds |
 | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | Word, Excel, PowerPoint extraction |
 
 Also: ripgrep ecosystem (`regex`, `globset`, `ignore`), [rusqlite](https://github.com/rusqlite/rusqlite) (graph storage), [rmcp](https://github.com/modelcontextprotocol/rust-sdk) (MCP server).

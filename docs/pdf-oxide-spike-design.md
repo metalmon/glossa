@@ -1,3 +1,5 @@
+> **Superseded** (2026-07-14): Spike complete — glossa migrated to `pdf_oxide` for PDF text, page render, and embeds. See `docs/superpowers/specs/2026-07-14-pdf-oxide-migration-design.md`.
+
 # PDF library spike: oxidize-pdf vs pdf_oxide
 
 **Date:** 2026-07-14  
