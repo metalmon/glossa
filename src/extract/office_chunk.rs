@@ -8,8 +8,72 @@ use std::path::Path;
 pub const CHUNK_CHAR_THRESHOLD: usize = 4000;
 
 pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
-    let _ = (path, ir, file_type);
-    todo!("chunk_ir")
+    let mut out = Vec::new();
+    let _multi_section = ir.sections.len() > 1;
+
+    for section in &ir.sections {
+        let section_title = section.title.as_deref();
+        let mut heading_path: Vec<String> = Vec::new();
+        let mut buf: Vec<Element> = Vec::new();
+
+        for el in &section.elements {
+            if let Element::Heading(h) = el {
+                flush_buf(
+                    path,
+                    file_type,
+                    &mut buf,
+                    &heading_path,
+                    section_title,
+                    &mut out,
+                );
+                let title = inline_md(&h.content);
+                let level = h.level as usize;
+                heading_path.truncate(level.saturating_sub(1));
+                heading_path.push(title);
+                buf.push(el.clone());
+                continue;
+            }
+            buf.push(el.clone());
+        }
+        flush_buf(
+            path,
+            file_type,
+            &mut buf,
+            &heading_path,
+            section_title,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn flush_buf(
+    path: &Path,
+    file_type: &str,
+    buf: &mut Vec<Element>,
+    heading_path: &[String],
+    section_title: Option<&str>,
+    out: &mut Vec<Chunk>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let text = render_elements(buf);
+    buf.clear();
+    if text.trim().is_empty() {
+        return;
+    }
+    let location = if !heading_path.is_empty() {
+        heading_path.join(" > ")
+    } else {
+        section_title.unwrap_or("").to_string()
+    };
+    out.push(Chunk {
+        doc_path: path.to_path_buf(),
+        location,
+        file_type: file_type.to_string(),
+        text,
+    });
 }
 
 pub(crate) fn render_elements(elements: &[Element]) -> String {
@@ -98,6 +162,57 @@ fn text_para(s: &str) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use office_oxide::ir::Section;
+
+    #[test]
+    fn chunk_splits_on_heading() {
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    text_para("intro"),
+                    Element::Heading(Heading {
+                        level: 1,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "H1".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("under"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let chunks = chunk_ir(Path::new("a.docx"), &ir, "docx");
+        assert!(chunks.len() >= 2, "{:?}", chunks.len());
+        assert!(chunks[0].text.contains("intro"));
+        assert_eq!(chunks.last().unwrap().location, "H1");
+        assert!(chunks.last().unwrap().text.contains("under"));
+    }
+
+    #[test]
+    fn chunk_splits_on_section_boundary() {
+        let ir = DocumentIR {
+            sections: vec![
+                Section {
+                    title: Some("Sheet1".into()),
+                    elements: vec![text_para("a")],
+                    ..Default::default()
+                },
+                Section {
+                    title: Some("Sheet2".into()),
+                    elements: vec![text_para("b")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let chunks = chunk_ir(Path::new("a.xlsx"), &ir, "xlsx");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].location, "Sheet1");
+        assert_eq!(chunks[1].location, "Sheet2");
+    }
 
     #[test]
     fn render_heading_and_paragraph() {
