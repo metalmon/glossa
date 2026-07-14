@@ -245,7 +245,7 @@ mod tests {
         let bytes = include_bytes!("../../tests/fixtures/table.pdf");
         let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
         // Layout-text is the primary path now: a table is flattened to readable rows on p.1 (its
-        // cell VALUES are preserved). The markdown-table partition is a fallback because oxidize-pdf
+        // cell VALUES are preserved). The markdown-table partition is a fallback when pdf_oxide
         // mis-detects multi-column prose as tables and mangles the words. p.1 also locks the
         // 1-based `p.N` page mapping the read contract rests on.
         assert_eq!(chunks[0].location, "p.1");

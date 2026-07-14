@@ -10,7 +10,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 
 ## Shipped in v1.0
 
-- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (oxidize-pdf, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors.
+- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors.
 - **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
