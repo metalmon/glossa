@@ -166,12 +166,63 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
 }
 
 fn extract_pdf_page_images(
-    _path: &Path,
-    _page: u64,
-    _max: usize,
+    path: &Path,
+    page: u64,
+    max: usize,
 ) -> anyhow::Result<Vec<DocImage>> {
-    // TODO(Task 4): extract PDF embeds with pdf_oxide.
-    Ok(Vec::new())
+    use pdf_oxide::extractors::ImageData;
+    use pdf_oxide::PdfDocument;
+
+    let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
+        return Ok(Vec::new());
+    };
+    let Ok(document) = PdfDocument::open(path) else {
+        return Ok(Vec::new());
+    };
+    let Ok(images) = document.extract_images(page_index) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for image in images {
+        if out.len() >= max {
+            break;
+        }
+        let (mime, bytes) = match image.data() {
+            ImageData::Jpeg(bytes) => ("image/jpeg", bytes.clone()),
+            ImageData::Raw { .. } => {
+                let Ok(bytes) = image.to_png_bytes() else {
+                    continue;
+                };
+                ("image/png", bytes)
+            }
+        };
+        out.push(DocImage {
+            mime: mime.into(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+pub fn render_pdf_page(path: &Path, page: u64) -> anyhow::Result<Option<DocImage>> {
+    use pdf_oxide::rendering::{render_page, RenderOptions};
+    use pdf_oxide::PdfDocument;
+
+    let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
+        return Ok(None);
+    };
+    let Ok(document) = PdfDocument::open(path) else {
+        return Ok(None);
+    };
+    let options = RenderOptions::with_dpi(200);
+    let Ok(image) = render_page(&document, page_index, &options) else {
+        return Ok(None);
+    };
+    Ok(Some(DocImage {
+        mime: "image/png".into(),
+        bytes: image.data,
+    }))
 }
 
 fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
@@ -267,5 +318,31 @@ mod image_tests {
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].mime, "image/png");
         assert_eq!(imgs[0].bytes, data);
+    }
+
+    fn sample_pdf() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample.pdf")
+    }
+
+    #[test]
+    fn render_pdf_page_returns_png_magic() {
+        let image = render_pdf_page(&sample_pdf(), 1)
+            .unwrap()
+            .expect("sample PDF page 1 should render");
+        assert_eq!(image.mime, "image/png");
+        assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn render_pdf_page_missing_page_is_none() {
+        assert_eq!(render_pdf_page(&sample_pdf(), 99).unwrap(), None);
+    }
+
+    #[test]
+    fn extract_images_from_pdf_soft_fails() {
+        assert!(extract_images(&sample_pdf(), 1, 4).is_ok());
     }
 }
