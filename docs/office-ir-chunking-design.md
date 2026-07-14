@@ -81,8 +81,9 @@ Empty paragraphs are **not** hard splits before the threshold (avoids exploding 
 ### Glue (never split here)
 
 - Do **not** split between a non-empty paragraph/heading and an immediately following `Table` (keeps captions with tables).
+- Do **not** split between a `Table` and an immediately following non-empty paragraph (keeps notes / «Примечание» under the table).
 - Do **not** split inside a `Table` (table is one element after expand).
-- Post-table note glue: **YAGNI** for v1 — add only if eval shows captions/notes after tables are stranded.
+- Glue applies to **at most one** paragraph on each side of the table (caption before, note after). Further paragraphs are normal soft/hard split candidates.
 
 ### Size threshold
 
@@ -120,7 +121,7 @@ Reuse patterns from office_oxide’s markdown rendering where practical, but **o
 | Fixture `sample.docx` / `sample_table.docx` | Still extract; table has pipes |
 | Synthetic merge H/V/block | Repeated values in every covered cell |
 | Headingless IR with empty paras + size over threshold | ≥2 chunks; splits on empty para after threshold |
-| Paragraph then Table under size pressure | Same chunk (glue) |
+| Paragraph then Table (and Table then note paragraph) under size pressure | Same chunk (glue both sides) |
 | Multi-section IR (two sheet titles) | ≥2 chunks; locations carry titles |
 | Existing office unit tests | Updated for IR path; no regress on markers |
 
@@ -142,5 +143,5 @@ Eval follow-up (manual / existing qwen35 harness, not blocking unit-test merge):
 1. Office extractor never calls whole-doc `to_markdown()` for indexing.
 2. Merged cells appear densified in chunk text (H and V repeat).
 3. Headingless multi-thousand-char Office docs produce multiple chunks without GOST-specific rules.
-4. Table captions immediately preceding tables are not stranded in the previous chunk when size pressure would otherwise split.
+4. Table captions immediately preceding tables, and one note paragraph immediately following, are not stranded across a size split.
 5. Unit tests cover expand + chunk rules; existing fixtures still pass.
