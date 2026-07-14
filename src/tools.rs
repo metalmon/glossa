@@ -244,6 +244,12 @@ pub fn read(
 ) -> ReadOut {
     #[cfg(feature = "notebook")]
     if looks_like_notebook_path(path) {
+        if page_image {
+            return ReadOut {
+                text: format!("page_image is only supported for PDF (got {path})"),
+                images: Vec::new(),
+            };
+        }
         if let Ok((rel, body)) = crate::notebook::read_note(root, idx, path) {
             trace.log("read", json!({ "notebook": path }), json!({ "notebook": rel }));
             return ReadOut { text: format!("{rel}\n{body}"), images: Vec::new() };
@@ -255,6 +261,12 @@ pub fn read(
     if let Some(g) = graph {
         if let Ok(Some(node)) = g.get_node(path) {
             if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
+                if page_image {
+                    return ReadOut {
+                        text: format!("page_image is only supported for PDF (got {path})"),
+                        images: Vec::new(),
+                    };
+                }
                 trace.log("read", json!({ "node": path }), json!({ "node": path }));
                 return read_node(idx, g, node);
             }
@@ -332,8 +344,8 @@ pub fn read(
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(&doc_path, n, 4).unwrap_or_default();
-    let body = format_chunk_body(n, &chunk.body);
+    let images = crate::read::extract_images(&doc_path, resolved_ord, 4).unwrap_or_default();
+    let body = format_chunk_body(resolved_ord, &chunk.body);
     ReadOut {
         text: format!("{}{}", body, footer),
         images,
@@ -1614,6 +1626,30 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let out = read(d.path(), &i, Some(&g), "sym:test", 1, false, &t).text;
         assert!(out.contains("evidence body"), "reasoning node read: {out}");
+    }
+
+    #[test]
+    fn read_page_image_rejects_reasoning_node_id() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sym:test", "Symptom", "Test")).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            Some(&g),
+            "sym:test",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(
+            out.text,
+            "page_image is only supported for PDF (got sym:test)"
+        );
+        assert!(out.images.is_empty());
     }
 
     #[test]

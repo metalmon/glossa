@@ -28,11 +28,17 @@ impl Extractor for PdfExtractor {
                 }
 
                 let mut out = Vec::with_capacity(page_count as usize);
-                let mut any_text = false;
                 for i in 0..page_count as usize {
-                    let text = doc.extract_text(i).unwrap_or_default();
-                    if !text.trim().is_empty() {
-                        any_text = true;
+                    let mut text = doc.extract_text(i).unwrap_or_default();
+                    if text.trim().is_empty() {
+                        text = doc
+                            .extract_tables(i)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|table| table_to_markdown(&expand_table(table)))
+                            .filter(|markdown| !markdown.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
                     }
                     out.push(Chunk {
                         doc_path: path_buf.clone(),
@@ -40,28 +46,6 @@ impl Extractor for PdfExtractor {
                         file_type: "pdf".into(),
                         text,
                     });
-                }
-
-                // If the text layer is empty on every page, preserve structural tables as markdown.
-                if !any_text {
-                    let mut filled = false;
-                    for i in 0..page_count as usize {
-                        let markdown = doc
-                            .extract_tables(i)
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|table| table_to_markdown(&expand_table(table)))
-                            .filter(|text| !text.trim().is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        if !markdown.trim().is_empty() {
-                            out[i].text = markdown;
-                            filled = true;
-                        }
-                    }
-                    if !filled {
-                        return Vec::new();
-                    }
                 }
 
                 pad_pdf_page_stubs(&mut out, &path_buf, page_count);
@@ -73,8 +57,8 @@ impl Extractor for PdfExtractor {
             return Ok(out);
         }
 
-        // Layer 3: no extractable text (scanned / image-only) or unparseable: NEVER drop the
-        // document — index it by filename so it's findable by name.
+        // Layer 3: only unparseable PDFs (open failure, zero pages, or a caught panic) reach this
+        // filename fallback. Parseable scan-only PDFs keep one empty p.N chunk per physical page.
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -121,6 +105,59 @@ fn pad_pdf_page_stubs(out: &mut Vec<Chunk>, doc_path: &Path, page_count: u32) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn blank_pdf(page_count: usize) -> Vec<u8> {
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {page_count} >>",
+                (0..page_count)
+                    .map(|i| format!("{} 0 R", i + 3))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ];
+        objects.extend((0..page_count).map(|_| {
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <<>> >>"
+                .to_string()
+        }));
+
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn scan_only_pdf_keeps_one_empty_chunk_per_page() {
+        // A parseable scan has physical pages but no text layer. Those page stubs are required
+        // so page_image can address every page; only unparseable PDFs use the filename fallback.
+        let chunks = PdfExtractor
+            .extract(Path::new("three-page-scan.pdf"), &blank_pdf(3))
+            .unwrap();
+
+        assert_eq!(chunks.len(), 3, "expected physical page stubs: {chunks:?}");
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.location, format!("p.{}", i + 1));
+            assert!(chunk.text.is_empty(), "blank page must stay empty: {chunk:?}");
+        }
+    }
 
     #[test]
     fn pad_pdf_page_stubs_fills_gaps() {
