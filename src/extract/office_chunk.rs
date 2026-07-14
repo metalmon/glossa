@@ -63,6 +63,8 @@ pub fn chunk_ir_with_threshold(
                 continue;
             }
 
+            // Soft-split at threshold: glue a caption paragraph onto the following table,
+            // and at most one note paragraph after a table (`glued_note_after_table`).
             if rendered_len >= threshold {
                 let glue_caption_to_table =
                     buf.last().is_some_and(is_nonempty_text_block) && is_table(el);
@@ -323,6 +325,13 @@ mod tests {
         };
         let chunks = chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 20);
         assert!(chunks.len() >= 2, "got {}", chunks.len());
+        for chunk in &chunks {
+            assert!(
+                !chunk.text.contains("\n\n\n"),
+                "kept empty para must not add extra blank lines: {:?}",
+                chunk.text
+            );
+        }
     }
 
     #[test]
@@ -346,7 +355,7 @@ mod tests {
                     text_para("Table 1 — caption"),
                     table,
                     text_para("Note under"),
-                    text_para("after-glue-can-split"),
+                    text_para("second after note"),
                 ],
                 ..Default::default()
             }],
@@ -354,11 +363,30 @@ mod tests {
         };
 
         let chunks = chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 30);
-        assert!(chunks.iter().any(|chunk| {
-            chunk.text.contains("Table 1 — caption")
-                && chunk.text.contains("| 1 |")
-                && chunk.text.contains("Note under")
-        }));
+        assert!(
+            chunks.iter().any(|chunk| {
+                chunk.text.contains("Table 1 — caption")
+                    && chunk.text.contains("| 1 |")
+                    && chunk.text.contains("Note under")
+            }),
+            "expected glued caption+table+note chunk, got {:?}",
+            chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !chunks.iter().any(|chunk| {
+                chunk.text.contains("Note under") && chunk.text.contains("second after note")
+            }),
+            "only one note may glue to the table; second para should split out"
+        );
+        if chunks.len() >= 2 {
+            assert!(
+                chunks.iter().any(|c| c.text.contains("second after note")),
+                "later chunk should carry the post-note paragraph"
+            );
+        }
     }
 
     #[test]
