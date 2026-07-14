@@ -37,7 +37,8 @@ pub struct TablesCompileWiring {
 }
 
 impl TablesCompileWiring {
-    /// Node types emitted by the table compiler — safe to replace per document on recompile.
+    /// Node types the compiler materializes and may replace per document on recompile
+    /// (parameter entity + constraint payloads + literals).
     pub fn compile_layer_node_types(&self, ont: &Ontology) -> Vec<String> {
         use std::collections::BTreeSet;
         let mut types = BTreeSet::new();
@@ -49,6 +50,15 @@ impl TablesCompileWiring {
             types.insert(name.clone());
         }
         types.into_iter().collect()
+    }
+
+    /// Relation names the compiler writes, intersected with what the ontology declares.
+    pub fn compile_layer_edge_types(&self, ont: &Ontology) -> Vec<String> {
+        SUPPORTED_COMPILER_EDGES
+            .iter()
+            .filter(|name| ont.raw_relations().contains_key(**name))
+            .map(|s| (*s).to_string())
+            .collect()
     }
 
     /// Resolve wiring from declared relations. Fails with an actionable message when the
@@ -187,5 +197,20 @@ mod tests {
         assert_eq!(w.literal_entity, "Literal");
         assert_eq!(w.enum_constraint, "Enum");
         assert_eq!(w.conditional_constraint, "Conditional");
+    }
+
+    #[test]
+    fn compile_layer_includes_parameter_and_compiler_edges_not_mentions() {
+        let ont = eval_ontology();
+        let w = TablesCompileWiring::resolve(&ont).unwrap();
+        let nodes = w.compile_layer_node_types(&ont);
+        assert!(
+            nodes.iter().any(|t| t == "Field"),
+            "compiler works with Field: {nodes:?}"
+        );
+        assert!(nodes.iter().any(|t| t == "Enum"));
+        let edges = w.compile_layer_edge_types(&ont);
+        assert!(edges.iter().any(|e| e == "CONSTRAINED_BY"));
+        assert!(!edges.iter().any(|e| e == "MENTIONS"));
     }
 }

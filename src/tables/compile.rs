@@ -109,9 +109,10 @@ pub fn tables_to_graph(
         lines.push(format!("Field «{field_label}» → {shape}"));
     }
 
-    let layer_types = wiring.compile_layer_node_types(ont);
+    let layer_nodes = wiring.compile_layer_node_types(ont);
+    let layer_edges = wiring.compile_layer_edge_types(ont);
     let replaced = g
-        .delete_agent_table_compile_layer(doc, &layer_types)
+        .delete_agent_table_compile_layer(doc, &layer_edges, &layer_nodes)
         .map_err(|e| anyhow::anyhow!("replace prior table-compile layer: {e}"))?;
     if replaced.nodes_removed > 0 || replaced.edges_removed > 0 {
         lines.push(format!(
@@ -410,6 +411,78 @@ mod tests {
                 .any(|c| matches!(c, glossa_constraint::Constraint::Conditional { .. })),
             "expected Conditional for D: {:?}",
             d.constraints
+        );
+    }
+
+    #[test]
+    fn recompile_preserves_field_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "test_doc.pdf";
+        let tables = crate::notebook::notes_root(dir.path()).join(mirror_dir_for_doc(doc));
+        std::fs::create_dir_all(&tables).unwrap();
+        std::fs::write(tables.join("bond.csp"), "Связка\nB\nBF\n").unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: doc.into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "stub".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = eval_ontology();
+        tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
+
+        let field_id = g
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.node_type == "Field" && n.label == "Связка")
+            .expect("compiled Field")
+            .id;
+        let mention_to = format!("{doc}#1");
+        g.put_edge(&crate::graph::store::Edge {
+            from: field_id.clone(),
+            to: mention_to.clone(),
+            edge_type: crate::graph::MENTIONS.into(),
+            prov: crate::graph::store::Provenance {
+                source_path: doc.into(),
+                range: None,
+                file_sig: None,
+                origin: "agent".into(),
+                confidence: 1.0,
+                created_at: 1,
+            },
+        })
+        .unwrap();
+
+        std::fs::write(tables.join("bond.csp"), "Связка\nB\n").unwrap();
+        tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
+
+        let mentions: Vec<_> = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == crate::graph::MENTIONS)
+            .collect();
+        assert!(
+            mentions
+                .iter()
+                .any(|e| e.from == field_id && e.to == mention_to),
+            "MENTIONS must survive recompile; got {:?}",
+            mentions
+        );
+        let problem = crate::constraint_adapter::load_problem(&g, &ont, Some(doc)).unwrap();
+        let bond = problem
+            .fields
+            .iter()
+            .find(|f| f.name == "Связка")
+            .expect("Связка field");
+        assert_eq!(
+            bond.constraints.len(),
+            1,
+            "constraint layer still replaced: {:?}",
+            bond.constraints
         );
     }
 
