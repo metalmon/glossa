@@ -188,7 +188,7 @@ pub fn table_to_markdown(table: &Table) -> String {
         let text = first_row
             .cells
             .get(i)
-            .map(cell_plain)
+            .map(markdown_cell_text)
             .unwrap_or_default();
         result.push(' ');
         result.push_str(&text);
@@ -205,7 +205,7 @@ pub fn table_to_markdown(table: &Table) -> String {
     for row in table.rows.iter().skip(1) {
         result.push('|');
         for i in 0..col_count {
-            let text = row.cells.get(i).map(cell_plain).unwrap_or_default();
+            let text = row.cells.get(i).map(markdown_cell_text).unwrap_or_default();
             result.push(' ');
             result.push_str(&text);
             result.push_str(" |");
@@ -218,6 +218,10 @@ pub fn table_to_markdown(table: &Table) -> String {
     }
 
     result
+}
+
+fn markdown_cell_text(cell: &TableCell) -> String {
+    cell_plain(cell).replace('|', "\\|")
 }
 
 fn cell_plain(cell: &TableCell) -> String {
@@ -272,6 +276,43 @@ fn text_cell(s: &str) -> TableCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use office_oxide::ir::Section;
+
+    #[test]
+    fn expand_merged_tables_on_document_ir() {
+        let table = Table {
+            rows: vec![TableRow {
+                cells: vec![
+                    TableCell {
+                        content: text_cell("A").content,
+                        col_span: 2,
+                        row_span: 1,
+                        ..Default::default()
+                    },
+                    text_cell("B"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![Element::Table(table)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        expand_merged_tables(&mut ir);
+        let Element::Table(expanded) = &ir.sections[0].elements[0] else {
+            panic!("expected table element");
+        };
+        assert_eq!(expanded.rows[0].cells.len(), 3);
+        assert_eq!(cell_plain(&expanded.rows[0].cells[0]), "A");
+        assert_eq!(cell_plain(&expanded.rows[0].cells[1]), "A");
+        assert_eq!(cell_plain(&expanded.rows[0].cells[2]), "B");
+        let md = table_to_markdown(expanded);
+        assert!(md.contains("| A | A |"), "got:\n{md}");
+    }
 
     #[test]
     fn expand_horizontal_span_repeats_value() {
@@ -371,6 +412,19 @@ mod tests {
         assert_eq!(cell_plain(&expanded.rows[1].cells[1]), "M");
         assert_eq!(cell_plain(&expanded.rows[0].cells[2]), "R1");
         assert_eq!(cell_plain(&expanded.rows[1].cells[2]), "R2");
+    }
+
+    #[test]
+    fn table_to_markdown_escapes_pipes_in_cell_text() {
+        let table = Table {
+            rows: vec![TableRow {
+                cells: vec![text_cell("a|b"), text_cell("c")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let md = table_to_markdown(&table);
+        assert!(md.contains("| a\\|b | c |"), "got:\n{md}");
     }
 
     #[test]
