@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-17
+
+### Fixed
+
+- **MCP profiles**: `#[tool_handler]` now uses the instance router so `reader` / `editor` / `full` actually hide write tools from `tools/list` (bare handler was rebuilding a fresh router every call).
+
 ## [1.2.0] — 2026-06-28
 
 ### Added
@@ -36,7 +42,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Initial public release: file-first index, graph, MCP server, BM25 search, grep, glob, read.
 
-[Unreleased]: https://github.com/metalmon/glossa/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/metalmon/glossa/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/metalmon/glossa/compare/v1.2.0...v0.1.1
 [1.2.0]: https://github.com/metalmon/glossa/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/metalmon/glossa/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/metalmon/glossa/releases/tag/v1.0.0

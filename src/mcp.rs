@@ -538,7 +538,9 @@ impl GlossaServer {
     }
 }
 
-#[tool_handler]
+// Must use the instance router — bare `#[tool_handler]` defaults to
+// `Self::tool_router()` (a fresh router), so profile `disable_route` never reaches tools/list.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
