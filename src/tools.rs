@@ -867,6 +867,168 @@ pub fn checklist_coverage_report(
     }
 }
 
+/// Default per-file delivery cap for `get_source_file`, matching ZeroClaw's ACP `deliver_file`
+/// limit (10 MB). Bytes above this degrade to a page slice or a structured error.
+pub const DEFAULT_SOURCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The deliverable source artifact: original bytes (or an extracted PDF page) plus a display name.
+/// Never carries provenance text — that rides on `SourceFileOut::text`.
+pub struct SourceBlob {
+    pub filename: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Result of resolving a citation to its backing file. `text` is the model-facing provenance or
+/// error line (never base64); `file` is the deliverable when resolution succeeded within the cap.
+pub struct SourceFileOut {
+    pub text: String,
+    pub file: Option<SourceBlob>,
+}
+
+/// Document MIME by extension for source delivery. Unlike `read::mime_for` (image types only),
+/// this covers the corpus's document formats; unknown → `application/octet-stream`.
+fn source_mime(name: &str) -> &'static str {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "rtf" => "application/rtf",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Resolve a citation reference to its backing corpus file, for delivery to the client as a
+/// cited source (not for reading its text — that is `read`).
+///
+/// `path` is a document path (as from search/grep) or a structural node id; a *reasoning* node id
+/// is rejected — it backs evidence in possibly several documents, not one file. `n` is the cited
+/// page (1-based, PDF), used for provenance and for the over-cap page slice.
+///
+/// Delivery: the whole file when it is `<= max_bytes`; otherwise, for a page-scoped PDF, the cited
+/// page extracted as its own PDF (text preserved, no rasterization); otherwise a structured error
+/// asking for a specific PDF page. `text` always states what was delivered so the model cites honestly.
+pub fn get_source_file(
+    idx: &DocIndex,
+    graph: Option<&crate::graph::store::GraphStore>,
+    path: &str,
+    n: Option<u64>,
+    max_bytes: u64,
+) -> SourceFileOut {
+    let err = |text: String| SourceFileOut { text, file: None };
+
+    // A reasoning node backs no single source file — steer to a document path/page instead.
+    if let Some(g) = graph {
+        if let Ok(Some(node)) = g.get_node(path) {
+            if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
+                return err(format!(
+                    "{path} is a reasoning node, not a source file — pass the document path (and page) from its `read` anchor instead"
+                ));
+            }
+        }
+    }
+
+    // Resolve to a real indexed document, tolerant of a mangled path (same as `read`).
+    let real = match idx.read_chunk_by_ord(path, 1) {
+        Ok(Some(_)) => path.to_string(),
+        _ => match idx.canonical_document_path(path) {
+            Some(r) => r,
+            None => return err(path_not_found(idx, path)),
+        },
+    };
+
+    let doc_path = idx.doc_file(&real);
+    let bytes = match std::fs::read(&doc_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(format!(
+                "source file for {real} is not readable on disk ({e}) — the index has it but the file may have moved"
+            ))
+        }
+    };
+    let name = real.rsplit(['\\', '/']).next().unwrap_or(&real).to_string();
+    let ext = std::path::Path::new(&real)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let size = bytes.len() as u64;
+    let page_note = n.map(|p| format!(" (cited page {p})")).unwrap_or_default();
+
+    // Whole file when it fits.
+    if size <= max_bytes {
+        return SourceFileOut {
+            text: format!("delivered whole file: {real}{page_note}"),
+            file: Some(SourceBlob { mime: source_mime(&name).to_string(), filename: name, bytes }),
+        };
+    }
+
+    // Over cap: a page-scoped PDF degrades to the cited page as its own PDF (text preserved).
+    if ext == "pdf" {
+        let Some(page) = n else {
+            return err(format!(
+                "{real} is {size} bytes, over the {max_bytes}-byte cap — pass the cited page `n` to deliver just that page as a PDF"
+            ));
+        };
+        return match slice_pdf_page(&doc_path, page) {
+            Ok(sliced) if (sliced.len() as u64) <= max_bytes => {
+                let stem = name.strip_suffix(".pdf").unwrap_or(&name);
+                SourceFileOut {
+                    text: format!(
+                        "delivered page {page} of {real} as a PDF (original {size} bytes exceeds the {max_bytes}-byte cap)"
+                    ),
+                    file: Some(SourceBlob {
+                        filename: format!("{stem}-p{page}.pdf"),
+                        mime: "application/pdf".to_string(),
+                        bytes: sliced,
+                    }),
+                }
+            }
+            Ok(sliced) => err(format!(
+                "page {page} of {real} is still {} bytes, over the {max_bytes}-byte cap — cite a lighter page",
+                sliced.len()
+            )),
+            Err(e) => err(format!("could not extract page {page} of {real}: {e}")),
+        };
+    }
+
+    err(format!(
+        "{real} is {size} bytes, over the {max_bytes}-byte cap, and is not a PDF — cite a specific PDF page for a lighter extract"
+    ))
+}
+
+/// Extract 1-based PDF page `page` into its own single-page PDF (bytes). Text and vector content
+/// are preserved (no rasterization). Errors if the page is out of range or the PDF can't be edited.
+fn slice_pdf_page(doc_path: &std::path::Path, page: u64) -> anyhow::Result<Vec<u8>> {
+    let mut ed = pdf_oxide::editor::DocumentEditor::open(doc_path)
+        .map_err(|e| anyhow::anyhow!("open PDF: {e}"))?;
+    let count = ed.current_page_count();
+    let idx0 = page.saturating_sub(1) as usize;
+    if idx0 >= count {
+        anyhow::bail!("page {page} out of range (document has {count} pages)");
+    }
+    ed.extract_pages_to_bytes(&[idx0])
+        .map_err(|e| anyhow::anyhow!("extract page: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +1048,96 @@ mod tests {
         }])
         .unwrap();
         (d, i)
+    }
+
+    fn pdf_corpus() -> (tempfile::TempDir, DocIndex) {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        (d, i)
+    }
+
+    #[test]
+    fn get_source_file_delivers_whole_pdf_under_cap() {
+        let (_d, i) = pdf_corpus();
+        let out = get_source_file(&i, None, "sample.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES);
+        let f = out.file.expect("file delivered");
+        assert_eq!(f.filename, "sample.pdf");
+        assert_eq!(f.mime, "application/pdf");
+        assert!(f.bytes.starts_with(b"%PDF"));
+        assert!(out.text.contains("whole file"));
+    }
+
+    #[test]
+    fn slice_pdf_page_yields_a_valid_pdf() {
+        let d = tempfile::tempdir().unwrap();
+        let pdf = d.path().join("sample.pdf");
+        std::fs::write(&pdf, include_bytes!("../tests/fixtures/sample.pdf")).unwrap();
+        // The core runtime check: pdf_oxide extracts page 1 into its own real PDF (text preserved).
+        let bytes = slice_pdf_page(&pdf, 1).expect("extract page 1");
+        assert!(bytes.starts_with(b"%PDF"));
+        assert!(bytes.len() > 100);
+        // Out-of-range page is an error, not a panic.
+        assert!(slice_pdf_page(&pdf, 9999).is_err());
+    }
+
+    #[test]
+    fn get_source_file_over_cap_pdf_delivers_page_slice() {
+        let (d, i) = pdf_corpus();
+        let pdf = d.path().join("sample.pdf");
+        let whole = std::fs::read(&pdf).unwrap().len() as u64;
+        let slice_len = slice_pdf_page(&pdf, 1).unwrap().len() as u64;
+        // Only assert the slice-delivery branch when the fixture allows it (a single page smaller
+        // than the whole file); the slicer itself is covered above regardless.
+        if slice_len < whole {
+            let out = get_source_file(&i, None, "sample.pdf", Some(1), slice_len);
+            let f = out.file.expect("page slice delivered");
+            assert_eq!(f.mime, "application/pdf");
+            assert!(f.filename.ends_with("-p1.pdf"));
+            assert!(f.bytes.starts_with(b"%PDF"));
+            assert!(out.text.contains("page 1"));
+        }
+    }
+
+    #[test]
+    fn get_source_file_cap_below_page_size_errs_not_panics() {
+        let (_d, i) = pdf_corpus();
+        // A cap smaller than even one extracted page → structured error, no file (never a panic).
+        let out = get_source_file(&i, None, "sample.pdf", Some(1), 10);
+        assert!(out.file.is_none());
+        assert!(out.text.contains("cap"));
+    }
+
+    #[test]
+    fn get_source_file_over_cap_pdf_without_page_asks_for_one() {
+        let (_d, i) = pdf_corpus();
+        let out = get_source_file(&i, None, "sample.pdf", None, 10);
+        assert!(out.file.is_none());
+        assert!(out.text.contains("cited page"));
+    }
+
+    #[test]
+    fn get_source_file_over_cap_non_pdf_errs() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("notes.md"), "# Title\n\nplenty of text here\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let out = get_source_file(&i, None, "notes.md", Some(1), 4);
+        assert!(out.file.is_none());
+        assert!(out.text.contains("not a PDF"));
+    }
+
+    #[test]
+    fn get_source_file_unknown_path_errs() {
+        let (_d, i) = pdf_corpus();
+        let out = get_source_file(&i, None, "nope.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES);
+        assert!(out.file.is_none());
+        assert!(out.text.contains("no document indexed"));
     }
 
     #[test]

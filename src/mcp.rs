@@ -4,7 +4,9 @@ use crate::index::store::index_dir;
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ProtocolVersion, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, Content, ProtocolVersion, ResourceContents, ServerCapabilities, ServerInfo,
+};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -336,6 +338,22 @@ struct ReadArgs {
         description = "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text."
     )]
     page_image: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SourceFileArgs {
+    #[schemars(description = "document path, exactly as shown in a search/grep result")]
+    path: String,
+    #[serde(default)]
+    #[schemars(
+        description = "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page"
+    )]
+    n: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "maximum delivered size in bytes (default 10 MB, matching the ACP client cap)"
+    )]
+    max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -675,6 +693,29 @@ impl GlossaServer {
                     content.push(Content::image(b64, img.mime));
                 }
             }
+        }
+        Ok(CallToolResult::success(content))
+    }
+
+    #[tool(
+        description = "Deliver the ORIGINAL source file behind a citation to the user for source attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a search/grep result and, for a PDF, the cited page `n`. Returns the file as an embedded resource the client can preview or download, plus a one-line note of what was delivered. A large PDF is delivered as just the cited page (still a real, text-bearing PDF); an oversize non-PDF, or an oversize ref with no page, returns guidance to cite a specific PDF page. Read-only; available in every profile."
+    )]
+    async fn get_source_file(
+        &self,
+        Parameters(a): Parameters<SourceFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.kick_freshen();
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.root).ok();
+        let max = a.max_bytes.unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
+        let out =
+            crate::tools::get_source_file(&idx, g.as_ref(), &a.path, a.n.map(u64::from), max);
+        let mut content = vec![Content::text(out.text)];
+        if let Some(f) = out.file {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&f.bytes);
+            content.push(Content::resource(
+                ResourceContents::blob(b64, f.filename).with_mime_type(f.mime),
+            ));
         }
         Ok(CallToolResult::success(content))
     }
