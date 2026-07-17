@@ -301,6 +301,10 @@ fn run_optimize(
     tags.insert("run".into(), run_label.clone().into());
     tags.insert("budget".into(), budget.to_string().into());
     tags.insert("minibatch".into(), minibatch.to_string().into());
+    tags.insert("w_search".into(), w_search.to_string().into());
+    tags.insert("w_grep".into(), w_grep.to_string().into());
+    tags.insert("w_glob".into(), w_glob.to_string().into());
+    tags.insert("w_read".into(), w_read.to_string().into());
     for t in &tag {
         if let Some((k, v)) = t.split_once('=') {
             tags.insert(k.to_string(), v.into());

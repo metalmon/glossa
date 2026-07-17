@@ -257,7 +257,17 @@ Seed: `gepa-out/answer_hotpot.prompt.txt` if present, else prod `system.minijinj
 | **glob** | `glob(pattern)` | gold path in listing |
 | **read** | `read(path,n)` after prefilled hits | pick matches gold |
 
-Combined: weighted average (`gepa_combined_acc`). Acceptance: minibatch improve → pool; **final pick** re-scores all candidates on **full val**.
+Combined: weighted macro-average of per-task val accuracies (`gepa_combined_acc` = `w_search·search + w_grep·grep + w_glob·glob + w_read·read`, normalized). Acceptance: minibatch improve → pool; **final pick** re-scores all candidates on **full val**.
+
+**Reading `just gepa-metrics`:**
+
+| Column | Meaning |
+|--------|---------|
+| `search` / `grep` / `glob` / `read` | Absolute macro-accuracy per micro-task on **full val** (not weighted). |
+| `final` / `baseline` | Weighted combined using the run's `w_*` tags (stored from v1.2.1+; older runs: infer weights or compare per-task only). |
+| `iter_avg` | Mean of `gepa_iter_combined` — **D_pareto subset**, not full val; can exceed `final` and must not be compared to per-task columns. |
+
+Recompute combined from per-task: `(w_search·search + w_grep·grep + w_glob·glob + w_read·read) / (w_search + w_grep + w_glob + w_read)` using weights from TZ tags (`w_search`, …) or the `just gepa` recipe defaults.
 
 ### Production checklist
 

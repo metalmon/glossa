@@ -4,6 +4,8 @@ Status as of **2026-07-02**. Version **1.2.0** (tag `v1.2.0`; `master` may be on
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
+For the reasoning graph’s inference-method direction (abduction / deduction / induction and beyond), see [graph-reasoning-directions.md](graph-reasoning-directions.md).
+
 Legend used below: **Shipped** = in a release today; **Partial** = exists but incomplete vs the goal; **Open** = not built.
 
 ---
@@ -80,7 +82,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Support ontology overlay | **Shipped** | [eval/ontology-support.toml](../eval/ontology-support.toml) — Symptom/Cause/Task spine, strict mode |
 | Crash atomicity per file | **Open** | Chunk graph writes autocommit; no one-txn-per-file |
 | Glossary `--expand` | **Open** | Term/co-occurrence layer not built; `CO_OCCURS` declared, no lexical indexer |
-| Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents |
+| Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents; see [graph-reasoning-directions.md](graph-reasoning-directions.md) |
 | Tailored ontology error messages | **Open** | e.g. explain Task → CAUSED_BY → Cause is invalid |
 
 ### Constraint graph (CSP)

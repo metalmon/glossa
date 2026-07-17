@@ -1527,6 +1527,23 @@ fn post_final_feedback(
     n_train: usize,
     n_val: usize,
 ) {
+    let recalc = weighted_quad_acc(
+        result.search_acc,
+        result.grep_acc,
+        result.glob_acc,
+        result.read_acc,
+        cfg.w_search,
+        cfg.w_grep,
+        cfg.w_glob,
+        cfg.w_read,
+        0.0,
+    );
+    if (recalc - result.best_acc).abs() > 1e-5 {
+        eprintln!(
+            "gepa warn: final combined {:.6} != macro {:.6} from per-task (w_search={} w_grep={} w_glob={} w_read={})",
+            result.best_acc, recalc, cfg.w_search, cfg.w_grep, cfg.w_glob, cfg.w_read,
+        );
+    }
     let ep = &result.episode_id;
     let tags = feedback_tags(cfg, "final");
     post_gepa_metrics(
@@ -1962,6 +1979,7 @@ pub fn run(
             l_val: child_l_bools,
             r_val: child_r_bools,
         });
+        // Iter metrics use D_pareto cached bools (best_pool_combined), not full-val rescoring.
         let (s, g, l, r, combined) = best_pool_combined(&pool, &cfg);
         post_iter_feedback(&cfg, it, s, g, l, r, combined, pool.len());
     }

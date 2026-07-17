@@ -17,6 +17,7 @@ User-facing documentation for the glossa knowledge-base engine.
 | [deploy/service.md](deploy/service.md) | Ops | Service install (Linux / Windows / macOS) |
 | [deploy/mcp-server.md](deploy/mcp-server.md) | DevOps | Advanced HTTP deployment, multi-instance |
 | [ROADMAP.md](ROADMAP.md) | Contributors | Backlog and product direction |
+| [graph-reasoning-directions.md](graph-reasoning-directions.md) | Contributors | Reasoning-graph direction: Peirce triad, planned inference modes |
 | [benchmarks.md](benchmarks.md) | Researchers | Append-only eval run log |
 
 ## Deploy automation
