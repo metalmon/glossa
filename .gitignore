@@ -27,6 +27,11 @@ eval/tensorzero/.env
 /wiki-corpus/
 /eval-data/*.tar.bz2
 
+# Local-only eval assets (corpus-specific SOPs — never commit)
+eval/sops/gost-*/
+new-episode.txt
+*.rtf.orig
+
 # Local debug logs and scratch (never commit)
 *.log
 episode_*.txt
