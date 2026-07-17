@@ -184,7 +184,7 @@ pub fn coverage_examples_from_materialize(examples: &[MaterializeExample]) -> Ve
         .iter()
         .map(|ex| {
             let graph_stats_report = format!(
-                "owned({}): 1 nodes\nprm:{}  [Param]  {} → {}#1\n",
+                "owned({}): 1 nodes\nprm:{}  [Param]  {}\n  MENTIONS → {}#1\n",
                 ex.doc, ex.parameter, ex.parameter, ex.doc,
             );
             CoverageExample {

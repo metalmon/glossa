@@ -206,6 +206,19 @@ fn did_you_mean(g: &GraphStore, reference: &str) -> String {
     }
 }
 
+/// Resolve an edge endpoint for delete: reasoning node id/label, or a section ref
+/// (`path#n` / `path#location`) stored as a raw edge endpoint (MENTIONS targets).
+fn resolve_delete_endpoint(g: &GraphStore, reference: &str) -> anyhow::Result<Option<String>> {
+    let ids = resolve_node_ref(g, reference)?;
+    if let Some(id) = ids.into_iter().next() {
+        return Ok(Some(id));
+    }
+    if reference.contains('#') {
+        return Ok(Some(reference.to_string()));
+    }
+    Ok(None)
+}
+
 pub fn apply_delete(
     g: &GraphStore,
     node_refs: Vec<String>,
@@ -228,13 +241,13 @@ pub fn apply_delete(
         }
     }
 
-    // Delete individual edges by (id-or-label) endpoint pairs; note ones that matched no edge/node.
+    // Delete individual edges by (id-or-label / section-ref) endpoint pairs.
     for er in &edges {
-        let from = resolve_node_ref(g, &er.from)?.into_iter().next();
-        let to = resolve_node_ref(g, &er.to)?.into_iter().next();
-        match (from, to) {
+        let from = resolve_delete_endpoint(g, &er.from)?;
+        let to = resolve_delete_endpoint(g, &er.to)?;
+        match (&from, &to) {
             (Some(f), Some(t)) => {
-                let n = g.delete_edge(&f, &er.edge_type, &t)?;
+                let n = g.delete_edge(f, &er.edge_type, t)?;
                 total += n;
                 if n == 0 {
                     notes.push(format!(
@@ -243,10 +256,19 @@ pub fn apply_delete(
                     ));
                 }
             }
-            _ => notes.push(format!(
-                "edge {} -{}-> {}: an endpoint matched no node",
-                er.from, er.edge_type, er.to
-            )),
+            _ => {
+                let mut hint = String::new();
+                if from.is_none() {
+                    hint.push_str(&did_you_mean(g, &er.from));
+                }
+                if to.is_none() {
+                    hint.push_str(&did_you_mean(g, &er.to));
+                }
+                notes.push(format!(
+                    "edge {} -{}-> {}: an endpoint matched no node{hint}",
+                    er.from, er.edge_type, er.to
+                ));
+            }
         }
     }
 

@@ -399,7 +399,7 @@ description = "Recompute the graph's DERIVED layer from what is currently stored
 parameters = "tools/graph_generalize.json"
 
 [tools.graph_stats]
-description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to list that document's owned non-structural nodes (`source_path` scope only) with outgoing MENTIONS targets. Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
+description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to list that document's owned non-structural nodes (`source_path` scope only) with all outgoing edges. Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
 parameters = "tools/graph_stats.json"
 
 [tools.graph_update]
@@ -461,7 +461,9 @@ parameters = "tools/done.json"
 # kb-eval-constraint compiles the tables to a graph after the episode.
 [functions.constraint_validate]
 type = "chat"
-tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "done"]
+# No index/reindex: eval seeds a per-run .glossa copy without corpus files; indexing
+# that dir would wipe the copied tantivy index (manifest → 0 files).
+tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "ls", "neighbors", "note", "read", "resolve", "search"]
 parallel_tool_calls = true
 
 # Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)

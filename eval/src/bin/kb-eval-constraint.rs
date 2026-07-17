@@ -368,8 +368,9 @@ fn exec_notebook(
             args.get("doc").and_then(|v| v.as_str()).unwrap_or(""),
             args.get("file").and_then(|v| v.as_str()).unwrap_or(""),
             args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+            // Models often pass `"append": "true"` (string); bare as_bool() → None → overwrite.
             args.get("append")
-                .and_then(|v| v.as_bool())
+                .and_then(glossa::json_util::as_bool)
                 .unwrap_or(false),
         ),
         "ls" => glossa::tools::ls_notes(agent_g_dir, idx, args.get("doc").and_then(|v| v.as_str())),
@@ -516,15 +517,21 @@ fn default_eval_sop_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints")
 }
 
-/// The tool executor for an agent episode. Index AND graph open the SAME store
-/// (`agent_g_dir`, a per-run copy of the indexed KB) — as in prod and the glossa
-/// kb-train eval — so the document's Section nodes are present and a MENTIONS edge
-/// resolves to a real section, not a fabricated node.
+/// Tool executor for an agent episode.
+///
+/// - **Corpus index** (`search`/`read`/`grep`/…) opens the real KB (`corpus_dir`) —
+///   source files live there.
+/// - **Graph + notebook** open the per-run store (`agent_g_dir`, a seeded `.glossa`
+///   copy) so mutations stay isolated.
+///
+/// `index`/`reindex` are refused: indexing `agent_g_dir` (no corpus files) would
+/// wipe the seeded tantivy index.
 fn make_exec(
     agent_g_dir: std::path::PathBuf,
+    corpus_dir: std::path::PathBuf,
     src_doc: String,
 ) -> impl Fn(&str, &Value) -> (String, Vec<String>, Vec<glossa::read::DocImage>) + Sync {
-    let idx_kb = DocIndex::open_or_create(&agent_g_dir).expect("open agent store index");
+    let idx_kb = DocIndex::open_or_create(&corpus_dir).expect("open corpus index");
     let spec_kb = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&agent_g_dir));
     let trace_kb = TraceLog::disabled();
     move |name: &str, args: &Value| {
@@ -549,13 +556,9 @@ fn make_exec(
                 vec![],
             ),
             "index" | "reindex" => (
-                match glossa::index::store::index_dir(&agent_g_dir, name == "reindex") {
-                    Ok(s) => format!(
-                        "indexed: {} added, {} removed, {} unchanged",
-                        s.added, s.removed, s.unchanged
-                    ),
-                    Err(e) => format!("index error: {e}"),
-                },
+                "index/reindex are disabled in constraint eval — the corpus is \
+                 already indexed in the KB; do not reindex the agent workspace."
+                    .into(),
                 vec![],
                 vec![],
             ),
@@ -581,7 +584,7 @@ fn make_exec(
             "graph_stats" => {
                 // Same contract as prod MCP (see mcp.rs): an arg naming a DOCUMENT —
                 // under `doc` OR `node`, resolved leniently — routes to that document's
-                // owned-node inventory (+ MENTIONS targets to `read`). A real
+                // owned-node inventory (all outgoing edges). A real
                 // node id gets node-inspection; nothing → the plain summary.
                 let doc = args
                     .get("doc")
@@ -653,23 +656,7 @@ fn make_exec(
     }
 }
 
-/// The agent's step-output contract (the zeroclaw shape: the engine reads the
-/// payload the AGENT produced — the driver adds no numbers of its own): the
-/// episode's final answer must contain `"remaining": N`. The LAST occurrence
-/// wins (the final self-check overrides earlier narration). None when the agent
-/// failed to report — the SOP condition then fail-closes and the loop ends.
-fn parse_reported_remaining(answer: &str) -> Option<usize> {
-    let pos = answer.rfind("remaining")?;
-    let digits: String = answer[pos..]
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
-}
-
-/// Per-step subagent round budget: each SOP step runs at most this many LLM turns before its
-/// episode is cut and the driver advances to the next step.
+/// Round budget per SOP step (used to size the continuous-conversation cap).
 const SOP_MAX_LLM_ROUNDS_PER_STEP: usize = 75;
 
 /// TensorZero may assign a different episode id on the first `/inference` response than
@@ -683,25 +670,20 @@ fn episode_id_for_report(fallback: &str, outcome: Option<&EpisodeOutcome>) -> St
 }
 
 
-/// SOP-driven discovery, run exactly as it will run under zeroclaw: ONE
-/// continuous agent conversation. The agent does a step's work with the tools,
-/// then calls `sop_advance(status, output)` to finish it and receive the next
-/// step's context — the engine routes on the agent's `output` payload
-/// (`{"remaining": N}`), never on driver-computed numbers. `sop_advance` is
-/// provided as a dynamic tool via `additional_tools`, mirroring the tool
-/// zeroclaw's runtime injects; the same SOP.md therefore deploys unchanged.
+/// SOP-driven discovery as ONE continuous agent conversation (context kept across
+/// steps). The agent finishes a step with `sop_advance(status, output)` and receives
+/// the next step's context in the tool result; the final step ends with a text-only
+/// reply (no tools). `sop_advance` / `get_task` / `delegate` are injected via
+/// `additional_tools`, mirroring zeroclaw. Fan-out `delegate` still spawns nested
+/// subagent episodes that end with their own text reply.
 ///
-/// The driver adds NO steering: it does not pick the target parameter, inject
-/// hints, or compute the gate. It only routes the agent's report through the
-/// vendored engine and surfaces the next step. Graph truth is logged next to the
-/// agent's report purely as an observability signal (a gap is a quality metric).
-///
-/// Eval-only guardrails (not in prod zeroclaw): per-step LLM round cap, progress
-/// logging, step-2 stuck detection (3× same `remaining`), and a lower visit limit.
+/// Eval-only: total LLM round cap (`steps × SOP_MAX_LLM_ROUNDS_PER_STEP`), progress
+/// logging, worker-cap on `delegate`.
 #[allow(clippy::too_many_arguments)]
 fn run_sop_conversation(
     sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
+    corpus_dir: &std::path::Path,
     src_doc: &str,
     _kb_docs_list: &str,
     gateway: &str,
@@ -711,11 +693,13 @@ fn run_sop_conversation(
 ) -> Result<EpisodeOutcome> {
     use kb_eval::sop;
     use sop::types::{SopRunStatus, SopStepResult, SopStepStatus};
+    use std::sync::atomic::Ordering::Relaxed;
+
     let sop_def = sop::load_sop(sop_dir, sop::types::SopExecutionMode::Auto)
         .with_context(|| format!("load SOP from {}", sop_dir.display()))?;
     let n_steps = sop_def.steps.len();
     eprintln!(
-        "[sop] loaded '{}' ({} steps, per-step subagents) from {}",
+        "[sop] loaded '{}' ({} steps, continuous agent) from {}",
         sop_def.name,
         n_steps,
         sop_dir.display()
@@ -723,44 +707,136 @@ fn run_sop_conversation(
 
     let get_task_tool = sop::prompt::load_get_task_tool(sop_dir)?;
     let sop_advance_tool = sop::prompt::load_sop_advance_tool(sop_dir)?;
-    let delegate_tool = sop::prompt::load_delegate_tool(sop_dir)?;
-    // `get_task_tool`/`delegate_tool` stay in scope for the fan-out orchestrator's tool set below.
-    let eval_tools = [get_task_tool.clone(), sop_advance_tool];
+    // Fan-out only when the SOP body has an orchestrator role (multi-agent).
+    let fanout_step = sop_def
+        .steps
+        .iter()
+        .find(|s| s.body.contains("{# ORCHESTRATOR #}"));
+    let build_step = fanout_step.map(|s| s.number);
+    let fanout_body = fanout_step.map(|s| s.body.clone()).unwrap_or_default();
+    let delegate_tool = if build_step.is_some() {
+        Some(sop::prompt::load_delegate_tool(sop_dir)?)
+    } else {
+        None
+    };
 
     let llm_rounds_step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let llm_rounds_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    // Shared SOP run state, mutated by the sop_advance handler inside the (Sync) exec.
     let run = std::sync::Arc::new(std::sync::Mutex::new(sop::driver::minimal_run(&sop_def)));
 
-    let normal_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
+    let spawn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let normal_exec = make_exec(
+        agent_g_dir.to_path_buf(),
+        corpus_dir.to_path_buf(),
+        src_doc.to_string(),
+    );
     let llm_rounds_step_exec = std::sync::Arc::clone(&llm_rounds_step);
 
     let exec = {
         let run = std::sync::Arc::clone(&run);
+        let sop_def = sop_def.clone();
+        let sopd = sop_dir.to_path_buf();
+        let agent_dir = agent_g_dir.to_path_buf();
+        let corpus = corpus_dir.to_path_buf();
+        let doc = src_doc.to_string();
+        let gw = gateway.to_string();
+        let tags = tags.clone();
+        let variant_s = variant.map(|s| s.to_string());
+        let fanout_body = fanout_body.clone();
+        let count = std::sync::Arc::clone(&spawn_count);
+        let n_steps_exec = n_steps;
         move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+            if name == "delegate" {
+                let Some(build_step) = build_step else {
+                    return (
+                        "this SOP has no subagents; `delegate` is not available".into(),
+                        vec![],
+                        vec![],
+                    );
+                };
+                let cur = run.lock().unwrap().current_step;
+                if cur != build_step {
+                    return (
+                        format!(
+                            "delegate is only available on the build step (step {build_step}); current step is {cur}"
+                        ),
+                        vec![],
+                        vec![],
+                    );
+                }
+                let n = count.fetch_add(1, Relaxed) + 1;
+                if let Some(msg) = spawn_capped(n, WORKER_CAP_PER_STEP) {
+                    return (msg.to_string(), vec![], vec![]);
+                }
+                let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("worker");
+                let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                let prompt = sop::fanout::format_agent_prompt(&fanout_body, agent, task);
+                let answer = run_subagent(
+                    &sopd,
+                    &agent_dir,
+                    &corpus,
+                    &doc,
+                    &gw,
+                    &tags,
+                    variant_s.as_deref(),
+                    timeout,
+                    &prompt,
+                );
+                return (answer, vec![], vec![]);
+            }
             if name != "sop_advance" {
                 return normal_exec(name, args);
             }
-            // Intra-step progress signal (e.g. Materialize's table-by-table loop). It does NOT
-            // change the step — step transitions happen on `done` (driver loop below). Reset the
-            // per-step round counter so a step that keeps making progress isn't cut by the cap.
-            llm_rounds_step_exec.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            {
+                let cur = run.lock().unwrap().current_step;
+                if cur as usize >= n_steps_exec {
+                    return (
+                        "already on the final step; reply with text only (no tools), do not call `sop_advance`"
+                            .into(),
+                        vec![],
+                        vec![],
+                    );
+                }
+            }
+
+            llm_rounds_step_exec.store(0, Relaxed);
+            let status = args.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
             let output = args
                 .get("output")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}")
                 .to_string();
-            let reported = parse_reported_remaining(&output)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "?".into());
-            let cur = run.lock().unwrap().current_step;
-            eprintln!("  [sop] step {cur} progress → agent reports {reported} remaining");
-            let msg = format!(
-                "Progress recorded ({reported} remaining for this step). Keep working on this \
-                 step; when it is fully complete, call `done` to finish the step and move on."
-            );
-            (msg, vec![], vec![])
+            let step_status = if status.eq_ignore_ascii_case("failed") {
+                SopStepStatus::Failed
+            } else {
+                SopStepStatus::Completed
+            };
+
+            let mut run = run.lock().unwrap();
+            let cur = run.current_step;
+            run.step_results.push(SopStepResult {
+                step_number: cur,
+                status: step_status,
+                output: output.clone(),
+                started_at: String::new(),
+                completed_at: None,
+            });
+            eprintln!("  [sop] step {cur} advanced via sop_advance (status={status})");
+
+            let next = cur + 1;
+            if let Some(step) = sop_def.steps.iter().find(|s| s.number == next) {
+                run.current_step = next;
+                let reply = sop::prompt::format_sop_advance_reply(&sop_def, &run, step);
+                return (reply, vec![], vec![]);
+            }
+            run.status = SopRunStatus::Completed;
+            (
+                "All SOP steps are complete. Finish with a short text reply (no tool calls)."
+                    .into(),
+                vec![],
+                vec![],
+            )
         }
     };
 
@@ -769,14 +845,30 @@ fn run_sop_conversation(
     let run_log = std::sync::Arc::clone(&run);
     let llm_rounds_step_chat = std::sync::Arc::clone(&llm_rounds_step);
     let llm_rounds_total_chat = std::sync::Arc::clone(&llm_rounds_total);
+    let n_steps_chat = n_steps;
     let mut chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
-        let since_step =
-            llm_rounds_step_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let total = llm_rounds_total_chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let since_step = llm_rounds_step_chat.fetch_add(1, Relaxed) + 1;
+        let total = llm_rounds_total_chat.fetch_add(1, Relaxed) + 1;
         if total.is_multiple_of(10) {
             let step = run_log.lock().unwrap().current_step;
             eprintln!("  [sop] LLM round {total} step {step} ({since_step} in step)");
         }
+        // Inject only the control tools that belong to the current step.
+        let step_tools = {
+            let r = run_log.lock().unwrap();
+            let mut tools = vec![get_task_tool.clone()];
+            if r.status != SopRunStatus::Completed {
+                if let (Some(bs), Some(dt)) = (build_step, delegate_tool.as_ref()) {
+                    if r.current_step == bs {
+                        tools.push(dt.clone());
+                    }
+                }
+                if (r.current_step as usize) < n_steps_chat {
+                    tools.push(sop_advance_tool.clone());
+                }
+            }
+            tools
+        };
         let e = ep.unwrap_or(&eid);
         let turn = kb_eval::tz::infer(
             gateway,
@@ -787,7 +879,7 @@ fn run_sop_conversation(
             timeout,
             variant,
             None,
-            Some(&eval_tools),
+            Some(&step_tools),
         )?;
         Ok(TzTurn {
             content: turn.content,
@@ -795,173 +887,102 @@ fn run_sop_conversation(
         })
     };
 
-    // Each SOP step runs as its OWN subagent (a fresh conversation): the step does its work
-    // and calls `done`, which finishes that subagent and advances the driver to the next step —
-    // a brand-new conversation seeded only with that step's context (its SOP body). This mirrors
-    // how the SOP deploys in prod (one agent per step) and keeps a step from being polluted by
-    // the whole run's accumulated history. `sop_advance` is an intra-step progress signal
-    // (Materialize's loop), NOT a transition. One episode_id throughout so feedback/scoring stay
-    // unified. Dedup OFF: the current dedup key is not path-aware across the unified
-    // read/grep-over-notebook surface, so it would wrongly collapse distinct reads/greps
-    // against different notebook paths. Re-enable once dedup is made path-aware.
+    // Text-only turn ends the episode (no `done` tool). Gate rejects early text
+    // until the agent is on the final SOP step (or already advanced past it).
     let policy = EpisodePolicy {
-        stop_on_done: true,
+        stop_on_done: false,
         dedup_readonly: false,
     };
-    let mut total_rounds = 0usize;
-    let mut total_deduped = 0usize;
-    let mut episode_id = Some(eid_ret);
-    let mut sop_done = false;
-    // Linear advance increments the step each iteration; the bound is a backstop only.
-    for _ in 0..(sop_def.steps.len() + 2) {
-        let cur = run.lock().unwrap().current_step;
-        let step = match sop_def.steps.iter().find(|s| s.number == cur) {
-            Some(s) => s.clone(),
-            None => {
-                sop_done = true;
-                break;
+
+    let first_step = sop_def
+        .steps
+        .iter()
+        .find(|s| s.number == run.lock().unwrap().current_step)
+        .cloned()
+        .context("SOP has no step matching current_step")?;
+    let initial_prompt = {
+        let run_guard = run.lock().unwrap();
+        if first_step.body.contains("{# ORCHESTRATOR #}") {
+            let mut ctx = format!(
+                "[SOP: {} (run {}) — Step {} of {}]\n\n",
+                sop_def.name, run_guard.run_id, first_step.number, run_guard.total_steps
+            );
+            ctx.push_str(&sop::fanout::format_orchestrator_prompt(&first_step.body));
+            if !first_step.suggested_tools.is_empty() {
+                ctx.push_str(&format!(
+                    "\nSuggested tools: {}\n",
+                    first_step.suggested_tools.join(", ")
+                ));
             }
-        };
-        llm_rounds_step.store(0, std::sync::atomic::Ordering::Relaxed);
-        // Fan-out step: an orchestrator agent decomposes the step and `spawn`s worker
-        // sub-episodes (one focused table each). Detected by the ORCHESTRATOR role marker.
-        let outcome = if step.body.contains("{# ORCHESTRATOR #}") {
-            use std::sync::atomic::Ordering::Relaxed;
-            let orch_prompt = sop::fanout::format_orchestrator_prompt(&step.body);
-            // Orchestrator tool set: get_task (read the source) + delegate (run subagents).
-            let orch_tools = [get_task_tool.clone(), delegate_tool.clone()];
-            let orch_eid = kb_eval::tz::backdated_episode_id(30);
-            let orch_chat = {
-                let gw = gateway.to_string();
-                let tags = tags.clone();
-                let variant_s = variant.map(|s| s.to_string());
-                let rounds_step = std::sync::Arc::clone(&llm_rounds_step);
-                let rounds_total = std::sync::Arc::clone(&llm_rounds_total);
-                let run_log = std::sync::Arc::clone(&run);
-                move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
-                    let since_step = rounds_step.fetch_add(1, Relaxed) + 1;
-                    let total = rounds_total.fetch_add(1, Relaxed) + 1;
-                    if total.is_multiple_of(10) {
-                        let s = run_log.lock().unwrap().current_step;
-                        eprintln!("  [sop] LLM round {total} step {s} ({since_step} in step, orch)");
-                    }
-                    let e = ep.unwrap_or(&orch_eid);
-                    let turn = kb_eval::tz::infer(
-                        &gw,
-                        "constraint_validate",
-                        e,
-                        messages,
-                        &tags,
-                        timeout,
-                        variant_s.as_deref(),
-                        None,
-                        Some(&orch_tools),
-                    )?;
-                    Ok(TzTurn {
-                        content: turn.content,
-                        episode_id: turn.episode_id,
-                    })
-                }
-            };
-            // Delegate-intercepting exec: `delegate` runs a nested subagent episode (via
-            // run_subagent) and returns ITS OWN answer; every other tool falls through to the
-            // normal dispatch. A per-step counter (Arc<AtomicUsize>, since exec is Fn + Sync)
-            // backstops runaway fan-out at WORKER_CAP_PER_STEP.
-            let spawn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let orch_exec = {
-                let sopd = sop_dir.to_path_buf();
-                let agent_dir = agent_g_dir.to_path_buf();
-                let doc = src_doc.to_string();
-                let gw = gateway.to_string();
-                let tags = tags.clone();
-                let variant_s = variant.map(|s| s.to_string());
-                let step_body = step.body.clone();
-                let normal = make_exec(agent_dir.clone(), doc.clone());
-                let count = std::sync::Arc::clone(&spawn_count);
-                move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-                    if name == "delegate" {
-                        let n = count.fetch_add(1, Relaxed) + 1;
-                        if let Some(msg) = spawn_capped(n, WORKER_CAP_PER_STEP) {
-                            return (msg.to_string(), vec![], vec![]);
-                        }
-                        // The orchestrator names the subagent (`researcher`/`worker`); we
-                        // run that role's prompt and return ITS OWN final answer — no
-                        // harness receipt (mirrors prod delegation).
-                        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("worker");
-                        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                        let prompt = sop::fanout::format_agent_prompt(&step_body, agent, task);
-                        let answer = run_subagent(
-                            &sopd,
-                            &agent_dir,
-                            &doc,
-                            &gw,
-                            &tags,
-                            variant_s.as_deref(),
-                            timeout,
-                            &prompt,
-                        );
-                        return (answer, vec![], vec![]);
-                    }
-                    normal(name, args)
-                }
-            };
-            run_episode(
-                orch_chat,
-                &orch_prompt,
-                &orch_exec,
-                SOP_MAX_LLM_ROUNDS_PER_STEP,
-                policy,
-            )?
+            ctx
         } else {
-            let prompt = {
-                let run = run.lock().unwrap();
-                sop::prompt::format_step_context(&sop_def, &run, &step)
-            };
-            run_episode(&mut chat, &prompt, &exec, SOP_MAX_LLM_ROUNDS_PER_STEP, policy)?
-        };
-        total_rounds += outcome.rounds;
-        total_deduped += outcome.deduped;
-        if outcome.episode_id.is_some() {
-            episode_id = outcome.episode_id.clone();
+            sop::prompt::format_step_context(&sop_def, &run_guard, &first_step)
         }
-        {
-            let mut run = run.lock().unwrap();
-            run.step_results.push(SopStepResult {
-                step_number: cur,
-                status: SopStepStatus::Completed,
-                output: outcome.answer.clone(),
-                started_at: String::new(),
-                completed_at: None,
-            });
-        }
-        eprintln!(
-            "  [sop] step {cur} finished (subagent done={} rounds={} deduped={}) → next step",
-            outcome.done, outcome.rounds, outcome.deduped
-        );
-        let next = cur + 1;
-        if sop_def.steps.iter().any(|s| s.number == next) {
-            run.lock().unwrap().current_step = next;
-        } else {
-            run.lock().unwrap().status = SopRunStatus::Completed;
-            sop_done = true;
-            break;
+    };
+
+    let max_rounds = SOP_MAX_LLM_ROUNDS_PER_STEP.saturating_mul(n_steps.max(1));
+    let run_for_gate = std::sync::Arc::clone(&run);
+    let n_steps_gate = n_steps;
+    let outcome = kb_eval::backend::tensorzero::run_episode_gated(
+        &mut chat,
+        &initial_prompt,
+        &exec,
+        max_rounds,
+        policy,
+        move || {
+            let r = run_for_gate.lock().unwrap();
+            if r.status == SopRunStatus::Completed || r.current_step as usize >= n_steps_gate {
+                None
+            } else {
+                Some(format!(
+                    "still on step {} of {}; call sop_advance to finish this step (final step: text reply, no tools)",
+                    r.current_step, n_steps_gate
+                ))
+            }
+        },
+    )?;
+
+    {
+        let mut run = run.lock().unwrap();
+        // If the agent finished with text on the final step without a prior
+        // sop_advance that marked the run complete, record the last step.
+        if run.status != SopRunStatus::Completed {
+            let cur = run.current_step;
+            if !run.step_results.iter().any(|r| r.step_number == cur) {
+                run.step_results.push(SopStepResult {
+                    step_number: cur,
+                    status: if outcome.done {
+                        SopStepStatus::Completed
+                    } else {
+                        SopStepStatus::Failed
+                    },
+                    output: outcome.answer.clone(),
+                    started_at: String::new(),
+                    completed_at: None,
+                });
+            }
+            if outcome.done {
+                run.status = SopRunStatus::Completed;
+            }
         }
     }
+
     let run = run.lock().unwrap();
     eprintln!(
-        "[sop] run {:?} — {} step-subagents executed (llm_rounds={}, deduped={} tool calls skipped)",
+        "[sop] run {:?} — {} steps recorded (llm_rounds={}, deduped={} tool calls skipped, done={})",
         run.status,
         run.step_results.len(),
-        total_rounds,
-        total_deduped
+        outcome.rounds,
+        outcome.deduped,
+        outcome.done
     );
     Ok(EpisodeOutcome {
-        answer: String::new(),
-        episode_id,
-        surfaced_titles: vec![],
-        done: sop_done,
-        rounds: total_rounds,
-        deduped: total_deduped,
+        answer: outcome.answer,
+        episode_id: outcome.episode_id.or(Some(eid_ret)),
+        surfaced_titles: outcome.surfaced_titles,
+        done: outcome.done,
+        rounds: outcome.rounds,
+        deduped: outcome.deduped,
     })
 }
 
@@ -973,12 +994,12 @@ const WORKER_CAP_PER_STEP: usize = 30;
 
 /// Worker-cap decision for the fan-out `spawn` arm. `count` is the post-increment
 /// spawn count for this step. Returns `None` to allow the spawn, or `Some(message)`
-/// once the count exceeds `cap` — the message tells the orchestrator to stop and `done`.
+/// once the count exceeds `cap` — the message tells the orchestrator to stop and advance.
 fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
     if count > cap {
         Some(
-            "Worker limit reached for this step. Do not spawn more workers; \
-             call `done` to finish the step.",
+            "Worker limit reached for this step. Do not delegate more workers; \
+             call `sop_advance` to finish this step.",
         )
     } else {
         None
@@ -990,15 +1011,16 @@ fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
 /// Run ONE delegated subagent episode and return its OWN final answer.
 ///
 /// A subagent neither delegates nor advances SOP steps: its tool set is the plain
-/// dispatch (`make_exec`) plus `get_task` ONLY (no `delegate`, no `sop_advance`).
-/// It does its work on disk and calls `done`; we return its final message (the
-/// `done` note / last content) — mirroring prod delegation, where the harness
-/// computes no receipt. Infer errors are non-fatal — a dead episode yields a
-/// short placeholder answer so the orchestrator always gets a reply.
+/// constraint_validate dispatch (no `delegate`, no `sop_advance`). It does its
+/// work on disk and finishes with a text-only reply; we return that final message
+/// — mirroring prod delegation, where the harness computes no receipt. Infer
+/// errors are non-fatal — a dead episode yields a short placeholder answer so the
+/// orchestrator always gets a reply.
 #[allow(clippy::too_many_arguments)]
 fn run_subagent(
     _sop_dir: &std::path::Path,
     agent_g_dir: &std::path::Path,
+    corpus_dir: &std::path::Path,
     src_doc: &str,
     gateway: &str,
     tags: &Value,
@@ -1011,8 +1033,11 @@ fn run_subagent(
     // task prose (as in prod). A subagent's advertised tools are the
     // constraint_validate function set (search/read/grep/note/graph_stats/…).
 
-    // Plain tool dispatch — already handles search/read/grep/note/ls/del/done.
-    let worker_exec = make_exec(agent_g_dir.to_path_buf(), src_doc.to_string());
+    let worker_exec = make_exec(
+        agent_g_dir.to_path_buf(),
+        corpus_dir.to_path_buf(),
+        src_doc.to_string(),
+    );
 
     let eid = kb_eval::tz::backdated_episode_id(30);
     let worker_chat = move |messages: &[Value], ep: Option<&str>| -> Result<TzTurn> {
@@ -1040,15 +1065,14 @@ fn run_subagent(
         &worker_exec,
         WORKER_MAX_ROUNDS,
         EpisodePolicy {
-            stop_on_done: true,
+            stop_on_done: false,
             dedup_readonly: false,
         },
     );
-    // The subagent returns its OWN answer (its `done` note / last message) — as in
-    // prod delegation. No harness-computed receipt.
+    // The subagent returns its OWN answer (final text) — as in prod delegation.
     match outcome {
         Ok(o) if !o.answer.trim().is_empty() => o.answer,
-        Ok(o) => format!("(субагент завершил без текста, done={})", o.done),
+        Ok(o) => format!("(субагент завершил без текста, ended={})", o.done),
         Err(e) => format!("(субагент прервался: {e})"),
     }
 }
@@ -1101,16 +1125,52 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
 }
 
 fn exec_graph_delete(idx: &DocIndex, g: &GraphStore, args: &Value) -> String {
-    let nodes: Vec<String> = args
+    #[derive(serde::Deserialize)]
+    struct DeleteEdgeArg {
+        from: String,
+        edge_type: String,
+        to: String,
+    }
+    let mut parse_errs: Vec<String> = Vec::new();
+    let mut nodes: Vec<String> = Vec::new();
+    for (i, n) in args
         .get("nodes")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|n| n.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    glossa::graph::ops::graph_delete(idx, g, nodes, vec![])
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        match serde_json::from_value::<String>(n.clone()) {
+            Ok(s) => nodes.push(s),
+            Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+        }
+    }
+    let mut edges: Vec<glossa::graph::agent::EdgeRef> = Vec::new();
+    for (i, e) in args
+        .get("edges")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        match serde_json::from_value::<DeleteEdgeArg>(e.clone()) {
+            Ok(d) => edges.push(glossa::graph::agent::EdgeRef {
+                from: d.from,
+                edge_type: d.edge_type,
+                to: d.to,
+            }),
+            Err(err) => parse_errs.push(format!("edges[{i}]: {err}")),
+        }
+    }
+    if !parse_errs.is_empty() {
+        return format!(
+            "graph_delete REJECTED — malformed input, fix and resend:\n- {}",
+            parse_errs.join("\n- ")
+        );
+    }
+    glossa::graph::ops::graph_delete(idx, g, nodes, edges)
 }
 
 fn exec_graph_update(g: &GraphStore, args: &Value) -> String {
@@ -1143,9 +1203,10 @@ fn norm_metric(s: &str) -> String {
     }
 }
 
-/// Value normalisation for domain coverage: strip a trailing unit, then collapse
-/// decimal notation via the solver's canonical form ("1,0"/"1.0"/"1" → "1"), so
-/// the metric matches the same way the solver compares.
+/// Value normalisation for domain coverage: strip a trailing unit (`[мм]`,
+/// ` м/с`, …) when the remainder is numeric, then collapse decimal notation via
+/// the solver's canonical form ("1,0"/"1.0"/"1" → "1"), so gold `63` matches
+/// agent `63 м/с` without changing the reference tables.
 fn norm_value(s: &str) -> String {
     let stripped = match s.rfind('[') {
         Some(p) if s.trim_end().ends_with(']') => s[..p].trim_end().to_string(),
@@ -1158,16 +1219,117 @@ fn norm_value(s: &str) -> String {
     // its clean match — recall is monotonic (never reduced), and it cannot merge two
     // genuinely distinct values (those differ before the trailing separator).
     let stripped = stripped.trim_end_matches([';', ',', ' ']).to_string();
+    let stripped = strip_trailing_unit_if_numeric(&stripped);
     glossa_constraint::solver::canon_scalar(&stripped)
 }
 
-/// A reference value is covered by an agent domain by exact membership, or because the
-/// domain holds a regex PATTERN that the value matches (canon on both sides).
+/// If `s` is `<number><space?><unit>` (unit = letters / `/` / `°`), return the
+/// number part so `63 м/с` and `63` compare equal. Non-numeric tokens (`F46`,
+/// `BF`) are left unchanged.
+fn strip_trailing_unit_if_numeric(s: &str) -> String {
+    let s = s.trim();
+    // Prefer a whitespace split: "63 м/с", "80 mm".
+    if let Some((left, right)) = s.rsplit_once(|c: char| c.is_whitespace()) {
+        let left = left.trim_end();
+        let right = right.trim();
+        if is_unit_token(right) && looks_numeric(left) {
+            return left.to_string();
+        }
+    }
+    // No space: "63м/с" — peel a trailing unit run off a numeric prefix.
+    let unit_start = s
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphabetic() || *c == '/' || *c == '°')
+        .map(|(i, _)| i)
+        .last();
+    if let Some(i) = unit_start {
+        if i > 0 {
+            let (num, unit) = s.split_at(i);
+            if is_unit_token(unit) && looks_numeric(num) {
+                return num.to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
+fn is_unit_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphabetic() || c == '/' || c == '°')
+}
+
+fn looks_numeric(s: &str) -> bool {
+    !s.is_empty() && s.replace(',', ".").parse::<f64>().is_ok()
+}
+
+/// A reference value is covered by an agent domain by exact membership, regex
+/// PATTERN match, or range-equivalence (`values_cover`: bands ≡ wide range).
 fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
     agent_dom.contains(ref_val)
         || agent_dom
             .iter()
             .any(|a| glossa_constraint::enum_alias_matches(a, ref_val))
+        || glossa_constraint::values_cover(agent_dom.iter().map(|s| s.as_str()), ref_val)
+}
+
+/// Column domains overlap under exact membership or range-equivalence either way.
+fn domains_overlap(a: &BTreeSet<String>, b: &BTreeSet<String>) -> bool {
+    a.iter().any(|v| domain_covers(b, v)) || b.iter().any(|v| domain_covers(a, v))
+}
+
+/// Gold relation row covered by agent rows: exact on non-range cells; range cells
+/// covered by the union of matching agent cells (`values_cover`).
+fn relation_gold_row_hit(gold: &[String], agent_tuples: &BTreeSet<Vec<String>>) -> bool {
+    if agent_tuples.contains(&gold.to_vec()) {
+        return true;
+    }
+    let range_cols: Vec<usize> = gold
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let span_is_range = glossa_constraint::solver::parse_range(c)
+                .is_some_and(|(lo, hi)| (hi - lo).abs() > 1e-9);
+            span_is_range.then_some(i)
+        })
+        .collect();
+    if range_cols.is_empty() {
+        return false;
+    }
+    let matching: Vec<&Vec<String>> = agent_tuples
+        .iter()
+        .filter(|at| {
+            at.len() == gold.len()
+                && (0..gold.len()).all(|i| {
+                    if range_cols.contains(&i) {
+                        true
+                    } else {
+                        at.get(i).is_some_and(|c| c == &gold[i])
+                    }
+                })
+        })
+        .collect();
+    if matching.is_empty() {
+        return false;
+    }
+    range_cols.iter().all(|&ri| {
+        let vals: Vec<&str> = matching
+            .iter()
+            .filter_map(|t| t.get(ri).map(|s| s.as_str()))
+            .collect();
+        glossa_constraint::values_cover(vals, &gold[ri])
+    })
+}
+
+/// Agent relation row counts for precision when some gold row matches exactly on
+/// non-range cells and each agent cell is ⊆ the corresponding gold cell.
+fn relation_agent_row_hit(agent: &[String], gold_tuples: &BTreeSet<Vec<String>>) -> bool {
+    if gold_tuples.contains(&agent.to_vec()) {
+        return true;
+    }
+    gold_tuples.iter().any(|g| {
+        g.len() == agent.len()
+            && agent.iter().zip(g.iter()).all(|(a, gv)| glossa_constraint::value_subseteq(a, gv))
+    })
 }
 
 fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
@@ -1607,7 +1769,7 @@ fn score_relations(
                                     .col_vals
                                     .iter()
                                     .enumerate()
-                                    .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
+                                    .filter(|(_, cv)| domains_overlap(cv, &ref_col_vals[pi]))
                                     .map(|(ci, _)| ci)
                                     .collect();
                                 if !cols.is_empty() {
@@ -1644,7 +1806,7 @@ fn score_relations(
                         at.col_vals
                             .iter()
                             .enumerate()
-                            .filter(|(_, cv)| ref_col_vals[pi].iter().any(|v| cv.contains(v)))
+                            .filter(|(_, cv)| domains_overlap(cv, &ref_col_vals[pi]))
                             .map(|(ci, _)| ci)
                             .collect()
                     }
@@ -1676,13 +1838,18 @@ fn score_relations(
                             .collect()
                     })
                     .collect();
-                let rows_hit =
-                    rt.rows.iter().filter(|r| agent_tuples.contains(&project_ref(r))).count();
+                let rows_hit = rt
+                    .rows
+                    .iter()
+                    .filter(|r| relation_gold_row_hit(&project_ref(r), &agent_tuples))
+                    .count();
                 let gold_proj: BTreeSet<Vec<String>> =
                     rt.rows.iter().map(|r| project_ref(r)).collect();
                 let agent_rows_total = agent_tuples.len();
-                let agent_rows_hit =
-                    agent_tuples.iter().filter(|t| gold_proj.contains(*t)).count();
+                let agent_rows_hit = agent_tuples
+                    .iter()
+                    .filter(|t| relation_agent_row_hit(t, &gold_proj))
+                    .count();
                 RelationCoverage {
                     ref_name: rt.name.clone(),
                     params: rt.params.clone(),
@@ -1724,70 +1891,106 @@ fn compare_relations(
     score_relations(ref_tables, &agent, canon_order, &agent_order.params, &agent_order.files)
 }
 
-/// Tables-only comparison, by domain: a reference parameter is identified among
-/// the agent's `.csp` columns by its VALUE SET, never by name (same semantics
-/// as `compare_graphs`' field/literal coverage — synonyms don't matter).
-/// Returns TablesReport: per-parameter assignments (greedy by recall) with recall
-/// metrics, plus union value-coverage.
+/// Tables comparison bound by marking-order manifests (`schema.toml`), not by
+/// value-set greed. Gold param at position `i` in `canon_order` is scored against
+/// the agent `.csp` named by `files[i]` (same index). Multi-column files contribute
+/// the dependent column (header matched to the param, else the last column —
+/// SOP `(ключ, поле)`). Without an agent schema, falls back to domain-greedy
+/// assignment (legacy / tests without a manifest).
 fn compare_tables_by_domain(
     agent_g_dir: &std::path::Path,
     src_doc: &str,
     cols: &[ColInfo],
+    canon_order: &[String],
 ) -> TablesReport {
-    let col_values = glossa::tables::csp_column_values(agent_g_dir, src_doc).unwrap_or_else(|e| {
-        eprintln!("[tables] csp scan error: {e:#}");
-        Default::default()
-    });
-    // Agent columns as an ordered list (BTreeMap is name-sorted → stable indices).
-    let agent_cols: Vec<(String, BTreeSet<String>)> = col_values
+    let agent_order = glossa::tables::read_schema_order(
+        &agent_g_dir
+            .join(".glossa/notes")
+            .join(src_doc)
+            .join("schema.toml"),
+    );
+    let per_file = glossa::tables::csp_tables_per_file(agent_g_dir, src_doc).unwrap_or_default();
+    let file_map: BTreeMap<String, usize> = per_file
         .iter()
-        .map(|(name, vals)| (name.clone(), vals.iter().map(|v| norm_value(v)).collect()))
+        .enumerate()
+        .map(|(i, (f, _))| (f.clone(), i))
         .collect();
-    // Reference domains (canon), preserving `cols` order.
+
     let ref_doms: Vec<BTreeSet<String>> = cols
         .iter()
         .map(|c| c.valid.iter().map(|v| norm_value(v)).collect())
         .collect();
+    let col_by_name: BTreeMap<&str, usize> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.as_str(), i))
+        .collect();
 
-    // Candidate (ref, agent) pairs with a non-zero overlap.
-    struct Cand {
-        ri: usize,
-        ai: usize,
-        hit: usize,
-        recall: f64,
-    }
-    let mut cands: Vec<Cand> = Vec::new();
-    for (ri, dom) in ref_doms.iter().enumerate() {
-        if dom.is_empty() {
-            continue;
+    let use_positional = !canon_order.is_empty() && !agent_order.files.is_empty();
+    let mut assigned: Vec<Option<(String, BTreeSet<String>)>> = vec![None; cols.len()];
+
+    if use_positional {
+        let n = canon_order.len().min(agent_order.files.len());
+        for i in 0..n {
+            let gname = &canon_order[i];
+            let Some(&ri) = col_by_name.get(gname.as_str()) else {
+                continue;
+            };
+            let file = &agent_order.files[i];
+            let Some(&ti) = file_map.get(file.as_str()) else {
+                continue;
+            };
+            let tbl = &per_file[ti].1;
+            let field_hint = agent_order.params.get(i).map(String::as_str);
+            let Some(dom) = param_domain_from_table(tbl, gname, field_hint) else {
+                continue;
+            };
+            assigned[ri] = Some((file.clone(), dom));
         }
-        for (ai, (_, ad)) in agent_cols.iter().enumerate() {
-            let hit = dom.iter().filter(|v| domain_covers(ad, v)).count();
-            if hit > 0 {
-                cands.push(Cand {
-                    ri,
-                    ai,
-                    hit,
-                    recall: hit as f64 / dom.len() as f64,
-                });
+    } else {
+        let col_values =
+            glossa::tables::csp_column_values(agent_g_dir, src_doc).unwrap_or_default();
+        let agent_cols: Vec<(String, BTreeSet<String>)> = col_values
+            .iter()
+            .map(|(name, vals)| (name.clone(), vals.iter().map(|v| norm_value(v)).collect()))
+            .collect();
+        struct Cand {
+            ri: usize,
+            ai: usize,
+            hit: usize,
+            recall: f64,
+        }
+        let mut cands: Vec<Cand> = Vec::new();
+        for (ri, dom) in ref_doms.iter().enumerate() {
+            if dom.is_empty() {
+                continue;
+            }
+            for (ai, (_, ad)) in agent_cols.iter().enumerate() {
+                let hit = dom.iter().filter(|v| domain_covers(ad, v)).count();
+                if hit > 0 {
+                    cands.push(Cand {
+                        ri,
+                        ai,
+                        hit,
+                        recall: hit as f64 / dom.len() as f64,
+                    });
+                }
             }
         }
-    }
-    // Greedy one-to-one: best recall first; deterministic tie-breaks.
-    cands.sort_by(|a, b| {
-        b.recall
-            .partial_cmp(&a.recall)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.hit.cmp(&a.hit))
-            .then(cols[a.ri].name.cmp(&cols[b.ri].name))
-            .then(agent_cols[a.ai].0.cmp(&agent_cols[b.ai].0))
-    });
-    let mut assigned: Vec<Option<usize>> = vec![None; cols.len()];
-    let mut agent_taken = vec![false; agent_cols.len()];
-    for c in &cands {
-        if assigned[c.ri].is_none() && !agent_taken[c.ai] {
-            assigned[c.ri] = Some(c.ai);
-            agent_taken[c.ai] = true;
+        cands.sort_by(|a, b| {
+            b.recall
+                .partial_cmp(&a.recall)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.hit.cmp(&a.hit))
+                .then(cols[a.ri].name.cmp(&cols[b.ri].name))
+                .then(agent_cols[a.ai].0.cmp(&agent_cols[b.ai].0))
+        });
+        let mut agent_taken = vec![false; agent_cols.len()];
+        for c in &cands {
+            if assigned[c.ri].is_none() && !agent_taken[c.ai] {
+                assigned[c.ri] = Some((agent_cols[c.ai].0.clone(), agent_cols[c.ai].1.clone()));
+                agent_taken[c.ai] = true;
+            }
         }
     }
 
@@ -1796,14 +1999,13 @@ fn compare_tables_by_domain(
         .enumerate()
         .map(|(ri, c)| {
             let dom = &ref_doms[ri];
-            match assigned[ri] {
-                Some(ai) => {
-                    let ad = &agent_cols[ai].1;
+            match &assigned[ri] {
+                Some((label, ad)) => {
                     let missing: Vec<String> =
                         dom.iter().filter(|v| !domain_covers(ad, v)).cloned().collect();
                     ParamCoverage {
                         ref_name: c.name.clone(),
-                        agent_col: Some(agent_cols[ai].0.clone()),
+                        agent_col: Some(label.clone()),
                         recall_hit: dom.len() - missing.len(),
                         recall_total: dom.len(),
                         missing,
@@ -1820,9 +2022,23 @@ fn compare_tables_by_domain(
         })
         .collect();
 
-    // Value coverage (union) — unchanged definition.
-    let agent_union: BTreeSet<String> =
-        agent_cols.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
+    let agent_union: BTreeSet<String> = if use_positional {
+        per_file
+            .iter()
+            .flat_map(|(_, t)| {
+                t.rows
+                    .iter()
+                    .flat_map(|r| r.iter().filter(|c| !c.is_empty()).map(|c| norm_value(c)))
+            })
+            .collect()
+    } else {
+        // Domain-greedy fallback path may have columns not in per_file parse.
+        glossa::tables::csp_column_values(agent_g_dir, src_doc)
+            .unwrap_or_default()
+            .values()
+            .flat_map(|s| s.iter().map(|v| norm_value(v)))
+            .collect()
+    };
     let ref_union: BTreeSet<String> = ref_doms.iter().flatten().cloned().collect();
     let values_covered = ref_union
         .iter()
@@ -1834,6 +2050,54 @@ fn compare_tables_by_domain(
         values_covered,
         values_total: ref_union.len(),
     }
+}
+
+/// Domain of a marking-slot parameter inside one `.csp` table.
+fn param_domain_from_table(
+    tbl: &glossa::tables::csp::CspTable,
+    gold_param: &str,
+    agent_field_hint: Option<&str>,
+) -> Option<BTreeSet<String>> {
+    if tbl.headers.is_empty() {
+        return None;
+    }
+    let ci = pick_param_column(&tbl.headers, gold_param, agent_field_hint)?;
+    Some(
+        tbl.rows
+            .iter()
+            .filter_map(|r| r.get(ci))
+            .filter(|c| !c.is_empty())
+            .map(|c| norm_value(c))
+            .collect(),
+    )
+}
+
+/// Which column holds the slot's own values: name match to gold/hint, else last
+/// column (SOP two-column form is `(ключ, поле)`).
+fn pick_param_column(
+    headers: &[String],
+    gold_param: &str,
+    agent_field_hint: Option<&str>,
+) -> Option<usize> {
+    if headers.len() == 1 {
+        return Some(0);
+    }
+    let targets: Vec<String> = std::iter::once(gold_param)
+        .chain(agent_field_hint)
+        .map(norm_name)
+        .filter(|s| !s.is_empty())
+        .collect();
+    for (i, h) in headers.iter().enumerate() {
+        let hn = norm_name(h);
+        if targets.iter().any(|t| {
+            &hn == t
+                || (t.chars().count() > 1 && hn.contains(t.as_str()))
+                || (hn.chars().count() > 1 && t.contains(hn.as_str()))
+        }) {
+            return Some(i);
+        }
+    }
+    Some(headers.len() - 1)
 }
 
 // ── Main ──
@@ -2073,13 +2337,9 @@ fn main() -> Result<()> {
                     )
                 }
                 "index" | "reindex" => (
-                    match glossa::index::store::index_dir(&agent_g_dir_clone, name == "reindex") {
-                        Ok(s) => format!(
-                            "indexed: {} added, {} removed, {} unchanged",
-                            s.added, s.removed, s.unchanged
-                        ),
-                        Err(e) => format!("index error: {e}"),
-                    },
+                    "index/reindex are disabled in constraint eval — the corpus is \
+                     already indexed in the KB; do not reindex the agent workspace."
+                        .into(),
                     vec![],
                     vec![],
                 ),
@@ -2173,7 +2433,7 @@ fn main() -> Result<()> {
 
         let t1 = std::time::Instant::now();
         // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
-        // fields with hundreds of literals + solve + done needs room to work.
+        // fields with hundreds of literals + solve needs room to work.
         let outcome = if cli.score_only {
             // No run — score the existing notes. Zero outcome; downstream reads
             // done/rounds via unwrap_or so this flows straight into the report.
@@ -2189,6 +2449,7 @@ fn main() -> Result<()> {
             run_sop_conversation(
                 &sop_dir,
                 &agent_g_dir,
+                &cli.kb,
                 &src_doc,
                 &kb_docs_list,
                 &cli.gateway,
@@ -2209,7 +2470,7 @@ fn main() -> Result<()> {
                 exec,
                 50,
                 EpisodePolicy {
-                    stop_on_done: true,
+                    stop_on_done: false,
                     dedup_readonly: false,
                 },
             )
@@ -2223,7 +2484,7 @@ fn main() -> Result<()> {
         let cli_gateway = &cli.gateway;
 
         if tables_only {
-            let report = compare_tables_by_domain(&agent_g_dir, &src_doc, &cols);
+            let report = compare_tables_by_domain(&agent_g_dir, &src_doc, &cols, &canon_order);
             let pc = report.params_covered(PARAM_COVERED_THRESHOLD);
             let pt = report.params_total();
             let vc = report.values_covered;
@@ -2518,9 +2779,12 @@ mod tests {
         // At/under the cap: allowed (None). The Nth allowed spawn has count == cap.
         assert!(spawn_capped(1, 30).is_none());
         assert!(spawn_capped(30, 30).is_none());
-        // First spawn past the cap is refused with a stop-and-done message.
+        // First spawn past the cap is refused with a stop-and-advance message.
         let over = spawn_capped(31, 30).expect("31 > 30 must be capped");
-        assert!(over.to_lowercase().contains("done"), "{over}");
+        assert!(
+            over.to_lowercase().contains("sop_advance"),
+            "{over}"
+        );
         assert!(spawn_capped(1000, 30).is_some());
         // Degenerate cap of 0: even the first spawn is refused.
         assert!(spawn_capped(1, 0).is_some());
@@ -2538,6 +2802,16 @@ mod tests {
         assert_ne!(norm_value("0,6"), norm_value("06"));
         // Distinct values stay distinct — they differ before any trailing char.
         assert_ne!(norm_value("50;"), norm_value("60;"));
+    }
+
+    #[test]
+    fn norm_value_strips_unit_suffix_when_numeric() {
+        assert_eq!(norm_value("63 м/с"), norm_value("63"));
+        assert_eq!(norm_value("80м/с"), norm_value("80"));
+        assert_eq!(norm_value("125 [мм]"), norm_value("125"));
+        // Non-numeric tokens keep letter suffixes (grit / bond codes).
+        assert_eq!(norm_value("F46"), "f46");
+        assert_ne!(norm_value("BF"), norm_value("B"));
     }
 
     #[test]
@@ -2679,6 +2953,63 @@ mod tests {
         assert_eq!(t.agent_rows_total, 3, "3 distinct agent pairs");
     }
 
+    #[test]
+    fn relation_range_bands_cover_wide_gold() {
+        // Gold: wide §4.5 ranges per bond. Agent: App Б odd bands — equivalent under
+        // range cover (odd lattice, matching hull).
+        let rt = RefTable {
+            name: "ЗИ".into(),
+            params: vec!["Связка".into(), "ЗИ".into()],
+            rows: vec![
+                vec!["B".into(), "25-49".into()],
+                vec!["BF".into(), "25-49".into()],
+                vec!["R".into(), "23-45".into()],
+                vec!["RF".into(), "23-45".into()],
+            ],
+        };
+        let b_bands = ["25-27", "29-31", "33-35", "37-39", "41-43", "45-49"];
+        let r_bands = ["23-25", "27-29", "31-33", "35-37", "39-41", "43-45"];
+        let mut rows = Vec::new();
+        for bond in ["B", "BF"] {
+            for b in b_bands {
+                rows.push(vec![bond.to_string(), b.to_string()]);
+            }
+        }
+        for bond in ["R", "RF"] {
+            for b in r_bands {
+                rows.push(vec![bond.to_string(), b.to_string()]);
+            }
+        }
+        let col_vals: Vec<BTreeSet<String>> = (0..2)
+            .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+            .collect();
+        let agent = vec![AgentTbl {
+            file: "zi.csp".into(),
+            headers: vec!["Связка".into(), "ЗИ".into()],
+            rows,
+            col_vals,
+        }];
+        let t = &score_relations(&[rt], &agent, &[], &[], &[]).tables[0];
+        assert_eq!(t.rows_hit, 4, "each gold (bond, wide range) covered by bands");
+        assert_eq!(t.rows_total, 4);
+        assert_eq!(t.agent_rows_hit, t.agent_rows_total, "every band ⊆ some gold range");
+        assert!(t.agent_rows_total > 4, "agent has many band rows");
+    }
+
+    #[test]
+    fn domain_covers_range_equivalence() {
+        let bands: BTreeSet<String> = ["25-27", "29-31", "33-35", "37-39", "41-43", "45-49"]
+            .iter()
+            .map(|s| norm_value(s))
+            .collect();
+        assert!(domain_covers(&bands, &norm_value("25—49")));
+        let gap: BTreeSet<String> = ["25-27", "29-31", "37-39", "41-43", "45-49"]
+            .iter()
+            .map(|s| norm_value(s))
+            .collect();
+        assert!(!domain_covers(&gap, &norm_value("25-49")));
+    }
+
     // Height and bore share values (10, 13); binding must send Высота to the D_T
     // (height) table, not the value-overlapping D_H one. Two positional paths:
     // field name and file name.
@@ -2759,23 +3090,6 @@ mod tests {
             "019f3e27-c60d-7b4f-a135-74871c652565"
         );
         assert_eq!(episode_id_for_report(fallback, None), fallback);
-    }
-
-    #[test]
-    fn parse_reported_remaining_contract() {
-        assert_eq!(
-            parse_reported_remaining(r#"done. {"remaining": 7}"#),
-            Some(7)
-        );
-        assert_eq!(parse_reported_remaining("remaining: 0"), Some(0));
-        // The LAST report wins — the final self-check overrides earlier narration.
-        assert_eq!(
-            parse_reported_remaining(r#"{"remaining": 9} … after the upsert: {"remaining": 3}"#),
-            Some(3)
-        );
-        assert_eq!(parse_reported_remaining("no report at all"), None);
-        assert_eq!(parse_reported_remaining("remaining params: none"), None);
-        assert_eq!(parse_reported_remaining(""), None);
     }
 
     #[test]
@@ -2919,7 +3233,7 @@ mod tests {
                 valid: vec!["20".into(), "32".into()],
             },
         ];
-        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
         assert_eq!(
             (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
             (1, 2)
@@ -2941,7 +3255,7 @@ mod tests {
             name: "Марка материала".into(),
             valid: vec!["14A".into(), "25A".into()],
         }];
-        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
         assert_eq!(
             (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
             (1, 1)
@@ -2956,7 +3270,7 @@ mod tests {
             name: "X".into(),
             valid: vec!["1".into()],
         }];
-        let report = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols);
+        let report = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols, &[]);
         assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 0);
         assert_eq!(report.values_covered, 0);
     }
@@ -2972,6 +3286,13 @@ mod tests {
         std::fs::write(mirror.join("diameter.csp"), "D\n50\n63\n80\n100\n125\n").unwrap();
         // The agent's own speed column is wrong: only 3 of 6 gold speeds.
         std::fs::write(mirror.join("speed.csp"), "speed\n63\n80\n100\n").unwrap();
+        // Marking-order schema: slot i binds gold param i to files[i] — speed cannot
+        // steal the diameter file even when domains overlap.
+        std::fs::write(
+            mirror.join("schema.toml"),
+            "[order]\nparams = [\"Наружный диаметр\", \"Скорость\"]\nfiles = [\"diameter.csp\", \"speed.csp\"]\n",
+        )
+        .unwrap();
         let cols = vec![
             ColInfo {
                 name: "Наружный диаметр".into(),
@@ -2984,12 +3305,11 @@ mod tests {
                 ],
             },
         ];
-        let report = compare_tables_by_domain(dir.path(), doc, &cols);
-        // Diameter takes the diameter column; speed can only be served by speed.csp.
+        let canon = vec!["Наружный диаметр".into(), "Скорость".into()];
+        let report = compare_tables_by_domain(dir.path(), doc, &cols, &canon);
         let speed = report.params.iter().find(|p| p.ref_name == "Скорость").unwrap();
-        assert_eq!(speed.agent_col.as_deref(), Some("speed"));
+        assert_eq!(speed.agent_col.as_deref(), Some("speed.csp"));
         assert_eq!((speed.recall_hit, speed.recall_total), (3, 6));
-        // At the 0.8 bar only Diameter (1.0) counts; speed (0.5) does not.
         assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 1);
         assert_eq!(report.params_total(), 2);
     }
@@ -3007,7 +3327,7 @@ mod tests {
             name: "P".into(),
             valid: vec!["1".into(), "2".into(), "3".into(), "4".into()],
         }];
-        let report = compare_tables_by_domain(dir.path(), doc, &cols);
+        let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
         assert_eq!(report.params_covered(0.5), 1); // old bar would pass
         assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 0); // 0.8 fails it
         let p = &report.params[0];

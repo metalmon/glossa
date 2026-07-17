@@ -453,27 +453,60 @@ mod tests {
         assert!(steps[2].title.contains("Compile"));
 
         // Step 1 is the fan-out step: the orchestrator delegates to named subagents.
-        // No routing under per-step subagents; no graph_build at the orchestrator level.
+        // No routing under continuous SOP agent; no graph_build at the orchestrator level.
         let build = &steps[0];
         assert_eq!(
             build.routing.when, None,
-            "fan-out step has no routing under per-step subagents"
+            "fan-out step has no routing under continuous SOP agent"
         );
         assert_eq!(build.routing.next, None);
         assert!(
             build.suggested_tools.contains(&"delegate".to_string()),
             "orchestrator delegates via `delegate`, not `spawn`"
         );
-        // The step exposes the researcher's graph_upsert and the worker's graph_stats.
-        assert!(build.suggested_tools.contains(&"graph_upsert".to_string()));
-        assert!(build.suggested_tools.contains(&"graph_stats".to_string()));
+        // Orchestrator: delegate/advance + corpus lookup if marking example missing.
+        assert!(build.suggested_tools.contains(&"sop_advance".to_string()));
+        assert!(build.suggested_tools.contains(&"delegate".to_string()));
+        assert!(build.suggested_tools.contains(&"grep".to_string()));
         assert!(
             !build.suggested_tools.contains(&"graph_build".to_string()),
             "fan-out step must not list graph_build"
+        );
+        assert!(
+            !build.suggested_tools.contains(&"done".to_string()),
+            "build step must not suggest done (use sop_advance)"
+        );
+        let schema = &steps[1];
+        assert!(schema.suggested_tools.contains(&"sop_advance".to_string()));
+        assert!(
+            !schema.suggested_tools.contains(&"done".to_string()),
+            "schema step must not suggest done (use sop_advance)"
         );
 
         // Step 3 is Compile — it owns graph_build and is the terminal step.
         let compile = &steps[2];
         assert!(compile.suggested_tools.contains(&"graph_build".to_string()));
+        assert!(
+            !compile.suggested_tools.contains(&"done".to_string()),
+            "compile ends with text reply, not done"
+        );
+    }
+
+    #[test]
+    fn parse_gost_constraints_solo_one_step_no_delegate() {
+        let md = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("sops/gost-constraints-solo/SOP.md"),
+        )
+        .expect("read gost-constraints-solo SOP.md");
+        let steps = parse_steps(&md);
+        assert_eq!(steps.len(), 1);
+        let s = &steps[0];
+        assert!(!s.body.contains("{# ORCHESTRATOR #}"));
+        assert!(!s.suggested_tools.contains(&"delegate".to_string()));
+        assert!(!s.suggested_tools.contains(&"sop_advance".to_string()));
+        assert!(s.suggested_tools.contains(&"graph_build".to_string()));
+        assert!(s.suggested_tools.contains(&"graph_upsert".to_string()));
+        assert!(s.suggested_tools.contains(&"note".to_string()));
     }
 }

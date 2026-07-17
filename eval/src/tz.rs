@@ -119,7 +119,18 @@ pub fn infer(
                     std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
                     continue;
                 }
-                return Err(anyhow!("tensorzero /inference failed: {e}"));
+                // Prefer the gateway JSON body (e.g. OpenRouter/provider detail) over
+                // a bare "status code 500" from ureq's Display.
+                let detail = match e {
+                    ureq::Error::Status(code, resp) => {
+                        let body = resp
+                            .into_string()
+                            .unwrap_or_else(|read_err| format!("<unreadable body: {read_err}>"));
+                        format!("status {code}: {body}")
+                    }
+                    other => other.to_string(),
+                };
+                return Err(anyhow!("tensorzero /inference failed: {detail}"));
             }
         }
     };

@@ -19,8 +19,8 @@ pub struct EpisodeOutcome {
     pub answer: String,
     pub episode_id: Option<String>,
     pub surfaced_titles: Vec<String>,
-    /// True when the episode ended via the `done` control tool (stop_on_done
-    /// policies) — the eval reads this; `done` itself is intercepted, never executed.
+    /// True when the episode ended cleanly: either via `done` (enrich /
+    /// `stop_on_done`) or via a text-only turn (answer / SOP — no more tools).
     pub done: bool,
     /// Rounds actually consumed (model turns).
     pub rounds: usize,
@@ -37,9 +37,9 @@ pub struct TzTurn {
 /// How an episode terminates and whether read-only tool calls are de-duplicated.
 #[derive(Clone, Copy, Default)]
 pub struct EpisodePolicy {
-    /// Terminate ONLY on an explicit `done` tool call (enrich): a text-only turn is no longer an
-    /// ending — the model is nudged to act or to call `done`, so "narrate-then-stop" can't end the
-    /// episode prematurely. When false (answer), a text-only turn IS the final answer, as before.
+    /// When true (enrich): terminate ONLY on an explicit `done` tool call; a text-only
+    /// turn is nudged to act or call `done`. When false (answer / constraint_validate SOP):
+    /// a text-only turn ends the episode (optionally gated via `run_episode_gated`).
     pub stop_on_done: bool,
     /// Short-circuit a read-only tool call whose (name, args) already ran this episode, returning a
     /// hint instead of re-executing — breaks the re-read-the-same-page thrash loop.
@@ -76,8 +76,8 @@ enum ToolKind {
 
 fn tool_kind(name: &str) -> ToolKind {
     match name {
-        // `done` ends the episode; `sop_advance` is an intra-step progress signal; `get_task`
-        // returns the (static) task — control signals: always executed, never deduped.
+        // `done` ends the episode; `sop_advance` advances the SOP step (same agent);
+        // `get_task` returns the (static) task — control signals: always executed, never deduped.
         "done" | "sop_advance" | "get_task" => ToolKind::Control,
         // Notebook I/O: ls/glob reflect the on-disk notebook (workbook + .csp), which
         // note/del mutate — so a cached notebook read goes stale on any notebook write.
@@ -94,6 +94,112 @@ fn tool_kind(name: &str) -> ToolKind {
         }
         _ => ToolKind::Corpus,
     }
+}
+
+/// Echo + exec args for one TZ tool_call block.
+///
+/// OpenRouter providers reject the *next* turn if any prior assistant
+/// `function.arguments` is not valid JSON. When TZ hands back `arguments: null`
+/// + broken `raw_arguments`, we heal via `jsonrepair` when possible; only
+/// unrepairable junk becomes `{}` + a retry hint.
+struct NormalizedToolArgs {
+    /// Value written into the echoed assistant `tool_call.arguments` (object or a
+    /// string that itself parses as a JSON object).
+    echo: Value,
+    /// Object passed to `exec` (parsed from a JSON-string echo when needed).
+    exec: Value,
+    /// When set, do not run `exec`; return this as the tool_result instead.
+    reject: Option<String>,
+}
+
+fn normalize_tool_call_arguments(call: &Value) -> NormalizedToolArgs {
+    const REJECT: &str = "Tool call arguments were not valid JSON and could not be repaired. Re-issue the same tool with a single valid JSON object as arguments.";
+
+    let reject_empty = || NormalizedToolArgs {
+        echo: json!({}),
+        exec: json!({}),
+        reject: Some(REJECT.to_string()),
+    };
+
+    let from_object = |obj: Value| NormalizedToolArgs {
+        echo: obj.clone(),
+        exec: obj,
+        reject: None,
+    };
+
+    let from_string = |s: &str, original: &Value| match parse_tool_args_object(s) {
+        Some(obj) => {
+            // Prefer echoing the original string when it already parsed cleanly;
+            // after healing, echo the repaired object (valid for providers).
+            let echo = if serde_json::from_str::<Value>(s)
+                .ok()
+                .is_some_and(|v| v.is_object())
+            {
+                original.clone()
+            } else {
+                obj.clone()
+            };
+            NormalizedToolArgs {
+                echo,
+                exec: obj,
+                reject: None,
+            }
+        }
+        None => reject_empty(),
+    };
+
+    // Prefer parsed `arguments` when TZ succeeded.
+    if let Some(args) = call.get("arguments").filter(|v| !v.is_null()) {
+        return match args {
+            Value::Object(_) => from_object(args.clone()),
+            Value::String(s) => from_string(s, args),
+            _ => reject_empty(),
+        };
+    }
+
+    // `arguments: null` — fall back to raw_arguments (string or already-parsed).
+    match call.get("raw_arguments") {
+        None => NormalizedToolArgs {
+            echo: json!({}),
+            exec: json!({}),
+            reject: None,
+        },
+        Some(raw) => match raw {
+            Value::Object(_) => from_object(raw.clone()),
+            Value::String(s) => from_string(s, raw),
+            _ => reject_empty(),
+        },
+    }
+}
+
+/// Parse tool-call args as a JSON object, healing via [`jsonrepair`] when needed.
+fn parse_tool_args_object(raw: &str) -> Option<Value> {
+    let cleaned = preprocess_tool_args_json(raw);
+    if let Ok(obj @ Value::Object(_)) = serde_json::from_str::<Value>(&cleaned) {
+        return Some(obj);
+    }
+    match jsonrepair::loads(&cleaned, &jsonrepair::Options::default()) {
+        Ok(obj @ Value::Object(_)) => Some(obj),
+        _ => None,
+    }
+}
+
+/// Strip non-JSON wrappers LLMs sometimes leave inside `function.arguments`.
+fn preprocess_tool_args_json(s: &str) -> String {
+    let mut t = s.trim().to_string();
+    for tag in ["</tool_call>", "<tool_call>", "</function>", "<function>"] {
+        t = t.replace(tag, "");
+    }
+    t = t.trim().to_string();
+    if let Some(rest) = t.strip_prefix("```json") {
+        t = rest.to_string();
+    } else if let Some(rest) = t.strip_prefix("```") {
+        t = rest.to_string();
+    }
+    if let Some(rest) = t.strip_suffix("```") {
+        t = rest.to_string();
+    }
+    t.trim().to_string()
 }
 
 /// Drive a TensorZero episode to a final outcome (no completion gate — the plain
@@ -114,11 +220,11 @@ where
 }
 
 /// Like [`run_episode`], plus an optional completion gate mirroring the zeroclaw
-/// SOP engine's `validate_step_output` + `finish_run`: when the model calls
-/// `done`, `done_gate()` inspects external state (e.g. the graph) and returns
-/// `Some(feedback)` to REJECT completion — the feedback is fed back and the loop
-/// continues — or `None` to accept. Deterministic, prompt-agnostic, so it works
-/// with the plain loop, TZ, and GEPA (which optimizes the prompt, not the gate).
+/// SOP engine's `validate_step_output` + `finish_run`. When the model tries to
+/// finish (`done` if `stop_on_done`, else a text-only turn), `done_gate()` may
+/// return `Some(feedback)` to REJECT completion — feedback is fed back and the
+/// loop continues — or `None` to accept. Deterministic, prompt-agnostic, so it
+/// works with the plain loop, TZ, and GEPA (which optimizes the prompt, not the gate).
 ///
 /// `chat(messages, episode_id)` performs one `/inference` call (episode_id is None on the first turn,
 /// then the id returned by the first turn). `tool_call` blocks are executed via `exec(name, args)`
@@ -185,11 +291,20 @@ where
                 .collect::<Vec<_>>()
                 .join("");
             if !policy.stop_on_done {
+                // Optional gate (e.g. SOP: reject text-end until the final step).
+                if let Some(reject) = done_gate() {
+                    messages.push(
+                        json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }),
+                    );
+                    messages.push(json!({ "role": "user", "content": [{ "type": "text", "text":
+                        format!("Not finished — {reject}") }] }));
+                    continue;
+                }
                 return Ok(EpisodeOutcome {
                     answer,
                     episode_id,
                     surfaced_titles,
-                    done: false,
+                    done: true,
                     rounds,
                     deduped,
                 });
@@ -235,14 +350,13 @@ where
             }
         }
 
-        // Build owned (id, name, args) triples with the raw_arguments fallback applied
-        // BEFORE spawning, so each thread owns its data.
-        // TZ returns `arguments: null` (with the raw string under `raw_arguments`)
-        // when the model emitted unparseable JSON args. Echoing `null` back is
-        // rejected by the input schema ("did not match any variant of
-        // ToolCallWrapper"), so fall back to `raw_arguments` (a string, which TZ
-        // accepts) and finally to `{}`.
-        let calls: Vec<(String, String, Value)> = tool_calls
+        // Normalize tool-call args before echo/exec. TZ returns `arguments: null` +
+        // `raw_arguments` when the model emitted unparseable JSON; echoing that raw
+        // string poisons the next OpenRouter turn ("function.arguments must be valid
+        // JSON"). Valid raw → echo the string / run with parsed object; invalid →
+        // echo `{}`, skip exec, tell the model to retry.
+        // (id, name, echo_args, exec_args, reject)
+        let calls: Vec<(String, String, Value, Value, Option<String>)> = tool_calls
             .iter()
             .map(|call| {
                 let id = call
@@ -255,13 +369,8 @@ where
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let args = call
-                    .get("arguments")
-                    .filter(|v| !v.is_null())
-                    .cloned()
-                    .or_else(|| call.get("raw_arguments").cloned())
-                    .unwrap_or_else(|| json!({}));
-                (id, name, args)
+                let norm = normalize_tool_call_arguments(call);
+                (id, name, norm.echo, norm.exec, norm.reject)
             })
             .collect();
 
@@ -276,8 +385,8 @@ where
             .collect();
         let tool_call_blocks: Vec<Value> = calls
             .iter()
-            .map(|(id, name, args)| {
-                json!({ "type": "tool_call", "id": id, "name": name, "arguments": args })
+            .map(|(id, name, echo, _, _)| {
+                json!({ "type": "tool_call", "id": id, "name": name, "arguments": echo })
             })
             .collect();
         let merged: Vec<Value> = preserved.into_iter().chain(tool_call_blocks).collect();
@@ -287,19 +396,28 @@ where
         // control always run. Then invalidate `seen` for the next turn by what the executed call
         // changed — a notebook write (note/del) makes cached notebook reads (ls/glob) stale;
         // a graph mutation makes graph reads stale; an index rebuild makes everything stale.
+        // Rejected (invalid JSON) calls never run and never enter `seen`.
         let run_flags: Vec<bool> = calls
             .iter()
-            .map(|(_, name, args)| {
+            .map(|(_, name, _, exec_args, reject)| {
+                if reject.is_some() {
+                    return false;
+                }
                 !(policy.dedup_readonly
                     && tool_kind(name) != ToolKind::Control
-                    && seen.contains(&(name.clone(), args.to_string())))
+                    && seen.contains(&(name.clone(), exec_args.to_string())))
             })
             .collect();
-        deduped += run_flags.iter().filter(|&&ran| !ran).count();
+        // Count only true dedup skips, not invalid-arg rejects.
+        deduped += calls
+            .iter()
+            .zip(&run_flags)
+            .filter(|((_, _, _, _, reject), &ran)| reject.is_none() && !ran)
+            .count();
         if policy.dedup_readonly {
-            for ((_, name, args), &ran) in calls.iter().zip(&run_flags) {
-                if !ran {
-                    continue; // deduped → didn't execute → state unchanged
+            for ((_, name, _, exec_args, reject), &ran) in calls.iter().zip(&run_flags) {
+                if !ran || reject.is_some() {
+                    continue;
                 }
                 match tool_kind(name) {
                     ToolKind::CorpusMutate => seen.clear(),
@@ -311,19 +429,19 @@ where
                     }),
                     _ => {}
                 }
-                seen.insert((name.clone(), args.to_string()));
+                seen.insert((name.clone(), exec_args.to_string()));
             }
         }
 
-        // Execute the to-run calls concurrently; substitute a hint for deduped ones. Order kept.
+        // Execute the to-run calls concurrently; substitute reject/dedup hints otherwise.
         let results: Vec<ToolExecResult> = std::thread::scope(|s| {
             let handles: Vec<Option<_>> = calls
                 .iter()
                 .zip(&run_flags)
-                .map(|((id, name, args), &run)| {
-                    if run {
+                .map(|((id, name, _, exec_args, reject), &run)| {
+                    if run && reject.is_none() {
                         Some(s.spawn(|| {
-                            let (result, titles, images) = exec(name, args);
+                            let (result, titles, images) = exec(name, exec_args);
                             (id.clone(), name.clone(), result, titles, images)
                         }))
                     } else {
@@ -332,21 +450,34 @@ where
                 })
                 .collect();
             handles
-                    .into_iter()
-                    .zip(calls.iter())
-                    .map(|(h, (id, name, _args))| match h {
-                        Some(h) => h.join().unwrap_or_else(|_| {
-                            (id.clone(), name.clone(), "tool panicked".to_string(), Vec::new(), Vec::new())
-                        }),
-                        None => (
+                .into_iter()
+                .zip(calls.iter())
+                .map(|(h, (id, name, _, _, reject))| match h {
+                    Some(h) => h.join().unwrap_or_else(|_| {
+                        (
                             id.clone(),
                             name.clone(),
-                            format!("(skipped) You already called `{name}` with these exact arguments and nothing has changed since. Use what you have, do something different, or call `done`."),
+                            "tool panicked".to_string(),
                             Vec::new(),
                             Vec::new(),
-                        ),
-                    })
-                    .collect()
+                        )
+                    }),
+                    None if reject.is_some() => (
+                        id.clone(),
+                        name.clone(),
+                        reject.clone().unwrap(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    None => (
+                        id.clone(),
+                        name.clone(),
+                        format!("(skipped) You already called `{name}` with these exact arguments and nothing has changed since. Use what you have, do something different, or call `done`."),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                })
+                .collect()
         });
 
         // Push one tool_result user message per call (in original call order),
@@ -912,6 +1043,44 @@ mod tests {
     }
 
     #[test]
+    fn normalize_accepts_object_and_valid_raw_string() {
+        let obj = normalize_tool_call_arguments(&json!({
+            "arguments": {"query": "x"}
+        }));
+        assert!(obj.reject.is_none());
+        assert_eq!(obj.exec["query"], "x");
+
+        let raw_ok = normalize_tool_call_arguments(&json!({
+            "arguments": Value::Null,
+            "raw_arguments": "{\"path\":\"a.md\",\"n\":1}"
+        }));
+        assert!(raw_ok.reject.is_none());
+        assert_eq!(raw_ok.echo, json!("{\"path\":\"a.md\",\"n\":1}"));
+        assert_eq!(raw_ok.exec["path"], "a.md");
+
+        // Truncated JSON is healed by jsonrepair — exec gets a closed object.
+        let raw_trunc = normalize_tool_call_arguments(&json!({
+            "arguments": Value::Null,
+            "raw_arguments": "{\"path\":\"a.md\",\"n\":1"
+        }));
+        assert!(
+            raw_trunc.reject.is_none(),
+            "truncated object should heal; reject={:?}",
+            raw_trunc.reject
+        );
+        assert_eq!(raw_trunc.exec["path"], "a.md");
+        assert!(raw_trunc.echo.is_object(), "healed args echoed as object");
+
+        // Non-object JSON still rejects (tool args must be an object).
+        let raw_bad = normalize_tool_call_arguments(&json!({
+            "arguments": Value::Null,
+            "raw_arguments": "[1, 2, 3]"
+        }));
+        assert!(raw_bad.reject.is_some());
+        assert_eq!(raw_bad.echo, json!({}));
+    }
+
+    #[test]
     fn echoes_raw_arguments_when_arguments_is_null() {
         // When the model emits unparseable JSON args, TZ returns `arguments: null`
         // plus the original string under `raw_arguments`. The echoed assistant
@@ -949,6 +1118,55 @@ mod tests {
             echoed["arguments"],
             json!("{\"path\":\"a.md\",\"n\":8}"),
             "null `arguments` must be replaced by the raw_arguments string"
+        );
+    }
+
+    /// Truncated `raw_arguments` are healed (jsonrepair), echoed as a valid object,
+    /// and executed — so the next OpenRouter turn is not poisoned.
+    #[test]
+    fn heals_truncated_raw_arguments_and_executes() {
+        use std::sync::{Arc, Mutex};
+        let round = RefCell::new(0usize);
+        let seen_round2: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+        let exec_args: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let exec_args2 = Arc::clone(&exec_args);
+        let chat = |msgs: &[Value], _eid: Option<&str>| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                Ok(TzTurn {
+                    content: vec![json!({
+                        "type": "tool_call", "id": "c1", "name": "note",
+                        "arguments": Value::Null,
+                        "raw_arguments": "{\"doc\":\"a.docx\",\"file\":\"x.csp\",\"content\":\"oops\""
+                    })],
+                    episode_id: "ep".into(),
+                })
+            } else {
+                *seen_round2.borrow_mut() = msgs.to_vec();
+                Ok(TzTurn {
+                    content: vec![json!({ "type": "text", "text": "ANSWER: recovered" })],
+                    episode_id: "ep".into(),
+                })
+            }
+        };
+        let exec = move |_: &str, args: &Value| {
+            *exec_args2.lock().unwrap() = Some(args.clone());
+            ("ok".into(), Vec::new(), Vec::new())
+        };
+        let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
+        assert_eq!(out.answer, "ANSWER: recovered");
+        let got = exec_args.lock().unwrap().clone().expect("exec must run after heal");
+        assert_eq!(got["doc"], "a.docx");
+        assert_eq!(got["file"], "x.csp");
+        assert_eq!(got["content"], "oops");
+        let msgs = seen_round2.borrow();
+        let echoed = &msgs[1]["content"][0];
+        assert_eq!(echoed["type"], "tool_call");
+        assert!(
+            echoed["arguments"].is_object(),
+            "healed args must be a JSON object in history, got {}",
+            echoed["arguments"]
         );
     }
 

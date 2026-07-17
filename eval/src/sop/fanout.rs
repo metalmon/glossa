@@ -15,8 +15,8 @@ const M_ORCH: &str = "{# ORCHESTRATOR #}";
 const M_RESEARCHER: &str = "{# RESEARCHER #}";
 const M_WORKER: &str = "{# WORKER #}";
 
-/// Split a step body on whole-line role markers. Text before the first marker
-/// (and any `{# SHARED #}` block) goes to `shared`; the rest to the named role.
+/// Split a step body on whole-line role markers. `{# SHARED #}` is optional —
+/// text before the first role marker still goes to `shared`. Named roles never mix.
 pub fn split_role_sections(body: &str) -> RoleSections {
     let mut out = RoleSections::default();
     // `shared` starts as the current bucket so pre-marker text is shared.
@@ -48,20 +48,27 @@ pub fn split_role_sections(body: &str) -> RoleSections {
 
 pub fn format_orchestrator_prompt(step_body: &str) -> String {
     let s = split_role_sections(&strip_gepa_anchor_lines(step_body));
-    format!("{}\n\n{}\n", s.shared, s.orchestrator)
+    if s.shared.is_empty() {
+        format!("{}\n", s.orchestrator)
+    } else {
+        format!("{}\n\n{}\n", s.shared, s.orchestrator)
+    }
 }
 
 /// Compose the prompt for a delegated subagent, selected by `agent` name
 /// (`"researcher"` → the RESEARCHER block, anything else → the WORKER block).
-/// The orchestrator delegates by name; each subagent gets ONLY its own role
-/// block (plus SHARED) so the two prompts never mix.
+/// Each subagent gets ONLY its own role block (plus optional SHARED).
 pub fn format_agent_prompt(step_body: &str, agent: &str, task: &str) -> String {
     let s = split_role_sections(&strip_gepa_anchor_lines(step_body));
     let role = match agent {
         "researcher" => &s.researcher,
         _ => &s.worker,
     };
-    format!("{}\n\n{}\n\nТвоя задача:\n{}\n", s.shared, role, task)
+    if s.shared.is_empty() {
+        format!("{}\n\nТвоя задача:\n{}\n", role, task)
+    } else {
+        format!("{}\n\n{}\n\nТвоя задача:\n{}\n", s.shared, role, task)
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +135,17 @@ worker B";
         assert!(r.contains("Both.") && r.contains("T1"));
         let w = format_agent_prompt(body, "worker", "T2");
         assert!(w.contains("Build csp.") && !w.contains("Hang MENTIONS."));
+    }
+
+    #[test]
+    fn roles_work_without_shared_block() {
+        let body = "{# ORCHESTRATOR #}\nOnly orch.\n{# RESEARCHER #}\nOnly res.\n{# WORKER #}\nOnly work.";
+        let s = split_role_sections(body);
+        assert!(s.shared.trim().is_empty());
+        assert_eq!(s.orchestrator.trim(), "Only orch.");
+        let orch = format_orchestrator_prompt(body);
+        assert!(orch.contains("Only orch.") && !orch.contains("Only res."));
+        let r = format_agent_prompt(body, "researcher", "T");
+        assert!(r.starts_with("Only res.") && !r.contains("Only work."));
     }
 }

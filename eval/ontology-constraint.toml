@@ -1,6 +1,7 @@
 # Constraint-domain ontology overlay for glossa.
 #
-# GOST-regulatory overlay: Field = product parameter, Enum = tabular values,
+# GOST-regulatory overlay: Param = research provenance + marking dependencies,
+# Field = compile-time constrained parameter, Enum = tabular values,
 # Conditional = piecewise domains. Core structural types (Document, Section, …)
 # and core edges (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN.
 #
@@ -10,18 +11,27 @@
 [meta]
 domain = "gost-regulatory"
 description = "Constraint graph for product parameters from GOST/regulatory documents."
-note = "IF_FIELD, IF_VALUE, HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION target Literal nodes (label = the scalar text), not Field."
+note = "Research uses Param (MENTIONS to sections, DEPENDS_ON to key Param). Compile uses Field ──CONSTRAINED_BY──► … . IF_FIELD/IF_VALUE/HAS_* target Literal nodes (label = scalar text), not Field or Param."
 
 # ── Entities ──
+[entities.Param]
+id_prefix = "prm"
+description = "A marking/designation parameter during research and .csp build. Hang MENTIONS from this node to every corpus section where its allowed values are listed. If its domain depends on another marking parameter, also hang DEPENDS_ON to that key Param. Not the compile subject — graph_build materializes Field + constraints from .csp; Param is left intact."
+
 [entities.Field]
 id_prefix = "fld"
-description = "A parameter of the product — the thing being constrained. One Field per parameter; its label is the parameter's name as the document writes it, human-readable and in the document's own language (this label is what a later table export shows). Its allowed values live in a constraint node the Field links to with CONSTRAINED_BY."
+description = "A parameter of the product — the thing being constrained after .csp compile. One Field per parameter; its label is the parameter's name as the document writes it, human-readable and in the document's own language (this label is what a later table export shows). Its allowed values live in a constraint node the Field links to with CONSTRAINED_BY."
 
 [entities.Literal]
 id_prefix = "lit"
 description = "A scalar carrier for constraint parameters: a number, string, regex pattern, or expression. Linked from Range/Regex/Formula/Conditional nodes via HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION, IF_FIELD, or IF_VALUE — not used for Enum values (those go in the Enum node's aliases)."
 
 # ── Relations ──
+[relations.DEPENDS_ON]
+from = ["Param"]
+to   = ["Param"]
+description = "Marking dependency: dependent Param ──DEPENDS_ON──► key Param. Means the dependent's allowed values are determined by the key (pair table / conditional domain). Direction is always dependent → key. Not a compile edge; not MENTIONS (evidence stays Param → section path#n)."
+
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
@@ -119,7 +129,8 @@ description = "Multiple CONSTRAINED_BY edges on one Field — domains intersect 
 example = "Field → Range + Enum(aliases=[…])"
 
 [patterns.provenance]
-description = "Record where values were read: Field ──MENTIONS──► section path#n (built-in edge, not declared here). Provenance is separate from ownership (source_path on nodes)."
+description = "Research provenance: Param ──MENTIONS──► section path#n (built-in edge). Marking dependency: dependent Param ──DEPENDS_ON──► key Param. Separate from compile ownership (Field + CONSTRAINED_BY from .csp)."
+example = "Param_H ──MENTIONS──► gost.pdf#12; Param_H ──DEPENDS_ON──► Param_D"
 
 # ── Table import (constraint compiler) ──
 [tables]

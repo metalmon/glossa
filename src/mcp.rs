@@ -364,7 +364,7 @@ struct NameArg {
 struct GraphStatsArgs {
     #[serde(default)]
     #[schemars(
-        description = "document source_path: list that document's owned non-structural nodes and their MENTIONS targets (doc is scope only; ontology-independent)"
+        description = "document source_path: list that document's owned non-structural nodes and all outgoing edges (doc is scope only; ontology-independent)"
     )]
     doc: Option<String>,
     #[serde(default)]
@@ -432,9 +432,9 @@ struct NoteArgs {
         description = "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing"
     )]
     content: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
-        description = "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is."
+        description = "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is. Pass JSON boolean true (string \"true\" is also accepted)."
     )]
     append: Option<bool>,
 }
@@ -932,7 +932,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass a document (its path — under `doc` OR `node`, resolved leniently) to list that document's owned non-structural nodes (`source_path` scope only) with outgoing MENTIONS targets `<path>#<n>` to `read` directly. Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
+        description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass a document (its path — under `doc` OR `node`, resolved leniently) to list that document's owned non-structural nodes (`source_path` scope only) with all outgoing edges (type → target label or path#n). Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
     )]
     async fn graph_stats(
         &self,
@@ -1101,7 +1101,9 @@ impl GlossaServer {
     }
 }
 
-#[tool_handler]
+// Must use the instance router — bare `#[tool_handler]` defaults to
+// `Self::tool_router()` (a fresh router), so profile `disable_route` never reaches tools/list.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());

@@ -9,7 +9,42 @@ pub fn norm_value(s: &str) -> String {
         Some(p) if s.trim_end().ends_with(']') => s[..p].trim_end().to_string(),
         _ => s.to_string(),
     };
+    let stripped = strip_trailing_unit_if_numeric(stripped.trim_end_matches([';', ',', ' ']));
     glossa_constraint::solver::canon_scalar(&stripped)
+}
+
+fn strip_trailing_unit_if_numeric(s: &str) -> String {
+    let s = s.trim();
+    if let Some((left, right)) = s.rsplit_once(|c: char| c.is_whitespace()) {
+        let left = left.trim_end();
+        let right = right.trim();
+        if is_unit_token(right) && looks_numeric(left) {
+            return left.to_string();
+        }
+    }
+    let unit_start = s
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphabetic() || *c == '/' || *c == '°')
+        .map(|(i, _)| i)
+        .last();
+    if let Some(i) = unit_start {
+        if i > 0 {
+            let (num, unit) = s.split_at(i);
+            if is_unit_token(unit) && looks_numeric(num) {
+                return num.to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
+fn is_unit_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphabetic() || c == '/' || c == '°')
+}
+
+fn looks_numeric(s: &str) -> bool {
+    !s.is_empty() && s.replace(',', ".").parse::<f64>().is_ok()
 }
 
 pub fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
@@ -18,6 +53,7 @@ pub fn domain_covers(agent_dom: &BTreeSet<String>, ref_val: &str) -> bool {
         || agent_dom
             .iter()
             .any(|a| glossa_constraint::enum_alias_matches(a, &rv))
+        || glossa_constraint::values_cover(agent_dom.iter().map(|s| s.as_str()), &rv)
 }
 
 /// Union of all non-empty cell values from parsed `.csp` text (all columns).
@@ -77,5 +113,14 @@ mod tests {
     #[test]
     fn value_recall_empty_csp() {
         assert_eq!(value_recall("not\ttsv\n", &["1".into()]), 0.0);
+    }
+
+    #[test]
+    fn value_recall_ignores_unit_suffix_mismatch() {
+        // Agent wrote marking-style "63 м/с"; gold has bare "63".
+        let csp = "V\n63 м/с\n80 м/с\n";
+        let gold = vec!["63".into(), "80".into()];
+        assert!((value_recall(csp, &gold) - 1.0).abs() < 1e-9);
+        assert_eq!(norm_value("63 м/с"), norm_value("63"));
     }
 }

@@ -846,7 +846,7 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
 }
 
 /// Doc-scoped inventory for `graph_stats(doc=…)`: non-structural nodes owned by
-/// `doc` (`source_path`) with outgoing `MENTIONS` targets. Ontology-independent.
+/// `doc` (`source_path`) with all outgoing edges. Ontology-independent.
 pub fn checklist_coverage_report(
     g: &crate::graph::store::GraphStore,
     doc: &str,
@@ -855,11 +855,9 @@ pub fn checklist_coverage_report(
         Ok(Some(inv)) => {
             let mut lines = vec![format!("owned({doc}): {} nodes", inv.nodes.len())];
             for n in &inv.nodes {
-                let head = format!("{}  [{}]  {}", n.id, n.node_type, n.label);
-                if n.mentions.is_empty() {
-                    lines.push(head);
-                } else {
-                    lines.push(format!("{} → {}", head, n.mentions.join(", ")));
+                lines.push(format!("{}  [{}]  {}", n.id, n.node_type, n.label));
+                for e in &n.outgoing {
+                    lines.push(format!("  {} → {}", e.edge_type, e.to));
                 }
             }
             lines.join("\n")

@@ -209,8 +209,26 @@ mod tests {
             "compiler works with Field: {nodes:?}"
         );
         assert!(nodes.iter().any(|t| t == "Enum"));
+        assert!(
+            !nodes.iter().any(|t| t == "Param"),
+            "Param is research-only, not compile wipe: {nodes:?}"
+        );
         let edges = w.compile_layer_edge_types(&ont);
         assert!(edges.iter().any(|e| e == "CONSTRAINED_BY"));
         assert!(!edges.iter().any(|e| e == "MENTIONS"));
+        assert!(
+            !edges.iter().any(|e| e == "DEPENDS_ON"),
+            "DEPENDS_ON is research-only: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn eval_ontology_declares_param_and_depends_on() {
+        let ont = eval_ontology();
+        assert!(ont.entity_types().iter().any(|t| t == "Param"));
+        assert_eq!(ont.id_abbrev("Param"), "prm");
+        assert!(ont.validate_edge("DEPENDS_ON", "Param", "Param").is_ok());
+        assert!(ont.validate_edge("DEPENDS_ON", "Field", "Field").is_err());
+        assert!(ont.validate_edge("DEPENDS_ON", "Param", "Field").is_err());
     }
 }

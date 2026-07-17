@@ -45,6 +45,8 @@ tar = "0.4"
 calamine = "0.26"
 tempfile = "3"
 ctrlc = "3"
+# Port of Python json_repair — heal truncated / messy LLM tool-call arguments.
+jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 
 [dev-dependencies]
 assert_cmd = "2"

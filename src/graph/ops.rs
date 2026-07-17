@@ -784,15 +784,21 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
 }
 
 /// Doc-scoped inventory for `graph_stats(doc=…)`: every non-structural node owned by
-/// `source_path == doc`, plus outgoing `MENTIONS` targets. Ontology-independent — `doc` is
-/// only a scope filter. Shared by MCP and constraint-eval so both see the same listing.
+/// `source_path == doc`, plus **all** outgoing edges. Ontology-independent — `doc` is only
+/// a scope filter. Shared by MCP and constraint-eval so both see the same listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedEdgeView {
+    pub edge_type: String,
+    /// Neighbour label when the endpoint is a graph node; otherwise the raw id / `path#n`.
+    pub to: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedNodeView {
     pub id: String,
     pub node_type: String,
     pub label: String,
-    /// Outgoing `MENTIONS` targets (`<path>#<n>`), in edge order, deduped.
-    pub mentions: Vec<String>,
+    pub outgoing: Vec<OwnedEdgeView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -809,6 +815,10 @@ pub fn doc_owned_inventory(
     let edges = g.all_edges()?;
     let structural: std::collections::HashSet<&str> =
         crate::graph::STRUCTURAL_NODES.iter().copied().collect();
+    let label_of: std::collections::HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.label.as_str()))
+        .collect();
     let mut owned: Vec<&Node> = nodes
         .iter()
         .filter(|n| n.prov.source_path == doc && !structural.contains(n.node_type.as_str()))
@@ -825,20 +835,31 @@ pub fn doc_owned_inventory(
     let views = owned
         .into_iter()
         .map(|n| {
-            let mut mentions = Vec::new();
-            for e in edges
+            let mut outgoing: Vec<OwnedEdgeView> = edges
                 .iter()
-                .filter(|e| e.edge_type == crate::graph::MENTIONS && e.from == n.id)
-            {
-                if !mentions.contains(&e.to) {
-                    mentions.push(e.to.clone());
-                }
-            }
+                .filter(|e| e.from == n.id)
+                .map(|e| {
+                    let to = label_of
+                        .get(e.to.as_str())
+                        .map(|l| (*l).to_string())
+                        .unwrap_or_else(|| e.to.clone());
+                    OwnedEdgeView {
+                        edge_type: e.edge_type.clone(),
+                        to,
+                    }
+                })
+                .collect();
+            outgoing.sort_by(|a, b| {
+                a.edge_type
+                    .cmp(&b.edge_type)
+                    .then_with(|| a.to.cmp(&b.to))
+            });
+            outgoing.dedup();
             OwnedNodeView {
                 id: n.id.clone(),
                 node_type: n.node_type.clone(),
                 label: n.label.clone(),
-                mentions,
+                outgoing,
             }
         })
         .collect();
@@ -888,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn doc_owned_inventory_scopes_by_source_path_lists_mentions() {
+    fn doc_owned_inventory_scopes_by_source_path_lists_all_outgoing() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
@@ -903,8 +924,10 @@ mod tests {
         cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
         cov_node(&g, "sec:a1", "Section", "раздел 1", &[], "a.docx");
         cov_edge(&g, "fld:vys-a", "MENTIONS", "sec:a1");
+        cov_node(&g, "prm:d", "Param", "D", &[], "a.docx");
         cov_node(&g, "prm:h", "Param", "H", &[], "a.docx");
         cov_edge(&g, "prm:h", "MENTIONS", "a.docx#2");
+        cov_edge(&g, "prm:h", "DEPENDS_ON", "prm:d");
         cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "a.docx");
         cov_node(&g, "fld:dia-b", "Field", "диаметр", &[], "b.docx");
 
@@ -930,15 +953,36 @@ mod tests {
             .iter()
             .find(|n| n.id == "fld:vys-a")
             .expect("высота");
-        assert_eq!(vys.mentions, vec!["sec:a1".to_string()]);
+        assert!(
+            vys.outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "раздел 1"),
+            "MENTIONS resolves Section to label: {:?}",
+            vys.outgoing
+        );
+        assert!(
+            vys.outgoing
+                .iter()
+                .any(|e| e.edge_type == "CONSTRAINED_BY" && e.to == "высота enum"),
+            "all outgoing types, not only MENTIONS: {:?}",
+            vys.outgoing
+        );
         let prm = inv.nodes.iter().find(|n| n.id == "prm:h").expect("Param");
-        assert_eq!(prm.mentions, vec!["a.docx#2".to_string()]);
+        assert!(prm
+            .outgoing
+            .iter()
+            .any(|e| e.edge_type == "MENTIONS" && e.to == "a.docx#2"));
+        assert!(
+            prm.outgoing
+                .iter()
+                .any(|e| e.edge_type == "DEPENDS_ON" && e.to == "D"),
+            "DEPENDS_ON must surface: {:?}",
+            prm.outgoing
+        );
         let zer = inv
             .nodes
             .iter()
             .find(|n| n.label == "зернистость")
             .unwrap();
-        assert!(zer.mentions.is_empty());
+        assert!(zer.outgoing.is_empty());
 
         assert!(doc_owned_inventory(&g, "zzz.docx").unwrap().is_none());
     }
@@ -949,10 +993,15 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
         cov_node(&g, "x:1", "Whatever", "X", &[], "doc.pdf");
         cov_edge(&g, "x:1", "MENTIONS", "doc.pdf#1");
+        cov_edge(&g, "x:1", "CUSTOM_REL", "doc.pdf#9");
         let inv = doc_owned_inventory(&g, "doc.pdf").unwrap().unwrap();
         assert_eq!(inv.nodes.len(), 1);
         assert_eq!(inv.nodes[0].node_type, "Whatever");
-        assert_eq!(inv.nodes[0].mentions, vec!["doc.pdf#1".to_string()]);
+        assert_eq!(inv.nodes[0].outgoing.len(), 2);
+        assert!(inv.nodes[0]
+            .outgoing
+            .iter()
+            .any(|e| e.edge_type == "CUSTOM_REL" && e.to == "doc.pdf#9"));
     }
 
     use crate::graph::ontology::Ontology;
@@ -1614,7 +1663,11 @@ to = ["Enum"]
         let c = doc_owned_inventory(&g, "gost.pdf").unwrap().unwrap();
         assert!(
             c.nodes.iter().any(|n| {
-                n.label == "Тип" && n.node_type == "Field" && !n.mentions.is_empty()
+                n.label == "Тип"
+                    && n.node_type == "Field"
+                    && n.outgoing
+                        .iter()
+                        .any(|e| e.edge_type == crate::graph::MENTIONS)
             }),
             "Field Тип should list MENTIONS: {:?}",
             c.nodes
@@ -1660,6 +1713,101 @@ to = ["Enum"]
                 .iter()
                 .map(|e| (e.edge_type.clone(), e.to.clone()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Delete a MENTIONS edge by label + `<path>#<n>` (the same shape the agent writes on upsert).
+    /// Section targets are not reasoning nodes — delete must still remove the edge and not
+    /// report a silent `deleted 0`.
+    #[test]
+    fn graph_delete_removes_mentions_edge_to_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "gost.docx".into(),
+            location: String::new(),
+            file_type: "docx".into(),
+            text: "table".into(),
+        }])
+        .unwrap();
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Зернистость", "gost.docx")],
+            vec![uedge("Зернистость", "MENTIONS", "gost.docx#1", "gost.docx")],
+            1,
+        );
+        assert!(!out.rejected, "{}", out.message);
+
+        let msg = graph_delete(
+            &idx,
+            &g,
+            vec![],
+            vec![EdgeRef {
+                from: "Зернистость".into(),
+                edge_type: "MENTIONS".into(),
+                to: "gost.docx#1".into(),
+            }],
+        );
+        assert!(
+            msg.contains("deleted 1") || msg.starts_with("deleted ") && !msg.contains("deleted 0"),
+            "must delete the MENTIONS edge: {msg}"
+        );
+        assert!(
+            !msg.contains("matched nothing") && !msg.contains("matched no"),
+            "successful delete must not look like a miss: {msg}"
+        );
+        let from_id = id_for(&ont, "Symptom", "Зернистость");
+        let outgoing = g.outgoing(&from_id).unwrap();
+        assert!(
+            !outgoing.iter().any(|e| e.edge_type == "MENTIONS"),
+            "MENTIONS edge must be gone: {outgoing:?}"
+        );
+    }
+
+    /// Missing MENTIONS delete must explain why, not bare `deleted 0 graph entries`.
+    #[test]
+    fn graph_delete_missing_mentions_edge_explains() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "gost.docx".into(),
+            location: String::new(),
+            file_type: "docx".into(),
+            text: "table".into(),
+        }])
+        .unwrap();
+        assert!(
+            !graph_upsert(
+                &idx,
+                &g,
+                &ont,
+                vec![unode("Symptom", "Зернистость", "gost.docx")],
+                vec![],
+                1,
+            )
+            .rejected
+        );
+
+        let msg = graph_delete(
+            &idx,
+            &g,
+            vec![],
+            vec![EdgeRef {
+                from: "Зернистость".into(),
+                edge_type: "MENTIONS".into(),
+                to: "gost.docx#1".into(),
+            }],
+        );
+        assert!(msg.contains("deleted 0"), "{msg}");
+        assert!(
+            msg.contains("matched no") || msg.contains("matched nothing"),
+            "must explain the no-op: {msg}"
         );
     }
 
@@ -1770,6 +1918,10 @@ to = ["Enum"]
         assert!(
             !msg2.contains("error"),
             "section ref resolution must not produce error: {msg2}"
+        );
+        assert!(
+            msg2.contains("matched no") || msg2.contains("matched nothing"),
+            "absent edge must explain the no-op, not bare deleted 0: {msg2}"
         );
 
         // Non-existent chunk ref: resolve_section_ref errors, original kept, no panic.

@@ -49,7 +49,6 @@ pub fn format_step_context(sop: &Sop, run: &SopRun, step: &SopStep) -> String {
         );
     }
 
-    ctx.push_str("\nWhen done, report your result.\n");
     ctx
 }
 
@@ -142,6 +141,17 @@ mod tests {
             .unwrap();
         assert!(agents.iter().any(|v| v == "researcher"));
         assert!(agents.iter().any(|v| v == "worker"));
+        let task_desc = t["parameters"]["properties"]["task"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            task_desc.contains("Пример маркировки"),
+            "worker task must include marking example: {task_desc}"
+        );
+        assert!(
+            !task_desc.contains("без ключа") || task_desc.contains("не передавай"),
+            "ambiguous «без ключа» must be clarified: {task_desc}"
+        );
     }
 
     #[test]
@@ -160,6 +170,9 @@ mod tests {
         assert!(out.contains("Previous: Step 1 completed"));
         assert!(out.contains("Current step: **Seed**"));
         assert!(out.contains("Suggested tools: grep"));
-        assert!(out.contains("When done, report your result."));
+        assert!(
+            !out.contains("When this step is complete, call `sop_advance`"),
+            "step body owns advance/finish; no generic footer"
+        );
     }
 }

@@ -101,6 +101,121 @@ pub fn parse_range(v: &str) -> Option<(f64, f64)> {
     Some(if a <= b { (a, b) } else { (b, a) })
 }
 
+/// Integer closed interval from a range label (`25-49`) or a plain integer atom (`27`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IntSpan {
+    lo: i64,
+    hi: i64,
+}
+
+fn near_int(x: f64) -> Option<i64> {
+    if !x.is_finite() || (x - x.round()).abs() > 1e-9 {
+        return None;
+    }
+    Some(x.round() as i64)
+}
+
+fn parse_int_span(v: &str) -> Option<IntSpan> {
+    let c = canon_scalar(v);
+    if let Some((a, b)) = parse_range(&c) {
+        return Some(IntSpan {
+            lo: near_int(a)?,
+            hi: near_int(b)?,
+        });
+    }
+    let n: f64 = c.replace(',', ".").parse().ok()?;
+    let x = near_int(n)?;
+    Some(IntSpan { lo: x, hi: x })
+}
+
+fn span_subseteq(piece: IntSpan, gold: IntSpan) -> bool {
+    piece.lo >= gold.lo && piece.hi <= gold.hi
+}
+
+fn lattice_step(endpoints: &[i64]) -> i64 {
+    if endpoints.is_empty() {
+        return 1;
+    }
+    let all_odd = endpoints.iter().all(|e| e.rem_euclid(2) == 1);
+    let all_even = endpoints.iter().all(|e| e.rem_euclid(2) == 0);
+    if all_odd || all_even {
+        2
+    } else {
+        1
+    }
+}
+
+/// Whether agent values collectively cover a gold scalar under range equivalence.
+///
+/// After canon (`25—49` ≡ `25-49`):
+/// - exact string match → covered;
+/// - gold atom → covered if some agent span contains it;
+/// - gold range → agent spans that lie inside the gold range must have matching
+///   hull (`lo`/`hi`), and every lattice point in the gold range must fall in at
+///   least one such span. Lattice step is 2 when all endpoints among gold and
+///   agent numeric spans are odd (or all even); otherwise step 1 (every integer).
+pub fn values_cover<'a, I>(agent_vals: I, gold: &str) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let gold_c = canon_scalar(gold);
+    let agents: Vec<String> = agent_vals
+        .into_iter()
+        .map(|s| canon_scalar(s))
+        .collect();
+    if agents.iter().any(|a| a == &gold_c) {
+        return true;
+    }
+    let Some(gold_span) = parse_int_span(&gold_c) else {
+        return false;
+    };
+    let pieces: Vec<IntSpan> = agents.iter().filter_map(|a| parse_int_span(a)).collect();
+    if gold_span.lo == gold_span.hi {
+        let x = gold_span.lo;
+        return pieces.iter().any(|p| p.lo <= x && x <= p.hi);
+    }
+    let contributing: Vec<IntSpan> = pieces
+        .iter()
+        .copied()
+        .filter(|p| span_subseteq(*p, gold_span))
+        .collect();
+    if contributing.is_empty() {
+        return false;
+    }
+    let hull_lo = contributing.iter().map(|p| p.lo).min().unwrap();
+    let hull_hi = contributing.iter().map(|p| p.hi).max().unwrap();
+    if hull_lo != gold_span.lo || hull_hi != gold_span.hi {
+        return false;
+    }
+    let mut ends = vec![gold_span.lo, gold_span.hi];
+    for p in &pieces {
+        ends.push(p.lo);
+        ends.push(p.hi);
+    }
+    let step = lattice_step(&ends);
+    let mut x = gold_span.lo;
+    while x <= gold_span.hi {
+        if !contributing.iter().any(|p| p.lo <= x && x <= p.hi) {
+            return false;
+        }
+        x += step;
+    }
+    true
+}
+
+/// Whether one agent value is allowed by a gold value (exact, or agent span ⊆ gold span).
+pub fn value_subseteq(agent: &str, gold: &str) -> bool {
+    let a = canon_scalar(agent);
+    let g = canon_scalar(gold);
+    if a == g {
+        return true;
+    }
+    match (parse_int_span(&a), parse_int_span(&g)) {
+        (Some(ap), Some(gp)) => span_subseteq(ap, gp),
+        _ => false,
+    }
+}
+
 /// Canonical form of a scalar for comparison. A decimal written with either a
 /// comma (Russian standards: "0,6", "1,0") or a dot collapses to one numeric
 /// form, so "1,0" == "1.0" == "1" and "152,4" == "152.4". Non-numeric values
@@ -725,6 +840,48 @@ mod tests {
         assert_eq!(parse_range("41—43"), Some((41.0, 43.0)));
         assert_eq!(parse_range("F46"), None);
         assert_eq!(parse_range("125"), None);
+    }
+
+    #[test]
+    fn values_cover_odd_bands_match_wide_gold_range() {
+        // App Б bands vs п. 4.5 wide range — same odd lattice, full hull.
+        let bands = [
+            "25-27", "29-31", "33-35", "37-39", "41-43", "45-49",
+        ];
+        assert!(values_cover(bands.iter().copied(), "25—49"));
+        assert!(values_cover(["25-49"].iter().copied(), "25-49"));
+        // Missing an interior odd band → gap on step-2 lattice.
+        let gap = ["25-27", "29-31", "37-39", "41-43", "45-49"];
+        assert!(!values_cover(gap.iter().copied(), "25-49"));
+        // Hull too short.
+        assert!(!values_cover(["25-27", "29-31"].iter().copied(), "25-49"));
+        // Piece outside gold → not contributing; hull fails if only outsider remains.
+        assert!(!values_cover(["25-51"].iter().copied(), "25-49"));
+    }
+
+    #[test]
+    fn values_cover_mixed_parity_uses_integer_lattice() {
+        // Mixed endpoints → every integer in [lo,hi] must be covered.
+        assert!(values_cover(["1-5"].iter().copied(), "1-5"));
+        assert!(values_cover(["1-2", "3-5"].iter().copied(), "1-5"));
+        assert!(!values_cover(["1-2", "4-5"].iter().copied(), "1-5")); // missing 3
+    }
+
+    #[test]
+    fn values_cover_atom_inside_agent_range() {
+        assert!(values_cover(["25-49"].iter().copied(), "27"));
+        assert!(values_cover(["25-27", "29-31"].iter().copied(), "27"));
+        assert!(!values_cover(["25-27"].iter().copied(), "33"));
+        assert!(!values_cover(["F46"].iter().copied(), "27"));
+    }
+
+    #[test]
+    fn value_subseteq_band_inside_gold_range() {
+        assert!(value_subseteq("25-27", "25-49"));
+        assert!(value_subseteq("27", "25-49"));
+        assert!(value_subseteq("25—49", "25-49"));
+        assert!(!value_subseteq("25-51", "25-49"));
+        assert!(!value_subseteq("B", "25-49"));
     }
 
     #[test]

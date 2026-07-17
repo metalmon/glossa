@@ -4,6 +4,7 @@ pub mod glob;
 pub mod graph;
 pub mod grep;
 pub mod index;
+pub mod json_util;
 pub mod mcp;
 pub mod model;
 pub mod query;
