@@ -92,6 +92,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 |------|--------|-------|
 | CSP solver in `kb` | **Open** | Not in main binary; eval TZ config has forward-looking `constraint_validate` / tool stubs only |
 | `constraint_solve` MCP tool | **Open** | Planned — see Track C |
+| Structured table tools (`table_add_row`, `table_get`, …) | **Open** | Agents build `.csp` tables as free-form `note` TSV today, which is error-prone on wide/joint tables. Give models first-class ops — add/edit/delete a row, read a table back structured, and pull a table out of a source document — so complex tables are manipulated as data, not hand-formatted text. At minimum: build these tools and add eval coverage that they behave. |
 
 **Planned behavior:** agent models constraints via **`graph_upsert`** (`Field` → `CONSTRAINED_BY` → Range/Enum/Regex/…); **`constraint_solve`** reads that subgraph only (no table extraction from the index).
 
