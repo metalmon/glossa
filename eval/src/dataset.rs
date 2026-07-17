@@ -31,7 +31,13 @@ struct RawItem {
 pub fn sanitize_title(title: &str) -> String {
     let mut s: String = title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     s = s.trim().replace(' ', "_");
     if s.is_empty() {
@@ -52,7 +58,11 @@ pub fn parse_hotpot(json: &str) -> anyhow::Result<Vec<Question>> {
                 id: r.id,
                 question: r.question,
                 answer: r.answer,
-                paragraphs: r.context.into_iter().map(|(title, sentences)| Paragraph { title, sentences }).collect(),
+                paragraphs: r
+                    .context
+                    .into_iter()
+                    .map(|(title, sentences)| Paragraph { title, sentences })
+                    .collect(),
                 supporting_titles: titles,
             }
         })
@@ -87,7 +97,10 @@ mod tests {
         assert_eq!(qs.len(), 1);
         assert_eq!(qs[0].answer, "Bob");
         assert_eq!(qs[0].paragraphs.len(), 2);
-        assert_eq!(qs[0].supporting_titles, vec!["Alice".to_string(), "Bob Page".to_string()]);
+        assert_eq!(
+            qs[0].supporting_titles,
+            vec!["Alice".to_string(), "Bob Page".to_string()]
+        );
     }
 
     #[test]

@@ -72,26 +72,52 @@ mod tests {
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
 
     fn prov() -> Provenance {
-        Provenance { source_path: "s".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 }
+        Provenance {
+            source_path: "s".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 1.0,
+            created_at: 0,
+        }
     }
     fn node(g: &GraphStore, id: &str) {
-        g.put_node(&Node { id: id.into(), node_type: "Entity".into(), label: id.into(), aliases: vec![], prov: prov() }).unwrap();
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: "Entity".into(),
+            label: id.into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
     }
     fn edge(g: &GraphStore, from: &str, to: &str, ty: &str) {
-        g.put_edge(&Edge { from: from.into(), to: to.into(), edge_type: ty.into(), prov: prov() }).unwrap();
+        g.put_edge(&Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: ty.into(),
+            prov: prov(),
+        })
+        .unwrap();
     }
 
     #[test]
     fn neighbors_respects_depth_and_type() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        for id in ["a", "b", "c", "d"] { node(&g, id); }
+        for id in ["a", "b", "c", "d"] {
+            node(&g, id);
+        }
         edge(&g, "a", "b", "REL");
         edge(&g, "b", "c", "REL");
         edge(&g, "a", "d", "OTHER");
 
         let d1 = neighbors(&g, "a", None, 1).unwrap();
-        assert!(d1.contains(&"b".to_string()) && d1.contains(&"d".to_string()) && !d1.contains(&"c".to_string()));
+        assert!(
+            d1.contains(&"b".to_string())
+                && d1.contains(&"d".to_string())
+                && !d1.contains(&"c".to_string())
+        );
 
         let d2 = neighbors(&g, "a", None, 2).unwrap();
         assert!(d2.contains(&"c".to_string()));
@@ -104,10 +130,15 @@ mod tests {
     fn path_finds_chain() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        for id in ["a", "b", "c"] { node(&g, id); }
+        for id in ["a", "b", "c"] {
+            node(&g, id);
+        }
         edge(&g, "a", "b", "REL");
         edge(&g, "b", "c", "REL");
-        assert_eq!(path(&g, "a", "c", 5).unwrap(), Some(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(
+            path(&g, "a", "c", 5).unwrap(),
+            Some(vec!["a".into(), "b".into(), "c".into()])
+        );
         assert_eq!(path(&g, "a", "z", 5).unwrap(), None);
     }
 }

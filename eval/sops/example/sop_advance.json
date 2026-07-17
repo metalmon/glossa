@@ -1,0 +1,18 @@
+{
+  "name": "sop_advance",
+  "description": "Finish the CURRENT SOP step and receive the next step's context. On a single-step SOP do not call this — finish with a normal text reply (no tool calls) after graph_build OK.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "description": "completed | failed"
+      },
+      "output": {
+        "type": "string",
+        "description": "JSON result string for this step"
+      }
+    },
+    "required": ["status", "output"]
+  }
+}

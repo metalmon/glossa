@@ -68,7 +68,10 @@ mod tests {
         std::fs::write(&p, b"# p.1\nalpha\n# p.10\nbeta\n").unwrap();
         let one = read_region(&p, Some("p.1")).unwrap();
         assert!(one.contains("alpha"), "exact p.1 must include page-1 text");
-        assert!(!one.contains("beta"), "exact p.1 must NOT include p.10 text");
+        assert!(
+            !one.contains("beta"),
+            "exact p.1 must NOT include p.10 text"
+        );
     }
 
     #[test]
@@ -87,6 +90,28 @@ mod tests {
         std::fs::write(&p, b"name,age\nbob,5\n").unwrap();
         let out = read_region(&p, None).unwrap();
         assert!(out.contains("name,age") && out.contains("bob,5"));
+    }
+
+    #[test]
+    fn exact_empty_pdf_page_does_not_fallback_to_whole_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("three-page-blank-middle.pdf");
+        std::fs::write(
+            &p,
+            include_bytes!("../tests/fixtures/three-page-blank-middle.pdf"),
+        )
+        .unwrap();
+        let whole = read_region(&p, None).unwrap();
+        let p2 = read_region(&p, Some("p.2")).unwrap();
+        assert!(
+            whole.contains("page one") && whole.contains("page three"),
+            "whole: {whole}"
+        );
+        assert!(
+            !p2.contains("page one") && !p2.contains("page three"),
+            "p.2 must not fall back: {p2:?}"
+        );
+        assert!(p2.trim().is_empty(), "blank page body: {p2:?}");
     }
 }
 
@@ -118,7 +143,11 @@ fn mime_for(name: &str) -> Option<&'static str> {
 }
 
 pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" => {
             if max == 0 {
@@ -126,52 +155,78 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
             }
             let bytes = std::fs::read(path)?;
             let mime = mime_for(&format!("x.{ext}")).unwrap_or("application/octet-stream");
-            Ok(vec![DocImage { mime: mime.into(), bytes }])
+            Ok(vec![DocImage {
+                mime: mime.into(),
+                bytes,
+            }])
         }
         "pdf" => extract_pdf_page_images(path, page, max),
         _ => extract_zip_media(path, max),
     }
 }
 
-fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
-    use oxidize_pdf::operations::{extract_images_from_pages, ExtractImagesOptions};
+fn extract_pdf_page_images(
+    path: &Path,
+    page: u64,
+    max: usize,
+) -> anyhow::Result<Vec<DocImage>> {
+    use pdf_oxide::extractors::ImageData;
+    use pdf_oxide::PdfDocument;
+
     if max == 0 {
         return Ok(Vec::new());
     }
-    // Unique per call (pid + monotonic counter) so concurrent reads — tool calls now run in
-    // parallel threads — never share a temp dir and clobber each other's files.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = std::env::temp_dir()
-        .join(format!("glossa-img-{}-{}", std::process::id(), uniq));
-    let _ = std::fs::create_dir_all(&tmp);
-    let result = (|| -> anyhow::Result<Vec<DocImage>> {
-        let opts = ExtractImagesOptions {
-            output_dir: tmp.clone(),
-            create_dir: true,
-            ..Default::default()
-        };
-        // page is 1-based (chunk number); oxidize-pdf uses 0-based page indices
-        let page_0 = page.saturating_sub(1) as usize;
-        let images = extract_images_from_pages(path, &[page_0], opts)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut out = Vec::new();
-        for img in images.into_iter().take(max) {
-            let mime = match img.format {
-                oxidize_pdf::graphics::ImageFormat::Jpeg => "image/jpeg",
-                oxidize_pdf::graphics::ImageFormat::Png => "image/png",
-                oxidize_pdf::graphics::ImageFormat::Tiff => "image/tiff",
-                _ => continue, // Raw / undecodable → skip
-            };
-            if let Ok(b) = std::fs::read(&img.file_path) {
-                out.push(DocImage { mime: mime.into(), bytes: b });
-            }
+    let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
+        return Ok(Vec::new());
+    };
+    let Ok(document) = PdfDocument::open(path) else {
+        return Ok(Vec::new());
+    };
+    let Ok(images) = document.extract_images(page_index) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for image in images {
+        if out.len() >= max {
+            break;
         }
-        Ok(out)
-    })();
-    let _ = std::fs::remove_dir_all(&tmp);
-    // A text-only page, malformed PDF, or decode failure → no images, not an error.
-    Ok(result.unwrap_or_default())
+        let (mime, bytes) = match image.data() {
+            ImageData::Jpeg(bytes) => ("image/jpeg", bytes.clone()),
+            ImageData::Raw { .. } => {
+                let Ok(bytes) = image.to_png_bytes() else {
+                    continue;
+                };
+                ("image/png", bytes)
+            }
+        };
+        out.push(DocImage {
+            mime: mime.into(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+/// Rasterize one PDF page (1-based) to PNG @ 200 DPI. Empty on failure.
+pub fn render_pdf_page(path: &Path, page: u64) -> anyhow::Result<Option<DocImage>> {
+    use pdf_oxide::rendering::{render_page, RenderOptions};
+    use pdf_oxide::PdfDocument;
+
+    let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
+        return Ok(None);
+    };
+    let Ok(document) = PdfDocument::open(path) else {
+        return Ok(None);
+    };
+    let options = RenderOptions::with_dpi(200);
+    let Ok(image) = render_page(&document, page_index, &options) else {
+        return Ok(None);
+    };
+    Ok(Some(DocImage {
+        mime: "image/png".into(),
+        bytes: image.data,
+    }))
 }
 
 fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
@@ -196,15 +251,22 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
         if out.len() >= max {
             break;
         }
-        let Some(mime) = mime_for(&name) else { continue };
+        let Some(mime) = mime_for(&name) else {
+            continue;
+        };
         use std::io::Read;
         let mut entry = match archive.by_name(&name) {
             Ok(e) => e,
             Err(_) => continue,
         };
         let mut buf = Vec::new();
-        if entry.read_to_end(&mut buf).is_err() { continue; }
-        out.push(DocImage { mime: mime.into(), bytes: buf });
+        if entry.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        out.push(DocImage {
+            mime: mime.into(),
+            bytes: buf,
+        });
     }
     Ok(out)
 }
@@ -260,5 +322,32 @@ mod image_tests {
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].mime, "image/png");
         assert_eq!(imgs[0].bytes, data);
+    }
+
+    fn sample_pdf() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample.pdf")
+    }
+
+    #[test]
+    fn render_pdf_page_returns_png_magic() {
+        let image = render_pdf_page(&sample_pdf(), 1)
+            .unwrap()
+            .expect("sample PDF page 1 should render");
+        assert_eq!(image.mime, "image/png");
+        assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(image.bytes.len() > 100);
+    }
+
+    #[test]
+    fn render_pdf_page_missing_page_is_none() {
+        assert_eq!(render_pdf_page(&sample_pdf(), 99).unwrap(), None);
+    }
+
+    #[test]
+    fn extract_images_from_pdf_soft_fails() {
+        assert!(extract_images(&sample_pdf(), 1, 4).is_ok());
     }
 }

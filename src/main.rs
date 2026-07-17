@@ -19,7 +19,10 @@ enum OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "kb", about = "File-First knowledge-base search (ripgrep syntax)")]
+#[command(
+    name = "kb",
+    about = "File-First knowledge-base search (ripgrep syntax)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -69,13 +72,9 @@ enum Cmd {
         location: Option<String>,
     },
     /// Build or update the on-disk index for ranked search.
-    Index {
-        path: Option<PathBuf>,
-    },
+    Index { path: Option<PathBuf> },
     /// Rebuild the index from scratch.
-    Reindex {
-        path: Option<PathBuf>,
-    },
+    Reindex { path: Option<PathBuf> },
     /// Inspect the knowledge graph.
     Graph {
         #[command(subcommand)]
@@ -87,11 +86,52 @@ enum Cmd {
         pattern: String,
         /// knowledge-base directory (default: nearest indexed root / current dir)
         path: Option<PathBuf>,
-        #[arg(short = 'i', long, help = "case-insensitive matching (-i)")] ignore_case: bool,
-        #[arg(short = 'F', long)] fixed: bool,
-        #[arg(short = 'w', long)] word: bool,
-        #[arg(short = 'g', long)] glob: Option<String>,
-        #[arg(short = 't', long = "type")] file_type: Option<String>,
+        #[arg(short = 'i', long, help = "case-insensitive matching (-i)")]
+        ignore_case: bool,
+        #[arg(short = 'F', long)]
+        fixed: bool,
+        #[arg(short = 'w', long)]
+        word: bool,
+        #[arg(short = 'g', long)]
+        glob: Option<String>,
+        #[arg(short = 't', long = "type")]
+        file_type: Option<String>,
+        #[arg(short = 'A', long, help = "N context lines after each match (-A)")]
+        after: Option<usize>,
+        #[arg(short = 'B', long, help = "N context lines before each match (-B)")]
+        before: Option<usize>,
+        #[arg(
+            short = 'C',
+            long,
+            help = "N context lines before AND after each match (-C)"
+        )]
+        context: Option<usize>,
+        #[arg(
+            short = 'o',
+            long = "only-matching",
+            help = "print only the matched substrings (-o)"
+        )]
+        only_matching: bool,
+        #[arg(
+            short = 'n',
+            long = "line-number",
+            help = "prefix each line with its chunk line number (-n)"
+        )]
+        line_number: bool,
+        #[arg(
+            short = 'c',
+            long,
+            help = "print only a count of matching lines per chunk (-c)"
+        )]
+        count: bool,
+        #[arg(
+            short = 'm',
+            long = "max-count",
+            help = "stop after N matching lines per chunk (-m)"
+        )]
+        max_count: Option<usize>,
+        #[arg(short = 'U', long, help = "let the pattern span lines (-U)")]
+        multiline: bool,
     },
     /// List documents whose PATH matches a shell glob (matches file paths, NOT text inside them —
     /// for content use `search` or `grep`).
@@ -117,7 +157,12 @@ enum Cmd {
         #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
-        #[arg(long, value_enum, default_value = "stdio", env = "GLOSSA_MCP_TRANSPORT")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "stdio",
+            env = "GLOSSA_MCP_TRANSPORT"
+        )]
         transport: McpTransport,
         /// Bind address for --transport streamable-http.
         #[arg(long, default_value = "127.0.0.1:8080", env = "GLOSSA_MCP_BIND")]
@@ -158,13 +203,11 @@ enum McpAction {
 #[derive(Subcommand)]
 enum GraphAction {
     /// Print node/edge counts.
-    Stats {
-        path: Option<PathBuf>,
-    },
+    Stats { path: Option<PathBuf> },
     /// Find graph nodes by concept (the `glossary` tool) — prints `id [type] label` + edges.
     #[command(visible_aliases = ["search", "find"])]
     Glossary {
-        /// concept in your own words, e.g. "потеря связи"
+        /// concept in your own words, e.g. "connection loss"
         query: String,
         path: Option<PathBuf>,
     },
@@ -182,9 +225,17 @@ enum GraphAction {
     /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
     Generalize {
         path: Option<PathBuf>,
-        #[arg(short = 'm', long, help = "also collapse near-duplicate nodes (destructive)")]
+        #[arg(
+            short = 'm',
+            long,
+            help = "also collapse near-duplicate nodes (destructive)"
+        )]
         merge: bool,
-        #[arg(short = 'p', long, help = "delete degenerate reasoning chains off the ontology spine (destructive)")]
+        #[arg(
+            short = 'p',
+            long,
+            help = "delete degenerate reasoning chains off the ontology spine (destructive)"
+        )]
         prune_incomplete: bool,
     },
     /// Print nodes reachable from NODE_ID.
@@ -234,6 +285,17 @@ enum GraphAction {
         #[arg(short = 't', long = "type", required = true)]
         node_type: Vec<String>,
     },
+    /// Compile a document's `.csp` limit tables (notebook notes) into the constraint graph.
+    #[cfg(feature = "constraint")]
+    Build {
+        path: Option<PathBuf>,
+        /// Owner document (`Field.source_path`), corpus-relative.
+        #[arg(long)]
+        doc: String,
+        /// Directory with `*.csp` (default: the document's notes mirror under `.glossa/notes/`).
+        #[arg(long)]
+        tables_dir: Option<PathBuf>,
+    },
 }
 
 fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
@@ -263,7 +325,6 @@ pub(crate) struct ServeParams {
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
-    pub service_name: Option<String>,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -308,7 +369,8 @@ pub(crate) fn run_serve(
                 cancel.cancel();
             }
             McpTransport::StreamableHttp => {
-                serve_streamable_http(server, &bind, allowed_hosts, cancel, on_transport_ready).await?;
+                serve_streamable_http(server, &bind, allowed_hosts, cancel, on_transport_ready)
+                    .await?;
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -396,7 +458,9 @@ async fn serve_streamable_http(
         .nest_service("/mcp", service)
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!("glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)");
+    tracing::info!(
+        "glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)"
+    );
     if let Some(f) = on_transport_ready {
         f();
     }
@@ -414,14 +478,28 @@ fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                // Our logs at info; silence tantivy's per-reload INFO chatter. RUST_LOG overrides.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn")),
+                // Our logs at info; silence noisy deps. RUST_LOG overrides.
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
+                }),
         )
         .with_writer(std::io::stderr)
         .try_init();
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Search { pattern, path, ignore_case, word, fixed, glob, file_type, limit, scan, no_ignore, format } => {
+        Cmd::Search {
+            pattern,
+            path,
+            ignore_case,
+            word,
+            fixed,
+            glob,
+            file_type,
+            limit,
+            scan,
+            no_ignore,
+            format,
+        } => {
             let path = glossa::root::resolve_root(path);
             let pretty = match format {
                 OutputFormat::Pretty => true,
@@ -435,8 +513,13 @@ fn main() -> anyhow::Result<()> {
             if !scan {
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                for h in idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())? {
-                    rg_lines.push(format!("{}:{}: {}  [{:.3}]", h.path, h.location, h.snippet, h.score));
+                for h in
+                    idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())?
+                {
+                    rg_lines.push(format!(
+                        "{}:{}: {}  [{:.3}]",
+                        h.path, h.location, h.snippet, h.score
+                    ));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&path, &h.path),
                         location: h.location.clone(),
@@ -446,7 +529,12 @@ fn main() -> anyhow::Result<()> {
                     records.push((h.path.clone(), h.location.clone()));
                 }
             } else {
-                let opts = QueryOpts { ignore_case, smart_case: !ignore_case, word, fixed };
+                let opts = QueryOpts {
+                    ignore_case,
+                    smart_case: !ignore_case,
+                    word,
+                    fixed,
+                };
                 let re = compile(&pattern, &opts)?;
                 let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
                 for h in search_chunks(&chunks, &re, limit) {
@@ -471,7 +559,10 @@ fn main() -> anyhow::Result<()> {
             if pretty {
                 // Index (default) results are ranked → print worst→best so the most relevant sits
                 // next to the prompt; the literal `--scan` results are kept in file order.
-                print!("{}", glossa::cli_fmt::render_search_pretty(&display, !scan, &pattern));
+                print!(
+                    "{}",
+                    glossa::cli_fmt::render_search_pretty(&display, !scan, &pattern)
+                );
             } else {
                 for l in &rg_lines {
                     println!("{l}");
@@ -510,7 +601,10 @@ fn main() -> anyhow::Result<()> {
                         match from_index {
                             Some(body) => {
                                 if glossa::cli_fmt::stdout_is_tty() {
-                                    println!("{}", glossa::cli_fmt::dim(&format!("── {p} · {loc} ──")));
+                                    println!(
+                                        "{}",
+                                        glossa::cli_fmt::dim(&format!("── {p} · {loc} ──"))
+                                    );
                                 }
                                 print!("{body}");
                                 if !body.ends_with('\n') {
@@ -530,23 +624,35 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Index { path } => {
             let path = glossa::root::resolve_root(path);
+            let started = std::time::Instant::now();
             let stats = glossa::index::store::index_dir(&path, false)?;
             println!(
-                "indexed: {} added, {} removed, {} unchanged",
-                stats.added, stats.removed, stats.unchanged
+                "indexed: {} added, {} removed, {} unchanged in {}",
+                stats.added,
+                stats.removed,
+                stats.unchanged,
+                glossa::cli_fmt::format_elapsed(started.elapsed())
             );
             Ok(())
         }
         Cmd::Reindex { path } => {
             let path = glossa::root::resolve_root(path);
+            let started = std::time::Instant::now();
             let stats = glossa::index::store::index_dir(&path, true)?;
-            println!("reindexed: {} files", stats.added);
+            println!(
+                "reindexed: {} files in {}",
+                stats.added,
+                glossa::cli_fmt::format_elapsed(started.elapsed())
+            );
             // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
             // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
             // merges are only reported, never applied here (use `kb graph generalize --merge`).
             let g = glossa::graph::store::GraphStore::open(&path)?;
             let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
-            let opts = glossa::graph::generalize::apply::Opts::from_ontology(&ont, glossa::trace::now_ms());
+            let opts = glossa::graph::generalize::apply::Opts::from_ontology(
+                &ont,
+                glossa::trace::now_ms(),
+            );
             let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
             println!(
                 "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
@@ -554,11 +660,43 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Grep { pattern, path, ignore_case, fixed, word, glob, file_type } => {
+        Cmd::Grep {
+            pattern,
+            path,
+            ignore_case,
+            fixed,
+            word,
+            glob,
+            file_type,
+            after,
+            before,
+            context,
+            only_matching,
+            line_number,
+            count,
+            max_count,
+            multiline,
+        } => {
             let path = glossa::root::resolve_root(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-            let opts = glossa::grep::GrepOpts { ignore_case, fixed, word, glob, file_type };
+            let opts = glossa::grep::GrepOpts {
+                ignore_case,
+                fixed,
+                word,
+                glob,
+                file_type,
+                // -A/-B override the shared -C on their respective side.
+                before: before.or(context).unwrap_or(0),
+                after: after.or(context).unwrap_or(0),
+                only_matching,
+                line_number,
+                count,
+                max_count,
+                multiline,
+                line_cap: None,
+                path: None,
+            };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
                 println!("{}", h.display_line());
             }
@@ -578,10 +716,24 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Mcp { action, path, profile, trace, no_graph, transport, bind, allowed_hosts, windows_service, service_name } => match action {
+        Cmd::Mcp {
+            action,
+            path,
+            profile,
+            trace,
+            no_graph,
+            transport,
+            bind,
+            allowed_hosts,
+            windows_service,
+            service_name: _service_name,
+        } => match action {
             Some(McpAction::DumpTzTools { config_dir }) => {
                 let n = glossa::tz_export::dump(&config_dir)?;
-                println!("dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml", n);
+                println!(
+                    "dump-tz-tools: wrote {} tool schemas and updated tensorzero.toml",
+                    n
+                );
                 Ok(())
             }
             None => {
@@ -594,14 +746,13 @@ fn main() -> anyhow::Result<()> {
                     transport,
                     bind,
                     allowed_hosts,
-                    service_name,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
                     // service dispatcher, which runs run_serve under SCM control (Stop → cancel).
                     #[cfg(windows)]
                     {
-                        return winsvc::run(params);
+                        return winsvc::run(params, _service_name);
                     }
                     #[cfg(not(windows))]
                     {
@@ -609,7 +760,12 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 // Foreground: OS signals (Ctrl-C / SIGTERM) drive graceful shutdown.
-                run_serve(params, tokio_util::sync::CancellationToken::new(), true, None)?;
+                run_serve(
+                    params,
+                    tokio_util::sync::CancellationToken::new(),
+                    true,
+                    None,
+                )?;
                 Ok(())
             }
         },
@@ -626,11 +782,20 @@ fn main() -> anyhow::Result<()> {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let trace = glossa::trace::TraceLog::disabled();
-                let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(&path));
-                println!("{}", glossa::tools::glossary(&idx, &g, &query, &spec, &trace));
+                let spec = glossa::tools::ChainSpec::from_ontology(
+                    &glossa::graph::ontology::Ontology::load_or_default(&path),
+                );
+                println!(
+                    "{}",
+                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace)
+                );
                 Ok(())
             }
-            GraphAction::Ls { path, node_type, limit } => {
+            GraphAction::Ls {
+                path,
+                node_type,
+                limit,
+            } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let nodes = g.all_nodes()?;
@@ -659,12 +824,18 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Generalize { path, merge, prune_incomplete } => {
+            GraphAction::Generalize {
+                path,
+                merge,
+                prune_incomplete,
+            } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
-                let mut opts =
-                    glossa::graph::generalize::apply::Opts::from_ontology(&ont, glossa::trace::now_ms());
+                let mut opts = glossa::graph::generalize::apply::Opts::from_ontology(
+                    &ont,
+                    glossa::trace::now_ms(),
+                );
                 opts.apply_merges = merge;
                 opts.prune_incomplete = prune_incomplete;
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
@@ -681,10 +852,19 @@ fn main() -> anyhow::Result<()> {
                 );
                 Ok(())
             }
-            GraphAction::Near { node_id, path, depth, types } => {
+            GraphAction::Near {
+                node_id,
+                path,
+                depth,
+                types,
+            } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
-                let filter = if types.is_empty() { None } else { Some(types.as_slice()) };
+                let filter = if types.is_empty() {
+                    None
+                } else {
+                    Some(types.as_slice())
+                };
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
                     println!("{id}");
                 }
@@ -702,14 +882,26 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Path { from, to, path, max_depth } => {
+            GraphAction::Path {
+                from,
+                to,
+                path,
+                max_depth,
+            } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
-                println!("{}", glossa::cli_fmt::render_path(found.as_ref(), &from, &to, max_depth));
+                println!(
+                    "{}",
+                    glossa::cli_fmt::render_path(found.as_ref(), &from, &to, max_depth)
+                );
                 Ok(())
             }
-            GraphAction::Dump { path, node_type, format } => {
+            GraphAction::Dump {
+                path,
+                node_type,
+                format,
+            } => {
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 match format.as_str() {
                     "text" => {
@@ -757,16 +949,15 @@ fn main() -> anyhow::Result<()> {
                         .to_string()
                 });
                 if fmt != "json" {
-                    anyhow::bail!(
-                        "import supports json only (graphml/dot are export-only)"
-                    );
+                    anyhow::bail!("import supports json only (graphml/dot are export-only)");
                 }
                 let contents = std::fs::read_to_string(&file)?;
                 let export = glossa::graph::io::from_json(&contents)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let now = glossa::trace::now_ms();
                 let g = glossa::graph::store::GraphStore::open(&path)?;
-                let (pruned, n, ed) = glossa::graph::io::import_replace_layer(&g, &ont, export, now)?;
+                let (pruned, n, ed) =
+                    glossa::graph::io::import_replace_layer(&g, &ont, export, now)?;
                 println!("graph import: pruned {pruned}, +{n} nodes, +{ed} edges");
                 Ok(())
             }
@@ -779,6 +970,27 @@ fn main() -> anyhow::Result<()> {
                     total += n;
                 }
                 println!("graph prune: {total} total entries removed");
+                Ok(())
+            }
+            #[cfg(feature = "constraint")]
+            GraphAction::Build {
+                path,
+                doc,
+                tables_dir,
+            } => {
+                let root = glossa::root::resolve_root(path);
+                glossa::index::store::ensure_fresh(&root)?;
+                let tables = tables_dir.unwrap_or_else(|| {
+                    glossa::notebook::notes_root(&root)
+                        .join(glossa::notebook::mirror_dir_for_doc(&doc))
+                });
+                let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
+                let g = glossa::graph::store::GraphStore::open(&root)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&root);
+                let report = glossa::tables::tables_to_graph(&idx, &g, &ont, &doc, &tables)?;
+                for line in &report.lines {
+                    println!("{line}");
+                }
                 Ok(())
             }
         },

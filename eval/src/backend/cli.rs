@@ -21,9 +21,12 @@ impl CliBackend {
     /// Default args template for `claude -p` acting as the glossa MCP client.
     pub fn claude_preset() -> Vec<String> {
         vec![
-            "-p".to_string(), "{prompt}".to_string(),
-            "--mcp-config".to_string(), "{mcp_config}".to_string(),
-            "--permission-mode".to_string(), "bypassPermissions".to_string(),
+            "-p".to_string(),
+            "{prompt}".to_string(),
+            "--mcp-config".to_string(),
+            "{mcp_config}".to_string(),
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
         ]
     }
 }
@@ -34,7 +37,12 @@ impl AgentBackend for CliBackend {
     }
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
         let mcp_config = if self.args.iter().any(|a| a == "{mcp_config}") {
-            let mut margs = vec!["mcp".to_string(), "--profile".to_string(), self.profile.clone(), "--trace".to_string()];
+            let mut margs = vec![
+                "mcp".to_string(),
+                "--profile".to_string(),
+                self.profile.clone(),
+                "--trace".to_string(),
+            ];
             if self.no_graph {
                 margs.push("--no-graph".to_string());
             }

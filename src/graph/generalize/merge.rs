@@ -60,7 +60,10 @@ mod tests {
         let nodes = vec![s("a"), s("b"), s("c"), s("d")];
         let pairs = vec![(s("a"), s("b")), (s("b"), s("c"))];
         // a-b-c collapse into one group; d stays a singleton → dropped
-        assert_eq!(merge_groups(&nodes, &pairs), vec![vec![s("a"), s("b"), s("c")]]);
+        assert_eq!(
+            merge_groups(&nodes, &pairs),
+            vec![vec![s("a"), s("b"), s("c")]]
+        );
     }
 
     #[test]

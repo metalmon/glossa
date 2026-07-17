@@ -29,26 +29,90 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
 }
 
 /// BM25 search (optionally scoped). Returns (model text, hits for the caller's scoring).
-pub fn search(idx: &DocIndex, query: &str, limit: usize, glob: Option<&str>, file_type: Option<&str>, trace: &TraceLog) -> (String, Vec<RankedHit>) {
+pub fn search(
+    idx: &DocIndex,
+    query: &str,
+    limit: usize,
+    glob: Option<&str>,
+    file_type: Option<&str>,
+    trace: &TraceLog,
+) -> (String, Vec<RankedHit>) {
     match idx.search_filtered(query, limit.max(1), glob, file_type) {
         Ok(hits) => {
-            let th: Vec<_> = hits.iter().map(|h| json!({"path": h.path, "location": h.location, "score": h.score})).collect();
+            let th: Vec<_> = hits
+                .iter()
+                .map(|h| json!({"path": h.path, "location": h.location, "score": h.score}))
+                .collect();
             trace.log("search", json!({"query": query}), json!(th));
-            let body = if hits.is_empty() { "(no results)".to_string() }
-                       else { hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n") };
+            let body = if hits.is_empty() {
+                "(no results)".to_string()
+            } else {
+                hits.iter()
+                    .map(|h| h.display_line())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             (body, hits)
         }
         Err(e) => (format!("search error: {e}"), Vec::new()),
     }
 }
 
-/// ripgrep-style literal/regex search; model text only.
-pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
+/// A notebook file's line-filtered grep: iterate `body.lines()`, keeping lines that match
+/// `pattern` under the same flag semantics (`fixed`/`ignore_case`/`word`) as the corpus grep —
+/// reusing its `prepare`/matcher so a notebook and a corpus grep agree on what counts as a
+/// match. Notebook files are short (no chunking), so every hit renders against a fixed `#1`,
+/// mirroring the corpus format `path:#ord: line`.
+#[cfg(feature = "notebook")]
+fn grep_notebook_body(rel: &str, body: &str, pattern: &str, opts: &GrepOpts) -> String {
+    if pattern.trim().is_empty() {
+        return "(no matches)".to_string();
+    }
+    let (pattern, opts) = crate::grep::prepare(pattern, opts);
+    let matcher = match crate::grep::build_matcher(&pattern, &opts) {
+        Ok(m) => m,
+        Err(e) => return format!("grep error: {e}"),
+    };
+    let hits: Vec<String> = body
+        .lines()
+        .filter(|l| matcher.is_match(l))
+        .map(|l| format!("{rel}:#1: {}", l.trim()))
+        .collect();
+    if hits.is_empty() {
+        "(no matches)".to_string()
+    } else {
+        hits.join("\n")
+    }
+}
+
+/// ripgrep-style literal/regex search; model text only. Also serves notebook files
+/// (feature-gated): a doc-scoped `opts.path` like `<doc>/<file>` is probed against the agent's
+/// on-disk notebook before falling through to the corpus grep below.
+pub fn grep(root: &std::path::Path, idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
+    #[cfg(feature = "notebook")]
+    if let Some(p) = opts.path.as_deref() {
+        if looks_like_notebook_path(p) {
+            if let Ok((rel, body)) = crate::notebook::read_note(root, idx, p) {
+                trace.log("grep", json!({ "notebook": p, "pattern": pattern }), json!({ "notebook": rel }));
+                return grep_notebook_body(&rel, &body, pattern, opts);
+            }
+        }
+    }
     match crate::grep::grep(idx, pattern, opts) {
         Ok(hits) => {
-            trace.log("grep", json!({"pattern": pattern}), json!({"hits": hits.len()}));
-            if hits.is_empty() { "(no matches)".to_string() }
-            else { hits.iter().map(|h| h.display_line()).collect::<Vec<_>>().join("\n") }
+            trace.log(
+                "grep",
+                json!({"pattern": pattern}),
+                json!({"hits": hits.len()}),
+            );
+            if hits.is_empty() {
+                "(no matches)".to_string()
+            } else {
+                hits.iter()
+                    .map(|h| h.display_line())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         }
         Err(e) => format!("grep error: {e}"),
     }
@@ -61,7 +125,14 @@ pub struct ReadOut {
 }
 
 /// Collect `(attribution, path, ord)` for every section node `nid` MENTIONS, de-duplicated via `seen`.
-fn gather_mentions(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str, attr: &str, seen: &mut std::collections::HashSet<(String, u64)>, out: &mut Vec<(String, String, u64)>) {
+fn gather_mentions(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    nid: &str,
+    attr: &str,
+    seen: &mut std::collections::HashSet<(String, u64)>,
+    out: &mut Vec<(String, String, u64)>,
+) {
     for e in g.outgoing(nid).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;
@@ -79,20 +150,44 @@ fn gather_mentions(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &st
 /// Omnivorous read of a graph NODE: the node's own line, plus every chunk it AND its 1-hop reasoning
 /// neighbours MENTION — each labelled with where it came from. Reading a Resolution gives its fix
 /// chunk; reading a Symptom also pulls the Cause/Resolution evidence one hop along the chain.
-fn read_node(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: crate::graph::store::Node) -> ReadOut {
+fn read_node(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    node: crate::graph::store::Node,
+) -> ReadOut {
     let mut seen = std::collections::HashSet::new();
     let mut chunks: Vec<(String, String, u64)> = Vec::new();
     gather_mentions(idx, g, &node.id, "MENTIONS", &mut seen, &mut chunks); // the node's own evidence
-    let label_of = |nid: &str| g.get_node(nid).ok().flatten().map(|n| n.label).unwrap_or_else(|| nid.to_string());
+    let label_of = |nid: &str| {
+        g.get_node(nid)
+            .ok()
+            .flatten()
+            .map(|n| n.label)
+            .unwrap_or_else(|| nid.to_string())
+    };
     // 1-hop reasoning neighbours (outgoing →, incoming ←), skipping the MENTIONS-to-section links.
     for e in g.outgoing(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.to.contains('#') {
-            gather_mentions(idx, g, &e.to, &format!("via → {} {}", e.edge_type, label_of(&e.to)), &mut seen, &mut chunks);
+            gather_mentions(
+                idx,
+                g,
+                &e.to,
+                &format!("via → {} {}", e.edge_type, label_of(&e.to)),
+                &mut seen,
+                &mut chunks,
+            );
         }
     }
     for e in g.incoming(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.from.contains('#') {
-            gather_mentions(idx, g, &e.from, &format!("via ← {} {}", e.edge_type, label_of(&e.from)), &mut seen, &mut chunks);
+            gather_mentions(
+                idx,
+                g,
+                &e.from,
+                &format!("via ← {} {}", e.edge_type, label_of(&e.from)),
+                &mut seen,
+                &mut chunks,
+            );
         }
     }
     let mut text = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
@@ -102,23 +197,76 @@ fn read_node(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: crate::g
     let mut images = Vec::new();
     for (attr, p, ord) in &chunks {
         if let Ok(Some(c)) = idx.read_chunk_by_ord(p, *ord) {
-            text.push_str(&format!("\n\n── {attr} · {p} #{ord} ──\n{}", c.body));
+            text.push_str(&format!(
+                "\n\n── {attr} · {p} #{ord} ──\n{}",
+                format_chunk_body(*ord, &c.body)
+            ));
         }
         images.extend(crate::read::extract_images(&idx.doc_file(p), *ord, 4).unwrap_or_default());
     }
     ReadOut { text, images }
 }
 
+/// Human-readable body for a chunk whose stored text may be empty (blank PDF page).
+pub fn format_chunk_body(ord: u64, body: &str) -> String {
+    if body.trim().is_empty() {
+        format!("(page #{ord} — no extractable text)")
+    } else {
+        body.to_string()
+    }
+}
+
+/// A notebook file is addressed doc-scoped as `<doc>/<file>`: it has a path separator and a
+/// note-file suffix. Corpus paths (a bare doc, a search result) don't match, so they skip the
+/// notebook probe entirely.
+#[cfg(feature = "notebook")]
+pub fn looks_like_notebook_path(path: &str) -> bool {
+    path.contains('/')
+        && matches!(
+            std::path::Path::new(path).extension().and_then(|e| e.to_str()),
+            Some("csp" | "md" | "txt" | "json")
+        )
+}
+
 /// Read chunk `n` of `path`: full stored body + a unified prev/next footer, plus extracted images
 /// (empty if the source file is absent — body still comes from the index). No truncation. Omnivorous:
 /// if `path` is a graph NODE id, returns that node + its (1-hop) evidence chunks (see `read_node`).
-pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, path: &str, n: u64, trace: &TraceLog) -> ReadOut {
+/// Also serves notebook files (feature-gated): a doc-scoped path like `<doc>/<file>` is probed
+/// against the agent's on-disk notebook before falling through to the corpus read below.
+pub fn read(
+    root: &std::path::Path,
+    idx: &DocIndex,
+    graph: Option<&crate::graph::store::GraphStore>,
+    path: &str,
+    n: u64,
+    page_image: bool,
+    trace: &TraceLog,
+) -> ReadOut {
+    #[cfg(feature = "notebook")]
+    if looks_like_notebook_path(path) {
+        if page_image {
+            return ReadOut {
+                text: format!("page_image is only supported for PDF (got {path})"),
+                images: Vec::new(),
+            };
+        }
+        if let Ok((rel, body)) = crate::notebook::read_note(root, idx, path) {
+            trace.log("read", json!({ "notebook": path }), json!({ "notebook": rel }));
+            return ReadOut { text: format!("{rel}\n{body}"), images: Vec::new() };
+        }
+    }
     // Omnivorous: a REASONING node id off a glossary line reads as the node + its evidence. A
     // structural node id IS a document path (e.g. a Document's id is its path), so it falls through
     // to the normal document read below.
     if let Some(g) = graph {
         if let Ok(Some(node)) = g.get_node(path) {
             if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
+                if page_image {
+                    return ReadOut {
+                        text: format!("page_image is only supported for PDF (got {path})"),
+                        images: Vec::new(),
+                    };
+                }
                 trace.log("read", json!({ "node": path }), json!({ "node": path }));
                 return read_node(idx, g, node);
             }
@@ -126,18 +274,27 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
     }
     // Try the exact path first. If the document isn't found, the model may have mangled the path
     // (e.g. collapsed a double space when copying it) — resolve it tolerantly and retry once.
-    let (path, chunk): (String, _) = match idx.read_chunk_by_ord(path, n) {
-        Ok(Some(c)) => (path.to_string(), c),
+    let (path, chunk, resolved_ord): (String, _, u64) = match idx.read_chunk_by_ord(path, n) {
+        Ok(Some(c)) => (path.to_string(), c, n),
         Ok(None) => match idx.last_chunk_ord(path) {
-            // Document exists; the chunk number is just out of range → report the valid range.
-            Ok(Some(max)) => return ReadOut {
-                text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
-                images: Vec::new(),
-            },
+            // Document exists; the chunk number is out of range. Rather than return an error a
+            // small model loops on (it reuses a chunk number from another doc — a 1-chunk file
+            // has no #3), CLAMP to the valid range and read that chunk. Its own header shows the
+            // real ordinal, so the model sees what it actually got.
+            Ok(Some(max)) => {
+                let ord = n.clamp(1, max);
+                match idx.read_chunk_by_ord(path, ord) {
+                    Ok(Some(c)) => (path.to_string(), c, ord),
+                    _ => return ReadOut {
+                        text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
+                        images: Vec::new(),
+                    },
+                }
+            }
             // No exact path match — try a tolerant resolve, then retry once.
             Ok(None) => match idx.canonical_document_path(path) {
                 Some(real) => match idx.read_chunk_by_ord(&real, n) {
-                    Ok(Some(c)) => (real, c),
+                    Ok(Some(c)) => (real, c, n),
                     _ => {
                         let text = match idx.last_chunk_ord(&real) {
                             Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
@@ -157,28 +314,113 @@ pub fn read(idx: &DocIndex, graph: Option<&crate::graph::store::GraphStore>, pat
     };
     let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
+    let doc_path = idx.doc_file(path);
+    if page_image {
+        let ext = doc_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext != "pdf" {
+            return ReadOut {
+                text: format!("page_image is only supported for PDF (got {path})"),
+                images: Vec::new(),
+            };
+        }
+        let images = match crate::read::render_pdf_page(&doc_path, resolved_ord) {
+            Ok(Some(img)) => vec![img],
+            _ => Vec::new(),
+        };
+        let text = if images.is_empty() {
+            format!("page_image: failed to render {path} #{resolved_ord}")
+        } else {
+            format!("page_image {path} #{resolved_ord}")
+        };
+        return ReadOut { text, images };
+    }
     let footer = match (chunk.prev, chunk.next) {
         (Some(p), Some(nx)) => format!("\n\n‹ prev #{p} · next #{nx} ›"),
         (None, Some(nx)) => format!("\n\n‹ start of document · next #{nx} ›"),
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(&idx.doc_file(path), n, 4).unwrap_or_default();
-    ReadOut { text: format!("{}{}", chunk.body, footer), images }
+    let images = crate::read::extract_images(&doc_path, resolved_ord, 4).unwrap_or_default();
+    let body = format_chunk_body(resolved_ord, &chunk.body);
+    ReadOut {
+        text: format!("{}{}", body, footer),
+        images,
+    }
 }
 
 /// List documents by path mask; model text only.
 pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
-            trace.log("glob", json!({"pattern": pattern}), json!({"docs": docs.len()}));
+            trace.log(
+                "glob",
+                json!({"pattern": pattern}),
+                json!({"docs": docs.len()}),
+            );
             if docs.is_empty() {
                 "(no documents match — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text)".to_string()
+            } else {
+                docs.iter()
+                    .map(|(p, n)| format!("{p}  ({n} chunks)"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
-            else { docs.iter().map(|(p, n)| format!("{p}  ({n} chunks)")).collect::<Vec<_>>().join("\n") }
         }
         Err(e) => format!("glob error: {e}"),
     }
+}
+
+/// Notebook: create, replace, or (with `append`) extend a note bound to an indexed document.
+#[cfg(feature = "notebook")]
+pub fn note(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    doc: &str,
+    file: &str,
+    content: &str,
+    append: bool,
+) -> String {
+    crate::notebook::note(root, idx, doc, file, content, append)
+}
+
+#[cfg(feature = "notebook")]
+pub fn ls_notes(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    doc: Option<&str>,
+) -> String {
+    crate::notebook::ls(root, idx, doc)
+}
+
+#[cfg(feature = "notebook")]
+pub fn del_note(root: &std::path::Path, idx: &crate::index::store::DocIndex, path: &str) -> String {
+    crate::notebook::del(root, idx, path)
+}
+
+/// Compile agent `.csp` limit tables for `doc` into the constraint graph (`kb graph build`).
+#[cfg(feature = "constraint")]
+pub fn graph_build(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    g: &crate::graph::store::GraphStore,
+    ont: &crate::graph::ontology::Ontology,
+    doc: &str,
+    tables_dir: Option<&std::path::Path>,
+) -> String {
+    use crate::notebook::{mirror_dir_for_doc, notes_root};
+    use crate::tables::{count_csp_files, format_graph_build_output, tables_to_graph};
+
+    if count_csp_files(root, doc) == 0 {
+        return "graph_build FAILED\n  no .csp files — materialize tables on step 2 first\n  fix: note(doc, file=\"….csp\", content=…) then graph_build again\n".into();
+    }
+    let tables = tables_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| notes_root(root).join(mirror_dir_for_doc(doc)));
+    format_graph_build_output(tables_to_graph(idx, g, ont, doc, &tables))
 }
 
 /// Render a graph node as a `(path, #ord)` reference string.
@@ -203,7 +445,9 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
 /// so output is byte-identical on graphs that haven't been generalized. Format:
 /// `"  · comm 3 · pr 0.142 · deg 5"` — only the parts that are present.
 fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
-    let Ok(Some(m)) = g.node_meta(id) else { return String::new() };
+    let Ok(Some(m)) = g.node_meta(id) else {
+        return String::new();
+    };
     let mut parts = Vec::new();
     if let Some(c) = m.community {
         parts.push(format!("comm {c}"));
@@ -231,7 +475,9 @@ pub struct ChainSpec {
 
 impl ChainSpec {
     pub fn from_ontology(ont: &crate::graph::ontology::Ontology) -> Self {
-        ChainSpec { spine_rels: ont.spine_relations() }
+        ChainSpec {
+            spine_rels: ont.spine_relations(),
+        }
     }
 }
 
@@ -239,7 +485,9 @@ impl Default for ChainSpec {
     /// No spines — `glossary` prints just the node head. Used by callers/tests that don't drive
     /// the reasoning chain.
     fn default() -> Self {
-        ChainSpec { spine_rels: Vec::new() }
+        ChainSpec {
+            spine_rels: Vec::new(),
+        }
     }
 }
 
@@ -293,7 +541,9 @@ fn chain_lines(
         if !seen.insert(e.to.clone()) {
             continue;
         }
-        let Ok(Some(node)) = g.get_node(&e.to) else { continue };
+        let Ok(Some(node)) = g.get_node(&e.to) else {
+            continue;
+        };
         let indent = "    ".repeat(depth + 1);
         out.push(format!(
             "{indent}→ {}  [{}]  {}{}{}",
@@ -313,10 +563,20 @@ fn chain_lines(
 /// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
 /// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `neighbors`.
 /// Empty → `"(no matches)"`.
-pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str, spec: &ChainSpec, trace: &TraceLog) -> String {
+pub fn glossary(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    name: &str,
+    spec: &ChainSpec,
+    trace: &TraceLog,
+) -> String {
     match g.resolve(name) {
         Ok(ids) => {
-            trace.log("glossary", json!({ "name": name }), json!({ "ids": ids.len() }));
+            trace.log(
+                "glossary",
+                json!({ "name": name }),
+                json!({ "ids": ids.len() }),
+            );
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
@@ -330,8 +590,17 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
                             Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id)),
                             // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
+                                // Node ids are label-only, so the owner document is not in the id.
+                                // Always show it (`@<doc>`) — the read-anchor doc is conditional on a
+                                // MENTIONS edge and may point to a *different* doc (cross-standard
+                                // reference), so the owner is not otherwise guaranteed in the head.
+                                let owner = if node.prov.source_path.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  @{}", node.prov.source_path)
+                                };
                                 let head = format!(
-                                    "{base}{}{}",
+                                    "{base}{owner}{}{}",
                                     meta_suffix(g, &node.id),
                                     read_anchor(idx, g, &node.id),
                                 );
@@ -365,13 +634,27 @@ pub fn glossary(idx: &DocIndex, g: &crate::graph::store::GraphStore, name: &str,
 /// Top community siblings / stats examples per cluster (PageRank-ranked).
 const COMMUNITY_TOP_LIMIT: usize = 8;
 
-pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Option<&str>, path: Option<&str>, n: Option<u64>, trace: &TraceLog) -> String {
+pub fn neighbors(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    node: Option<&str>,
+    path: Option<&str>,
+    n: Option<u64>,
+    trace: &TraceLog,
+) -> String {
     let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
         nid.to_string()
     } else if let (Some(p), Some(nn)) = (path, n) {
+        // `#0` → first chunk: numbering is 1-based, but the model often writes 0 out of
+        // programming habit. Tolerate it instead of erroring so it doesn't loop guessing.
+        let nn = if nn == 0 { 1 } else { nn };
         match idx.location_for_ord(p, nn) {
             Ok(Some(loc)) => crate::graph::build::section_id(p, &loc),
-            Ok(None) => return format!("no chunk #{nn} in {p}"),
+            Ok(None) => {
+                return format!(
+                    "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
+                )
+            }
             Err(e) => return format!("neighbors error: {e}"),
         }
     } else {
@@ -381,12 +664,22 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Opti
     let mut lines = Vec::new();
     for e in g.outgoing(&id).unwrap_or_default() {
         if e.edge_type == "SIMILAR" && seen.insert(e.to.clone()) {
-            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.to), meta_suffix(g, &e.to), read_anchor(idx, g, &e.to)));
+            lines.push(format!(
+                "SIMILAR  {}{}{}",
+                endpoint_ref(idx, g, &e.to),
+                meta_suffix(g, &e.to),
+                read_anchor(idx, g, &e.to)
+            ));
         }
     }
     for e in g.incoming(&id).unwrap_or_default() {
         if e.edge_type == "SIMILAR" && seen.insert(e.from.clone()) {
-            lines.push(format!("SIMILAR  {}{}{}", endpoint_ref(idx, g, &e.from), meta_suffix(g, &e.from), read_anchor(idx, g, &e.from)));
+            lines.push(format!(
+                "SIMILAR  {}{}{}",
+                endpoint_ref(idx, g, &e.from),
+                meta_suffix(g, &e.from),
+                read_anchor(idx, g, &e.from)
+            ));
         }
     }
     let similar_count = lines.len();
@@ -411,10 +704,18 @@ pub fn neighbors(idx: &DocIndex, g: &crate::graph::store::GraphStore, node: Opti
         json!({"id": id}),
         json!({"similar": similar_count, "community": lines.len() - similar_count}),
     );
-    if lines.is_empty() { "(no related cases)".to_string() } else { lines.join("\n") }
+    if lines.is_empty() {
+        "(no related cases)".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
-fn stats_example_line(g: &crate::graph::store::GraphStore, id: &str, meta: &crate::graph::store::NodeMeta) -> String {
+fn stats_example_line(
+    g: &crate::graph::store::GraphStore,
+    id: &str,
+    meta: &crate::graph::store::NodeMeta,
+) -> String {
     match g.get_node(id) {
         Ok(Some(n)) => {
             let pr = meta
@@ -427,12 +728,102 @@ fn stats_example_line(g: &crate::graph::store::GraphStore, id: &str, meta: &crat
     }
 }
 
+/// Domain-independent breakdown of the graph: how many nodes of each `node_type`
+/// and how many edges of each `edge_type` exist. Nothing here is hardcoded to a
+/// domain — the type/relation names come from whatever ontology populated the
+/// store (e.g. `nodes: Enum 8, Field 10, Section 40 | edges: CONSTRAINED_BY 8,
+/// CONTAINS 40, MENTIONS 10`).
+pub fn graph_type_counts(g: &crate::graph::store::GraphStore) -> String {
+    use std::collections::BTreeMap;
+    let mut node_types: BTreeMap<String, usize> = BTreeMap::new();
+    let mut edge_types: BTreeMap<String, usize> = BTreeMap::new();
+    for n in g.all_nodes().unwrap_or_default() {
+        *node_types.entry(n.node_type).or_default() += 1;
+    }
+    for e in g.all_edges().unwrap_or_default() {
+        *edge_types.entry(e.edge_type).or_default() += 1;
+    }
+    let join = |m: &BTreeMap<String, usize>| {
+        if m.is_empty() {
+            "(none)".to_string()
+        } else {
+            m.iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    format!(
+        "by type — nodes: {} | edges: {}",
+        join(&node_types),
+        join(&edge_types)
+    )
+}
+
+/// Universal "everything about one node" view: identity (`id`, `node_type`,
+/// `label`, `aliases`) plus every OUTGOING and INCOMING edge with the other
+/// endpoint's label. Fully domain-independent — used by `graph_stats(node=…)`.
+pub fn node_inspect(g: &crate::graph::store::GraphStore, id: &str) -> String {
+    let node = match g.get_node(id) {
+        Ok(Some(n)) => n,
+        Ok(None) => return format!("node {id}: not found"),
+        Err(e) => return format!("node {id}: error: {e}"),
+    };
+    let label_of = |other: &str| match g.get_node(other) {
+        Ok(Some(n)) => n.label,
+        _ => "?".to_string(),
+    };
+    let aliases = if node.aliases.is_empty() {
+        "—".to_string()
+    } else {
+        node.aliases.join(", ")
+    };
+    // Node ids are label-only, so always show the owner document — otherwise the
+    // same field label across standards is indistinguishable in the head.
+    let doc = if node.prov.source_path.is_empty() {
+        "—"
+    } else {
+        node.prov.source_path.as_str()
+    };
+    let mut out = format!(
+        "node {}\ntype: {}\ndoc: {}\nlabel: {}\naliases: {}",
+        node.id, node.node_type, doc, node.label, aliases
+    );
+    let edges = g.all_edges().unwrap_or_default();
+    let mut outgoing: Vec<String> = edges
+        .iter()
+        .filter(|e| e.from == node.id)
+        .map(|e| format!("  -{}-> {} ({})", e.edge_type, e.to, label_of(&e.to)))
+        .collect();
+    let mut incoming: Vec<String> = edges
+        .iter()
+        .filter(|e| e.to == node.id)
+        .map(|e| format!("  {} ({}) -{}->", e.from, label_of(&e.from), e.edge_type))
+        .collect();
+    outgoing.sort();
+    incoming.sort();
+    out.push_str(&format!("\noutgoing ({}):", outgoing.len()));
+    out.push_str(&if outgoing.is_empty() {
+        "\n  —".to_string()
+    } else {
+        format!("\n{}", outgoing.join("\n"))
+    });
+    out.push_str(&format!("\nincoming ({}):", incoming.len()));
+    out.push_str(&if incoming.is_empty() {
+        "\n  —".to_string()
+    } else {
+        format!("\n{}", incoming.join("\n"))
+    });
+    out
+}
+
 /// Graph node/edge counts and, when `node_meta` exists, a per-community overview with up to
-/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank.
+/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank. The second line is a
+/// domain-independent breakdown by node/edge type ([`graph_type_counts`]).
 pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     let nodes = g.node_count().unwrap_or(0);
     let edges = g.edge_count().unwrap_or(0);
-    let mut out = format!("nodes: {nodes}, edges: {edges}");
+    let mut out = format!("nodes: {nodes}, edges: {edges}\n{}", graph_type_counts(g));
     if g.node_meta_count().unwrap_or(0) == 0 {
         return format!("{out}\ncommunities: (none)");
     }
@@ -443,12 +834,37 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     out.push_str(&format!("\ncommunities: {}", sizes.len()));
     for (comm, size) in sizes {
         out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
-        for (id, meta) in g.community_top_nodes(comm, COMMUNITY_TOP_LIMIT).unwrap_or_default() {
+        for (id, meta) in g
+            .community_top_nodes(comm, COMMUNITY_TOP_LIMIT)
+            .unwrap_or_default()
+        {
             out.push('\n');
             out.push_str(&stats_example_line(g, &id, &meta));
         }
     }
     out
+}
+
+/// Doc-scoped inventory for `graph_stats(doc=…)`: non-structural nodes owned by
+/// `doc` (`source_path`) with all outgoing edges. Ontology-independent.
+pub fn checklist_coverage_report(
+    g: &crate::graph::store::GraphStore,
+    doc: &str,
+) -> String {
+    match crate::graph::ops::doc_owned_inventory(g, doc) {
+        Ok(Some(inv)) => {
+            let mut lines = vec![format!("owned({doc}): {} nodes", inv.nodes.len())];
+            for n in &inv.nodes {
+                lines.push(format!("{}  [{}]  {}", n.id, n.node_type, n.label));
+                for e in &n.outgoing {
+                    lines.push(format!("  {} → {}", e.edge_type, e.to));
+                }
+            }
+            lines.join("\n")
+        }
+        Ok(None) => format!("owned({doc}): (none)"),
+        Err(e) => format!("owned({doc}): error: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -462,20 +878,195 @@ mod tests {
     fn idx() -> (tempfile::TempDir, DocIndex) {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("АБАК.pdf"), location: "p.7".into(), file_type: "pdf".into(), text: "параметр maxTsdr равен 3000".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("МОДУЛЬ.pdf"),
+            location: "p.7".into(),
+            file_type: "pdf".into(),
+            text: "параметр maxTsdr равен 3000".into(),
+        }])
+        .unwrap();
         (d, i)
     }
 
+    #[test]
+    fn read_page_image_returns_pdf_page_png_without_chunk_body() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.pdf",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert!(!out.text.contains("glossa sample"));
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime, "image/png");
+        assert!(out.images[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn read_page_image_clamps_out_of_range_ord_to_last_page() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.pdf",
+            99,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime, "image/png");
+    }
+
+    #[test]
+    fn read_page_image_rejects_non_pdf_document() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("sample.md"), b"# Sample\nglossa sample\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.md",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(
+            out.text,
+            "page_image is only supported for PDF (got sample.md)"
+        );
+        assert!(out.images.is_empty());
+    }
+
+    #[test]
+    fn read_empty_pdf_page_returns_success_with_label() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.2".into(),
+                file_type: "pdf".into(),
+                text: String::new(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.3".into(),
+                file_type: "pdf".into(),
+                text: "charlie".into(),
+            },
+        ])
+        .unwrap();
+        let t = TraceLog::disabled();
+        let out = read(d.path(), &i, None, "d.pdf", 2, false, &t);
+        assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
+        assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
+        assert!(
+            out.text.contains("prev #1") && out.text.contains("next #3"),
+            "footer: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn read_serves_notebook_file_by_doc_scoped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        // The notebook resolves a note's doc-scoped path against an INDEXED document (same
+        // validation `note`/`ls` use), so register the doc before writing a note under it.
+        let doc = "some_std.docx";
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from(doc),
+            location: "p.1".into(),
+            file_type: "docx".into(),
+            text: "placeholder".into(),
+        }])
+        .unwrap();
+        // create a notebook file under the doc's mirror
+        crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n", false);
+        let out = read(
+            dir.path(),
+            &idx,
+            None,
+            "some_std.docx/sizes.csp",
+            1,
+            false,
+            &TraceLog::disabled(),
+        );
+        assert!(out.text.contains("50") && out.text.contains("63"), "got: {}", out.text);
+        // a non-notebook, non-corpus path still errors as before
+        let miss = read(
+            dir.path(),
+            &idx,
+            None,
+            "no/such/thing",
+            1,
+            false,
+            &TraceLog::disabled(),
+        );
+        assert!(miss.text.contains("no document indexed") || miss.text.contains("not found"), "got: {}", miss.text);
+    }
+
     fn prov() -> Provenance {
-        Provenance { source_path: "d.pdf".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 0.8, created_at: 1 }
+        Provenance {
+            source_path: "d.pdf".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.8,
+            created_at: 1,
+        }
     }
     fn node(id: &str, ty: &str, label: &str) -> Node {
-        Node { id: id.into(), node_type: ty.into(), label: label.into(), aliases: Vec::new(), prov: prov() }
+        Node {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        }
     }
     fn edge(from: &str, rel: &str, to: &str) -> Edge {
-        Edge { from: from.into(), to: to.into(), edge_type: rel.into(), prov: prov() }
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: rel.into(),
+            prov: prov(),
+        }
     }
     /// A graph with one full causal spine (Symptom→Cause→Resolution) plus two SIMILAR tasks
     /// hanging off the Symptom (the generalization layer).
@@ -487,7 +1078,7 @@ mod tests {
             node("cau:tsdr", "Cause", "Малый maxTsdr"),
             node("res:set", "Resolution", "Изменить maxTsdr в 3000"),
             node("tsk:upd", "Task", "Обновление ПО модулей"),
-            node("tsk:prog", "Task", "Программирование АБАК"),
+            node("tsk:prog", "Task", "Программирование контроллера"),
         ] {
             g.put_node(&n).unwrap();
         }
@@ -502,7 +1093,9 @@ mod tests {
         (d, g)
     }
     fn spine_spec() -> ChainSpec {
-        ChainSpec { spine_rels: vec!["CAUSED_BY".into(), "RESOLVED_BY".into()] }
+        ChainSpec {
+            spine_rels: vec!["CAUSED_BY".into(), "RESOLVED_BY".into()],
+        }
     }
 
     #[test]
@@ -512,11 +1105,25 @@ mod tests {
         let t = TraceLog::disabled();
         let out = glossary(&i, &g, "Профибус потеря связи", &spine_spec(), &t);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
-        assert!(out.contains("[Symptom]") && out.contains("Профибус потеря связи"), "{out}");
-        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"), "{out}");
-        assert!(out.contains("→ RESOLVED_BY") && out.contains("[Resolution]") && out.contains("Изменить maxTsdr"), "{out}");
+        assert!(
+            out.contains("[Symptom]") && out.contains("Профибус потеря связи"),
+            "{out}"
+        );
+        assert!(
+            out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"),
+            "{out}"
+        );
+        assert!(
+            out.contains("→ RESOLVED_BY")
+                && out.contains("[Resolution]")
+                && out.contains("Изменить maxTsdr"),
+            "{out}"
+        );
         // SIMILAR is no longer part of glossary — it moved to neighbors
-        assert!(!out.contains("SIMILAR"), "glossary must not show SIMILAR: {out}");
+        assert!(
+            !out.contains("SIMILAR"),
+            "glossary must not show SIMILAR: {out}"
+        );
     }
 
     #[test]
@@ -525,10 +1132,15 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let empty = ChainSpec { spine_rels: Vec::new() };
+        let empty = ChainSpec {
+            spine_rels: Vec::new(),
+        };
         let out = glossary(&i, &g, "Профибус потеря связи", &empty, &t);
         assert!(out.contains("[Symptom]"), "{out}");
-        assert!(!out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"), "no spines → no chain: {out}");
+        assert!(
+            !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
+            "no spines → no chain: {out}"
+        );
     }
 
     #[test]
@@ -537,9 +1149,17 @@ mod tests {
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
-        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей") && out.contains("Программирование АБАК"), "{out}");
+        assert!(
+            out.contains("SIMILAR")
+                && out.contains("Обновление ПО модулей")
+                && out.contains("Программирование контроллера"),
+            "{out}"
+        );
         // it must NOT walk the causal spine — that is glossary's job
-        assert!(!out.contains("CAUSED_BY") && !out.contains("[Resolution]"), "neighbors is generalization only: {out}");
+        assert!(
+            !out.contains("CAUSED_BY") && !out.contains("[Resolution]"),
+            "neighbors is generalization only: {out}"
+        );
     }
 
     const REASONING_ONT: &str = r#"
@@ -597,9 +1217,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:a"), None, None, &t);
-        assert!(out.contains("COMMUNITY"), "expected community siblings: {out}");
-        assert!(out.contains("cau:a") || out.contains("res:a"), "same-component siblings: {out}");
-        assert!(!out.contains("sym:b") && !out.contains("cau:b") && !out.contains("res:b"), "other component excluded: {out}");
+        assert!(
+            out.contains("COMMUNITY"),
+            "expected community siblings: {out}"
+        );
+        assert!(
+            out.contains("cau:a") || out.contains("res:a"),
+            "same-component siblings: {out}"
+        );
+        assert!(
+            !out.contains("sym:b") && !out.contains("cau:b") && !out.contains("res:b"),
+            "other component excluded: {out}"
+        );
         assert!(!out.contains("sym:a  [Symptom]"), "self excluded: {out}");
     }
 
@@ -612,10 +1241,13 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
-        assert!(out.contains("SIMILAR") && out.contains("Обновление ПО модулей"), "{out}");
+        assert!(
+            out.contains("SIMILAR") && out.contains("Обновление ПО модулей"),
+            "{out}"
+        );
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert!(
-            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование АБАК")),
+            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование контроллера")),
             "SIMILAR nodes must not repeat in COMMUNITY: {out}",
         );
     }
@@ -626,19 +1258,64 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         g.replace_node_meta(&[
-            ("sym:loss".into(), NodeMeta { community: Some(1), pagerank: Some(0.9), degree: Some(3) }),
-            ("cau:tsdr".into(), NodeMeta { community: Some(1), pagerank: Some(0.2), degree: Some(1) }),
-            ("res:set".into(), NodeMeta { community: Some(1), pagerank: Some(0.7), degree: Some(2) }),
-            ("tsk:upd".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
-            ("tsk:prog".into(), NodeMeta { community: Some(1), pagerank: Some(0.1), degree: Some(1) }),
+            (
+                "sym:loss".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.9),
+                    degree: Some(3),
+                },
+            ),
+            (
+                "cau:tsdr".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.2),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "res:set".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.7),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "tsk:upd".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.5),
+                    degree: Some(1),
+                },
+            ),
+            (
+                "tsk:prog".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.1),
+                    degree: Some(1),
+                },
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
         let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
-        assert_eq!(community_lines.len(), 2, "limit excludes SIMILAR dupes, top-2 by pr after SIMILAR taken: {out}");
-        assert!(community_lines[0].contains("res:set"), "highest pr sibling first: {out}");
-        assert!(community_lines[1].contains("cau:tsdr"), "second by pr: {out}");
+        assert_eq!(
+            community_lines.len(),
+            2,
+            "limit excludes SIMILAR dupes, top-2 by pr after SIMILAR taken: {out}"
+        );
+        assert!(
+            community_lines[0].contains("res:set"),
+            "highest pr sibling first: {out}"
+        );
+        assert!(
+            community_lines[1].contains("cau:tsdr"),
+            "second by pr: {out}"
+        );
     }
 
     #[test]
@@ -653,14 +1330,37 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             g.put_node(&n).unwrap();
         }
         g.replace_node_meta(&[
-            ("sym:a".into(), NodeMeta { community: Some(0), pagerank: Some(0.9), degree: Some(2) }),
-            ("sym:b".into(), NodeMeta { community: Some(1), pagerank: Some(0.5), degree: Some(1) }),
+            (
+                "sym:a".into(),
+                NodeMeta {
+                    community: Some(0),
+                    pagerank: Some(0.9),
+                    degree: Some(2),
+                },
+            ),
+            (
+                "sym:b".into(),
+                NodeMeta {
+                    community: Some(1),
+                    pagerank: Some(0.5),
+                    degree: Some(1),
+                },
+            ),
         ])
         .unwrap();
         let out = graph_stats(&g);
-        assert!(out.contains("nodes: 2") && out.contains("communities: 2"), "{out}");
-        assert!(out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"), "{out}");
-        assert!(out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"), "{out}");
+        assert!(
+            out.contains("nodes: 2") && out.contains("communities: 2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"),
+            "{out}"
+        );
+        assert!(
+            out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -669,25 +1369,42 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let g = GraphStore::open(gd.path()).unwrap();
         g.put_node(&node("sym:x", "Symptom", "X")).unwrap();
         let out = graph_stats(&g);
-        assert!(out.contains("nodes: 1") && out.contains("communities: (none)"), "{out}");
+        assert!(
+            out.contains("nodes: 1") && out.contains("communities: (none)"),
+            "{out}"
+        );
     }
 
     #[test]
     fn read_is_omnivorous_over_reasoning_node_ids() {
-        let (_d, i) = idx(); // АБАК.pdf #p.7 = "параметр maxTsdr равен 3000"
+        let (_d, i) = idx(); // МОДУЛЬ.pdf #p.7 = "параметр maxTsdr равен 3000"
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
-        g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000")).unwrap();
-        g.put_edge(&edge("res:fix", "MENTIONS", "АБАК.pdf#p.7")).unwrap();
+        g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000"))
+            .unwrap();
+        g.put_edge(&edge("res:fix", "MENTIONS", "МОДУЛЬ.pdf#p.7"))
+            .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
-        let out = read(&i, Some(&g), "res:fix", 1, &t).text;
-        assert!(out.contains("[Resolution]") && out.contains("Изменить maxTsdr"), "node header: {out}");
-        assert!(out.contains("── MENTIONS · АБАК.pdf #7 ──"), "attributed evidence header: {out}");
-        assert!(out.contains("параметр maxTsdr равен 3000"), "evidence body: {out}");
+        let out = read(_d.path(), &i, Some(&g), "res:fix", 1, false, &t).text;
+        assert!(
+            out.contains("[Resolution]") && out.contains("Изменить maxTsdr"),
+            "node header: {out}"
+        );
+        assert!(
+            out.contains("── MENTIONS · МОДУЛЬ.pdf #7 ──"),
+            "attributed evidence header: {out}"
+        );
+        assert!(
+            out.contains("параметр maxTsdr равен 3000"),
+            "evidence body: {out}"
+        );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(&i, Some(&g), "АБАК.pdf", 7, &t).text;
-        assert!(doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"), "doc read unchanged: {doc}");
+        let doc = read(_d.path(), &i, Some(&g), "МОДУЛЬ.pdf", 7, false, &t).text;
+        assert!(
+            doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
+            "doc read unchanged: {doc}"
+        );
     }
 
     #[test]
@@ -707,19 +1424,33 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let big = "Я".repeat(5000); // > old 4000-char cap
         i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("d.md"), location: "S1".into(), file_type: "md".into(), text: big.clone() },
-            Chunk { doc_path: PathBuf::from("d.md"), location: "S2".into(), file_type: "md".into(), text: "second".into() },
-        ]).unwrap();
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: big.clone(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "second".into(),
+            },
+        ])
+        .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "d.md", 1, &t);
-        assert!(out.text.contains(&big), "full body, no cap");                 // not truncated
+        let out = read(d.path(), &i, None, "d.md", 1, false, &t);
+        assert!(out.text.contains(&big), "full body, no cap"); // not truncated
         assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
-        assert!(out.text.contains("‹ start of document · next #2 ›"));        // unified footer (MCP wording)
-        // Out-of-range read reports the valid chunk range so the model can self-correct.
-        let oor = read(&i, None, "d.md", 99, &t).text;
-        assert!(oor.contains("no chunk #99 in d.md") && oor.contains("2 chunks") && oor.contains("#1..#2"), "range hint: {oor}");
+        assert!(out.text.contains("‹ start of document · next #2 ›")); // unified footer (MCP wording)
+                                                                       // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
+                                                                       // #2 = "second") instead of an error the model loops on.
+        let oor = read(d.path(), &i, None, "d.md", 99, false, &t).text;
+        assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
-        assert!(read(&i, None, "nope.md", 1, &t).text.contains("no document indexed at nope.md"));
+        assert!(read(d.path(), &i, None, "nope.md", 1, false, &t)
+            .text
+            .contains("no document indexed at nope.md"));
     }
 
     #[test]
@@ -727,38 +1458,95 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         // Real file name has a double space; the model copies it back with a single space.
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "safety body".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "safety body".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "dir/Safety Manual - 1_0_3.pdf", 1, &t); // single space
-        assert!(out.text.contains("safety body"), "resolved despite collapsed double space: {}", out.text);
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "dir/Safety Manual - 1_0_3.pdf",
+            1,
+            false,
+            &t,
+        ); // single space
+        assert!(
+            out.text.contains("safety body"),
+            "resolved despite collapsed double space: {}",
+            out.text
+        );
         // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
-        let out2 = read(&i, None, "dir\\\\Safety Manual - 1_0_3.pdf", 1, &t);
-        assert!(out2.text.contains("safety body"), "resolved despite doubled backslash: {}", out2.text);
+        let out2 = read(
+            d.path(),
+            &i,
+            None,
+            "dir\\\\Safety Manual - 1_0_3.pdf",
+            1,
+            false,
+            &t,
+        );
+        assert!(
+            out2.text.contains("safety body"),
+            "resolved despite doubled backslash: {}",
+            out2.text
+        );
     }
 
     #[test]
     fn read_tolerates_spurious_leading_prefix() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("БД ДПТК\\doc.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "body text".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("Архив БД\\doc.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "body text".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "kb-manual\\БД ДПТК\\doc.pdf", 1, &t);
-        assert!(out.text.contains("body text"), "strip spurious prefix: {}", out.text);
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "kb-manual\\Архив БД\\doc.pdf",
+            1,
+            false,
+            &t,
+        );
+        assert!(
+            out.text.contains("body text"),
+            "strip spurious prefix: {}",
+            out.text
+        );
     }
 
     #[test]
     fn read_suggests_path_on_total_miss() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("БД ДПТК\\Методика повerки АбакПЛК 2025.pdf"), location: "p.1".into(), file_type: "pdf".into(), text: "x".into() },
-        ]).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("Архив БД\\Методика поверки МодульПЛК 2025.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, None, "kb-manual\\АбакПЛК 2025.pdf", 1, &t).text;
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "kb-manual\\МодульПЛК 2025.pdf",
+            1,
+            false,
+            &t,
+        )
+        .text;
         assert!(out.contains("did you mean"), "hint on miss: {out}");
         assert!(out.contains("Методика"), "suggest real path: {out}");
     }
@@ -774,35 +1562,95 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             label: "Test".into(),
             aliases: vec![],
             prov: prov(),
-        }).unwrap();
-        i.write_chunks(&[
-            Chunk { doc_path: PathBuf::from("evidence.md"), location: "S1".into(), file_type: "md".into(), text: "evidence body".into() },
-        ]).unwrap();
+        })
+        .unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("evidence.md"),
+            location: "S1".into(),
+            file_type: "md".into(),
+            text: "evidence body".into(),
+        }])
+        .unwrap();
         g.put_edge(&Edge {
             from: "sym:test".into(),
             to: "evidence.md#S1".into(),
             edge_type: "MENTIONS".into(),
             prov: prov(),
-        }).unwrap();
+        })
+        .unwrap();
         let t = TraceLog::disabled();
-        let out = read(&i, Some(&g), "sym:test", 1, &t).text;
+        let out = read(d.path(), &i, Some(&g), "sym:test", 1, false, &t).text;
         assert!(out.contains("evidence body"), "reasoning node read: {out}");
     }
 
     #[test]
+    fn read_page_image_rejects_reasoning_node_id() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sym:test", "Symptom", "Test")).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            Some(&g),
+            "sym:test",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert_eq!(
+            out.text,
+            "page_image is only supported for PDF (got sym:test)"
+        );
+        assert!(out.images.is_empty());
+    }
+
+    #[test]
     fn grep_and_glob_render() {
-        let (_d, i) = idx();
+        let (d, i) = idx();
         let t = TraceLog::disabled();
-        assert!(grep(&i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
-        assert_eq!(grep(&i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t), "(no matches)");
-        assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
+        assert!(grep(d.path(), &i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
+        assert_eq!(
+            grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
+            "(no matches)"
+        );
+        assert!(glob(&i, "*МОДУЛЬ*", &t).contains("МОДУЛЬ.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
+    }
+
+    #[test]
+    fn grep_matches_lines_in_a_notebook_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        // The notebook resolves a note's doc-scoped path against an INDEXED document (same
+        // validation `note`/`ls` use), so register the doc before writing a note under it.
+        let doc = "some_std.docx";
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from(doc),
+            location: "p.1".into(),
+            file_type: "docx".into(),
+            text: "placeholder".into(),
+        }])
+        .unwrap();
+        crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n80\n", false);
+        let opts = crate::grep::GrepOpts {
+            path: Some("some_std.docx/sizes.csp".into()),
+            ..Default::default()
+        };
+        let out = grep(dir.path(), &idx, "63", &opts, &TraceLog::disabled());
+        assert!(out.contains("63"), "notebook grep should find the line; got: {out}");
+        assert!(!out.contains("no document indexed"), "must not error on a notebook path");
+        // a non-matching pattern still renders "(no matches)", not an index error
+        let none = grep(dir.path(), &idx, "nomatchzzz", &opts, &TraceLog::disabled());
+        assert_eq!(none, "(no matches)");
     }
 
     // ── graph tool tests ────────────────────────────────────────────────────
 
-    use crate::graph::store::{GraphStore, Node, Edge, Provenance};
     use crate::graph::ontology::Ontology;
+    use crate::graph::store::{Edge, GraphStore, Node, Provenance};
 
     const GRAPH_ONT: &str = r#"
 [entities.Organization]
@@ -863,8 +1711,14 @@ strict = true
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
         let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(result.contains("org:acme"), "expected node id in result, got: {result}");
-        assert_eq!(glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t), "(no matches)");
+        assert!(
+            result.contains("org:acme"),
+            "expected node id in result, got: {result}"
+        );
+        assert_eq!(
+            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t),
+            "(no matches)"
+        );
     }
 
     #[test]
@@ -876,15 +1730,24 @@ strict = true
 
         // Before the pass there is no node_meta → output is unannotated (back-compat).
         let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(!before.contains("comm "), "no meta annotation before generalize: {before}");
+        assert!(
+            !before.contains("comm "),
+            "no meta annotation before generalize: {before}"
+        );
 
         // Run the generalization pass → community/centrality land in node_meta.
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
         let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
-        assert!(after.contains("org:acme"), "still shows the node id: {after}");
-        assert!(after.contains("comm "), "glossary surfaces community after generalize: {after}");
+        assert!(
+            after.contains("org:acme"),
+            "still shows the node id: {after}"
+        );
+        assert!(
+            after.contains("comm "),
+            "glossary surfaces community after generalize: {after}"
+        );
     }
 
     #[test]
@@ -910,8 +1773,10 @@ strict = true
             aliases: vec![],
             prov: prov(),
         };
-        g.put_node(&node("sym:loss", "Symptom", "Потеря связи")).unwrap();
-        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr")).unwrap();
+        g.put_node(&node("sym:loss", "Symptom", "Потеря связи"))
+            .unwrap();
+        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr"))
+            .unwrap();
         g.put_edge(&Edge {
             from: "sym:loss".into(),
             to: "cau:maxtsdr".into(),
@@ -924,8 +1789,14 @@ strict = true
         // so the agent sees the causal chain without a separate call.
         let out = glossary(&idx, &g, "Потеря связи", &spine_spec(), &t);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
-        assert!(out.contains("→ CAUSED_BY") && out.contains("[Cause]"), "walks the CAUSED_BY hop: {out}");
-        assert!(out.contains("Малый maxTsdr"), "shows the connected Cause label: {out}");
+        assert!(
+            out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
+            "walks the CAUSED_BY hop: {out}"
+        );
+        assert!(
+            out.contains("Малый maxTsdr"),
+            "shows the connected Cause label: {out}"
+        );
     }
 
     // Structural chunk-navigation tests (NEXT/CHILD/PARENT/PREV/REFERENCES, node_meta on a
@@ -939,7 +1810,11 @@ strict = true
         use crate::index::store::index_dir;
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("g.md"), b"# Intro\nhello\n## Details\nworld\n").unwrap();
+        std::fs::write(
+            dir.path().join("g.md"),
+            b"# Intro\nhello\n## Details\nworld\n",
+        )
+        .unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
@@ -950,6 +1825,9 @@ strict = true
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
-        assert_eq!(glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t), "(no matches)");
+        assert_eq!(
+            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t),
+            "(no matches)"
+        );
     }
 }

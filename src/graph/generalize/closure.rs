@@ -13,7 +13,11 @@ pub struct Rule {
 
 impl Rule {
     pub fn new(a: &str, b: &str, result: &str) -> Self {
-        Rule { a: a.into(), b: b.into(), result: result.into() }
+        Rule {
+            a: a.into(),
+            b: b.into(),
+            result: result.into(),
+        }
     }
 }
 
@@ -57,7 +61,10 @@ mod tests {
     fn infers_symptom_resolved_by_via_cause() {
         let edges = vec![t("S", "CAUSED_BY", "C"), t("C", "RESOLVED_BY", "R")];
         let rules = vec![Rule::new("CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY")];
-        assert_eq!(transitive_closure(&edges, &rules), vec![t("S", "RESOLVED_BY", "R")]);
+        assert_eq!(
+            transitive_closure(&edges, &rules),
+            vec![t("S", "RESOLVED_BY", "R")]
+        );
     }
 
     #[test]

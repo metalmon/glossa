@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "pattern": {
-      "description": "ripgrep -g glob over document paths, e.g. *, **/*, *.pdf, *.{pdf,htm}, *АБАК*",
+      "description": "ripgrep -g glob over document paths, e.g. * or **/* (all documents), or *<name-fragment>* to find a file by name",
       "type": "string"
     }
   },

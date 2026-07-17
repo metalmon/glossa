@@ -8,10 +8,24 @@ pub struct ImageExtractor;
 /// spaces (so an image is findable by name/topic via search/glob). No pixels are read at index time.
 fn label_for(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-    let parent = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+    let parent = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let raw = format!("{parent} {stem}");
-    raw.chars().map(|c| if c == '_' || c == '-' || c == '.' { ' ' } else { c }).collect::<String>()
-        .split_whitespace().collect::<Vec<_>>().join(" ")
+    raw.chars()
+        .map(|c| {
+            if c == '_' || c == '-' || c == '.' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl Extractor for ImageExtractor {
@@ -20,7 +34,11 @@ impl Extractor for ImageExtractor {
     }
 
     fn extract(&self, path: &Path, _bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("img").to_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("img")
+            .to_lowercase();
         Ok(vec![Chunk {
             doc_path: path.to_path_buf(),
             location: "(image)".into(),
@@ -42,6 +60,10 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_type, "png");
         assert_eq!(chunks[0].location, "(image)");
-        assert!(chunks[0].text.contains("Схемы") && chunks[0].text.contains("profibus") && chunks[0].text.contains("сегмент"));
+        assert!(
+            chunks[0].text.contains("Схемы")
+                && chunks[0].text.contains("profibus")
+                && chunks[0].text.contains("сегмент")
+        );
     }
 }

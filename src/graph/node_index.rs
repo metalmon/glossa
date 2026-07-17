@@ -9,7 +9,9 @@ use anyhow::Context;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
 use tantivy::{Index, IndexReader, TantivyDocument, TantivyError, Term};
 
 pub struct NodeIndex {
@@ -45,7 +47,12 @@ impl NodeIndex {
             .tokenizers()
             .register("multilang", multilang_analyzer(default_detector()));
         let reader = index.reader()?;
-        Ok(NodeIndex { index, reader, id, text })
+        Ok(NodeIndex {
+            index,
+            reader,
+            id,
+            text,
+        })
     }
 
     /// Number of indexed nodes (non-deleted). The `GraphStore` compares this to the node-table
@@ -76,7 +83,7 @@ impl NodeIndex {
 
     /// BM25 search over node text; returns node ids best-first. Returns EVERY node that shares at
     /// least one query term (recall first), ranked by BM25 — so a node matching several rare query
-    /// terms outranks one matching a single generic word ("АБАК", in most labels), and the caller
+    /// terms outranks one matching a single generic word (a brand name present in most labels), and the caller
     /// sees the strongest matches at the top. A query that tokenizes to nothing returns empty.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         // Tokenize the query with the index's own analyzer so query terms match indexed terms

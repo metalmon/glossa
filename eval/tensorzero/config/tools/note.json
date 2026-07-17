@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "append": {
+      "default": null,
+      "description": "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "content": {
+      "description": "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing",
+      "type": "string"
+    },
+    "doc": {
+      "description": "Indexed document path from grep/read (#n stripped server-side)",
+      "type": "string"
+    },
+    "file": {
+      "description": "Note filename with extension. `.csp` = a limit table (tab-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note",
+      "type": "string"
+    }
+  },
+  "required": [
+    "doc",
+    "file",
+    "content"
+  ],
+  "type": "object"
+}

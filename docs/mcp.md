@@ -14,28 +14,36 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 
 | Profile | Typical use | Disabled tools |
 |---------|-------------|----------------|
-| `reader` | Answer agents | `index`, `reindex`, `graph_upsert`, `graph_delete`, `graph_update`, `graph_generalize`, `graph_stats`, `purge` |
-| `editor` | Index + graph editing | `purge` |
+| `reader` | Answer agents | `index`, `reindex`, `graph_*`, `purge`, `note`, `del` |
+| `editor` | Index + graph + notebook write | `purge` |
 | `full` | Admin | (none) |
+
+Reader keeps **notebook read** (`ls` to list notes; note content is read with the regular `read` tool) to inspect specialist notes.
 
 `--no-graph` hides all graph and index tools (search + read only) for eval control arms.
 
-`resolve` is available in every profile.
+`resolve`, `get_ontology`, and `constraint_solve` are available in every profile (`constraint_solve` returns an error unless the binary was built with `--features constraint`).
 
-## Tools (15)
+## Tools
 
 | Tool | reader | editor | full | Purpose |
 |------|:------:|:------:|:----:|---------|
 | `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
-| `read` | ✓ | ✓ | ✓ | Read chunk `#n` or graph node evidence |
+| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
 | `neighbors` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
 | `resolve` | ✓ | ✓ | ✓ | Entity resolution by name |
+| `get_ontology` | ✓ | ✓ | ✓ | Knowledge-base ontology as JSON: parameters, constraints, relations, graph-building patterns |
+| `constraint_solve` | ✓ | ✓ | ✓ | CSP solver over the constraint graph (`validate` / `infer` / `check`); requires a build with the `constraint` cargo feature |
+| `ls` | ✓ | ✓ | ✓ | List notebook notes (agent workspace); read note content with `read` |
+| `note` | | ✓ | ✓ | Create/replace — or with `append: true` extend — a notebook note (`doc`, `file`, `content`; `.csp` = validated limit table) |
+| `del` | | ✓ | ✓ | Delete a notebook note |
 | `index` | | ✓ | ✓ | Incremental index |
 | `reindex` | | ✓ | ✓ | Full rebuild |
 | `graph_upsert` | | ✓ | ✓ | Create/update reasoning nodes and edges |
+| `graph_build` | | ✓ | ✓ | Compile `.csp` limit tables into constraint graph |
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
 | `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive) |
@@ -47,7 +55,7 @@ Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 ## Typical agent workflow
 
 1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
-2. **`read(path, n)`** — open full chunk text (embedded office images returned as vision content when supported).
+2. **`read(path, n)`** — open full chunk text (embedded office images returned as vision content when supported; `page_image: true` renders a PDF page as PNG for hard-to-parse tables/layout).
 3. **`glossary("concept")`** — jump to reasoning graph; get cause → resolution chain with `read` anchors.
 4. **`neighbors(node_id)`** — alternate cases (SIMILAR, COMMUNITY) when the first chain is close but wrong.
 5. **`graph_upsert`** (editor) — add validated reasoning nodes; response shows what was written.
@@ -84,6 +92,8 @@ kb mcp ./my-corpus --profile reader \
 Endpoint: `http://127.0.0.1:8080/mcp`
 
 Environment fallbacks: `GLOSSA_MCP_TRANSPORT`, `GLOSSA_MCP_BIND`.
+
+Quickstart helpers: [`scripts/start-mcp-http.sh`](../scripts/start-mcp-http.sh) / [`scripts/start-mcp-http.ps1`](../scripts/start-mcp-http.ps1) start a streamable-http server against a corpus and print ready-to-paste Cursor `mcpServers` JSON.
 
 Ops endpoints: `/health`, `/ready`, `/metrics` (Prometheus). Details in [deploy/mcp-server.md](deploy/mcp-server.md).
 
@@ -130,7 +140,7 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 
 ## Freshness and maintenance
 
-Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes.
+Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `del`) use `.glossa/notebook.lock` the same way.
 
 ## Regenerate external tool schemas
 
@@ -140,7 +150,7 @@ After changing MCP tools:
 just tools
 ```
 
-Writes schemas to `eval/tensorzero/config/tools/` from the live router definitions.
+Writes schemas to `eval/tensorzero/config/tools/` from the live router definitions. Equivalent CLI: `kb mcp dump-tz-tools -d eval/tensorzero/config` — regenerates TensorZero tool config from the live MCP tool definitions (one source of truth).
 
 ## Production
 

@@ -7,17 +7,21 @@ use glossa::graph::store::GraphStore;
 use glossa::index::store::{DocIndex, RankedHit};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "kb-train", about = "Build & learn: enrich graph, export TZ episodes, GEPA optimize")]
+#[command(
+    name = "kb-train",
+    about = "Build & learn: enrich graph, export TZ episodes, GEPA optimize"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Enrich the reasoning graph from solved training cases.
     Enrich {
@@ -49,6 +53,21 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         k: usize,
     },
+    /// Export constraint materialize/research/compile-fix datasets from TZ ClickHouse episodes.
+    ExportTzConstraint {
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out: PathBuf,
+        #[arg(long, default_value = "constraint_validate")]
+        function: String,
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long, default_value = "kb-val")]
+        val_dir: PathBuf,
+        #[arg(long)]
+        clickhouse: Option<String>,
+    },
     /// Legacy graph dump (auxiliary gold index only — not primary training source).
     Dump {
         #[arg(long, default_value = "kb-test")]
@@ -64,6 +83,17 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
+    /// Bootstrap constraint GEPA materialize.jsonl from local gold tables.
+    SyntheticConstraint {
+        #[arg(long, default_value = "kb-val")]
+        val_dir: PathBuf,
+        #[arg(long, default_value = "doc.pdf")]
+        doc: String,
+        #[arg(long, default_value = "eval/fixtures/constraint-research-gold.json")]
+        research_gold: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out: PathBuf,
+    },
     /// GEPA-optimize the prod answer_hotpot system prompt (quad search + grep + glob + read scoring).
     Optimize {
         #[arg(long, default_value = "gepa-out/search.jsonl")]
@@ -76,7 +106,10 @@ enum Cmd {
         read: PathBuf,
         #[arg(long, default_value = "gepa-out/answer_hotpot.prompt.txt")]
         out: PathBuf,
-        #[arg(long, default_value = "eval/tensorzero/config/answer_hotpot/system.minijinja")]
+        #[arg(
+            long,
+            default_value = "eval/tensorzero/config/answer_hotpot/system.minijinja"
+        )]
         seed: PathBuf,
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
@@ -124,21 +157,177 @@ enum Cmd {
         #[arg(long, default_value = "pareto")]
         candidate_selection: String,
     },
+    /// GEPA-optimize constraint agent prompt slices (5 pools: discover → validate).
+    OptimizeConstraint {
+        #[arg(long, default_value = "gepa-constraint-out/discover.jsonl")]
+        discover: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/materialize.jsonl")]
+        materialize: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/compile.jsonl")]
+        compile: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/coverage.jsonl")]
+        coverage: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out/validate.jsonl")]
+        validate: PathBuf,
+        #[arg(long, default_value = "gepa-constraint-out")]
+        out_dir: PathBuf,
+        #[arg(
+            long,
+            default_value = "gepa-constraint-out/constraint_materialize.prompt.txt"
+        )]
+        out: PathBuf,
+        #[arg(long, default_value = "eval/sops/example")]
+        sop_dir: PathBuf,
+        #[arg(long, default_value = "kb-test")]
+        work: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        gateway: String,
+        #[arg(long, default_value = "cdiscover")]
+        discover_function: String,
+        #[arg(long, default_value = "cmaterialize")]
+        materialize_function: String,
+        #[arg(long, default_value = "ccompile")]
+        compile_function: String,
+        #[arg(long, default_value = "ccoverage")]
+        coverage_function: String,
+        #[arg(long, default_value = "cvalidate")]
+        validate_function: String,
+        #[arg(long, default_value = "gepa_reflect")]
+        reflect_function: String,
+        #[arg(long, default_value = "baseline")]
+        variant: String,
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tag: Vec<String>,
+        #[arg(long, default_value_t = 0.3)]
+        val_frac: f64,
+        #[arg(long, default_value_t = 6)]
+        budget: usize,
+        #[arg(long, default_value_t = 8)]
+        minibatch: usize,
+        #[arg(long, default_value_t = 0.5)]
+        hit_threshold: f64,
+        #[arg(long)]
+        rng_seed: Option<u64>,
+        #[arg(long, default_value_t = 20)]
+        pareto_size: usize,
+        #[arg(long, default_value_t = 0.25)]
+        w_discover: f64,
+        #[arg(long, default_value_t = 0.30)]
+        w_materialize: f64,
+        #[arg(long, default_value_t = 0.15)]
+        w_compile: f64,
+        #[arg(long, default_value_t = 0.20)]
+        w_coverage: f64,
+        #[arg(long, default_value_t = 0.10)]
+        w_validate: f64,
+    },
+    /// Splice GEPA-optimized prompt slices into SOP.md between `{# GEPA:<TAG>_START/_END #}` anchors.
+    ApplySopSlices {
+        /// SOP pack directory containing SOP.md.
+        #[arg(long, default_value = "eval/sops/example")]
+        sop_dir: PathBuf,
+        /// Directory with `constraint_<tag>.prompt.txt` slice files.
+        #[arg(long, default_value = "gepa-constraint-out")]
+        slices: PathBuf,
+    },
+}
+
+/// Replace each anchored SOP.md region with the matching slice file, keeping the anchors.
+/// Anchors present in the SOP but without a slice file are skipped with a note; at least
+/// one region must be spliced. The previous SOP.md is kept as SOP.md.bak.
+fn apply_sop_slices(sop_dir: &Path, slices: &Path) -> Result<()> {
+    let sop_md = sop_dir.join("SOP.md");
+    let text =
+        std::fs::read_to_string(&sop_md).with_context(|| format!("read {}", sop_md.display()))?;
+    let mut tags: Vec<String> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("{# GEPA:") {
+        let after = &rest[i + "{# GEPA:".len()..];
+        match after.find("_START #}") {
+            Some(j) if after[..j].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                if !tags.contains(&after[..j].to_string()) {
+                    tags.push(after[..j].to_string());
+                }
+                rest = &after[j..];
+            }
+            _ => rest = after,
+        }
+    }
+    anyhow::ensure!(
+        !tags.is_empty(),
+        "no {{# GEPA:<TAG>_START #}} anchors in {}",
+        sop_md.display()
+    );
+    let mut out = text.clone();
+    let mut applied = 0usize;
+    for tag in &tags {
+        let slice = slices.join(format!("constraint_{}.prompt.txt", tag.to_lowercase()));
+        if !slice.exists() {
+            eprintln!("skip {tag}: no {}", slice.display());
+            continue;
+        }
+        let body =
+            std::fs::read_to_string(&slice).with_context(|| format!("read {}", slice.display()))?;
+        let start = format!("{{# GEPA:{tag}_START #}}");
+        let end = format!("{{# GEPA:{tag}_END #}}");
+        let s = out.find(&start).with_context(|| format!("anchor {start} missing"))?;
+        let e = out.find(&end).with_context(|| format!("anchor {end} missing"))?;
+        anyhow::ensure!(e > s, "anchor {end} precedes {start}");
+        out.replace_range(s + start.len()..e, &format!("\n{}\n", body.trim()));
+        applied += 1;
+    }
+    anyhow::ensure!(
+        applied > 0,
+        "no slice files in {} matched anchors ({})",
+        slices.display(),
+        tags.join(", ")
+    );
+    let bak = sop_md.with_extension("md.bak");
+    std::fs::write(&bak, &text).with_context(|| format!("write {}", bak.display()))?;
+    std::fs::write(&sop_md, &out).with_context(|| format!("write {}", sop_md.display()))?;
+    println!(
+        "applied {applied} GEPA slice(s) to {} (backup {})",
+        sop_md.display(),
+        bak.display()
+    );
+    Ok(())
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Enrich { train, work, limit, tensorzero_endpoint, tensorzero_function } => {
-            kb_eval::enrich::run_enrich(&train, &work, limit, &tensorzero_endpoint, &tensorzero_function)
-        }
-        Cmd::ExportTz { work, out, train, function, run, clickhouse, k } => {
+        Cmd::ApplySopSlices { sop_dir, slices } => apply_sop_slices(&sop_dir, &slices),
+        Cmd::Enrich {
+            train,
+            work,
+            limit,
+            tensorzero_endpoint,
+            tensorzero_function,
+        } => kb_eval::enrich::run_enrich(
+            &train,
+            &work,
+            limit,
+            &tensorzero_endpoint,
+            &tensorzero_function,
+        ),
+        Cmd::ExportTz {
+            work,
+            out,
+            train,
+            function,
+            run,
+            clickhouse,
+            k,
+        } => {
             let train_files = if train.is_empty() {
                 vec![PathBuf::from("kb-val/derived/synthetic-train.json")]
             } else {
                 train
             };
             kb_eval::export_tz::run_export(kb_eval::export_tz::ExportConfig {
-                clickhouse_url: clickhouse.unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
+                clickhouse_url: clickhouse
+                    .unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
                 function_name: function,
                 run_tag: run,
                 train_files,
@@ -148,8 +337,81 @@ fn main() -> Result<()> {
             })
             .map(|_| ())
         }
-        Cmd::Dump { work, out, k, poll_secs, idle_stop, once } => {
-            run_dump(work, out, k, poll_secs, idle_stop, once)
+        Cmd::ExportTzConstraint {
+            work,
+            out,
+            function,
+            run,
+            val_dir,
+            clickhouse,
+        } => kb_eval::export_tz_constraint::run(
+            kb_eval::export_tz_constraint::ExportTzConstraintConfig {
+                clickhouse_url: clickhouse
+                    .unwrap_or_else(kb_eval::export_tz::default_clickhouse_url),
+                work,
+                out,
+                function,
+                run,
+                val_dir,
+            },
+        )
+        .map(|_| ()),
+        Cmd::Dump {
+            work,
+            out,
+            k,
+            poll_secs,
+            idle_stop,
+            once,
+        } => run_dump(work, out, k, poll_secs, idle_stop, once),
+        Cmd::SyntheticConstraint {
+            val_dir,
+            doc,
+            research_gold,
+            out,
+        } => {
+            std::fs::create_dir_all(&out)?;
+            let examples =
+                kb_eval::constraint_synthetic::materialize_examples_from_dir(&val_dir, &doc)?;
+            let materialize_path = out.join("materialize.jsonl");
+            kb_eval::constraint_synthetic::write_materialize_jsonl(&materialize_path, &examples)?;
+            let compile =
+                kb_eval::constraint_synthetic::compile_fix_examples_from_materialize(&examples);
+            let compile_path = out.join("compile.jsonl");
+            kb_eval::constraint_synthetic::write_compile_jsonl(&compile_path, &compile)?;
+            let coverage =
+                kb_eval::constraint_synthetic::coverage_examples_from_materialize(&examples);
+            let coverage_path = out.join("coverage.jsonl");
+            kb_eval::constraint_synthetic::write_coverage_jsonl(&coverage_path, &coverage)?;
+            let validate =
+                kb_eval::constraint_synthetic::validate_examples_from_materialize(&examples);
+            let validate_path = out.join("validate.jsonl");
+            kb_eval::constraint_synthetic::write_validate_jsonl(&validate_path, &validate)?;
+            let discover = if research_gold.exists() {
+                kb_eval::constraint_synthetic::load_research_grep_examples(&research_gold)?
+            } else {
+                eprintln!(
+                    "research gold fixture {} not found (local-only asset) — writing empty discover.jsonl",
+                    research_gold.display()
+                );
+                Vec::new()
+            };
+            let discover_path = out.join("discover.jsonl");
+            kb_eval::constraint_synthetic::write_discover_jsonl(&discover_path, &discover)?;
+            println!(
+                "wrote materialize={} -> {}, compile={} -> {}, coverage={} -> {}, validate={} -> {}, discover={} -> {}",
+                examples.len(),
+                materialize_path.display(),
+                compile.len(),
+                compile_path.display(),
+                coverage.len(),
+                coverage_path.display(),
+                validate.len(),
+                validate_path.display(),
+                discover.len(),
+                discover_path.display()
+            );
+            Ok(())
         }
         Cmd::Optimize {
             search,
@@ -208,6 +470,69 @@ fn main() -> Result<()> {
             pareto_size,
             candidate_selection,
         ),
+        Cmd::OptimizeConstraint {
+            discover,
+            materialize,
+            compile,
+            coverage,
+            validate,
+            out_dir,
+            out,
+            sop_dir,
+            work,
+            gateway,
+            discover_function,
+            materialize_function,
+            compile_function,
+            coverage_function,
+            validate_function,
+            reflect_function,
+            variant,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            hit_threshold,
+            rng_seed,
+            pareto_size,
+            w_discover,
+            w_materialize,
+            w_compile,
+            w_coverage,
+            w_validate,
+        } => run_optimize_constraint(
+            discover,
+            materialize,
+            compile,
+            coverage,
+            validate,
+            out_dir,
+            out,
+            sop_dir,
+            work,
+            gateway,
+            discover_function,
+            materialize_function,
+            compile_function,
+            coverage_function,
+            validate_function,
+            reflect_function,
+            variant,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            hit_threshold,
+            rng_seed,
+            pareto_size,
+            w_discover,
+            w_materialize,
+            w_compile,
+            w_coverage,
+            w_validate,
+        ),
     }
 }
 
@@ -227,9 +552,10 @@ fn load_jsonl<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<Vec<T>> 
         if line.trim().is_empty() {
             continue;
         }
-        out.push(serde_json::from_str(&line).with_context(|| {
-            format!("parse {} line {}", path.display(), n + 1)
-        })?);
+        out.push(
+            serde_json::from_str(&line)
+                .with_context(|| format!("parse {} line {}", path.display(), n + 1))?,
+        );
     }
     Ok(out)
 }
@@ -357,7 +683,170 @@ fn run_optimize(
     Ok(())
 }
 
-fn evidence_is_relevant(analyzer: &glossa::index::multilang::TermAnalyzer, label: &str, chunk_text: &str) -> bool {
+fn load_sop_gepa_seed(sop_dir: &Path, out: &Path, tag: &str) -> Result<String> {
+    if out.exists() {
+        let content = std::fs::read_to_string(out)
+            .with_context(|| format!("read prior prompt {}", out.display()))?;
+        if !content.trim().is_empty() {
+            return Ok(content);
+        }
+    }
+    let md = kb_eval::constraint_gepa_sop::load_sop_md(sop_dir)?;
+    kb_eval::constraint_gepa_sop::extract_gepa_slice(&md, tag)
+        .with_context(|| format!("extract GEPA:{tag} seed from SOP.md"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize_constraint(
+    discover: PathBuf,
+    materialize: PathBuf,
+    compile: PathBuf,
+    coverage: PathBuf,
+    validate: PathBuf,
+    out_dir: PathBuf,
+    out: PathBuf,
+    sop_dir: PathBuf,
+    work: PathBuf,
+    gateway: String,
+    discover_function: String,
+    materialize_function: String,
+    compile_function: String,
+    coverage_function: String,
+    validate_function: String,
+    reflect_function: String,
+    variant: String,
+    run: Option<String>,
+    tag: Vec<String>,
+    val_frac: f64,
+    budget: usize,
+    minibatch: usize,
+    hit_threshold: f64,
+    rng_seed: Option<u64>,
+    pareto_size: usize,
+    w_discover: f64,
+    w_materialize: f64,
+    w_compile: f64,
+    w_coverage: f64,
+    w_validate: f64,
+) -> Result<()> {
+    let discover_examples = if discover.exists() {
+        kb_eval::gepa_constraint::load_discover_jsonl(&discover)?
+    } else {
+        Vec::new()
+    };
+    let materialize_examples = kb_eval::gepa_constraint::load_materialize_jsonl(&materialize)?;
+    let compile_examples = if compile.exists() {
+        kb_eval::gepa_constraint::load_compile_jsonl(&compile)?
+    } else {
+        Vec::new()
+    };
+    let coverage_examples = if coverage.exists() {
+        kb_eval::gepa_constraint::load_coverage_jsonl(&coverage)?
+    } else {
+        Vec::new()
+    };
+    let validate_examples = if validate.exists() {
+        kb_eval::gepa_constraint::load_validate_jsonl(&validate)?
+    } else {
+        Vec::new()
+    };
+    let discover_out = out_dir.join("constraint_discover.prompt.txt");
+    let materialize_out = out;
+    let compile_out = out_dir.join("constraint_compile.prompt.txt");
+    let coverage_out = out_dir.join("constraint_coverage.prompt.txt");
+    let validate_out = out_dir.join("constraint_validate.prompt.txt");
+    let seed_discover_prompt = load_sop_gepa_seed(&sop_dir, &discover_out, "DISCOVER")?;
+    let seed_materialize_prompt = load_sop_gepa_seed(&sop_dir, &materialize_out, "MATERIALIZE")?;
+    let seed_compile_prompt = load_sop_gepa_seed(&sop_dir, &compile_out, "COMPILE")?;
+    let seed_coverage_prompt = load_sop_gepa_seed(&sop_dir, &coverage_out, "COVERAGE")?;
+    let seed_validate_prompt = load_sop_gepa_seed(&sop_dir, &validate_out, "VALIDATE")?;
+    let run_label = run.clone().unwrap_or_else(kb_eval::gepa::default_run_tag);
+    let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
+    let mut tags = serde_json::Map::new();
+    if let Some(ref r) = run {
+        tags.insert("run".into(), r.clone().into());
+    }
+    for t in &tag {
+        if let Some((k, v)) = t.split_once('=') {
+            tags.insert(k.to_string(), v.into());
+        }
+    }
+
+    let result = kb_eval::gepa_constraint::run(
+        kb_eval::gepa_constraint::GepaConstraintConfig {
+            gateway,
+            discover_function,
+            materialize_function,
+            compile_function,
+            coverage_function,
+            validate_function,
+            reflect_function,
+            variant,
+            episode_id: kb_eval::tz::backdated_episode_id(30),
+            tags: Value::Object(tags),
+            val_frac,
+            budget,
+            minibatch,
+            seed_discover_prompt,
+            seed_materialize_prompt,
+            seed_compile_prompt,
+            seed_coverage_prompt,
+            seed_validate_prompt,
+            hit_threshold,
+            seed: rng_seed,
+            pareto_size,
+            w_discover,
+            w_materialize,
+            w_compile,
+            w_coverage,
+            w_validate,
+            work,
+        },
+        discover_examples,
+        materialize_examples,
+        compile_examples,
+        coverage_examples,
+        validate_examples,
+    )?;
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    if let Some(parent) = materialize_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&discover_out, &result.discover_prompt)
+        .with_context(|| format!("write {}", discover_out.display()))?;
+    std::fs::write(&materialize_out, &result.materialize_prompt)
+        .with_context(|| format!("write {}", materialize_out.display()))?;
+    std::fs::write(&compile_out, &result.compile_prompt)
+        .with_context(|| format!("write {}", compile_out.display()))?;
+    std::fs::write(&coverage_out, &result.coverage_prompt)
+        .with_context(|| format!("write {}", coverage_out.display()))?;
+    std::fs::write(&validate_out, &result.validate_prompt)
+        .with_context(|| format!("write {}", validate_out.display()))?;
+    println!(
+        "wrote best prompts -> {}, {}, {}, {}, {} (run={run_label}, episode={}, baseline_acc={:.3}, best_acc={:.3}, discover_acc={:.3}, materialize_acc={:.3}, compile_acc={:.3}, coverage_acc={:.3}, validate_acc={:.3}, candidates={})",
+        discover_out.display(),
+        materialize_out.display(),
+        compile_out.display(),
+        coverage_out.display(),
+        validate_out.display(),
+        result.episode_id,
+        result.baseline_acc,
+        result.best_acc,
+        result.discover_acc,
+        result.materialize_acc,
+        result.compile_acc,
+        result.coverage_acc,
+        result.validate_acc,
+        result.candidates,
+    );
+    Ok(())
+}
+
+fn evidence_is_relevant(
+    analyzer: &glossa::index::multilang::TermAnalyzer,
+    label: &str,
+    chunk_text: &str,
+) -> bool {
     let mut label_terms = HashSet::new();
     {
         let mut s = std::collections::BTreeSet::new();
@@ -369,7 +858,10 @@ fn evidence_is_relevant(analyzer: &glossa::index::multilang::TermAnalyzer, label
     }
     let mut chunk_terms = std::collections::BTreeSet::new();
     analyzer.terms(chunk_text, &mut chunk_terms);
-    let shared = label_terms.iter().filter(|t| chunk_terms.contains(*t)).count();
+    let shared = label_terms
+        .iter()
+        .filter(|t| chunk_terms.contains(*t))
+        .count();
     shared * 2 >= label_terms.len()
 }
 
@@ -385,7 +877,14 @@ fn hits_json(hits: &[RankedHit]) -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u32, once: bool) -> Result<()> {
+fn run_dump(
+    work: PathBuf,
+    out: PathBuf,
+    k: usize,
+    poll_secs: u64,
+    idle_stop: u32,
+    once: bool,
+) -> Result<()> {
     use std::io::Write as _;
 
     eprintln!("note: `dump` is legacy — prefer `export-tz` from ClickHouse episodes");
@@ -409,7 +908,8 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
     );
 
     let mut seen: HashSet<String> = HashSet::new();
-    let (mut nodes_kept, mut search_written, mut select_written, mut recall_hit) = (0u64, 0u64, 0u64, 0u64);
+    let (mut nodes_kept, mut search_written, mut select_written, mut recall_hit) =
+        (0u64, 0u64, 0u64, 0u64);
     let mut idle = 0u32;
 
     loop {
@@ -446,12 +946,21 @@ fn run_dump(work: PathBuf, out: PathBuf, k: usize, poll_secs: u64, idle_stop: u3
             }
             nodes_kept += 1;
             let gold_locs: Vec<String> = relevant.iter().map(|(p, l)| format!("{p}#{l}")).collect();
-            writeln!(search_f, "{}", json!({"question": node.label, "gold": gold_locs}))?;
+            writeln!(
+                search_f,
+                "{}",
+                json!({"question": node.label, "gold": gold_locs})
+            )?;
             search_written += 1;
-            let hits = idx.search_filtered(&node.label, k, None, None).unwrap_or_default();
+            let hits = idx
+                .search_filtered(&node.label, k, None, None)
+                .unwrap_or_default();
             let gold_set: HashSet<(String, String)> = relevant.into_iter().collect();
-            let gold_ords: Vec<u64> =
-                hits.iter().filter(|h| gold_set.contains(&(h.path.clone(), h.location.clone()))).map(|h| h.ord).collect();
+            let gold_ords: Vec<u64> = hits
+                .iter()
+                .filter(|h| gold_set.contains(&(h.path.clone(), h.location.clone())))
+                .map(|h| h.ord)
+                .collect();
             if !gold_ords.is_empty() {
                 recall_hit += 1;
                 writeln!(

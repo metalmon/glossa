@@ -26,8 +26,10 @@ pub fn incomplete_nodes(
     if spines.is_empty() {
         return Vec::new();
     }
-    let type_of: HashMap<&str, &str> =
-        nodes.iter().map(|(id, ty)| (id.as_str(), ty.as_str())).collect();
+    let type_of: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|(id, ty)| (id.as_str(), ty.as_str()))
+        .collect();
 
     // ── Core survivors: union, over every declared spine, of the nodes on a complete typed chain. ──
     let mut survivors: HashSet<&str> = HashSet::new();
@@ -131,17 +133,29 @@ mod tests {
         items.iter().map(|x| x.to_string()).collect()
     }
     fn n(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
     fn e(triples: &[(&str, &str, &str)]) -> Vec<Triple> {
-        triples.iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())).collect()
+        triples
+            .iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect()
     }
     fn sp(anchor: &str, rels: &[&str]) -> Spine {
-        Spine { anchor: anchor.into(), relations: rels.iter().map(|r| r.to_string()).collect() }
+        Spine {
+            anchor: anchor.into(),
+            relations: rels.iter().map(|r| r.to_string()).collect(),
+        }
     }
     // The support overlay: a causal spine and an informational (Task) spine.
     fn spines() -> Vec<Spine> {
-        vec![sp("Symptom", &["CAUSED_BY", "RESOLVED_BY"]), sp("Task", &["RESOLVED_BY"])]
+        vec![
+            sp("Symptom", &["CAUSED_BY", "RESOLVED_BY"]),
+            sp("Task", &["RESOLVED_BY"]),
+        ]
     }
     // RESOLVED_BY.from = [Symptom, Cause, Task] → all four are spine types.
     fn spine_types() -> HashSet<String> {
@@ -155,7 +169,9 @@ mod tests {
     fn complete_chain_survives() {
         let nodes = n(&[("S", "Symptom"), ("C", "Cause"), ("R", "Resolution")]);
         let edges = e(&[("S", "CAUSED_BY", "C"), ("C", "RESOLVED_BY", "R")]);
-        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
+        assert!(
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty()
+        );
     }
 
     #[test]
@@ -163,7 +179,9 @@ mod tests {
         // the informational shape: Task -RESOLVED_BY-> Resolution is complete on the Task spine
         let nodes = n(&[("T", "Task"), ("R", "Resolution")]);
         let edges = e(&[("T", "RESOLVED_BY", "R")]);
-        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
+        assert!(
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty()
+        );
     }
 
     #[test]
@@ -190,11 +208,21 @@ mod tests {
 
     #[test]
     fn orphans_and_isolated_pruned() {
-        let nodes = n(&[("C", "Cause"), ("R", "Resolution"), ("S", "Symptom"), ("T", "Task")]);
+        let nodes = n(&[
+            ("C", "Cause"),
+            ("R", "Resolution"),
+            ("S", "Symptom"),
+            ("T", "Task"),
+        ]);
         let edges = e(&[]); // all isolated
         assert_eq!(
             incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()),
-            vec!["C".to_string(), "R".to_string(), "S".to_string(), "T".to_string()]
+            vec![
+                "C".to_string(),
+                "R".to_string(),
+                "S".to_string(),
+                "T".to_string()
+            ]
         );
     }
 
@@ -213,7 +241,9 @@ mod tests {
             ("R", "SETS", "P"),
             ("P", "OF", "M"),
         ]);
-        assert!(incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty());
+        assert!(
+            incomplete_nodes(&nodes, &edges, &spines(), &spine_types(), &structural()).is_empty()
+        );
     }
 
     #[test]

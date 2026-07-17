@@ -46,7 +46,7 @@ pub fn path_matches_fs(matcher: &GlobMatcher, path: &Path) -> bool {
 }
 
 /// List the DISTINCT document paths whose path matches `pattern`, each with its highest chunk
-/// number (≈ page/section count, the `n`-range for `read(path, n)`). Sorted by path.
+/// number (for PDFs: last page number; every page 1..N is addressable after indexing). Sorted by path.
 pub fn glob_docs(idx: &DocIndex, pattern: &str) -> anyhow::Result<Vec<(String, u64)>> {
     let matcher = compile_glob(pattern)?;
     let mut by_path: BTreeMap<String, u64> = BTreeMap::new();
@@ -103,8 +103,8 @@ mod tests {
     #[test]
     fn glob_docs_lists_distinct_matching_paths_with_counts() {
         let (_d, idx) = idx_with(&[
-            ("kb\\Руководство АБАК.pdf", "p.1", "a"),
-            ("kb\\Руководство АБАК.pdf", "p.2", "b"),
+            ("kb\\Руководство МОДУЛЬ.pdf", "p.1", "a"),
+            ("kb\\Руководство МОДУЛЬ.pdf", "p.2", "b"),
             ("kb\\Safety Manual.pdf", "p.1", "c"),
             ("kb\\Прочее.md", "S1", "d"),
         ]);
@@ -114,11 +114,11 @@ mod tests {
             pdfs,
             vec![
                 ("kb\\Safety Manual.pdf".to_string(), 1),
-                ("kb\\Руководство АБАК.pdf".to_string(), 2),
+                ("kb\\Руководство МОДУЛЬ.pdf".to_string(), 2),
             ]
         );
-        let abak = glob_docs(&idx, "*АБАК*").unwrap();
-        assert_eq!(abak, vec![("kb\\Руководство АБАК.pdf".to_string(), 2)]);
+        let manual = glob_docs(&idx, "*МОДУЛЬ*").unwrap();
+        assert_eq!(manual, vec![("kb\\Руководство МОДУЛЬ.pdf".to_string(), 2)]);
         assert!(glob_docs(&idx, "*nomatch*").unwrap().is_empty());
     }
 
@@ -152,10 +152,7 @@ mod tests {
 
     #[test]
     fn glob_discovery_alias_lists_all() {
-        let (_d, idx) = idx_with(&[
-            ("one.pdf", "p.1", "a"),
-            ("two\\three.pdf", "p.1", "b"),
-        ]);
+        let (_d, idx) = idx_with(&[("one.pdf", "p.1", "a"), ("two\\three.pdf", "p.1", "b")]);
         assert_eq!(glob_docs(&idx, "").unwrap().len(), 2);
         assert_eq!(glob_docs(&idx, "**/*").unwrap().len(), 2);
     }

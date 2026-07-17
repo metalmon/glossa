@@ -15,13 +15,20 @@ pub mod image;
 pub mod links;
 pub mod markdown;
 pub mod office;
+pub mod office_chunk;
+pub mod office_table;
 pub mod pdf;
+pub mod pdf_table;
 pub mod text;
 
 /// Extract one file's chunks into `sink`. Whole-file binary/doc formats (md/office/pdf) are read
 /// fully; csv/tsv/html and any other readable file stream from the path (constant memory).
 pub fn extract_file(path: &Path, sink: &mut dyn FnMut(Chunk)) -> anyhow::Result<()> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     for ex in crate::walk::extractors() {
         if ex.file_types().contains(&ext.as_str()) {
             let bytes = std::fs::read(path)?;

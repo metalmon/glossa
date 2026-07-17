@@ -19,10 +19,14 @@ pub fn extract_links(text: &str) -> Vec<String> {
         if caps.get(1).is_some_and(|b| !b.as_str().is_empty()) {
             continue; // image embed, not a link
         }
-        if let Some(m) = caps.get(2) { push_if_local(m.as_str(), &mut out); }
+        if let Some(m) = caps.get(2) {
+            push_if_local(m.as_str(), &mut out);
+        }
     }
     for caps in html.captures_iter(text) {
-        if let Some(m) = caps.get(1) { push_if_local(m.as_str(), &mut out); }
+        if let Some(m) = caps.get(1) {
+            push_if_local(m.as_str(), &mut out);
+        }
     }
     out
 }
@@ -56,8 +60,14 @@ mod tests {
         let links = extract_links(text);
         assert!(links.contains(&"b.md".to_string()));
         assert!(links.contains(&"sub/c.html".to_string()));
-        assert!(links.contains(&"d.md".to_string()), "trailing #anchor stripped");
-        assert!(!links.iter().any(|l| l.contains("x.com")), "external excluded");
+        assert!(
+            links.contains(&"d.md".to_string()),
+            "trailing #anchor stripped"
+        );
+        assert!(
+            !links.iter().any(|l| l.contains("x.com")),
+            "external excluded"
+        );
         assert!(!links.iter().any(|l| l.starts_with('#')), "anchor excluded");
     }
 
@@ -65,6 +75,9 @@ mod tests {
     fn image_embeds_are_not_links() {
         let links = extract_links("![diagram](pic.png) but [real](doc.md)");
         assert!(links.contains(&"doc.md".to_string()), "real link kept");
-        assert!(!links.iter().any(|l| l.contains("pic.png")), "image embed excluded");
+        assert!(
+            !links.iter().any(|l| l.contains("pic.png")),
+            "image embed excluded"
+        );
     }
 }

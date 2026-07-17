@@ -35,7 +35,7 @@ flowchart TB
 Each document is split into **chunks** with stable locations:
 
 - Markdown / Office: heading-based sections
-- PDF: one chunk per page (`p.N`)
+- PDF: one chunk per page (`p.N`); blank pages are indexed with an empty body so every physical page `1..N` is addressable via `read(path, n)`
 - Plain text: streaming segments
 
 Every chunk carries a corpus-relative path and location string. Search and `read` use `[#n]` chunk numbers; graph MENTIONS edges anchor reasoning nodes to `(path, #n)`.
@@ -46,8 +46,8 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 
 | Format | Library | Notes |
 |--------|---------|-------|
-| PDF | [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | Per-page text; lenient parsing; scans indexed by filename if no text |
-| Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx |
+| PDF | [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | Per-page text; blank pages indexed empty; page raster for vision agents; embedded image extraction; scans indexed by filename if no text |
+| Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
 
 Binary files are skipped silently. Extraction is streaming (no fixed size cap).
@@ -110,7 +110,7 @@ glossa stands on:
 | Project | Role |
 |---------|------|
 | [Tantivy](https://github.com/quickwit-oss/tantivy) | BM25 index |
-| [oxidize-pdf](https://github.com/bzsanti/oxidizePdf) | PDF extraction |
+| [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | PDF text extraction, page render, embeds |
 | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | Office extraction |
 | rusqlite | Graph persistence |
 | rmcp | MCP protocol |

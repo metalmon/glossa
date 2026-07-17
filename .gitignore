@@ -2,10 +2,9 @@
 docs/superpowers/
 /target
 
-# Local debug knowledge base (real data — never commit)
-kb-test/
-kb-val/
-
+# Local debug knowledge bases (real data — never commit)
+kb-*/
+kb-val*/
 # Local index/manifest caches
 .glossa/
 
@@ -15,18 +14,29 @@ eval-data/
 # Eval working corpus + generated result reports
 /eval-corpus/
 /eval-*.json
+/eval/results/
 
 # GEPA dump/optimize artifacts (search.jsonl/select.jsonl derived from the corpus — never commit)
 /gepa-out/
+/gepa-constraint-out/
 
 # TensorZero local secrets + the fullwiki corpus/archive (large/secret, not committed)
 eval/tensorzero/.env
 /wiki-corpus/
 /eval-data/*.tar.bz2
 
+# Local-only eval assets (corpus-specific SOPs — never commit); example/ ships
+eval/sops/*
+!eval/sops/example/
+eval/fixtures/constraint-research-gold.json
+new-episode.txt
+*.rtf.orig
+
 # Local debug logs and scratch (never commit)
 *.log
 episode_*.txt
+episode-*.txt
+eval-dump/
 g.json
 run-chain.sh
 _test_strip.sh
@@ -35,3 +45,5 @@ prof-*.jsonl
 kb-build.log
 gepa-out/gepa-long.current
 .cursor/
+
+tmp/

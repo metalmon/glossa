@@ -63,6 +63,7 @@ impl InferenceTurn {
 
 /// One `/inference` call (kb-eval pattern). Pass `system` to override the variant's system template
 /// at runtime (GEPA search/read); omit it for functions whose prompt lives entirely in `tensorzero.toml`.
+#[allow(clippy::too_many_arguments)]
 pub fn infer(
     gateway: &str,
     function: &str,
@@ -72,6 +73,7 @@ pub fn infer(
     timeout: Duration,
     variant: Option<&str>,
     system: Option<&str>,
+    additional_tools: Option<&[Value]>,
 ) -> Result<InferenceTurn> {
     let base = gateway_base(gateway);
     let url = format!("{base}/inference");
@@ -86,6 +88,14 @@ pub fn infer(
     });
     if let Some(variant) = variant {
         body["variant_name"] = json!(variant);
+    }
+    // Dynamic tools supplied at inference time (not in the gateway's function
+    // config). Used to give the SOP-conversation agent the `sop_advance` tool,
+    // exactly as zeroclaw's runtime provides it in production.
+    if let Some(tools) = additional_tools {
+        if !tools.is_empty() {
+            body["additional_tools"] = json!(tools);
+        }
     }
     if tags.as_object().is_some_and(|o| !o.is_empty()) {
         body["tags"] = tags.clone();
@@ -109,7 +119,18 @@ pub fn infer(
                     std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
                     continue;
                 }
-                return Err(anyhow!("tensorzero /inference failed: {e}"));
+                // Prefer the gateway JSON body (e.g. OpenRouter/provider detail) over
+                // a bare "status code 500" from ureq's Display.
+                let detail = match e {
+                    ureq::Error::Status(code, resp) => {
+                        let body = resp
+                            .into_string()
+                            .unwrap_or_else(|read_err| format!("<unreadable body: {read_err}>"));
+                        format!("status {code}: {body}")
+                    }
+                    other => other.to_string(),
+                };
+                return Err(anyhow!("tensorzero /inference failed: {detail}"));
             }
         }
     };
@@ -220,10 +241,22 @@ mod tests {
 
     #[test]
     fn gateway_base_replaces_localhost() {
-        assert_eq!(gateway_base("http://localhost:3000"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("http://localhost:3000/"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("http://127.0.0.1:3000"), "http://127.0.0.1:3000");
-        assert_eq!(gateway_base("https://localhost:3000"), "https://127.0.0.1:3000");
+        assert_eq!(
+            gateway_base("http://localhost:3000"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("http://localhost:3000/"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("http://127.0.0.1:3000"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_base("https://localhost:3000"),
+            "https://127.0.0.1:3000"
+        );
     }
 
     /// `cargo test -p kb-eval live_ensure_function -- --ignored --nocapture`

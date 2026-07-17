@@ -7,11 +7,11 @@ This knowledge base has a reasoning graph over the solved cases: a symptom links
 
 When the graph has no match, fall back to plain retrieval using this strategic protocol:
 
-1. **SCOPE IDENTIFICATION (GLOB FIRST)**: Before searching content, extract specific identifiers (product series like "ABAK", "IVK", hardware names, manual types) from the query. Run `glob("<KeyIdentifier>*")` to list candidate documents. This narrows the search space and prevents noise from generic manuals. If multiple candidates exist, prioritize those specifically named for operation ("Руководство по эксплуатации") or safety. Select the most relevant document path(s) for targeted searches/reads.
+1. **SCOPE IDENTIFICATION (GLOB FIRST)**: Before searching content, extract specific identifiers (product series names, hardware names, manual types) from the query. Run `glob("<KeyIdentifier>*")` to list candidate documents. This narrows the search space and prevents noise from generic manuals. If multiple candidates exist, prioritize those specifically named for operation (user/operating manuals) or safety. Select the most relevant document path(s) for targeted searches/reads.
 
 2. **TARGETED RETRIEVAL**:
    - **Exact Codes/Terms**: If the query contains precise identifiers (part numbers, parameter tags, register names), use `grep("<Token>")`. Grepping ensures you find the specific instance without noise. Keep patterns short and literal.
-   - **Concepts/Symptoms**: Use `search()` **within the context of the specific document(s)** identified via glob. Do not perform blind global searches unless no specific device/context is mentioned. Combine the core concept with the device/product name in your search query (e.g., "Profibus DP loss stability ABAK PLC"). Note: BM25 rankings are noisy; top results often point to general introductions rather than specific troubleshooting steps.
+   - **Concepts/Symptoms**: Use `search()` **within the context of the specific document(s)** identified via glob. Do not perform blind global searches unless no specific device/context is mentioned. Combine the core concept with the device/product name in your search query (e.g., "Profibus DP loss stability <product series> PLC"). Note: BM25 rankings are noisy; top results often point to general introductions rather than specific troubleshooting steps.
 
 3. **CHUNK SELECTION & READING (READ)**:
    - **Ignore Top-of-List Bias**: If relying on search/grep results, do NOT assume the first hit `[1]` or top-3 are correct. Scan lower-ranked hits carefully; the gold chunk is often buried due to broader matches appearing earlier. Inspect snippets for *specific constraints* (values, settings, procedural steps), not just keyword mentions.
@@ -24,4 +24,4 @@ Tools:
 - glossary(name): resolve a symptom/term/component to graph nodes. A reasoning node prints its full cause → resolution chain, each hop with a `read path #n` anchor to open.
 - neighbors(node): related cases for a reasoning-node id copied from a `glossary` line (its SIMILAR cross-links); each renders a `read path #n` anchor. You may instead pass `path` + `n` for a chunk.
 - search(query): BM25 keyword search → numbered `[#n]` hits. grep(pattern): exact/regex literal match. glob(pattern): list documents by path mask.
-- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8").
+- read(path, n): n is the `[#n]` integer shown in a search/grep result. Pass it as a plain integer (e.g. 8), never a list ([8]) or string ("8"). For a messy PDF table page, call again with `page_image: true` to get a 200 DPI PNG of that page.

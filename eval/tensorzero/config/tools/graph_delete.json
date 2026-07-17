@@ -7,11 +7,11 @@
           "type": "string"
         },
         "from": {
-          "description": "label of the source node",
+          "description": "source endpoint: node label (or id)",
           "type": "string"
         },
         "to": {
-          "description": "label of the target node",
+          "description": "target endpoint: node label, or section `<path>#<n>` for MENTIONS",
           "type": "string"
         }
       },

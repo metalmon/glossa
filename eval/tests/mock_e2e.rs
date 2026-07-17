@@ -12,14 +12,26 @@ fn mock_run_scores_and_reports() {
       {"_id":"q2","question":"What?","answer":"42","context":[["N",["n1."]]],"supporting_facts":[["N",0]]}
     ]"#).unwrap();
 
-    Command::cargo_bin("kb-eval").unwrap()
+    Command::cargo_bin("kb-eval")
+        .unwrap()
         .current_dir(dir.path())
-        .args(["run", "--dataset", ds.to_str().unwrap(), "--backend", "mock"])
+        .args([
+            "run",
+            "--dataset",
+            ds.to_str().unwrap(),
+            "--backend",
+            "mock",
+        ])
         .assert()
         .success()
-        .stdout(contains("backend=mock").and(contains("questions=2")).and(contains("EM=")));
+        .stdout(
+            contains("backend=mock")
+                .and(contains("questions=2"))
+                .and(contains("EM=")),
+        );
 
-    let wrote = fs::read_dir(dir.path()).unwrap()
+    let wrote = fs::read_dir(dir.path())
+        .unwrap()
         .filter_map(|e| e.ok())
         .any(|e| e.file_name().to_string_lossy().starts_with("eval-mock-"));
     assert!(wrote, "a report JSON should be written");

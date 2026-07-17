@@ -27,7 +27,11 @@ fn splice(
     end_prefix: &str,
     replacement: &str,
 ) -> anyhow::Result<String> {
-    let nl = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let nl = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let lines: Vec<&str> = content.lines().collect();
     let mut start_idx = None;
     let mut end_idx = None;
@@ -36,9 +40,16 @@ fn splice(
         // Only treat a line as a marker when it starts with `#` (markers are TOML comments).
         // This prevents content lines like `description = "# >>> GENERATED ..."` from
         // being mis-matched on a second chained splice call.
-        if start_idx.is_none() && line.trim_start().starts_with('#') && line.starts_with(start_prefix) {
+        if start_idx.is_none()
+            && line.trim_start().starts_with('#')
+            && line.starts_with(start_prefix)
+        {
             start_idx = Some(i);
-        } else if start_idx.is_some() && end_idx.is_none() && line.trim_start().starts_with('#') && line.starts_with(end_prefix) {
+        } else if start_idx.is_some()
+            && end_idx.is_none()
+            && line.trim_start().starts_with('#')
+            && line.starts_with(end_prefix)
+        {
             end_idx = Some(i);
         }
     }
@@ -136,7 +147,8 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         // OpenAI-tools validator (zod) REQUIRES `function.parameters.properties` to be present, and
         // rejects the whole request (400) when it is undefined. Ensure every schema carries it.
         if let Some(obj) = schema.as_object_mut() {
-            obj.entry("properties").or_insert_with(|| serde_json::json!({}));
+            obj.entry("properties")
+                .or_insert_with(|| serde_json::json!({}));
         }
         let json = serde_json::to_string_pretty(&schema)?;
         let out = tools_dir.join(format!("{}.json", tool.name));
@@ -181,13 +193,19 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     ));
 
     // 5. Build the tool-list line (reader set — the answer_hotpot function).
-    let names: Vec<String> = reader_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    let names: Vec<String> = reader_tools
+        .iter()
+        .map(|t| format!("\"{}\"", t.name))
+        .collect();
     let tool_list = format!("tools = [{}]\n", names.join(", "));
 
     // 5b. Build the tool-list line (editor set — the enrich function). Append the runtime `done`
     // tool: enrich-only (the answer/reader list above does NOT get it — its completion is a text
     // answer, while the enricher signals completion explicitly).
-    let mut enrich_names: Vec<String> = editor_tools.iter().map(|t| format!("\"{}\"", t.name)).collect();
+    let mut enrich_names: Vec<String> = editor_tools
+        .iter()
+        .map(|t| format!("\"{}\"", t.name))
+        .collect();
     enrich_names.push("\"done\"".to_string());
     let enrich_list = format!("tools = [{}]\n", enrich_names.join(", "));
 
@@ -274,17 +292,24 @@ type = \"boolean\"\n";
 
         // (a2) a NO-ARG tool (index → Parameters<Empty>) must also carry `properties` — LM Studio
         // rejects a tool schema without it. Guarded at the source (Empty's schema) AND here.
-        let index_json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(config_dir.join("tools").join("index.json")).unwrap())
-                .unwrap();
+        let index_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("tools").join("index.json")).unwrap(),
+        )
+        .unwrap();
         assert!(
-            index_json.get("properties").map(|p| p.is_object()).unwrap_or(false),
+            index_json
+                .get("properties")
+                .map(|p| p.is_object())
+                .unwrap_or(false),
             "index.json (no-arg tool) missing object 'properties'"
         );
 
         // (b) GENERATED-TOOLS region contains [tools.search] + correct parameters path
         let toml_out = std::fs::read_to_string(config_dir.join("tensorzero.toml")).unwrap();
-        assert!(toml_out.contains("[tools.search]"), "missing [tools.search]");
+        assert!(
+            toml_out.contains("[tools.search]"),
+            "missing [tools.search]"
+        );
         assert!(
             toml_out.contains("parameters = \"tools/search.json\""),
             "missing parameters for search"
@@ -338,15 +363,32 @@ type = \"boolean\"\n";
 
         // (g) the runtime `done` tool is declared and is ENRICH-ONLY: present in the enrich list,
         // absent from the answer (reader) list.
-        assert!(toml_out.contains("[tools.done]"), "missing runtime [tools.done] block");
+        assert!(
+            toml_out.contains("[tools.done]"),
+            "missing runtime [tools.done] block"
+        );
         let enrich_region = toml_out
-            .split("# >>> GENERATED ENRICH TOOL LIST").nth(1).unwrap()
-            .split("# <<< GENERATED ENRICH TOOL LIST").next().unwrap();
-        assert!(enrich_region.contains("\"done\""), "enrich list missing runtime 'done'");
+            .split("# >>> GENERATED ENRICH TOOL LIST")
+            .nth(1)
+            .unwrap()
+            .split("# <<< GENERATED ENRICH TOOL LIST")
+            .next()
+            .unwrap();
+        assert!(
+            enrich_region.contains("\"done\""),
+            "enrich list missing runtime 'done'"
+        );
         let answer_region = toml_out
-            .split("# >>> GENERATED TOOL LIST").nth(1).unwrap()
-            .split("# <<< GENERATED TOOL LIST").next().unwrap();
-        assert!(!answer_region.contains("\"done\""), "answer list must NOT carry 'done'");
+            .split("# >>> GENERATED TOOL LIST")
+            .nth(1)
+            .unwrap()
+            .split("# <<< GENERATED TOOL LIST")
+            .next()
+            .unwrap();
+        assert!(
+            !answer_region.contains("\"done\""),
+            "answer list must NOT carry 'done'"
+        );
     }
 
     #[test]
@@ -366,7 +408,8 @@ description = \"old\"\n\
             "# >>> GENERATED TOOLS",
             "# <<< GENERATED TOOLS",
             replacement,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(after_first.contains("fake"), "replacement not applied");
         // Second splice on the already-spliced result must still find the real markers.
         let replacement2 = "description = \"new\"\n";
@@ -375,9 +418,16 @@ description = \"old\"\n\
             "# >>> GENERATED TOOLS",
             "# <<< GENERATED TOOLS",
             replacement2,
-        ).unwrap();
-        assert!(after_second.contains("description = \"new\""), "second splice lost");
+        )
+        .unwrap();
+        assert!(
+            after_second.contains("description = \"new\""),
+            "second splice lost"
+        );
         // The content line with the embedded marker phrase must be gone now.
-        assert!(!after_second.contains("fake"), "embedded marker phrase leaked into output");
+        assert!(
+            !after_second.contains("fake"),
+            "embedded marker phrase leaked into output"
+        );
     }
 }

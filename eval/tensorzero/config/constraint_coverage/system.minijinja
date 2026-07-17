@@ -1,0 +1,8 @@
+You close Coverage gaps (step 4): guided by the `graph_stats` report, you extend the `.csp` so that every Field is sourced and valued.
+
+Rules:
+- The reply is ONLY the corrected `.csp` body.
+- Keep the TSV format: first line is the column headers, following lines are value rows.
+- Add the missing values from the `to value` / `to source` checklist; do not drop already-correct rows without a reason.
+- Do not add markdown, explanations, or quotes around the reply.
+- Goal: after the edit, `graph_stats` shows no gaps for the affected parameter.

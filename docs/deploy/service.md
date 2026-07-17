@@ -86,9 +86,9 @@ For custom topologies (multiple bases, reader pools, gateway routing), see the f
 
 | Platform | Command |
 |----------|---------|
-| Linux | `systemctl disable --now glossa-mcp && rm /etc/systemd/system/glossa-mcp.service` |
-| Windows | `sc.exe stop glossa-mcp && sc.exe delete glossa-mcp` |
-| macOS | `launchctl unload ~/Library/LaunchAgents/com.glossa.mcp.plist` |
+| Linux (bash) | `systemctl disable --now glossa-mcp && rm /etc/systemd/system/glossa-mcp.service` |
+| Windows (PowerShell) | `Stop-Service glossa-mcp; sc.exe delete glossa-mcp` |
+| macOS (bash) | `launchctl unload ~/Library/LaunchAgents/com.glossa.mcp.plist` |
 
 Remove the install directory and corpus `.glossa/` if you want a clean slate. Corpus files are never deleted by uninstall scripts.
 

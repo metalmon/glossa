@@ -15,9 +15,24 @@ path = "src/main.rs"
 name = "kb-train"
 path = "src/bin/kb-train.rs"
 
+[[bin]]
+name = "kb-eval-constraint"
+path = "src/bin/kb-eval-constraint.rs"
+
+[[bin]]
+name = "convert-xlsx"
+path = "src/bin/convert-xlsx.rs"
+
+[[bin]]
+name = "kb-dump-episode"
+path = "src/bin/kb-dump-episode.rs"
+
 [dependencies]
-glossa = { path = ".." }
+glossa = { path = "..", features = ["constraint"] }
+glossa-constraint = { path = "../constraint" }
 anyhow = "1"
+regex = "1"
+toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,8 +42,12 @@ rand = "0.8"
 base64 = "0.22"
 bzip2 = "0.4"
 tar = "0.4"
+calamine = "0.26"
+tempfile = "3"
+ctrlc = "3"
+# Port of Python json_repair — heal truncated / messy LLM tool-call arguments.
+jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

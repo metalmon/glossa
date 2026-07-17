@@ -58,7 +58,11 @@ pub fn walk_files(
 
 /// Collect all chunks under `root` into a Vec (thin wrapper over the streaming pipeline; for `read`
 /// and tests — `index_dir` streams instead).
-pub fn collect_chunks(root: &Path, glob: Option<&str>, respect_ignore: bool) -> anyhow::Result<Vec<Chunk>> {
+pub fn collect_chunks(
+    root: &Path,
+    glob: Option<&str>,
+    respect_ignore: bool,
+) -> anyhow::Result<Vec<Chunk>> {
     let mut all = Vec::new();
     walk_files(root, glob, respect_ignore, &mut |path| {
         crate::extract::extract_file(path, &mut |c| all.push(c))
@@ -78,7 +82,11 @@ mod cover_tests {
         std::fs::write(dir.path().join("c.rs"), b"fn beta() {}").unwrap();
         std::fs::write(dir.path().join("d.png"), [0x89, b'P', 0x00, 0x01]).unwrap();
         let chunks = collect_chunks(dir.path(), None, false).unwrap();
-        let joined: String = chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join("\n");
+        let joined: String = chunks
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(joined.contains("alpha"));
         assert!(joined.contains("jsonvalue"));
         assert!(joined.contains("beta"));

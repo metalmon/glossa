@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "doc": {
+      "description": "Document owner source_path — compiles every *.csp limit table under .glossa/notes/<doc>/ into the constraint graph (same as kb graph build)",
+      "type": "string"
+    },
+    "tables_dir": {
+      "default": null,
+      "description": "Optional directory of .csp files; default is the document's notebook mirror",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "doc"
+  ],
+  "type": "object"
+}

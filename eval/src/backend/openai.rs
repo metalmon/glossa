@@ -28,7 +28,10 @@ impl AgentBackend for OpenAiBackend {
     }
 
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
-        let url = format!("{}/v1/chat/completions", self.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.endpoint.trim_end_matches('/')
+        );
         let tools = tools_schema();
         let chat = |messages: &[Value]| -> anyhow::Result<Value> {
             let body = json!({
@@ -38,11 +41,15 @@ impl AgentBackend for OpenAiBackend {
                 "temperature": 0.0
             });
             let body_str = serde_json::to_string(&body)?;
-            let mut req = ureq::post(&url).timeout(self.timeout).set("Content-Type", "application/json");
+            let mut req = ureq::post(&url)
+                .timeout(self.timeout)
+                .set("Content-Type", "application/json");
             if let Some(key) = &self.api_key {
                 req = req.set("Authorization", &format!("Bearer {key}"));
             }
-            let resp = req.send_string(&body_str).map_err(|e| anyhow!("endpoint request failed: {e}"))?;
+            let resp = req
+                .send_string(&body_str)
+                .map_err(|e| anyhow!("endpoint request failed: {e}"))?;
             let text = resp.into_string().context("read endpoint response")?;
             let v: Value = serde_json::from_str(&text).context("parse endpoint json")?;
             if let Some(err) = v.get("error") {
@@ -61,8 +68,12 @@ impl AgentBackend for OpenAiBackend {
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
         let graph = glossa::graph::store::GraphStore::open(work).ok();
         // Ontology-driven chain spec so glossary/neighbors render identically to the MCP surface.
-        let spec = glossa::tools::ChainSpec::from_ontology(&glossa::graph::ontology::Ontology::load_or_default(work));
-        let exec = |name: &str, args: &Value| execute_tool(name, args, &idx, graph.as_ref(), &spec, &trace);
+        let spec = glossa::tools::ChainSpec::from_ontology(
+            &glossa::graph::ontology::Ontology::load_or_default(work),
+        );
+        let exec = |name: &str, args: &Value| {
+            execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace)
+        };
 
         let messages = vec![
             json!({ "role": "system", "content": prompt::system_prompt() }),
@@ -138,7 +149,10 @@ where
         messages.push(msg.clone()); // echo the assistant turn that requested the tools
         for call in &calls {
             let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = call.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = call
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let args = parse_tool_args(call);
             let result = exec(name, &args);
             messages.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
@@ -155,7 +169,10 @@ where
 }
 
 fn content_of(msg: &Value) -> String {
-    msg.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string()
+    msg.get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Tool-call `function.arguments` is a JSON-encoded string per the OpenAI spec, but some servers
@@ -170,8 +187,16 @@ fn parse_tool_args(call: &Value) -> Value {
 
 /// Execute one glossa tool in-process against the corpus in `work`, logging it to the trace
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
-fn execute_tool(name: &str, args: &Value, idx: &glossa::index::store::DocIndex, graph: Option<&glossa::graph::store::GraphStore>, spec: &glossa::tools::ChainSpec, trace: &TraceLog) -> String {
-    crate::backend::glossa_tools::exec(name, args, idx, graph, spec, trace).0
+fn execute_tool(
+    name: &str,
+    args: &Value,
+    root: &Path,
+    idx: &glossa::index::store::DocIndex,
+    graph: Option<&glossa::graph::store::GraphStore>,
+    spec: &glossa::tools::ChainSpec,
+    trace: &TraceLog,
+) -> String {
+    crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace).0
 }
 
 #[cfg(test)]
@@ -216,18 +241,27 @@ mod tests {
                 }))
             } else {
                 // by now the tool result must be in the transcript
-                let has_tool = msgs.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1");
+                let has_tool = msgs
+                    .iter()
+                    .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1");
                 assert!(has_tool, "tool result not fed back: {msgs:?}");
                 Ok(json!({ "role": "assistant", "content": "ANSWER: Chief of Protocol" }))
             }
         };
         let exec = |name: &str, args: &Value| {
-            seen.borrow_mut().push((name.to_string(), args["query"].as_str().unwrap_or("").to_string()));
+            seen.borrow_mut().push((
+                name.to_string(),
+                args["query"].as_str().unwrap_or("").to_string(),
+            ));
             "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string()
         };
-        let out = run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, 4).unwrap();
+        let out =
+            run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, 4).unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
-        assert_eq!(seen.borrow().as_slice(), &[("search".to_string(), "corliss".to_string())]);
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[("search".to_string(), "corliss".to_string())]
+        );
     }
 
     #[test]

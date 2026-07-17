@@ -7,8 +7,8 @@
 
 use anyhow::Context;
 use glossa::graph::agent::{EdgeRef, NodeUpdate};
-use glossa::graph::ops::{UpsertEdge, UpsertNode};
 use glossa::graph::ontology::Ontology;
+use glossa::graph::ops::{UpsertEdge, UpsertNode};
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
@@ -34,7 +34,6 @@ struct TrainCase {
     answer: String,
 }
 
-
 pub fn run_enrich(
     train: &Path,
     work: &Path,
@@ -43,8 +42,7 @@ pub fn run_enrich(
     function_name: &str,
 ) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(train).context("read train JSON")?;
-    let mut cases: Vec<TrainCase> =
-        serde_json::from_str(&raw).context("parse train JSON")?;
+    let mut cases: Vec<TrainCase> = serde_json::from_str(&raw).context("parse train JSON")?;
 
     if limit > 0 && cases.len() > limit {
         cases.truncate(limit);
@@ -55,18 +53,12 @@ pub fn run_enrich(
     let work_buf: PathBuf = work.to_path_buf();
 
     for (i, case) in cases.iter().enumerate() {
-        println!(
-            "[{}/{}] enriching: {}",
-            i + 1,
-            cases.len(),
-            &case._id
-        );
+        println!("[{}/{}] enriching: {}", i + 1, cases.len(), &case._id);
 
         // Clone per iteration so the move-captured exec closure doesn't consume the outer buf.
         let work_iter = work_buf.clone();
         let idx = DocIndex::open_or_create(&work_iter)?;
-        let graph = GraphStore::open(&work_iter)
-            .context("open graph store")?;
+        let graph = GraphStore::open(&work_iter).context("open graph store")?;
         let trace = TraceLog::to_dir(&work_iter);
         // Ontology-driven chain spec so glossary/neighbors render identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&work_iter));
@@ -83,148 +75,209 @@ pub fn run_enrich(
         let rc = Arc::clone(&rounds_total);
 
         // Enrich-specific exec: handles graph_upsert locally, delegates the rest.
-        let exec = move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-            if name == "graph_upsert" {
-                // Parse element-wise so one malformed node/edge doesn't silently drop the rest:
-                // a blanket `unwrap_or_default()` would yield an empty vec on any error and report a
-                // fake "upserted 0" success, losing the model's valid items without telling it.
-                let mut parse_errs: Vec<String> = Vec::new();
-                let mut nodes: Vec<UpsertNode> = Vec::new();
-                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
-                    match serde_json::from_value::<UpsertNode>(n.clone()) {
-                        Ok(un) => nodes.push(un),
-                        Err(e) => parse_errs.push(format!("node[{i}]: {e}")),
+        let exec =
+            move |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+                if name == "graph_upsert" {
+                    // Parse element-wise so one malformed node/edge doesn't silently drop the rest:
+                    // a blanket `unwrap_or_default()` would yield an empty vec on any error and report a
+                    // fake "upserted 0" success, losing the model's valid items without telling it.
+                    let mut parse_errs: Vec<String> = Vec::new();
+                    let mut nodes: Vec<UpsertNode> = Vec::new();
+                    for (i, n) in args
+                        .get("nodes")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
+                        match serde_json::from_value::<UpsertNode>(n.clone()) {
+                            Ok(un) => nodes.push(un),
+                            Err(e) => parse_errs.push(format!("node[{i}]: {e}")),
+                        }
                     }
-                }
-                let mut edges: Vec<UpsertEdge> = Vec::new();
-                for (i, e) in args.get("edges").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
-                    match serde_json::from_value::<UpsertEdge>(e.clone()) {
-                        Ok(ue) => edges.push(ue),
-                        Err(err) => parse_errs.push(format!("edge[{i}]: {err}")),
+                    let mut edges: Vec<UpsertEdge> = Vec::new();
+                    for (i, e) in args
+                        .get("edges")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
+                        match serde_json::from_value::<UpsertEdge>(e.clone()) {
+                            Ok(ue) => edges.push(ue),
+                            Err(err) => parse_errs.push(format!("edge[{i}]: {err}")),
+                        }
                     }
-                }
-                // Partial apply: only reject outright if NOTHING parsed; otherwise apply the
-                // parseable items and append the parse errors so the model resends just those.
-                if nodes.is_empty() && edges.is_empty() && !parse_errs.is_empty() {
-                    erc.fetch_add(1, Ordering::Relaxed);
-                    let msg = format!(
+                    // Partial apply: only reject outright if NOTHING parsed; otherwise apply the
+                    // parseable items and append the parse errors so the model resends just those.
+                    if nodes.is_empty() && edges.is_empty() && !parse_errs.is_empty() {
+                        erc.fetch_add(1, Ordering::Relaxed);
+                        let msg = format!(
                         "graph_upsert REJECTED — every item was malformed, fix and resend:\n- {}",
                         parse_errs.join("\n- ")
                     );
-                    eprintln!("    \u{2717} {}", msg.replace('\n', "; "));
-                    return (msg, vec![], vec![]);
-                }
-                let ont = Ontology::load_or_default(&work_iter);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let mut out = glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now);
-                if !parse_errs.is_empty() {
-                    out.message.push_str(&format!(
-                        "\n{} item(s) could not be parsed and were skipped:\n- {}",
-                        parse_errs.len(),
-                        parse_errs.join("\n- ")
-                    ));
-                }
-                for l in &out.dump {
-                    eprintln!("    {l}");
-                }
-                if out.rejected {
-                    erc.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    nc.fetch_add(out.nodes, Ordering::Relaxed);
-                    ec.fetch_add(out.edges, Ordering::Relaxed);
-                }
-                (out.message, vec![], vec![])
-            } else if name == "graph_delete" {
-                #[derive(serde::Deserialize)]
-                struct DeleteEdgeArg {
-                    from: String,
-                    edge_type: String,
-                    to: String,
-                }
-                // Element-wise parse: a malformed item must REJECT, not silently no-op.
-                let mut parse_errs: Vec<String> = Vec::new();
-                let mut node_labels: Vec<String> = Vec::new();
-                for (i, n) in args.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
-                    match serde_json::from_value::<String>(n.clone()) {
-                        Ok(s) => node_labels.push(s),
-                        Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                        eprintln!("    \u{2717} {}", msg.replace('\n', "; "));
+                        return (msg, vec![], vec![]);
                     }
-                }
-                let mut edge_refs: Vec<EdgeRef> = Vec::new();
-                for (i, e) in args.get("edges").and_then(|v| v.as_array()).cloned().unwrap_or_default().iter().enumerate() {
-                    match serde_json::from_value::<DeleteEdgeArg>(e.clone()) {
-                        Ok(d) => edge_refs.push(EdgeRef { from: d.from, edge_type: d.edge_type, to: d.to }),
-                        Err(err) => parse_errs.push(format!("edges[{i}]: {err}")),
+                    let ont = Ontology::load_or_default(&work_iter);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut out =
+                        glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now);
+                    if !parse_errs.is_empty() {
+                        out.message.push_str(&format!(
+                            "\n{} item(s) could not be parsed and were skipped:\n- {}",
+                            parse_errs.len(),
+                            parse_errs.join("\n- ")
+                        ));
                     }
-                }
-                if !parse_errs.is_empty() {
-                    erc.fetch_add(1, Ordering::Relaxed);
-                    (format!("graph_delete REJECTED — malformed input, fix and resend:\n- {}", parse_errs.join("\n- ")), vec![], vec![])
-                } else {
-                    let msg = glossa::graph::ops::graph_delete(&idx, &graph, node_labels, edge_refs);
-                    (msg, vec![], vec![])
-                }
-            } else if name == "graph_update" {
-                #[derive(serde::Deserialize)]
-                struct UpdateNodeArg {
-                    label: String,
-                    new_label: Option<String>,
-                    new_type: Option<String>,
-                }
-                let mut parse_errs: Vec<String> = Vec::new();
-                let mut ups: Vec<NodeUpdate> = Vec::new();
-                if let Some(arr) = args.get("nodes").and_then(|v| v.as_array()) {
-                    for (i, n) in arr.iter().enumerate() {
-                        match serde_json::from_value::<UpdateNodeArg>(n.clone()) {
-                            Ok(u) => ups.push(NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type }),
+                    for l in &out.dump {
+                        eprintln!("    {l}");
+                    }
+                    if out.rejected {
+                        erc.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        nc.fetch_add(out.nodes, Ordering::Relaxed);
+                        ec.fetch_add(out.edges, Ordering::Relaxed);
+                    }
+                    (out.message, vec![], vec![])
+                } else if name == "graph_delete" {
+                    #[derive(serde::Deserialize)]
+                    struct DeleteEdgeArg {
+                        from: String,
+                        edge_type: String,
+                        to: String,
+                    }
+                    // Element-wise parse: a malformed item must REJECT, not silently no-op.
+                    let mut parse_errs: Vec<String> = Vec::new();
+                    let mut node_labels: Vec<String> = Vec::new();
+                    for (i, n) in args
+                        .get("nodes")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
+                        match serde_json::from_value::<String>(n.clone()) {
+                            Ok(s) => node_labels.push(s),
                             Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
                         }
                     }
-                } else if args.get("label").is_some() {
-                    // The model sent a single update FLAT ({label, new_label, new_type}) instead of
-                    // wrapping it in nodes[] — accept it rather than silently updating nothing.
-                    match serde_json::from_value::<UpdateNodeArg>(args.clone()) {
-                        Ok(u) => ups.push(NodeUpdate { label: u.label, new_label: u.new_label, new_type: u.new_type }),
-                        Err(e) => parse_errs.push(format!("flat update: {e}")),
+                    let mut edge_refs: Vec<EdgeRef> = Vec::new();
+                    for (i, e) in args
+                        .get("edges")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                    {
+                        match serde_json::from_value::<DeleteEdgeArg>(e.clone()) {
+                            Ok(d) => edge_refs.push(EdgeRef {
+                                from: d.from,
+                                edge_type: d.edge_type,
+                                to: d.to,
+                            }),
+                            Err(err) => parse_errs.push(format!("edges[{i}]: {err}")),
+                        }
                     }
-                }
-                if !parse_errs.is_empty() {
-                    erc.fetch_add(1, Ordering::Relaxed);
-                    (format!("graph_update REJECTED — malformed input, fix and resend:\n- {}", parse_errs.join("\n- ")), vec![], vec![])
-                } else {
-                    let msg = glossa::graph::ops::graph_update(&graph, ups);
+                    if !parse_errs.is_empty() {
+                        erc.fetch_add(1, Ordering::Relaxed);
+                        (
+                            format!(
+                                "graph_delete REJECTED — malformed input, fix and resend:\n- {}",
+                                parse_errs.join("\n- ")
+                            ),
+                            vec![],
+                            vec![],
+                        )
+                    } else {
+                        let msg =
+                            glossa::graph::ops::graph_delete(&idx, &graph, node_labels, edge_refs);
+                        (msg, vec![], vec![])
+                    }
+                } else if name == "graph_update" {
+                    #[derive(serde::Deserialize)]
+                    struct UpdateNodeArg {
+                        label: String,
+                        new_label: Option<String>,
+                        new_type: Option<String>,
+                    }
+                    let mut parse_errs: Vec<String> = Vec::new();
+                    let mut ups: Vec<NodeUpdate> = Vec::new();
+                    if let Some(arr) = args.get("nodes").and_then(|v| v.as_array()) {
+                        for (i, n) in arr.iter().enumerate() {
+                            match serde_json::from_value::<UpdateNodeArg>(n.clone()) {
+                                Ok(u) => ups.push(NodeUpdate {
+                                    label: u.label,
+                                    new_label: u.new_label,
+                                    new_type: u.new_type,
+                                }),
+                                Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
+                            }
+                        }
+                    } else if args.get("label").is_some() {
+                        // The model sent a single update FLAT ({label, new_label, new_type}) instead of
+                        // wrapping it in nodes[] — accept it rather than silently updating nothing.
+                        match serde_json::from_value::<UpdateNodeArg>(args.clone()) {
+                            Ok(u) => ups.push(NodeUpdate {
+                                label: u.label,
+                                new_label: u.new_label,
+                                new_type: u.new_type,
+                            }),
+                            Err(e) => parse_errs.push(format!("flat update: {e}")),
+                        }
+                    }
+                    if !parse_errs.is_empty() {
+                        erc.fetch_add(1, Ordering::Relaxed);
+                        (
+                            format!(
+                                "graph_update REJECTED — malformed input, fix and resend:\n- {}",
+                                parse_errs.join("\n- ")
+                            ),
+                            vec![],
+                            vec![],
+                        )
+                    } else {
+                        let msg = glossa::graph::ops::graph_update(&graph, ups);
+                        (msg, vec![], vec![])
+                    }
+                } else if name == "graph_generalize" {
+                    // Agent-driven generalization (the same shared op the MCP tool uses → identical
+                    // output). Non-destructive. The enricher is a full Editor agent, so this works
+                    // in-process instead of returning "unknown tool" and stalling the turn.
+                    let ont = Ontology::load_or_default(&work_iter);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    (
+                        glossa::graph::ops::graph_generalize(&graph, &ont, now),
+                        vec![],
+                        vec![],
+                    )
+                } else if name == "index" || name == "reindex" {
+                    let full = name == "reindex";
+                    let msg = match glossa::index::store::index_dir(&work_iter, full) {
+                        Ok(s) => format!(
+                            "{}: {} added, {} removed, {} unchanged",
+                            if full { "reindexed" } else { "indexed" },
+                            s.added,
+                            s.removed,
+                            s.unchanged
+                        ),
+                        Err(e) => format!("{name} error: {e}"),
+                    };
                     (msg, vec![], vec![])
+                } else {
+                    glossa_tools::exec(name, args, &work_iter, &idx, Some(&graph), &spec, &trace)
                 }
-            } else if name == "graph_generalize" {
-                // Agent-driven generalization (the same shared op the MCP tool uses → identical
-                // output). Non-destructive. The enricher is a full Editor agent, so this works
-                // in-process instead of returning "unknown tool" and stalling the turn.
-                let ont = Ontology::load_or_default(&work_iter);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                (glossa::graph::ops::graph_generalize(&graph, &ont, now), vec![], vec![])
-            } else if name == "index" || name == "reindex" {
-                let full = name == "reindex";
-                let msg = match glossa::index::store::index_dir(&work_iter, full) {
-                    Ok(s) => format!(
-                        "{}: {} added, {} removed, {} unchanged",
-                        if full { "reindexed" } else { "indexed" },
-                        s.added,
-                        s.removed,
-                        s.unchanged
-                    ),
-                    Err(e) => format!("{name} error: {e}"),
-                };
-                (msg, vec![], vec![])
-            } else {
-                glossa_tools::exec(name, args, &idx, Some(&graph), &spec, &trace)
-            }
-        };
+            };
 
         // Per-case episode id (groups all the case's inferences into one TZ episode).
         let eid = uuid::Uuid::now_v7().to_string();
@@ -259,7 +312,9 @@ pub fn run_enrich(
                         };
                         attempt += 1;
                         if retryable && attempt <= 4 {
-                            std::thread::sleep(std::time::Duration::from_millis(800 * u64::from(attempt)));
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                800 * u64::from(attempt),
+                            ));
                             continue;
                         }
                         return Err(anyhow::anyhow!("tensorzero /inference: {e}"));
@@ -281,7 +336,10 @@ pub fn run_enrich(
                 .and_then(|c| c.as_array())
                 .cloned()
                 .unwrap_or_default();
-            Ok(TzTurn { content, episode_id })
+            Ok(TzTurn {
+                content,
+                episode_id,
+            })
         };
 
         let user = format!(

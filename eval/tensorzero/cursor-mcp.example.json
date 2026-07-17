@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "tensorzero": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}

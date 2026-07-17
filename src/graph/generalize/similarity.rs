@@ -10,7 +10,9 @@ use crate::index::multilang::{default_detector, multilang_analyzer, TermAnalyzer
 use std::collections::BTreeSet;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING};
+use tantivy::schema::{
+    IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
 use tantivy::{doc, Index, TantivyDocument, Term};
 
 /// #2 — Real BM25-over-labels via an in-RAM tantivy index using the SAME `multilang` analyzer as the
@@ -78,7 +80,11 @@ pub fn label_bm25(
         let mut others: Vec<(String, f64)> = Vec::new();
         for (score, addr) in hits {
             let d: TantivyDocument = searcher.doc(addr)?;
-            let other = d.get_first(id_f).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let other = d
+                .get_first(id_f)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             if other.is_empty() {
                 continue;
             }
@@ -186,9 +192,14 @@ mod tests {
 
     #[test]
     fn label_jaccard_links_paraphrase_not_unrelated() {
+        // Russian labels are intentional: they exercise the Cyrillic stemming path of the
+        // shared morphology pipeline (word-order/inflection-tolerant term sets).
         let labels = vec![
             ("s1".to_string(), "Потеря связи Modbus".to_string()),
-            ("s2".to_string(), "Modbus потеря связи периодическая".to_string()),
+            (
+                "s2".to_string(),
+                "Modbus потеря связи периодическая".to_string(),
+            ),
             ("x".to_string(), "Замена предохранителя".to_string()),
         ];
         let pairs = label_jaccard(&labels, 0.4);
@@ -214,15 +225,22 @@ mod tests {
 
     #[test]
     fn label_bm25_links_paraphrase_not_unrelated() {
+        // Russian labels are intentional: they exercise the multilang (Cyrillic) analyzer
+        // in the in-RAM BM25 index.
         let labels = vec![
             ("s1".to_string(), "Потеря связи Modbus".to_string()),
-            ("s2".to_string(), "Modbus периодическая потеря связи".to_string()),
+            (
+                "s2".to_string(),
+                "Modbus периодическая потеря связи".to_string(),
+            ),
             ("x".to_string(), "Замена предохранителя питания".to_string()),
         ];
         // relative threshold: paraphrase scores a high fraction of self-score; unrelated never matches
         let pairs = label_bm25(&labels, 0.3, 5).unwrap();
         assert!(
-            pairs.iter().any(|(a, b, r)| a == "s1" && b == "s2" && *r <= 1.0 && *r >= 0.3),
+            pairs
+                .iter()
+                .any(|(a, b, r)| a == "s1" && b == "s2" && *r <= 1.0 && *r >= 0.3),
             "paraphrase pair expected with ratio, got {pairs:?}"
         );
         assert!(!pairs.iter().any(|(a, b, _)| a == "x" || b == "x"));

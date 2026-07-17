@@ -31,7 +31,7 @@ Copy your documents into `CorpusPath` before or after install. Initial index run
 | `-Bind` | `127.0.0.1:8080` | HTTP bind |
 | `-InstallDir` | `C:\Program Files\glossa` | Extract location |
 | `-ServiceName` | `glossa-mcp` | SCM service name |
-| `-AllowedHost` | `localhost` | MCP `--allowed-host` |
+| `-AllowedHost` | IP/host from `-Bind` | MCP `--allowed-host` (e.g. `127.0.0.1` for `127.0.0.1:8080`) |
 
 ## Service account
 
@@ -46,11 +46,13 @@ MCP endpoint: `http://127.0.0.1:8080/mcp`
 ## Manage
 
 ```powershell
-sc.exe query glossa-mcp
-sc.exe stop glossa-mcp
-sc.exe start glossa-mcp
-sc.exe delete glossa-mcp   # after stop
+Get-Service glossa-mcp
+Stop-Service glossa-mcp
+Start-Service glossa-mcp
+Stop-Service glossa-mcp; sc.exe delete glossa-mcp
 ```
+
+Use `;` to chain commands in PowerShell (not `&&` — unsupported in Windows PowerShell 5.x).
 
 Manual index after adding files:
 

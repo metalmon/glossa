@@ -12,7 +12,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 
 ## Shipped in v1.0
 
-- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (oxidize-pdf, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors.
+- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors.
 - **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
@@ -81,6 +81,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | `resolve` / `delete_by_source` | **Partial** | Label index for resolve; `delete_by_source` scans `source_path` O(n) |
 | Support ontology overlay | **Shipped** | [eval/ontology-support.toml](../eval/ontology-support.toml) — Symptom/Cause/Task spine, strict mode |
 | Crash atomicity per file | **Open** | Chunk graph writes autocommit; no one-txn-per-file |
+| Cross-process `graph_upsert` lock | **Open** | Advisory `.glossa/graph.lock` (fs4), like `generalize.lock` / `notebook.lock`; today only in-process Mutex on SQLite |
 | Glossary `--expand` | **Open** | Term/co-occurrence layer not built; `CO_OCCURS` declared, no lexical indexer |
 | Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents; see [graph-reasoning-directions.md](graph-reasoning-directions.md) |
 | Tailored ontology error messages | **Open** | e.g. explain Task → CAUSED_BY → Cause is invalid |
@@ -121,6 +122,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Hotpot distractor runs | **Shipped** | Logged in [benchmarks.md](benchmarks.md) (50q slices) |
 | `prep-fullwiki` | **Shipped** | CLI + shard builder in `kb-eval prep-fullwiki` |
 | `export-tz` quad jsonl + GEPA | **Shipped** | v1.2.0 — search, grep, glob, read micro-tasks only |
+| Constraint GEPA (5 pools: discover / materialize / compile / coverage / validate) | **Partial** | 5-pool loop, TZ functions, and apply path shipped; graph_build / graph_stats / constraint_solve scorers still use text-recall proxies. See [constraint-gepa.md](constraint-gepa.md). |
 | GEPA graph micro-tasks (`glossary`, `neighbors`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, neighbors → related case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
 | `--no-graph` control arm | **Shipped** | `kb-eval run --no-graph`, MCP `--no-graph` |
 | Gold join / `case_id` | **Partial** | TZ sets `case_id`; export joins by id or question; OpenAI backend has no tags; enrich sets `case_id` |

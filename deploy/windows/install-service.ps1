@@ -22,7 +22,7 @@
   Windows service name (default glossa-mcp).
 
 .PARAMETER AllowedHost
-  Value for --allowed-host (default localhost).
+  Value for --allowed-host. Defaults to the IP/hostname from -Bind (e.g. 127.0.0.1:8080 → 127.0.0.1).
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -40,7 +40,7 @@ param(
 
     [string] $ServiceName = "glossa-mcp",
 
-    [string] $AllowedHost = "localhost"
+    [string] $AllowedHost
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,6 +51,40 @@ $ZipName = "$Stem.zip"
 $Url = "https://github.com/$Repo/releases/download/v$Version/$ZipName"
 $ExtractDir = Join-Path $InstallDir $Stem
 $KbExe = Join-Path $ExtractDir "kb.exe"
+
+if (-not $AllowedHost) {
+    if ($Bind -match '^([^:]+)') {
+        $AllowedHost = $Matches[1]
+    } else {
+        $AllowedHost = "127.0.0.1"
+    }
+}
+
+function Remove-GlossaService {
+    param([string] $Name)
+    $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $existing) { return }
+    Write-Host "Stopping and removing existing service $Name ..."
+    if ($existing.Status -ne "Stopped") {
+        Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    & sc.exe delete $Name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete $Name failed (exit $LASTEXITCODE)" }
+    Start-Sleep -Seconds 1
+}
+
+function Get-GlossaServiceDiagnostics {
+    param([string] $Name)
+    $query = & sc.exe query $Name 2>&1 | Out-String
+    $config = & sc.exe qc $Name 2>&1 | Out-String
+    @"
+sc.exe query $Name :
+$query
+sc.exe qc $Name :
+$config
+"@
+}
 
 Write-Host "Downloading $Url ..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -75,26 +109,39 @@ if (-not (Test-Path $Manifest)) {
     if ($LASTEXITCODE -ne 0) { throw "kb index failed with exit code $LASTEXITCODE" }
 }
 
-# sc.exe requires a space after binPath= and start=
-$BinPath = "`"$KbExe`" mcp `"$CorpusPath`" --profile $Profile --transport streamable-http --bind $Bind --allowed-host $AllowedHost --windows-service --service-name $ServiceName"
+$BinaryPathName = "`"$KbExe`" mcp `"$CorpusPath`" --profile $Profile --transport streamable-http --bind $Bind --allowed-host $AllowedHost --windows-service --service-name $ServiceName"
 
-$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Stopping and removing existing service $ServiceName ..."
-    sc.exe stop $ServiceName | Out-Null
-    Start-Sleep -Seconds 2
-    sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Seconds 1
-}
+Remove-GlossaService -Name $ServiceName
 
 Write-Host "Creating service $ServiceName ..."
-sc.exe create $ServiceName binPath= $BinPath start= auto | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed" }
-sc.exe description $ServiceName "glossa MCP ($Profile) on $CorpusPath" | Out-Null
+New-Service `
+    -Name $ServiceName `
+    -BinaryPathName $BinaryPathName `
+    -DisplayName $ServiceName `
+    -Description "glossa MCP ($Profile) on $CorpusPath" `
+    -StartupType Automatic | Out-Null
 
 Write-Host "Starting service ..."
-sc.exe start $ServiceName | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "sc.exe start failed — check Event Viewer and corpus permissions" }
+try {
+    Start-Service -Name $ServiceName -ErrorAction Stop
+} catch {
+    $diag = Get-GlossaServiceDiagnostics -Name $ServiceName
+    throw @"
+Start-Service failed: $($_.Exception.Message)
+
+$diag
+Check Event Viewer (Windows Logs → Application) and corpus permissions for LocalSystem.
+"@
+}
+
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Service -Name $ServiceName).Status -ne "Running") {
+    if ((Get-Date) -gt $deadline) {
+        $diag = Get-GlossaServiceDiagnostics -Name $ServiceName
+        throw "Service $ServiceName did not reach Running within 30s.`n`n$diag"
+    }
+    Start-Sleep -Milliseconds 500
+}
 
 Write-Host ""
 Write-Host "Installed."
@@ -104,5 +151,5 @@ Write-Host "  MCP URL:  http://$Bind/mcp"
 Write-Host "  Health:   curl http://$Bind/health"
 Write-Host ""
 Write-Host "Connect agents: docs/connect-to-agents.md"
-Write-Host "Stop:    sc.exe stop $ServiceName"
-Write-Host "Remove:  sc.exe stop $ServiceName; sc.exe delete $ServiceName"
+Write-Host "Stop:    Stop-Service $ServiceName"
+Write-Host "Remove:  Stop-Service $ServiceName; sc.exe delete $ServiceName"

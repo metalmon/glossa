@@ -66,13 +66,43 @@ mod tests {
     fn roundtrips_and_detects_change() {
         let dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::default();
-        m.files.insert("a.md".into(), FileSig { mtime_secs: 10, size: 20 });
+        m.files.insert(
+            "a.md".into(),
+            FileSig {
+                mtime_secs: 10,
+                size: 20,
+            },
+        );
         m.save(dir.path()).unwrap();
 
         let loaded = Manifest::load(dir.path());
-        assert_eq!(loaded.files.get("a.md"), Some(&FileSig { mtime_secs: 10, size: 20 }));
-        assert!(!loaded.changed("a.md", FileSig { mtime_secs: 10, size: 20 }));
-        assert!(loaded.changed("a.md", FileSig { mtime_secs: 11, size: 20 }));
-        assert!(loaded.changed("new.md", FileSig { mtime_secs: 1, size: 1 }));
+        assert_eq!(
+            loaded.files.get("a.md"),
+            Some(&FileSig {
+                mtime_secs: 10,
+                size: 20
+            })
+        );
+        assert!(!loaded.changed(
+            "a.md",
+            FileSig {
+                mtime_secs: 10,
+                size: 20
+            }
+        ));
+        assert!(loaded.changed(
+            "a.md",
+            FileSig {
+                mtime_secs: 11,
+                size: 20
+            }
+        ));
+        assert!(loaded.changed(
+            "new.md",
+            FileSig {
+                mtime_secs: 1,
+                size: 1
+            }
+        ));
     }
 }

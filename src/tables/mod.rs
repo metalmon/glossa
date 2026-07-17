@@ -1,0 +1,29 @@
+//! Agent-authored limit tables (`.glossa/notes/<doc>/*.csp`) and constraint compilation.
+
+pub mod csp;
+pub mod schema;
+
+#[cfg(feature = "notebook")]
+pub use crate::notebook::{
+    list_note_paths, mirror_dir_for_doc, normalize_note_file, notes_root, resolve_note_by_document,
+    resolve_note_by_path, NoteEntry, NotePath,
+};
+
+#[cfg(feature = "constraint")]
+mod capabilities;
+#[cfg(feature = "constraint")]
+mod compile;
+#[cfg(feature = "constraint")]
+mod coverage;
+#[cfg(feature = "constraint")]
+mod report;
+#[cfg(feature = "constraint")]
+mod wiring;
+
+#[cfg(feature = "constraint")]
+pub use compile::tables_to_graph;
+pub use schema::{parse_schema_order, read_schema_order, SchemaOrder};
+#[cfg(feature = "constraint")]
+pub use coverage::{count_csp_files, csp_column_values, csp_tables_per_file};
+#[cfg(feature = "constraint")]
+pub use report::format_graph_build_output;

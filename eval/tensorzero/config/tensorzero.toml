@@ -195,6 +195,112 @@ extra_body = [
   { pointer = "/repetition_penalty", value = 1.1 },
 ]
 
+# ── Constraint GEPA materialize micro-task: emit .csp from workbook excerpt ──
+[functions.cmaterialize]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.cmaterialize.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_materialize/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Constraint GEPA discover micro-task: find source chunks for constraint data ──
+[functions.cdiscover]
+type = "chat"
+tools = ["grep", "read", "glob", "search"]
+parallel_tool_calls = false
+
+[functions.cdiscover.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_discover/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Constraint GEPA research micro-task (legacy alias → discover template) ──
+[functions.cresearch]
+type = "chat"
+tools = ["grep", "read", "glob", "search"]
+parallel_tool_calls = false
+
+[functions.cresearch.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_discover/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Constraint GEPA compile micro-task: repair .csp after graph_build errors ──
+[functions.ccompile]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccompile.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_compile/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA coverage micro-task: close graph_stats gaps ──
+[functions.ccoverage]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccoverage.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_coverage/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA validate micro-task: repair .csp after constraint_solve errors ──
+[functions.cvalidate]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.cvalidate.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_solve_micro/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
+# ── Constraint GEPA compile-fix micro-task (legacy alias → compile template) ──
+[functions.ccompile_fix]
+type = "chat"
+parallel_tool_calls = false
+
+[functions.ccompile_fix.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "constraint_compile/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+max_tokens = 2048
+
 # ── GEPA reflection: mutator proposes an improved answer_hotpot system prompt ──
 [functions.gepa_reflect]
 type = "chat"
@@ -216,7 +322,7 @@ extra_body = [
 [functions.answer_hotpot]
 type = "chat"
 # >>> GENERATED TOOL LIST
-tools = ["glob", "glossary", "grep", "neighbors", "read", "resolve", "search"]
+tools = ["constraint_solve", "get_ontology", "glob", "glossary", "grep", "ls", "neighbors", "read", "resolve", "search"]
 # <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
@@ -260,13 +366,29 @@ extra_body = [
 
 # ── Tools (the GATEWAY only declares them; the eval HARNESS executes them on glossa) ──
 # >>> GENERATED TOOLS (kb dump-tz-tools) — do not edit by hand
+[tools.constraint_solve]
+description = "CSP solver for constraint graphs. Modes: validate, infer, check. Returns actionable feedback when the problem is empty or assignment keys miss Field labels."
+parameters = "tools/constraint_solve.json"
+
+[tools.del]
+description = "Delete a notebook note by path (from ls)."
+parameters = "tools/del.json"
+
+[tools.get_ontology]
+description = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert."
+parameters = "tools/get_ontology.json"
+
 [tools.glob]
-description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*АБАК*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last chunk number (page/section count)."
+description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*`, `**/*`, `*.pdf`, `*.{pdf,htm}`, `*Manual*`). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; for PDFs every page 1..N is addressable (blank pages return empty text)."
 parameters = "tools/glob.json"
 
 [tools.glossary]
 description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
 parameters = "tools/glossary.json"
+
+[tools.graph_build]
+description = "Compile all .csp limit tables for doc into the constraint graph (kb graph build). On success: capability scan and per-Field shapes; on failure: compiler-style errors with file/row/field hints. Fix tables with read/note, then call again."
+parameters = "tools/graph_build.json"
 
 [tools.graph_delete]
 description = "Remove reasoning nodes/edges from the graph by label — use it to delete a node or relation you added by mistake or that is no longer valid. Deleting a node also removes edges touching it."
@@ -277,7 +399,7 @@ description = "Recompute the graph's DERIVED layer from what is currently stored
 parameters = "tools/graph_generalize.json"
 
 [tools.graph_stats]
-description = "Graph node/edge counts and community overview: each community's size plus up to eight reasoning nodes ranked by centrality (`id [type] label`, PageRank)."
+description = "Universal graph statistics. Default (summary) mode: node counts by type and edge counts by relation, plus a per-community overview (each community's size and up to eight nodes ranked by centrality: `id [type] label`, PageRank). Pass `doc` (a document source_path) to list that document's owned non-structural nodes (`source_path` scope only) with all outgoing edges. Ontology-independent. Pass `node` (a node id) to switch to node-inspection mode: everything about that one node — id, type, label, aliases, and every outgoing/incoming edge with the neighbour's label."
 parameters = "tools/graph_stats.json"
 
 [tools.graph_update]
@@ -285,27 +407,35 @@ description = "Edit an existing graph node in place — change its label or type
 parameters = "tools/graph_update.json"
 
 [tools.graph_upsert]
-description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label (or section `<path>#<n>`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
-description = "Find an exact string in the text — a code, version, identifier, parameter name, error message, or exact phrase (e.g. `maxTsdr`, `5.7.2`). ripgrep regex supported; smart-case. Use it whenever the question names a precise token to locate (codes/versions/part numbers beat keyword `search`). For fuzzy/conceptual lookup, use `search`. Returns matching lines as `path:#n: line`; read the full chunk with `read(path, n)`."
+description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, a short designation code, a numeric value). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
 parameters = "tools/grep.json"
 
 [tools.index]
 description = "Build/update the index + structural graph for the knowledge base."
 parameters = "tools/index.json"
 
+[tools.ls]
+description = "List notebook notes. Optional doc filter. Paths in the output are arguments for read/del."
+parameters = "tools/ls.json"
+
 [tools.neighbors]
 description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors."
 parameters = "tools/neighbors.json"
+
+[tools.note]
+description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/read/del with paths from ls afterward."
+parameters = "tools/note.json"
 
 [tools.purge]
 description = "Delete the index + graph for the knowledge base."
 parameters = "tools/purge.json"
 
 [tools.read]
-description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). Returns the chunk's full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI PNG instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
 parameters = "tools/read.json"
 
 [tools.reindex]
@@ -325,29 +455,15 @@ description = "Signal that the reasoning graph for this case is complete — the
 parameters = "tools/done.json"
 # <<< GENERATED TOOLS
 
-# ── Constraint tools ──
-[tools.get_ontology]
-description = "Return the knowledge-base ontology as JSON: meta, parameters (entities), constraints (constraint types), relations (including built-in MENTIONS), and graph-building patterns. Call before graph_upsert to learn valid node/edge shapes. Patterns describe HOW to assemble subgraphs; they do not include examples."
-parameters = "tools/get_ontology.json"
-
-[tools.constraint_solve]
-description = "CSP solver for constraint graphs. Modes: validate (check field values), infer (infer each field's domain from partial assignment), check (graph internal consistency). Pass field_assignments as a map of Field label → value. Returns actionable feedback when the problem is empty or assignment keys miss Field labels."
-parameters = "tools/constraint_solve.json"
-
-# ── Constraint validation function: agent builds graph from GOST then validates ──
-# Tools = all glossa tools so the agent can search/read the GOST document,
-# build the constraint graph via graph_upsert, self-check with constraint_solve,
-# and signal completion with done.
+# ── Constraint validation function: agent materializes .csp limit tables (phase A) ──
+# Full editor toolset (same list as enrich): the prompt steers the tables workflow;
+# graph tools stay available but nothing points the model at them.
+# kb-eval-constraint compiles the tables to a graph after the episode.
 [functions.constraint_validate]
 type = "chat"
-tools = [
-  "search", "read", "grep", "glob",
-  "get_ontology",
-  "graph_upsert", "graph_delete", "graph_update",
-  "graph_stats", "graph_generalize",
-  "constraint_solve",
-  "done",
-]
+# No index/reindex: eval seeds a per-run .glossa copy without corpus files; indexing
+# that dir would wipe the copied tantivy index (manifest → 0 files).
+tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "ls", "neighbors", "note", "read", "resolve", "search"]
 parallel_tool_calls = true
 
 # Default variant: Qwen3.6-35B-A3B via OpenRouter (strong enough for this task)
@@ -355,6 +471,7 @@ parallel_tool_calls = true
 type = "chat_completion"
 model = "qwen3_coder"
 system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
 temperature = 0.7
 extra_body = [
   { pointer = "/top_k", value = 20 },
@@ -368,12 +485,133 @@ extra_body = [
 type = "chat_completion"
 model = "qwen"
 system_template = "constraint_validate/system.minijinja"
-temperature = 1.0
+max_tokens = 2048
+temperature = 0.3
 top_p = 0.95
+# Lowered temp 1.0 → 0.3: worker .csp FORMAT was erratic run-to-run (name-as-column,
+# horizontal rows, naming drift) — high temperature. Structured output wants determinism.
+# presence_penalty kept (anti-loop; qwen4b once re-wrote the same note ×23).
+presence_penalty = 1.5
 extra_body = [
   { pointer = "/top_k", value = 40 },
   { pointer = "/min_p", value = 0.1 },
   { pointer = "/repetition_penalty", value = 1.1 },
+]
+
+# ── Ceiling / comparison models via OpenRouter ──────────────────────────────
+# Larger models to bound how high the constraint-extraction task can score and
+# to compare against local qwen4b. Minimal configs on purpose: NO Qwen-only
+# top_k/min_p (OpenAI/Anthropic reject them); reasoning left at each model's
+# default (all non-thinking by default — add a `-thinking` model or
+# reasoning.enabled=true to test thinking mode). Same system_template as qwen35.
+# Model IDs verified against the live OpenRouter catalog.
+
+[models.gpt4o_mini]
+routing = ["openrouter"]
+[models.gpt4o_mini.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "openai/gpt-4o-mini"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.gpt4o_mini]
+type = "chat_completion"
+model = "gpt4o_mini"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
+[models.gpt5_mini]
+routing = ["openrouter"]
+[models.gpt5_mini.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "openai/gpt-5-mini"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.gpt5_mini]
+type = "chat_completion"
+model = "gpt5_mini"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
+[models.qwen_max]
+routing = ["openrouter"]
+[models.qwen_max.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "qwen/qwen3-max"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.qwen_max]
+type = "chat_completion"
+model = "qwen_max"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
+[models.sonnet5]
+routing = ["openrouter"]
+[models.sonnet5.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "anthropic/claude-sonnet-5"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.sonnet5]
+type = "chat_completion"
+model = "sonnet5"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
+[models.deepseek_v32]
+routing = ["openrouter"]
+[models.deepseek_v32.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "deepseek/deepseek-v3.2"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.deepseek_v32]
+type = "chat_completion"
+model = "deepseek_v32"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
+]
+
+[models.opus48]
+routing = ["openrouter"]
+[models.opus48.providers.openrouter]
+type = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model_name = "anthropic/claude-opus-4.8"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[functions.constraint_validate.variants.opus48]
+type = "chat_completion"
+model = "opus48"
+system_template = "constraint_validate/system.minijinja"
+max_tokens = 8192
+temperature = 0.7
+extra_body = [
+  { pointer = "/reasoning", value = { enabled = false } },
 ]
 
 # ── Enricher function: reverse-trace solved support cases into graph edges ──
@@ -381,7 +619,7 @@ extra_body = [
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["glob", "glossary", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "neighbors", "read", "reindex", "resolve", "search", "done"]
+tools = ["constraint_solve", "del", "get_ontology", "glob", "glossary", "graph_build", "graph_delete", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "read", "reindex", "resolve", "search", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 
@@ -564,6 +802,107 @@ type = "float"
 optimize = "max"
 level = "episode"
 
+# ── Constraint GEPA optimization (5 pools) ──
+[metrics.gepa_c_baseline_discover]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_compile]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_validate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_research]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_compile_fix]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_baseline_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_iter_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_discover]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_combined_acc]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_materialize]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_compile]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_validate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_research]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_compile_fix]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_final_combined]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.gepa_c_candidates]
+type = "float"
+optimize = "max"
+level = "episode"
+
 # ── Constraint eval feedback (CSP solver + LLM epistemic comparison) ──
 [metrics.csp_violations]
 type = "float"
@@ -582,6 +921,22 @@ level = "episode"
 
 [metrics.csp_agreement]
 type = "boolean"
+optimize = "max"
+level = "episode"
+
+# Discover-once → validate-all: one built graph is swept over the whole row corpus.
+[metrics.validation_accuracy]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.valid_pass_rate]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.invalid_catch_rate]
+type = "float"
 optimize = "max"
 level = "episode"
 
@@ -622,6 +977,22 @@ optimize = "max"
 level = "episode"
 
 [metrics.agent_graph_edge_count]
+type = "float"
+optimize = "max"
+level = "episode"
+
+# ── Tables-only phase (agent .csp vs reference domains, name-free) ──
+[metrics.ref_param_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.ref_value_coverage]
+type = "float"
+optimize = "max"
+level = "episode"
+
+[metrics.table_csp_count]
 type = "float"
 optimize = "max"
 level = "episode"

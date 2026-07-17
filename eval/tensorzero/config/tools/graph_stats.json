@@ -1,5 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "properties": {},
+  "properties": {
+    "doc": {
+      "default": null,
+      "description": "document source_path: list that document's owned non-structural nodes and all outgoing edges (doc is scope only; ontology-independent)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "node": {
+      "default": null,
+      "description": "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
   "type": "object"
 }

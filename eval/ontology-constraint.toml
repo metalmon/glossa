@@ -1,0 +1,143 @@
+# Constraint-domain ontology overlay for glossa.
+#
+# Regulatory overlay: Param = research provenance + designation dependencies,
+# Field = compile-time constrained parameter, Enum = tabular values,
+# Conditional = piecewise domains. Core structural types (Document, Section, …)
+# and core edges (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN.
+#
+# Deploy: cp eval/ontology-constraint.toml <corpus>/.glossa/ontology.toml
+# Requires: glossa built with --features constraint.
+
+[meta]
+domain = "regulatory"
+description = "Constraint graph for product parameters from regulatory/standards documents."
+note = "Research uses Param (MENTIONS to sections, DEPENDS_ON to key Param). Compile uses Field ──CONSTRAINED_BY──► … . IF_FIELD/IF_VALUE/HAS_* target Literal nodes (label = scalar text), not Field or Param."
+
+# ── Entities ──
+[entities.Param]
+id_prefix = "prm"
+description = "A designation parameter during research and .csp build. Hang MENTIONS from this node to every corpus section where its allowed values are listed. If its domain depends on another designation parameter, also hang DEPENDS_ON to that key Param. Not the compile subject — graph_build materializes Field + constraints from .csp; Param is left intact."
+
+[entities.Field]
+id_prefix = "fld"
+description = "A parameter of the product — the thing being constrained after .csp compile. One Field per parameter; its label is the parameter's name as the document writes it, human-readable and in the document's own language (this label is what a later table export shows). Its allowed values live in a constraint node the Field links to with CONSTRAINED_BY."
+
+[entities.Literal]
+id_prefix = "lit"
+description = "A scalar carrier for constraint parameters: a number, string, regex pattern, or expression. Linked from Range/Regex/Formula/Conditional nodes via HAS_MIN, HAS_MAX, HAS_PATTERN, HAS_EXPRESSION, IF_FIELD, or IF_VALUE — not used for Enum values (those go in the Enum node's aliases)."
+
+# ── Relations ──
+[relations.DEPENDS_ON]
+from = ["Param"]
+to   = ["Param"]
+description = "Designation dependency: dependent Param ──DEPENDS_ON──► key Param. Means the dependent's allowed values are determined by the key (pair table / conditional domain). Direction is always dependent → key. Not a compile edge; not MENTIONS (evidence stays Param → section path#n)."
+
+[relations.CONSTRAINED_BY]
+from = ["Field"]
+to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula", "Conditional"]
+description = "Links a Field to the node holding its constraint — usually an Enum of allowed values (or Range/Regex/Formula). The Field and its constraint node are separate nodes; the graph tells them apart by node type, so they can share the parameter's name as their label."
+
+[relations.HAS_MIN]
+from = ["Range"]
+to   = ["Literal"]
+description = "Lower bound of a Range constraint: Range ──HAS_MIN──► Literal(min value)."
+
+[relations.HAS_MAX]
+from = ["Range"]
+to   = ["Literal"]
+description = "Upper bound of a Range constraint: Range ──HAS_MAX──► Literal(max value)."
+
+[relations.HAS_PATTERN]
+from = ["Regex"]
+to   = ["Literal"]
+description = "The regex pattern for a Regex constraint: Regex ──HAS_PATTERN──► Literal(pattern)."
+
+[relations.HAS_EXPRESSION]
+from = ["Formula"]
+to   = ["Literal"]
+description = "The expression for a Formula constraint: Formula ──HAS_EXPRESSION──► Literal(expression)."
+
+[relations.IF_FIELD]
+from = ["Conditional"]
+to   = ["Literal"]
+description = "The trigger field for a Conditional: Conditional ──IF_FIELD──► Literal(field name)."
+
+[relations.IF_VALUE]
+from = ["Conditional"]
+to   = ["Literal"]
+description = "The trigger value for a Conditional: Conditional ──IF_VALUE──► Literal(trigger value)."
+
+[relations.HAS_CONSTRAINT]
+from = ["Conditional"]
+to   = ["Range", "Regex", "Enum", "Required", "Forbidden", "Formula"]
+description = "The inner constraint that applies when the Conditional's IF_FIELD/IF_VALUE match: Conditional ──HAS_CONSTRAINT──► Enum (or Range/Regex/…)."
+
+[validation]
+strict = true
+
+# ── Constraint types (consumed by constraint_solve) ──
+[constraint_types.Range]
+params = ["min", "max"]
+description = "A continuous numeric interval. Literal nodes for min and max via HAS_MIN / HAS_MAX. Fixed lists of values are Enum, not Range."
+
+[constraint_types.Regex]
+params = ["pattern"]
+description = "A string pattern. One Literal (the regex) linked HAS_PATTERN."
+
+[constraint_types.Enum]
+params = ["values"]
+description = "A parameter's set of allowed values. One Enum node carrying every value in its `aliases`, linked from the Field by CONSTRAINED_BY. Its label names the same parameter as the Field, written coherently in the parameter's own language — the values themselves stay in `aliases`, not in the label."
+
+[constraint_types.Formula]
+params = ["expression"]
+description = "A computed relationship between fields. One Literal (the expression) linked HAS_EXPRESSION."
+
+[constraint_types.Required]
+params = []
+description = "The field is required in every assignment."
+
+[constraint_types.Forbidden]
+params = []
+description = "The field is absent or null in every assignment."
+
+[constraint_types.Conditional]
+params = [
+  "IF_FIELD → Literal (trigger field name as text)",
+  "IF_VALUE → Literal (trigger value as text)",
+  "HAS_CONSTRAINT → inner Enum/Range/…",
+]
+description = "Piecewise domain: several Conditional nodes on one Field, one per trigger. Each branch: IF_FIELD → Literal(field name), IF_VALUE → Literal(value), HAS_CONSTRAINT → Enum or Range. Use Literal for IF edges, not Field. Separate branches, not one merged Enum."
+
+[patterns.independent_enum]
+description = "Parameter with a fixed table of values, no cross-field trigger in the source: Field ──CONSTRAINED_BY──► Enum, all values in aliases."
+example = "Field → Enum(aliases=[v1, v2, …])"
+
+[patterns.conditional_enum]
+description = "Parameter domain depends on another parameter. Field A ──CONSTRAINED_BY──► several Conditional nodes; each branch: create Literal nodes for the trigger (IF_FIELD→Literal field name, IF_VALUE→Literal value), then HAS_CONSTRAINT→Enum(aliases=[…]) or Range."
+example = "Field_A → Conditional(IF_FIELD→Literal(\"Field_K\"), IF_VALUE→Literal(\"k1\"), HAS_CONSTRAINT→Enum set1)"
+
+[patterns.conditional_range]
+description = "Regulatory bound per trigger value: Field ──CONSTRAINED_BY──► Conditional(IF trigger → Range min..max on the scale)."
+example = "Field_X → Conditional(IF key=k1 → Range a1..a2), Conditional(IF key=k2 → Range b1..b2)"
+
+[patterns.formula_cross_field]
+description = "A field computed from others: Field ──CONSTRAINED_BY──► Formula ──HAS_EXPRESSION──► Literal(expression)."
+example = "Field_S → Formula(expression='S = d * k')"
+
+[patterns.combined_constraints]
+description = "Multiple CONSTRAINED_BY edges on one Field — domains intersect in infer mode (e.g. Range AND Enum on the same parameter)."
+example = "Field → Range + Enum(aliases=[…])"
+
+[patterns.provenance]
+description = "Research provenance: Param ──MENTIONS──► section path#n (built-in edge). Designation dependency: dependent Param ──DEPENDS_ON──► key Param. Separate from compile ownership (Field + CONSTRAINED_BY from .csp)."
+example = "Param_H ──MENTIONS──► doc.pdf#12; Param_H ──DEPENDS_ON──► Param_D"
+
+# ── Table import (constraint compiler) ──
+[tables]
+delimiter = "\t"
+# Column headers to ignore during .csp import (corpus-specific; exact header text).
+skip_columns = []
+
+# Per-column compile hints, keyed by the exact column header as written in the source, e.g.:
+# [tables.compile_hints."<column header>"]
+# strategy = "skip"

@@ -1,0 +1,9 @@
+{
+  "name": "get_task",
+  "description": "Return the owner document for this eval run (eval-only). Call once at the start. Use the returned `doc` for notebook tools (note, ls, del). Corpus search (grep, search, read) spans the whole knowledge base — including documents cited by this doc.",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}

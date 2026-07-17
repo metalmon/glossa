@@ -163,11 +163,14 @@ impl CaseRegistry {
 pub fn load_case_registry(paths: &[PathBuf]) -> Result<CaseRegistry> {
     let mut reg = CaseRegistry::default();
     for path in paths {
-        let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let cases: Vec<TrainCase> = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let cases: Vec<TrainCase> =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         for case in cases {
             reg.by_id.insert(case.id.clone(), case.clone());
-            reg.by_question.insert(normalize_question(&case.question), case);
+            reg.by_question
+                .insert(normalize_question(&case.question), case);
         }
     }
     Ok(reg)
@@ -236,9 +239,15 @@ pub fn parse_search_hits(text: &str) -> Vec<ParsedHit> {
         if !line.starts_with("[#") {
             continue;
         }
-        let Some(rest) = line.strip_prefix("[#") else { continue };
-        let Some((ord_s, rest)) = rest.split_once(']') else { continue };
-        let Ok(ord) = ord_s.trim().parse::<u64>() else { continue };
+        let Some(rest) = line.strip_prefix("[#") else {
+            continue;
+        };
+        let Some((ord_s, rest)) = rest.split_once(']') else {
+            continue;
+        };
+        let Ok(ord) = ord_s.trim().parse::<u64>() else {
+            continue;
+        };
         let Some((path, label, snippet)) = split_search_hit_body(rest.trim()) else {
             continue;
         };
@@ -257,9 +266,15 @@ pub fn parse_grep_hits(text: &str) -> Vec<ParsedHit> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        let Some((path, rest)) = line.split_once(":#") else { continue };
-        let Some((ord_s, snippet)) = rest.split_once(": ") else { continue };
-        let Ok(ord) = ord_s.trim().parse::<u64>() else { continue };
+        let Some((path, rest)) = line.split_once(":#") else {
+            continue;
+        };
+        let Some((ord_s, snippet)) = rest.split_once(": ") else {
+            continue;
+        };
+        let Ok(ord) = ord_s.trim().parse::<u64>() else {
+            continue;
+        };
         out.push(ParsedHit {
             ord,
             path: path.trim().to_string(),
@@ -352,8 +367,14 @@ pub fn parse_retrieval_events(messages: &[Value]) -> Vec<EpisodeEvent> {
                     if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                         continue;
                     }
-                    let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                    let Some(call) = pending.remove(&id) else { continue };
+                    let id = block
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let Some(call) = pending.remove(&id) else {
+                        continue;
+                    };
                     let result = block
                         .get("result")
                         .and_then(|r| r.as_str())
@@ -361,28 +382,48 @@ pub fn parse_retrieval_events(messages: &[Value]) -> Vec<EpisodeEvent> {
                         .to_string();
                     match call.name.as_str() {
                         "search" => {
-                            let query = call.args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                            let query = call
+                                .args
+                                .get("query")
+                                .and_then(|q| q.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             events.push(EpisodeEvent::Search {
                                 query,
                                 result_text: result,
                             });
                         }
                         "grep" => {
-                            let pattern = call.args.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                            let pattern = call
+                                .args
+                                .get("pattern")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             events.push(EpisodeEvent::Grep {
                                 pattern,
                                 result_text: result,
                             });
                         }
                         "glob" => {
-                            let pattern = call.args.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                            let pattern = call
+                                .args
+                                .get("pattern")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             events.push(EpisodeEvent::Glob {
                                 pattern,
                                 result_text: result,
                             });
                         }
                         "read" => {
-                            let path = call.args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                            let path = call
+                                .args
+                                .get("path")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let n = call
                                 .args
                                 .get("n")
@@ -415,10 +456,22 @@ struct PendingCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EpisodeEvent {
-    Search { query: String, result_text: String },
-    Grep { pattern: String, result_text: String },
-    Glob { pattern: String, result_text: String },
-    Read { path: String, n: u64 },
+    Search {
+        query: String,
+        result_text: String,
+    },
+    Grep {
+        pattern: String,
+        result_text: String,
+    },
+    Glob {
+        pattern: String,
+        result_text: String,
+    },
+    Read {
+        path: String,
+        n: u64,
+    },
 }
 
 fn parse_gold_source(source: &str) -> Option<(String, String)> {
@@ -556,9 +609,15 @@ fn gold_from_graph_relevance(
             if e.edge_type != glossa::graph::MENTIONS {
                 continue;
             }
-            let Some((p, l)) = e.to.split_once('#') else { continue };
-            let Some((canon, loc)) = validate_gold_pair(idx, p, l) else { continue };
-            let Some(text) = idx.read_chunk(&canon, &loc).ok().flatten() else { continue };
+            let Some((p, l)) = e.to.split_once('#') else {
+                continue;
+            };
+            let Some((canon, loc)) = validate_gold_pair(idx, p, l) else {
+                continue;
+            };
+            let Some(text) = idx.read_chunk(&canon, &loc).ok().flatten() else {
+                continue;
+            };
             let mut chunk_terms = std::collections::BTreeSet::new();
             analyzer.terms(&text, &mut chunk_terms);
             let shared = q_terms.iter().filter(|t| chunk_terms.contains(*t)).count();
@@ -567,7 +626,7 @@ fn gold_from_graph_relevance(
             }
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.0));
     scored.dedup_by(|a, b| a.1 == b.1);
     scored.into_iter().take(3).map(|(_, g)| g).collect()
 }
@@ -645,7 +704,13 @@ fn rank_of_gold(hits: &[ParsedHit], idx: &DocIndex, gold: &[(String, String)]) -
     None
 }
 
-fn hydrate_snippet(idx: &DocIndex, path: &str, ord: u64, parsed: &str, hydrated: &mut u64) -> String {
+fn hydrate_snippet(
+    idx: &DocIndex,
+    path: &str,
+    ord: u64,
+    parsed: &str,
+    hydrated: &mut u64,
+) -> String {
     if !parsed.is_empty() {
         return parsed.to_string();
     }
@@ -715,6 +780,7 @@ enum LastPrefill {
 }
 
 /// Build search/grep/glob/read examples from one episode transcript.
+#[allow(clippy::too_many_arguments)]
 pub fn examples_from_episode(
     episode_id: &str,
     messages: &[Value],
@@ -724,7 +790,12 @@ pub fn examples_from_episode(
     top_k: usize,
     read_skipped_no_gold_in_prefill: &mut u64,
     read_snippets_hydrated: &mut u64,
-) -> (Vec<SearchExample>, Vec<GrepExample>, Vec<GlobExample>, Vec<ReadExample>) {
+) -> (
+    Vec<SearchExample>,
+    Vec<GrepExample>,
+    Vec<GlobExample>,
+    Vec<ReadExample>,
+) {
     let question = match extract_question(messages) {
         Some(q) => q,
         None => return (vec![], vec![], vec![], vec![]),
@@ -732,7 +803,7 @@ pub fn examples_from_episode(
     if gold_pairs.is_empty() {
         return (vec![], vec![], vec![], vec![]);
     }
-    let gold = gold_strings(&gold_pairs);
+    let gold = gold_strings(gold_pairs);
     let case_id = Some(case.id.clone());
 
     let mut searches = Vec::new();
@@ -749,7 +820,7 @@ pub fn examples_from_episode(
                     .filter_map(|h| canonicalize_hit(idx, h))
                     .collect();
                 let top = hits.iter().take(top_k).cloned().collect::<Vec<_>>();
-                let rank = rank_of_gold(&top, idx, &gold_pairs);
+                let rank = rank_of_gold(&top, idx, gold_pairs);
                 let hit = rank.is_some();
                 searches.push(SearchExample {
                     episode_id: episode_id.to_string(),
@@ -760,18 +831,18 @@ pub fn examples_from_episode(
                     hit,
                     rank,
                 });
-                last = Some(LastPrefill::Search {
-                    query,
-                    hits,
-                });
+                last = Some(LastPrefill::Search { query, hits });
             }
-            EpisodeEvent::Grep { pattern, result_text } => {
+            EpisodeEvent::Grep {
+                pattern,
+                result_text,
+            } => {
                 let hits: Vec<ParsedHit> = parse_grep_hits(&result_text)
                     .into_iter()
                     .filter_map(|h| canonicalize_hit(idx, h))
                     .collect();
                 let top = hits.iter().take(top_k).cloned().collect::<Vec<_>>();
-                let rank = rank_of_gold(&top, idx, &gold_pairs);
+                let rank = rank_of_gold(&top, idx, gold_pairs);
                 let hit = rank.is_some();
                 greps.push(GrepExample {
                     episode_id: episode_id.to_string(),
@@ -788,12 +859,15 @@ pub fn examples_from_episode(
                     result_text,
                 });
             }
-            EpisodeEvent::Glob { pattern, result_text } => {
+            EpisodeEvent::Glob {
+                pattern,
+                result_text,
+            } => {
                 let paths: Vec<String> = parse_glob_paths(&result_text)
                     .into_iter()
                     .filter_map(|p| idx.canonical_document_path(&p))
                     .collect();
-                let hit = glob_lists_gold(&paths, idx, &gold_pairs);
+                let hit = glob_lists_gold(&paths, idx, gold_pairs);
                 globs.push(GlobExample {
                     episode_id: episode_id.to_string(),
                     case_id: case_id.clone(),
@@ -805,13 +879,15 @@ pub fn examples_from_episode(
                 });
             }
             EpisodeEvent::Read { path, n } => {
-                let Some(prefill) = last.as_ref() else { continue };
-                if !prefill_contains_gold(idx, prefill, &gold_pairs) {
+                let Some(prefill) = last.as_ref() else {
+                    continue;
+                };
+                if !prefill_contains_gold(idx, prefill, gold_pairs) {
                     *read_skipped_no_gold_in_prefill += 1;
                     continue;
                 }
                 let path = idx.canonical_document_path(&path).unwrap_or(path);
-                let read_hit = read_matches_gold(idx, &path, n, &gold_pairs);
+                let read_hit = read_matches_gold(idx, &path, n, gold_pairs);
                 match prefill {
                     LastPrefill::Search { query, hits } => {
                         reads.push(ReadExample {
@@ -827,7 +903,10 @@ pub fn examples_from_episode(
                             grep_result: String::new(),
                         });
                     }
-                    LastPrefill::Grep { pattern, result_text } => {
+                    LastPrefill::Grep {
+                        pattern,
+                        result_text,
+                    } => {
                         reads.push(ReadExample {
                             episode_id: episode_id.to_string(),
                             case_id: case_id.clone(),
@@ -889,7 +968,7 @@ pub fn synthetic_grep(
             Some(g) if !g.is_empty() => g,
             _ => continue,
         };
-        let gold = gold_strings(&gold_pairs);
+        let gold = gold_strings(gold_pairs);
         let (path, loc) = &gold_pairs[0];
         let Some(text) = idx.read_chunk(path, loc).ok().flatten() else {
             continue;
@@ -897,7 +976,8 @@ pub fn synthetic_grep(
         let Some(token) = pick_grep_token(&text) else {
             continue;
         };
-        let hits = glossa::grep::grep(idx, &token, &glossa::grep::GrepOpts::default()).unwrap_or_default();
+        let hits =
+            glossa::grep::grep(idx, &token, &glossa::grep::GrepOpts::default()).unwrap_or_default();
         let parsed: Vec<ParsedHit> = hits
             .iter()
             .map(|h| ParsedHit {
@@ -907,7 +987,7 @@ pub fn synthetic_grep(
                 snippet: h.line.clone(),
             })
             .collect();
-        let hit = parsed.iter().any(|h| hit_matches_gold(idx, h, &gold_pairs));
+        let hit = parsed.iter().any(|h| hit_matches_gold(idx, h, gold_pairs));
         greps.push(GrepExample {
             episode_id: format!("synthetic-grep-{}", case.id),
             case_id: Some(case.id.clone()),
@@ -941,13 +1021,13 @@ pub fn synthetic_glob(
             .into_iter()
             .filter_map(|p| idx.canonical_document_path(&p))
             .collect();
-        let hit = glob_lists_gold(&paths, idx, &gold_pairs);
+        let hit = glob_lists_gold(&paths, idx, gold_pairs);
         globs.push(GlobExample {
             episode_id: format!("synthetic-glob-{}", case.id),
             case_id: Some(case.id.clone()),
             question: case.question.clone(),
             glob_pattern: pattern,
-            gold: gold_strings(&gold_pairs),
+            gold: gold_strings(gold_pairs),
             hit,
             synthetic: true,
         });
@@ -1012,7 +1092,8 @@ fn ch_query_episodes(
         if line.trim().is_empty() {
             continue;
         }
-        let row: ChEpisodeRow = serde_json::from_str(line).context("parse clickhouse JSONEachRow")?;
+        let row: ChEpisodeRow =
+            serde_json::from_str(line).context("parse clickhouse JSONEachRow")?;
         out.push((row.episode_id, row.input, row.case_id));
     }
     Ok(out)
@@ -1063,7 +1144,11 @@ pub fn run_export(cfg: ExportConfig) -> Result<ExportStats> {
     let mut glob_f = std::fs::File::create(&glob_part)?;
     let mut read_f = std::fs::File::create(&read_part)?;
 
-    let episodes = ch_query_episodes(&cfg.clickhouse_url, &cfg.function_name, cfg.run_tag.as_deref())?;
+    let episodes = ch_query_episodes(
+        &cfg.clickhouse_url,
+        &cfg.function_name,
+        cfg.run_tag.as_deref(),
+    )?;
     eprintln!(
         "export-tz: fetched {} episodes from ClickHouse in {:.1}s",
         episodes.len(),
@@ -1078,7 +1163,7 @@ pub fn run_export(cfg: ExportConfig) -> Result<ExportStats> {
     let mut processed = 0u64;
     for (episode_id, input_json, tag_case_id) in episodes {
         processed += 1;
-        if processed % 25 == 0 || processed == stats.episodes_total {
+        if processed.is_multiple_of(25) || processed == stats.episodes_total {
             eprintln!(
                 "export-tz: episode {processed}/{} ({:.1}s)",
                 stats.episodes_total,
@@ -1101,7 +1186,14 @@ pub fn run_export(cfg: ExportConfig) -> Result<ExportStats> {
         };
         let tag_id = tag_case_id.trim();
         let joined_by_id = !tag_id.is_empty() && registry.by_id.contains_key(tag_id);
-        let case = match registry.resolve(if tag_id.is_empty() { None } else { Some(tag_id) }, &question) {
+        let case = match registry.resolve(
+            if tag_id.is_empty() {
+                None
+            } else {
+                Some(tag_id)
+            },
+            &question,
+        ) {
             Some(c) => c.clone(),
             None => {
                 stats.episodes_skipped_no_gold += 1;
@@ -1220,9 +1312,8 @@ pub fn run_export(cfg: ExportConfig) -> Result<ExportStats> {
         (&glob_part, &glob_path),
         (&read_part, &read_path),
     ] {
-        std::fs::rename(part, final_path).with_context(|| {
-            format!("rename {} -> {}", part.display(), final_path.display())
-        })?;
+        std::fs::rename(part, final_path)
+            .with_context(|| format!("rename {} -> {}", part.display(), final_path.display()))?;
     }
 
     println!(
@@ -1255,7 +1346,11 @@ pub fn run_export(cfg: ExportConfig) -> Result<ExportStats> {
              re-run eval with current kb-eval (run=…) for reliable gold join"
         );
     }
-    if stats.search_rows == 0 && stats.grep_rows == 0 && stats.glob_rows == 0 && stats.read_rows == 0 {
+    if stats.search_rows == 0
+        && stats.grep_rows == 0
+        && stats.glob_rows == 0
+        && stats.read_rows == 0
+    {
         anyhow::bail!("export produced no supervision rows — check episodes, registry, and gold");
     }
     Ok(stats)
@@ -1444,7 +1539,9 @@ mod tests {
         let ev = parse_search_read_events(&msgs);
         assert_eq!(ev.len(), 2);
         assert!(matches!(&ev[0], EpisodeEvent::Search { query, .. } if query == "CPU clock MHz"));
-        assert!(matches!(&ev[1], EpisodeEvent::Read { path, n: 3, .. } if path == "kb-test/doc.htm"));
+        assert!(
+            matches!(&ev[1], EpisodeEvent::Read { path, n: 3, .. } if path == "kb-test/doc.htm")
+        );
     }
 
     #[test]
@@ -1457,8 +1554,11 @@ mod tests {
             source: Some("kb-test/doc.htm:#2".into()),
         };
         reg.by_id.insert(case.id.clone(), case.clone());
-        reg.by_question.insert(normalize_question(&case.question), case);
-        assert!(reg.resolve(Some("syn-0001"), "totally different text").is_some());
+        reg.by_question
+            .insert(normalize_question(&case.question), case);
+        assert!(reg
+            .resolve(Some("syn-0001"), "totally different text")
+            .is_some());
         assert!(reg.resolve(None, "What is the clock speed?").is_some());
     }
 
@@ -1540,11 +1640,17 @@ mod tests {
             &mut hydrated,
         );
         assert_eq!(searches.len(), 1);
-        assert!(searches[0].hit, "expected search hit after path canonicalization");
+        assert!(
+            searches[0].hit,
+            "expected search hit after path canonicalization"
+        );
         assert_eq!(searches[0].gold, vec!["kb-test/doc.pdf#p.3"]);
         assert_eq!(reads.len(), 1);
         assert!(reads[0].hit);
-        assert_eq!(reads[0].model_read.as_ref().unwrap().path, "kb-test/doc.pdf");
+        assert_eq!(
+            reads[0].model_read.as_ref().unwrap().path,
+            "kb-test/doc.pdf"
+        );
         assert_eq!(reads[0].hits[0]["path"], "kb-test/doc.pdf");
         assert_eq!(reads[0].hits[0]["location"], "p.3");
         assert_eq!(reads[0].hits[0]["snippet"], "CPU runs at 1000 MHz");

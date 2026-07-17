@@ -1,0 +1,26 @@
+# Designation code → constraint tables (single agent, single step)
+
+This example SOP drives one agent through a full constraint-extraction episode
+over a technical document that defines a *designation code* (an ordered product
+marking such as `<name>-<size>-<grade> <spec-ref>`). It produces one `.csp`
+constraint table per variable field, a `schema.toml` manifest, and a compiled
+graph. Point the eval runner at a corpus containing such a document and adapt
+the anchors below to your domain.
+
+## Steps
+
+1. **Build the** `.csp` **files, schema and graph**
+  {# GEPA:SOLO_START #}
+   **You are a single agent** — the whole collection up to compile. There is no `delegate`.
+   Your task is to build the constraint tables for the designation code defined by the standard.
+   Owner document: `get_task().doc`. Notebook files (note(file=...)) live under this document only.
+   **1. The designation example.** `search` / `grep` / `read`. Anchor on the section that shows a worked designation example (often titled "Designation", "Ordering information", or similar). Try `search` with the whole phrase first; if empty, `grep` for the anchor words with `context` 20–40. Take the compact designation string **as a whole**; the field layout comes from the expanded description next to it, in the edition currently in force (fields removed by an amendment do not count). Walk it **left to right without skipping**.
+   **2. Which slots are Params.** A Param is a characteristic from the expanded description that offers a **choice** from a series of values. A slot fixed to a single value for the whole document (the product name, the trailing spec reference) is not a Param. Two names for the same slot are one Param. Slots outside the example, or removed by an amendment, are out of scope.
+   **Decomposing tables.** Several marking-field columns in **one** table are not a single composite "whole table" Param. **Each** such column gets its own Param and its own `.csp`. The table only encodes joint admissibility: the leading column is the key; the others get `DEPENDS_ON` → key and two-column `(key, field)` files. Do not fold all columns into one multi-column file. The key itself may in turn depend on parameters not shown in the table; in that case, when writing the key's csp file, record it there as a field of the key it depends on.
+   **3. MENTIONS.** For every Param field: `grep`/`search` for the places that enumerate its admissible values (not to copy the domain out). Collect all such places: within this document (including separate tables/sections per value of another field — one per **each**), and, when values are defined "per <cited document>" or in another section, follow the reference via the document's normative-references list to that chunk or document. The designation example itself is **not** an enumeration site. When recording ranges, compare against the example: you may have found the bounds of a range while the document actually enumerates a series of admissible ranges you have not found yet. First **collect** the sections, then batch `graph_upsert`: `Param` + `MENTIONS` to `<path>#<n>`. Prose in the reply creates no edges.
+   **4. DEPENDS_ON — after MENTIONS.** Beyond the table decomposition above: (2) several `MENTIONS` pointing at tables/sections keyed by **different values** of another field → `DEPENDS_ON` to it; do not merge the series; (3) an explicit "depending on …" clause. Otherwise the enumeration stands on its own. Batch all findings with `graph_upsert` **dependent → key**; do not leave them only in your reasoning.
+   **5. Assembling the** `.csp` **files — per Param.** `graph_stats(doc)` — the `MENTIONS` / `DEPENDS_ON` edges. `read` every section from `MENTIONS` (missing — search yourself). You need the whole series, not the single value from the example. If there is no closed enumeration, record what the document does provide; do not invent the rest. With several sources, take the **normative** requirement on admissible values; do not expand informative reference scales. If there is `DEPENDS_ON → key` (or you see the dependency yourself — add the edge), write a two-column `(key, field)` file; otherwise one-column. Cells hold values **as they appear in the marking** (code, number, interval). Dashes: an interval written as one token in the designation → one value; a series element whose bounds come "per <cited document>" → all elements of the series. `;` separates list values. Units only if present in the example's token. Keep the document's decimal separator. `note(doc, file="<name>.csp", …)`; verify via `read` / TableEcho.
+   **6. Schema.** `ls(doc)` — the actual `.csp` files. Order = the **Param** slots of the example, left to right (fixed single-value slots are **not** in `files`). `note(…, file="schema.toml")`: `[order]` and `files = [ … ]`. No extra files; duplicated content for one slot — one file. Priority: the slot's own 1-col file → otherwise the pair file.
+   **7. Compile.** `graph_build(doc)` on the full set. On **FAILED** — `read` → `note` → `graph_build` again. After a stable **OK** — a short text reply **without tools** (the episode is finished): the example, the Param list, the dependencies.
+  {# GEPA:SOLO_END #}
+  - tools: get_task, grep, search, read, glob, ls, note, del, graph_stats, graph_upsert, graph_build
