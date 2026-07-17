@@ -1,7 +1,5 @@
 # Office IR Chunking Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Index all Office formats via `office_oxide` DocumentIR: densify merged cells (H+V value repeat), chunk at IR level (heading/section hard splits, post-threshold empty-paragraph soft splits, caption/note glue around tables), emit GFM `Chunk`s without whole-doc `to_markdown()`.
 
 **Architecture:** `OfficeExtractor` opens with `Document::from_reader` → `to_ir()` → `expand_merged_tables` → `chunk_ir`. New modules `office_table.rs` (expand + pipe render) and `office_chunk.rs` (split rules + element markdown). Threshold 4000 chars (same as `extract/text.rs` `MAX_CHARS`).
@@ -854,7 +852,7 @@ git commit -m "docs: note office IR extraction path"
 
 ### Task 7 (optional follow-up, not blocking): Eval harness
 
-Manual / existing qwen35 docx eval: Marka 0/3→3/3; grain/T/H values intact. No code in this plan — operator run after merge.
+Manual / existing small-model docx eval: target-parameter retrieval 0/3→3/3; dependent table values intact. No code in this plan — operator run after merge.
 
 ---
 
@@ -864,7 +862,7 @@ Manual / existing qwen35 docx eval: Marka 0/3→3/3; grain/T/H values intact. No
 |------------------|------|
 | All office via `to_ir()` | 5 |
 | Merge expand H+V | 1 |
-| IR chunking, no GOST heuristics | 3–4 |
+| IR chunking, no corpus-specific heuristics | 3–4 |
 | Empty para soft split post-threshold | 4 |
 | Caption + note glue | 4 |
 | Threshold 4000 | 4 (`CHUNK_CHAR_THRESHOLD`) |

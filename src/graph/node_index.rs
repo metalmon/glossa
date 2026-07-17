@@ -83,7 +83,7 @@ impl NodeIndex {
 
     /// BM25 search over node text; returns node ids best-first. Returns EVERY node that shares at
     /// least one query term (recall first), ranked by BM25 — so a node matching several rare query
-    /// terms outranks one matching a single generic word ("АБАК", in most labels), and the caller
+    /// terms outranks one matching a single generic word (a brand name present in most labels), and the caller
     /// sees the strongest matches at the top. A query that tokenizes to nothing returns empty.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         // Tokenize the query with the index's own analyzer so query terms match indexed terms

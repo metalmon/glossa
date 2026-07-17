@@ -1,6 +1,6 @@
 # Constraint-domain ontology overlay for glossa.
 #
-# GOST-regulatory overlay: Param = research provenance + marking dependencies,
+# Regulatory overlay: Param = research provenance + designation dependencies,
 # Field = compile-time constrained parameter, Enum = tabular values,
 # Conditional = piecewise domains. Core structural types (Document, Section, …)
 # and core edges (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN.
@@ -9,14 +9,14 @@
 # Requires: glossa built with --features constraint.
 
 [meta]
-domain = "gost-regulatory"
-description = "Constraint graph for product parameters from GOST/regulatory documents."
+domain = "regulatory"
+description = "Constraint graph for product parameters from regulatory/standards documents."
 note = "Research uses Param (MENTIONS to sections, DEPENDS_ON to key Param). Compile uses Field ──CONSTRAINED_BY──► … . IF_FIELD/IF_VALUE/HAS_* target Literal nodes (label = scalar text), not Field or Param."
 
 # ── Entities ──
 [entities.Param]
 id_prefix = "prm"
-description = "A marking/designation parameter during research and .csp build. Hang MENTIONS from this node to every corpus section where its allowed values are listed. If its domain depends on another marking parameter, also hang DEPENDS_ON to that key Param. Not the compile subject — graph_build materializes Field + constraints from .csp; Param is left intact."
+description = "A designation parameter during research and .csp build. Hang MENTIONS from this node to every corpus section where its allowed values are listed. If its domain depends on another designation parameter, also hang DEPENDS_ON to that key Param. Not the compile subject — graph_build materializes Field + constraints from .csp; Param is left intact."
 
 [entities.Field]
 id_prefix = "fld"
@@ -30,7 +30,7 @@ description = "A scalar carrier for constraint parameters: a number, string, reg
 [relations.DEPENDS_ON]
 from = ["Param"]
 to   = ["Param"]
-description = "Marking dependency: dependent Param ──DEPENDS_ON──► key Param. Means the dependent's allowed values are determined by the key (pair table / conditional domain). Direction is always dependent → key. Not a compile edge; not MENTIONS (evidence stays Param → section path#n)."
+description = "Designation dependency: dependent Param ──DEPENDS_ON──► key Param. Means the dependent's allowed values are determined by the key (pair table / conditional domain). Direction is always dependent → key. Not a compile edge; not MENTIONS (evidence stays Param → section path#n)."
 
 [relations.CONSTRAINED_BY]
 from = ["Field"]
@@ -114,11 +114,11 @@ example = "Field → Enum(aliases=[v1, v2, …])"
 
 [patterns.conditional_enum]
 description = "Parameter domain depends on another parameter. Field A ──CONSTRAINED_BY──► several Conditional nodes; each branch: create Literal nodes for the trigger (IF_FIELD→Literal field name, IF_VALUE→Literal value), then HAS_CONSTRAINT→Enum(aliases=[…]) or Range."
-example = "Field_A → Conditional(IF_FIELD→Literal(\"B\"), IF_VALUE→Literal(\"41\"), HAS_CONSTRAINT→Enum set1)"
+example = "Field_A → Conditional(IF_FIELD→Literal(\"Field_K\"), IF_VALUE→Literal(\"k1\"), HAS_CONSTRAINT→Enum set1)"
 
 [patterns.conditional_range]
 description = "Regulatory bound per trigger value: Field ──CONSTRAINED_BY──► Conditional(IF trigger → Range min..max on the scale)."
-example = "Field_ZI → Conditional(IF bond=B → Range 25..49), Conditional(IF bond=R → Range 23..45)"
+example = "Field_X → Conditional(IF key=k1 → Range a1..a2), Conditional(IF key=k2 → Range b1..b2)"
 
 [patterns.formula_cross_field]
 description = "A field computed from others: Field ──CONSTRAINED_BY──► Formula ──HAS_EXPRESSION──► Literal(expression)."
@@ -129,13 +129,15 @@ description = "Multiple CONSTRAINED_BY edges on one Field — domains intersect 
 example = "Field → Range + Enum(aliases=[…])"
 
 [patterns.provenance]
-description = "Research provenance: Param ──MENTIONS──► section path#n (built-in edge). Marking dependency: dependent Param ──DEPENDS_ON──► key Param. Separate from compile ownership (Field + CONSTRAINED_BY from .csp)."
-example = "Param_H ──MENTIONS──► gost.pdf#12; Param_H ──DEPENDS_ON──► Param_D"
+description = "Research provenance: Param ──MENTIONS──► section path#n (built-in edge). Designation dependency: dependent Param ──DEPENDS_ON──► key Param. Separate from compile ownership (Field + CONSTRAINED_BY from .csp)."
+example = "Param_H ──MENTIONS──► doc.pdf#12; Param_H ──DEPENDS_ON──► Param_D"
 
 # ── Table import (constraint compiler) ──
 [tables]
 delimiter = "\t"
-skip_columns = ["Сопроводительный документ"]
+# Column headers to ignore during .csp import (corpus-specific; exact header text).
+skip_columns = []
 
-[tables.compile_hints."Марка шлифматериала"]
-strategy = "skip"
+# Per-column compile hints, keyed by the exact column header as written in the source, e.g.:
+# [tables.compile_hints."<column header>"]
+# strategy = "skip"

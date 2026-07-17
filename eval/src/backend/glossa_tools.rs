@@ -272,20 +272,20 @@ mod tests {
                 doc_path: PathBuf::from("a.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "Зернистость F24".into(),
+                text: "Плотность F24".into(),
             },
             Chunk {
                 doc_path: PathBuf::from("b.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "Зернистость F60".into(),
+                text: "Плотность F60".into(),
             },
         ])
         .unwrap();
         let trace = TraceLog::disabled();
         let out = exec(
             "grep",
-            &json!({"pattern": "Зернистость", "path": "a.pdf#1"}),
+            &json!({"pattern": "Плотность", "path": "a.pdf#1"}),
             dir.path(),
             &idx,
             None,
@@ -303,7 +303,7 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
             Chunk {
-                doc_path: PathBuf::from("АБАК.pdf"),
+                doc_path: PathBuf::from("ШАБЛОН.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
                 text: "горячая замена".into(),
@@ -319,7 +319,7 @@ mod tests {
         let trace = TraceLog::disabled();
         let g = exec(
             "glob",
-            &json!({"pattern": "*АБАК*"}),
+            &json!({"pattern": "*ШАБЛОН*"}),
             dir.path(),
             &idx,
             None,
@@ -327,10 +327,10 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(g.contains("АБАК") && !g.contains("Other"), "glob: {g}");
+        assert!(g.contains("ШАБЛОН") && !g.contains("Other"), "glob: {g}");
         let s = exec(
             "search",
-            &json!({"query": "замена", "glob": "*АБАК*"}),
+            &json!({"query": "замена", "glob": "*ШАБЛОН*"}),
             dir.path(),
             &idx,
             None,
@@ -339,7 +339,7 @@ mod tests {
         )
         .0;
         assert!(
-            s.contains("АБАК") && !s.contains("Other"),
+            s.contains("ШАБЛОН") && !s.contains("Other"),
             "scoped search: {s}"
         );
     }

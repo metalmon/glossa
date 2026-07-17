@@ -380,7 +380,7 @@ struct Empty {}
 #[derive(Debug, Deserialize, JsonSchema)]
 #[allow(dead_code)]
 struct ConstraintSolveArgs {
-    #[schemars(description = "GOST document source_path (which document's constraints to load)")]
+    #[schemars(description = "Source document source_path (which document's constraints to load)")]
     source_path: String,
     #[schemars(description = "mode: validate | infer | check")]
     mode: String,
@@ -967,7 +967,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `F24`, `400`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
+        description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
     )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
@@ -1235,7 +1235,7 @@ mod tests {
     async fn glob_tool_lists_documents() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("АБАК.md"),
+            dir.path().join("МОДУЛЬ.md"),
             "# A\nраз\n# B\nдва\n".as_bytes(),
         )
         .unwrap();
@@ -1245,12 +1245,12 @@ mod tests {
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
-                pattern: "*АБАК*".into()
+                pattern: "*МОДУЛЬ*".into()
             }))
             .await
             .unwrap()
         );
-        assert!(out.contains("АБАК"), "lists the matching doc: {out}");
+        assert!(out.contains("МОДУЛЬ"), "lists the matching doc: {out}");
         assert!(!out.contains("Other"), "excludes non-matching: {out}");
     }
 

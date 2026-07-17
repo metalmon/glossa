@@ -1330,17 +1330,17 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("БД ДПТК\\doc.pdf"),
+            doc_path: PathBuf::from("Архив БД\\doc.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
         }])
         .unwrap();
         assert_eq!(
-            idx.resolve_path("kb-manual\\БД ДПТК\\doc.pdf")
+            idx.resolve_path("kb-manual\\Архив БД\\doc.pdf")
                 .unwrap()
                 .as_deref(),
-            Some("БД ДПТК\\doc.pdf")
+            Some("Архив БД\\doc.pdf")
         );
     }
 
@@ -1444,7 +1444,7 @@ mod search_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
             Chunk {
-                doc_path: PathBuf::from("a/АБАК.pdf"),
+                doc_path: PathBuf::from("a/МОДУЛЬ.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
                 text: "горячая замена цпу".into(),
@@ -1467,11 +1467,11 @@ mod search_tests {
         let all = idx.search_filtered("замена", 10, None, None).unwrap();
         assert_eq!(all.len(), 3);
         // glob scopes to the matching path only
-        let abak = idx
-            .search_filtered("замена", 10, Some("*АБАК*"), None)
+        let manual = idx
+            .search_filtered("замена", 10, Some("*МОДУЛЬ*"), None)
             .unwrap();
-        assert_eq!(abak.len(), 1);
-        assert!(abak[0].path.contains("АБАК"));
+        assert_eq!(manual.len(), 1);
+        assert!(manual[0].path.contains("МОДУЛЬ"));
         // file_type scopes to md only
         let md = idx.search_filtered("замена", 10, None, Some("md")).unwrap();
         assert_eq!(md.len(), 1);

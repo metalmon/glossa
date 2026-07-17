@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn column_values_union_across_files() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
         std::fs::write(mirror.join("a.csp"), "Width\tNote\n10\tok\n20\t\n").unwrap();
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn malformed_csp_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
         std::fs::write(mirror.join("bad.csp"), "a\tb\n1\t2\t3\t4\n").unwrap();
@@ -141,12 +141,12 @@ mod tests {
     #[test]
     fn tables_per_file_keeps_files_separate() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
         // A multi-column combination table and a flat table.
         std::fs::write(mirror.join("height.csp"), "h\tD\n0,6\t125\n0,6\t150\n").unwrap();
-        std::fs::write(mirror.join("grit.csp"), "Зернистость\nF16\nF20\n").unwrap();
+        std::fs::write(mirror.join("voltage.csp"), "Voltage\n220\n380\n").unwrap();
         let tables = csp_tables_per_file(dir.path(), doc).unwrap();
         assert_eq!(tables.len(), 2);
         let height = tables.iter().find(|(f, _)| f == "height.csp").unwrap();

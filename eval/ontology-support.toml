@@ -22,15 +22,15 @@ props = []
 [entities.Task]       # a how-to intent (a procedure the user wants to perform)
 id_prefix = "tsk"
 props = []
-[entities.Parameter]  # a configurable setting (maxTsdr, watchdog, метод вычисления, …)
+[entities.Parameter]  # a configurable setting (maxTsdr, watchdog, calculation method, …)
 props = []
-[entities.Product]    # АБАК ПЛК, ИВК АБАК+, AbakReporter, MasterSCADA, …
+[entities.Product]    # a product line: a PLC family, a metering unit, reporting/SCADA software, …
 props = []
-[entities.Module]     # FI частотный, ЦПУ, ATB.* платы, K1 исполнение, …
+[entities.Module]     # a hardware module: frequency-input board, CPU, I/O boards, a hardware variant, …
 props = []
-[entities.Medium]     # the operating medium / среда (СУГ, природный газ, нефтепродукты, …)
+[entities.Medium]     # the operating medium (gas, liquid, petroleum products, …)
 props = []
-[entities.Standard]   # МИ 3151, ГОСТ 31369, СТО 5.9, NAMUR, HART, …
+[entities.Standard]   # a cited standard or procedure: national standards, metrology procedures, NAMUR, HART, …
 props = []
 [entities.Version]    # a build / firmware version (5.7.2, image-5.7.4, …)
 props = []
@@ -49,7 +49,7 @@ to = ["Resolution"]
 from = ["Resolution"]
 to = ["Parameter"]
 
-# the "среда" bridge the operator assumes but no document states plainly
+# the operating-medium bridge the operator assumes but no document states plainly
 [relations.HANDLED_AS]
 from = ["Medium"]
 to = ["Medium"]

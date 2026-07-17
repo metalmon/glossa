@@ -1012,6 +1012,7 @@ strict = true
             id: "org:acme".into(),
             node_type: "Organization".into(),
             label: "Acme Corp".into(),
+            // Cyrillic alias is intentional: exercises case-insensitive Cyrillic alias matching.
             aliases: vec!["ООО Акме".into(), "ACME".into()],
             prov: agent_prov(),
         };
@@ -1042,26 +1043,26 @@ strict = true
         let n = Node {
             id: "org:x".into(),
             node_type: "Organization".into(),
-            label: "Старое Имя".into(),
+            label: "Old Name".into(),
             aliases: vec![],
             prov: agent_prov(),
         };
         g.upsert(&ont, &[n], &[]).unwrap();
         // exact lookup served by the label_norm index
-        assert_eq!(g.resolve("Старое Имя").unwrap(), vec!["org:x".to_string()]);
+        assert_eq!(g.resolve("Old Name").unwrap(), vec!["org:x".to_string()]);
         assert_eq!(
-            g.find_by_label("старое имя").unwrap(),
+            g.find_by_label("old name").unwrap(),
             Some("org:x".to_string())
         );
 
         // rename → label_norm must follow, otherwise the index goes stale
-        g.update_node("org:x", Some("Новое Имя"), None).unwrap();
+        g.update_node("org:x", Some("New Name"), None).unwrap();
         assert_eq!(
-            g.find_by_label("Новое Имя").unwrap(),
+            g.find_by_label("New Name").unwrap(),
             Some("org:x".to_string())
         );
-        assert_eq!(g.find_by_label("Старое Имя").unwrap(), None);
-        assert_eq!(g.resolve("новое имя").unwrap(), vec!["org:x".to_string()]);
+        assert_eq!(g.find_by_label("Old Name").unwrap(), None);
+        assert_eq!(g.resolve("new name").unwrap(), vec!["org:x".to_string()]);
     }
 
     #[test]

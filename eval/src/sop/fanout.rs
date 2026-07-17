@@ -65,9 +65,9 @@ pub fn format_agent_prompt(step_body: &str, agent: &str, task: &str) -> String {
         _ => &s.worker,
     };
     if s.shared.is_empty() {
-        format!("{}\n\nТвоя задача:\n{}\n", role, task)
+        format!("{}\n\nYour task:\n{}\n", role, task)
     } else {
-        format!("{}\n\n{}\n\nТвоя задача:\n{}\n", s.shared, role, task)
+        format!("{}\n\n{}\n\nYour task:\n{}\n", s.shared, role, task)
     }
 }
 
@@ -110,10 +110,10 @@ worker B";
         assert!(orch.contains("Decompose and delegate."));
         assert!(!orch.contains("Build one table."));
 
-        let w = format_agent_prompt(body, "worker", "Собери поле «высота»");
+        let w = format_agent_prompt(body, "worker", "Collect the \"height\" field");
         assert!(w.contains("Both read this."));
         assert!(w.contains("Build one table."));
-        assert!(w.contains("Собери поле «высота»"));
+        assert!(w.contains("Collect the \"height\" field"));
         assert!(!w.contains("Decompose and delegate."));
     }
 

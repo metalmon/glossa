@@ -145,7 +145,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
             // A path that resolves to no indexed document is the real failure here —
             // say so plainly instead of blaming the chunk number, which sends the model
             // chasing a different number when it should fix the document path (e.g. it
-            // wrote the name transliterated, "гост…" for "gost…", instead of copying it).
+            // wrote the name transliterated into another script instead of copying it).
             let Some(path) = idx.canonical_document_path(raw) else {
                 return Err(format!(
                     "no document '{raw}' in the base — copy the document path exactly as grep/read prints it, character for character"
@@ -177,7 +177,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
 /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
 /// morphology match against existing reasoning nodes (the small model often paraphrases its own
 /// label — a truncation or wording variant). As a last resort, strip a leading node-TYPE token the
-/// model prefixed onto its own label ("Standard ГОСТ Р 57978-2017" → "ГОСТ Р 57978-2017") — gated
+/// model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234") — gated
 /// on the token naming a declared type, so ordinary multi-word labels are never mangled.
 /// Returns None when nothing matches.
 fn resolve_endpoint_label(
@@ -912,58 +912,58 @@ mod tests {
     fn doc_owned_inventory_scopes_by_source_path_lists_all_outgoing() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        cov_node(&g, "fld:vys-a", "Field", "высота", &[], "a.docx");
+        cov_node(&g, "fld:hgt-a", "Field", "height", &[], "a.docx");
         cov_node(
             &g,
-            "enum:vys-a",
+            "enum:hgt-a",
             "Enum",
-            "высота enum",
+            "height enum",
             &["10", "20"],
             "a.docx",
         );
-        cov_edge(&g, "fld:vys-a", "CONSTRAINED_BY", "enum:vys-a");
-        cov_node(&g, "sec:a1", "Section", "раздел 1", &[], "a.docx");
-        cov_edge(&g, "fld:vys-a", "MENTIONS", "sec:a1");
+        cov_edge(&g, "fld:hgt-a", "CONSTRAINED_BY", "enum:hgt-a");
+        cov_node(&g, "sec:a1", "Section", "section 1", &[], "a.docx");
+        cov_edge(&g, "fld:hgt-a", "MENTIONS", "sec:a1");
         cov_node(&g, "prm:d", "Param", "D", &[], "a.docx");
         cov_node(&g, "prm:h", "Param", "H", &[], "a.docx");
         cov_edge(&g, "prm:h", "MENTIONS", "a.docx#2");
         cov_edge(&g, "prm:h", "DEPENDS_ON", "prm:d");
-        cov_node(&g, "fld:zer-a", "Field", "зернистость", &[], "a.docx");
-        cov_node(&g, "fld:dia-b", "Field", "диаметр", &[], "b.docx");
+        cov_node(&g, "fld:wid-a", "Field", "width", &[], "a.docx");
+        cov_node(&g, "fld:dia-b", "Field", "diameter", &[], "b.docx");
 
         let inv = doc_owned_inventory(&g, "a.docx")
             .unwrap()
             .expect("A owns nodes");
         let labels: Vec<_> = inv.nodes.iter().map(|n| n.label.as_str()).collect();
-        assert!(labels.contains(&"высота"));
-        assert!(labels.contains(&"зернистость"));
+        assert!(labels.contains(&"height"));
+        assert!(labels.contains(&"width"));
         assert!(labels.contains(&"H"), "Param must appear: {labels:?}");
         assert!(
-            labels.contains(&"высота enum"),
+            labels.contains(&"height enum"),
             "Enum owned by doc is listed: {labels:?}"
         );
         assert!(
-            !labels.contains(&"раздел 1"),
+            !labels.contains(&"section 1"),
             "Section is structural, excluded"
         );
-        assert!(!labels.contains(&"диаметр"));
+        assert!(!labels.contains(&"diameter"));
 
-        let vys = inv
+        let hgt = inv
             .nodes
             .iter()
-            .find(|n| n.id == "fld:vys-a")
-            .expect("высота");
+            .find(|n| n.id == "fld:hgt-a")
+            .expect("height");
         assert!(
-            vys.outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "раздел 1"),
+            hgt.outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "section 1"),
             "MENTIONS resolves Section to label: {:?}",
-            vys.outgoing
+            hgt.outgoing
         );
         assert!(
-            vys.outgoing
+            hgt.outgoing
                 .iter()
-                .any(|e| e.edge_type == "CONSTRAINED_BY" && e.to == "высота enum"),
+                .any(|e| e.edge_type == "CONSTRAINED_BY" && e.to == "height enum"),
             "all outgoing types, not only MENTIONS: {:?}",
-            vys.outgoing
+            hgt.outgoing
         );
         let prm = inv.nodes.iter().find(|n| n.id == "prm:h").expect("Param");
         assert!(prm
@@ -977,12 +977,12 @@ mod tests {
             "DEPENDS_ON must surface: {:?}",
             prm.outgoing
         );
-        let zer = inv
+        let wid = inv
             .nodes
             .iter()
-            .find(|n| n.label == "зернистость")
+            .find(|n| n.label == "width")
             .unwrap();
-        assert!(zer.outgoing.is_empty());
+        assert!(wid.outgoing.is_empty());
 
         assert!(doc_owned_inventory(&g, "zzz.docx").unwrap().is_none());
     }
@@ -1059,13 +1059,13 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         let nodes = vec![
-            unode("Symptom", "Потеря связи", "case1.docx"),
-            unode("Resolution", "Перезагрузка модуля", "case1.docx"),
+            unode("Symptom", "Connection loss", "case1.docx"),
+            unode("Resolution", "Module restart", "case1.docx"),
         ];
         let edges = vec![uedge(
-            "Потеря связи",
+            "Connection loss",
             "RESOLVED_BY",
-            "Перезагрузка модуля",
+            "Module restart",
             "case1.docx",
         )];
 
@@ -1114,37 +1114,37 @@ strict = true
 
         // Upsert: Symptom + Resolution + RESOLVED_BY edge.
         let nodes = vec![
-            unode("Symptom", "Потеря связи", "case1.docx"),
-            unode("Resolution", "Перезагрузка модуля", "case1.docx"),
+            unode("Symptom", "Connection loss", "case1.docx"),
+            unode("Resolution", "Module restart", "case1.docx"),
         ];
         let edges = vec![uedge(
-            "Потеря связи",
+            "Connection loss",
             "RESOLVED_BY",
-            "Перезагрузка модуля",
+            "Module restart",
             "case1.docx",
         )];
         graph_upsert(&idx, &g, &ont, nodes, edges, 1);
 
         // Rename the Symptom node.
         let ups = vec![NodeUpdate {
-            label: "Потеря связи".into(),
-            new_label: Some("Нестабильная связь".into()),
+            label: "Connection loss".into(),
+            new_label: Some("Unstable connection".into()),
             new_type: None,
         }];
         let result = graph_update(&g, ups);
         assert_eq!(result, "updated 1 nodes", "unexpected result: {result}");
 
         // (a) a node with the new label exists
-        let id = g.find_by_label("Нестабильная связь").unwrap();
+        let id = g.find_by_label("Unstable connection").unwrap();
         assert!(id.is_some(), "new label not found");
         let id = id.unwrap();
 
         // (b) the id is the label-derived id for the original label
-        let expected_id = id_for(&ont, "Symptom", "Потеря связи");
+        let expected_id = id_for(&ont, "Symptom", "Connection loss");
         assert_eq!(id, expected_id, "id should be the label-derived id");
 
         // (c) the RESOLVED_BY edge still exists
-        let res_id = id_for(&ont, "Resolution", "Перезагрузка модуля");
+        let res_id = id_for(&ont, "Resolution", "Module restart");
         let out = g.outgoing(&id).unwrap();
         assert!(
             out.iter()
@@ -1163,11 +1163,11 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         // Only the Symptom node — Resolution label is missing from batch and graph.
-        let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
+        let nodes = vec![unode("Symptom", "Connection loss", "case1.docx")];
         let edges = vec![uedge(
-            "Потеря связи",
+            "Connection loss",
             "RESOLVED_BY",
-            "Перезагрузка модуля",
+            "Module restart",
             "case1.docx",
         )];
 
@@ -1193,13 +1193,13 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         let nodes = vec![
-            unode("Symptom", "Потеря связи", "case1.docx"),
-            unode("Resolution", "Перезапуск", "case1.docx"),
+            unode("Symptom", "Connection loss", "case1.docx"),
+            unode("Resolution", "Restart", "case1.docx"),
         ];
         let edges = vec![uedge(
-            "Потеря связи",
+            "Connection loss",
             "RESOLVED_BY",
-            "Перезапуск",
+            "Restart",
             "case1.docx",
         )];
 
@@ -1209,8 +1209,8 @@ strict = true
         assert_eq!(out.edges, 1);
 
         // Assert the RESOLVED_BY edge connects the label-derived ids.
-        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
-        let res_id = id_for(&ont, "Resolution", "Перезапуск");
+        let sym_id = id_for(&ont, "Symptom", "Connection loss");
+        let res_id = id_for(&ont, "Resolution", "Restart");
         let outgoing = g.outgoing(&sym_id).unwrap();
         assert!(
             outgoing
@@ -1221,7 +1221,7 @@ strict = true
     }
 
     /// The model routinely prefixes an endpoint label with the node's TYPE
-    /// ("Symptom Потеря связи" for the node labelled "Потеря связи"); the edge used
+    /// ("Symptom Connection loss" for the node labelled "Connection loss"); the edge used
     /// to drop and the agent retried forever. Strip the type token and resolve.
     #[test]
     fn edge_endpoint_with_type_prefixed_label_resolves() {
@@ -1232,14 +1232,14 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         let nodes = vec![
-            unode("Symptom", "Потеря связи", "case1.docx"),
-            unode("Resolution", "Перезапуск", "case1.docx"),
+            unode("Symptom", "Connection loss", "case1.docx"),
+            unode("Resolution", "Restart", "case1.docx"),
         ];
         // Both endpoints written type-prefixed, the way the model actually does it.
         let edges = vec![uedge(
-            "Symptom Потеря связи",
+            "Symptom Connection loss",
             "RESOLVED_BY",
-            "Resolution Перезапуск",
+            "Resolution Restart",
             "case1.docx",
         )];
 
@@ -1249,8 +1249,8 @@ strict = true
             "type-prefixed endpoints should resolve: {}",
             out.message
         );
-        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
-        let res_id = id_for(&ont, "Resolution", "Перезапуск");
+        let sym_id = id_for(&ont, "Symptom", "Connection loss");
+        let res_id = id_for(&ont, "Resolution", "Restart");
         assert!(g
             .outgoing(&sym_id)
             .unwrap()
@@ -1258,14 +1258,14 @@ strict = true
             .any(|e| e.edge_type == "RESOLVED_BY" && e.to == res_id));
 
         // An ordinary multi-word label whose first word is NOT a type is untouched:
-        // "Потеря связи" itself still resolves as before (no mangling).
+        // "Connection loss" itself still resolves as before (no mangling).
         let ok = resolve_endpoint_label(
             &g,
             &ont,
             &Default::default(),
             &Default::default(),
             &std::collections::HashSet::new(),
-            "Потеря связи",
+            "Connection loss",
             &[],
         );
         assert_eq!(ok, Some(sym_id));
@@ -1280,11 +1280,11 @@ strict = true
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         write_doc(&idx, "case1.docx");
 
-        let nodes = vec![unode("Symptom", "Потеря связи", "case1.docx")];
+        let nodes = vec![unode("Symptom", "Connection loss", "case1.docx")];
         let edges = vec![uedge(
-            "Потеря связи",
+            "Connection loss",
             "RESOLVED_BY",
-            "Неизвестный узел",
+            "Unknown node label",
             "case1.docx",
         )];
 
@@ -1294,7 +1294,7 @@ strict = true
         assert_eq!(out.nodes, 1);
         assert_eq!(out.edges, 0);
         assert!(
-            out.message.contains("Неизвестный узел") && out.message.contains("dropped"),
+            out.message.contains("Unknown node label") && out.message.contains("dropped"),
             "message names the dropped edge's bad label: {}",
             out.message
         );
@@ -1311,11 +1311,11 @@ strict = true
         write_doc(&idx, "case1.docx");
 
         let nodes = vec![
-            unode("Symptom", "Потеря связи", "case1.docx"),
-            unode("Resolution", "Перезапуск", "case1.docx"),
+            unode("Symptom", "Connection loss", "case1.docx"),
+            unode("Resolution", "Restart", "case1.docx"),
         ];
         // a MENTIONS edge with no `to` target — malformed.
-        let edges = vec![uedge("Потеря связи", "MENTIONS", "", "case1.docx")];
+        let edges = vec![uedge("Connection loss", "MENTIONS", "", "case1.docx")];
 
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
         assert!(!out.rejected, "valid nodes are written: {}", out.message);
@@ -1359,12 +1359,12 @@ strict = true
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
             1,
         );
 
-        let del = graph_delete(&idx, &g, vec!["Несуществующий".into()], vec![]);
+        let del = graph_delete(&idx, &g, vec!["Nonexistent".into()], vec![]);
         assert!(
             del.contains("matched nothing"),
             "delete names the unmatched ref: {del}"
@@ -1373,7 +1373,7 @@ strict = true
         let upd = graph_update(
             &g,
             vec![NodeUpdate {
-                label: "Несуществующий".into(),
+                label: "Nonexistent".into(),
                 new_label: Some("X".into()),
                 new_type: None,
             }],
@@ -1399,17 +1399,17 @@ strict = true
             &g,
             &ont,
             vec![
-                unode("Symptom", "Потеря связи Profibus", "c.docx"),
+                unode("Symptom", "Profibus connection loss", "c.docx"),
                 unode(
                     "Resolution",
-                    "Изменение параметра maxTsdr и перезапуск службы",
+                    "Change maxTsdr parameter and restart service",
                     "c.docx",
                 ),
             ],
             vec![uedge(
-                "Потеря связи Profibus",
+                "Profibus connection loss",
                 "RESOLVED_BY",
-                "Изменение параметра maxTsdr и перезапуск службы",
+                "Change maxTsdr parameter and restart service",
                 "c.docx",
             )],
             1,
@@ -1423,9 +1423,9 @@ strict = true
             &ont,
             vec![],
             vec![uedge(
-                "Потеря связи Profibus",
+                "Profibus connection loss",
                 "RESOLVED_BY",
-                "Изменение параметра maxTsdr",
+                "Change maxTsdr parameter",
                 "c.docx",
             )],
             2,
@@ -1446,14 +1446,14 @@ strict = true
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
 
         // Index only one real document.
-        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+        write_doc(&idx, "kb-test\\extra-data\\real.pdf");
 
         // Node with a hallucinated path — must be rejected.
         let out = graph_upsert(
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Потеря связи", "case_support_001")],
+            vec![unode("Symptom", "Connection loss", "case_support_001")],
             vec![],
             1,
         );
@@ -1475,8 +1475,8 @@ strict = true
             &ont,
             vec![unode(
                 "Symptom",
-                "Потеря связи",
-                "kb-test\\Доп.данные\\real.pdf",
+                "Connection loss",
+                "kb-test\\extra-data\\real.pdf",
             )],
             vec![],
             2,
@@ -1494,7 +1494,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+        write_doc(&idx, "kb-test\\extra-data\\real.pdf");
 
         let out = graph_upsert(
             &idx,
@@ -1502,8 +1502,8 @@ strict = true
             &ont,
             vec![unode(
                 "Symptom",
-                "Потеря связи",
-                "kb-manual\\kb-test\\Доп.данные\\real.pdf",
+                "Connection loss",
+                "kb-manual\\kb-test\\extra-data\\real.pdf",
             )],
             vec![],
             1,
@@ -1513,9 +1513,9 @@ strict = true
             "prefixed source_path must resolve: {}",
             out.message
         );
-        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let sym_id = id_for(&ont, "Symptom", "Connection loss");
         let node = g.get_node(&sym_id).unwrap().unwrap();
-        assert_eq!(node.prov.source_path, "kb-test\\Доп.данные\\real.pdf");
+        assert_eq!(node.prov.source_path, "kb-test\\extra-data\\real.pdf");
     }
 
     #[test]
@@ -1524,13 +1524,13 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        write_doc(&idx, "kb-test\\Доп.данные\\real.pdf");
+        write_doc(&idx, "kb-test\\extra-data\\real.pdf");
 
         let out = graph_upsert(
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Потеря связи", "wrong\\real.pdf")],
+            vec![unode("Symptom", "Connection loss", "wrong\\real.pdf")],
             vec![],
             1,
         );
@@ -1569,21 +1569,21 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
             crate::model::Chunk {
-                doc_path: "gost.pdf".into(),
+                doc_path: "spec.pdf".into(),
                 location: "p.3".into(),
                 file_type: "pdf".into(),
                 text: "body".into(),
             },
             crate::model::Chunk {
-                doc_path: "gost.pdf".into(),
+                doc_path: "spec.pdf".into(),
                 location: "p.4".into(),
                 file_type: "pdf".into(),
                 text: String::new(),
             },
         ])
         .unwrap();
-        let resolved = resolve_section_ref(&idx, "gost.pdf#4").unwrap();
-        assert_eq!(resolved, Some("gost.pdf#4".to_string()));
+        let resolved = resolve_section_ref(&idx, "spec.pdf#4").unwrap();
+        assert_eq!(resolved, Some("spec.pdf#4".to_string()));
     }
 
     /// MENTIONS target that resolves to a real section is NOT a node in the agent graph.
@@ -1592,11 +1592,11 @@ strict = true
         let v: Value = serde_json::from_str(
             r#"{
             "nodes": [
-                {"node_type":"Enum","label":"Тип","source_path":"gost.pdf","aliases":["41","42"]},
-                {"edge_type":"CONSTRAINED_BY","from":"fld:тип","to":"Тип","source_path":"gost.pdf"}
+                {"node_type":"Enum","label":"Type","source_path":"spec.pdf","aliases":["41","42"]},
+                {"edge_type":"CONSTRAINED_BY","from":"fld:type","to":"Type","source_path":"spec.pdf"}
             ],
             "edges": [
-                {"edge_type":"MENTIONS","from":"fld:тип","to":"gost.pdf#1","source_path":"gost.pdf"}
+                {"edge_type":"MENTIONS","from":"fld:type","to":"spec.pdf#1","source_path":"spec.pdf"}
             ]
         }"#,
         )
@@ -1625,7 +1625,7 @@ to = ["Enum"]
         )
         .unwrap();
         idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "gost.pdf".into(),
+            doc_path: "spec.pdf".into(),
             location: String::new(),
             file_type: "pdf".into(),
             text: "values table".into(),
@@ -1636,7 +1636,7 @@ to = ["Enum"]
                 &idx,
                 &g,
                 &ont,
-                vec![unode("Field", "Тип", "gost.pdf")],
+                vec![unode("Field", "Type", "spec.pdf")],
                 vec![],
                 1,
             )
@@ -1646,30 +1646,30 @@ to = ["Enum"]
             &idx,
             &g,
             &ont,
-            vec![unode("Enum", "Тип", "gost.pdf")],
-            vec![uedge("Тип", "MENTIONS", "#1", "gost.pdf")],
+            vec![unode("Enum", "Type", "spec.pdf")],
+            vec![uedge("Type", "MENTIONS", "#1", "spec.pdf")],
             2,
         );
         assert!(!out.rejected, "{}", out.message);
-        let fld = id_for(&ont, "Field", "Тип");
+        let fld = id_for(&ont, "Field", "Type");
         assert!(
             g.outgoing(&fld)
                 .unwrap()
                 .iter()
-                .any(|e| e.edge_type == "MENTIONS" && e.to == "gost.pdf#1"),
+                .any(|e| e.edge_type == "MENTIONS" && e.to == "spec.pdf#1"),
             "MENTIONS must attach to the Field, not the Enum: {:?}",
             g.outgoing(&fld).unwrap()
         );
-        let c = doc_owned_inventory(&g, "gost.pdf").unwrap().unwrap();
+        let c = doc_owned_inventory(&g, "spec.pdf").unwrap().unwrap();
         assert!(
             c.nodes.iter().any(|n| {
-                n.label == "Тип"
+                n.label == "Type"
                     && n.node_type == "Field"
                     && n.outgoing
                         .iter()
                         .any(|e| e.edge_type == crate::graph::MENTIONS)
             }),
-            "Field Тип should list MENTIONS: {:?}",
+            "Field Type should list MENTIONS: {:?}",
             c.nodes
         );
     }
@@ -1678,7 +1678,7 @@ to = ["Enum"]
     /// The edge must still land — a bare "#1" is qualified by the edge's source_path, and
     /// a resolved section ref is exempt from the node-existence check. A single-chunk
     /// heading-less doc has no location, so its location falls back to the ordinal and
-    /// its section id is "gost.docx#1".
+    /// its section id is "spec.docx#1".
     #[test]
     fn mentions_to_section_ref_survives_separate_agent_graph() {
         let dir = tempfile::tempdir().unwrap();
@@ -1686,7 +1686,7 @@ to = ["Enum"]
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "gost.docx".into(),
+            doc_path: "spec.docx".into(),
             location: String::new(),
             file_type: "docx".into(),
             text: "table of allowed values".into(),
@@ -1697,17 +1697,17 @@ to = ["Enum"]
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Тип", "gost.docx")],
-            vec![uedge("Тип", "MENTIONS", "#1", "gost.docx")],
+            vec![unode("Symptom", "Type", "spec.docx")],
+            vec![uedge("Type", "MENTIONS", "#1", "spec.docx")],
             1,
         );
         assert!(!out.rejected, "upsert rejected: {}", out.message);
-        let from_id = id_for(&ont, "Symptom", "Тип");
+        let from_id = id_for(&ont, "Symptom", "Type");
         let outgoing = g.outgoing(&from_id).unwrap();
         assert!(
             outgoing
                 .iter()
-                .any(|e| e.edge_type == "MENTIONS" && e.to == "gost.docx#1"),
+                .any(|e| e.edge_type == "MENTIONS" && e.to == "spec.docx#1"),
             "MENTIONS edge to a section ref must land; got: {:?}",
             outgoing
                 .iter()
@@ -1726,7 +1726,7 @@ to = ["Enum"]
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "gost.docx".into(),
+            doc_path: "spec.docx".into(),
             location: String::new(),
             file_type: "docx".into(),
             text: "table".into(),
@@ -1736,8 +1736,8 @@ to = ["Enum"]
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Зернистость", "gost.docx")],
-            vec![uedge("Зернистость", "MENTIONS", "gost.docx#1", "gost.docx")],
+            vec![unode("Symptom", "Voltage", "spec.docx")],
+            vec![uedge("Voltage", "MENTIONS", "spec.docx#1", "spec.docx")],
             1,
         );
         assert!(!out.rejected, "{}", out.message);
@@ -1747,9 +1747,9 @@ to = ["Enum"]
             &g,
             vec![],
             vec![EdgeRef {
-                from: "Зернистость".into(),
+                from: "Voltage".into(),
                 edge_type: "MENTIONS".into(),
-                to: "gost.docx#1".into(),
+                to: "spec.docx#1".into(),
             }],
         );
         assert!(
@@ -1760,7 +1760,7 @@ to = ["Enum"]
             !msg.contains("matched nothing") && !msg.contains("matched no"),
             "successful delete must not look like a miss: {msg}"
         );
-        let from_id = id_for(&ont, "Symptom", "Зернистость");
+        let from_id = id_for(&ont, "Symptom", "Voltage");
         let outgoing = g.outgoing(&from_id).unwrap();
         assert!(
             !outgoing.iter().any(|e| e.edge_type == "MENTIONS"),
@@ -1776,7 +1776,7 @@ to = ["Enum"]
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "gost.docx".into(),
+            doc_path: "spec.docx".into(),
             location: String::new(),
             file_type: "docx".into(),
             text: "table".into(),
@@ -1787,7 +1787,7 @@ to = ["Enum"]
                 &idx,
                 &g,
                 &ont,
-                vec![unode("Symptom", "Зернистость", "gost.docx")],
+                vec![unode("Symptom", "Voltage", "spec.docx")],
                 vec![],
                 1,
             )
@@ -1799,9 +1799,9 @@ to = ["Enum"]
             &g,
             vec![],
             vec![EdgeRef {
-                from: "Зернистость".into(),
+                from: "Voltage".into(),
                 edge_type: "MENTIONS".into(),
-                to: "gost.docx#1".into(),
+                to: "spec.docx#1".into(),
             }],
         );
         assert!(msg.contains("deleted 0"), "{msg}");
@@ -1826,7 +1826,7 @@ to = ["Enum"]
             text: "content".into(),
         }])
         .unwrap();
-        let mut n = unode("Symptom", "Тип", "d.md");
+        let mut n = unode("Symptom", "Type", "d.md");
         n.aliases = vec!["41".into(), "42".into()];
         assert!(!graph_upsert(&idx, &g, &ont, vec![n], vec![], 1).rejected);
         // Re-send the same node with no aliases (e.g. re-anchoring a dropped edge).
@@ -1835,14 +1835,14 @@ to = ["Enum"]
                 &idx,
                 &g,
                 &ont,
-                vec![unode("Symptom", "Тип", "d.md")],
+                vec![unode("Symptom", "Type", "d.md")],
                 vec![],
                 2
             )
             .rejected
         );
         let node = g
-            .get_node(&id_for(&ont, "Symptom", "Тип"))
+            .get_node(&id_for(&ont, "Symptom", "Type"))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1954,13 +1954,13 @@ to = ["Enum"]
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "sym:Горячая замена CPU", "case1.docx")],
+            vec![unode("Symptom", "sym:CPU hot swap", "case1.docx")],
             vec![],
             1,
         );
         assert!(!out.rejected, "{}", out.message);
-        let expected = id_for(&ont, "Symptom", "Горячая замена CPU");
-        assert_eq!(expected, "sym:горячая-замена-cpu");
+        let expected = id_for(&ont, "Symptom", "CPU hot swap");
+        assert_eq!(expected, "sym:cpu-hot-swap");
         assert!(g.get_node(&expected).unwrap().is_some());
         assert!(out.message.contains("Written:"), "{}", out.message);
         assert!(out.message.contains(&expected), "{}", out.message);
@@ -2001,17 +2001,17 @@ strict = true
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
             1,
         );
-        let sym_id = id_for(&ont, "Symptom", "Потеря связи");
+        let sym_id = id_for(&ont, "Symptom", "Connection loss");
         let out = graph_upsert(
             &idx,
             &g,
             &ont,
-            vec![unode("Resolution", "Перезапуск", "case1.docx")],
-            vec![uedge(&sym_id, "RESOLVED_BY", "Перезапуск", "case1.docx")],
+            vec![unode("Resolution", "Restart", "case1.docx")],
+            vec![uedge(&sym_id, "RESOLVED_BY", "Restart", "case1.docx")],
             2,
         );
         assert!(!out.rejected, "{}", out.message);
@@ -2035,7 +2035,7 @@ strict = true
             vec![NodeSpec {
                 id: "sym:legacy-id".into(),
                 node_type: "Symptom".into(),
-                label: "Потеря связи".into(),
+                label: "Connection loss".into(),
                 aliases: vec![],
                 source_path: "case1.docx".into(),
                 range: None,
@@ -2050,7 +2050,7 @@ strict = true
             &idx,
             &g,
             &ont,
-            vec![unode("Symptom", "Потеря связи", "case1.docx")],
+            vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
             2,
         );

@@ -214,8 +214,8 @@ mod tests {
     #[test]
     fn mirror_keeps_extension() {
         assert_eq!(
-            mirror_dir_for_doc("gost_r_57978-2017.pdf"),
-            "gost_r_57978-2017.pdf"
+            mirror_dir_for_doc("spec_2019-rev3.pdf"),
+            "spec_2019-rev3.pdf"
         );
         assert_ne!(
             mirror_dir_for_doc("doc.pdf"),

@@ -5,9 +5,9 @@
 //! artifacts of the source system — they are CUT here so the JSON is clean:
 //! every column is keyed by its human-readable name, every value is a datum.
 //!
-//! Units of measure are separated, not lost: a column "Наружный диаметр [мм]"
-//! with values "125 [мм]" becomes column "Наружный диаметр" with value 125 and
-//! a `units` map entry {"Наружный диаметр": "мм"} per table. Columns with
+//! Units of measure are separated, not lost: a column "Outer diameter [mm]"
+//! with values "125 [mm]" becomes column "Outer diameter" with value 125 and
+//! a `units` map entry {"Outer diameter": "mm"} per table. Columns with
 //! mixed units keep their values verbatim.
 //!
 //! Files whose stem starts with `_` are metadata by convention and are still
@@ -51,7 +51,7 @@ fn cell_text(c: &calamine::Data) -> String {
     }
 }
 
-/// Split a trailing bracketed unit: "Наружный диаметр [мм]" → ("Наружный диаметр", Some("мм")).
+/// Split a trailing bracketed unit: "Outer diameter [mm]" → ("Outer diameter", Some("mm")).
 fn split_unit(s: &str) -> (&str, Option<&str>) {
     let t = s.trim();
     if let (Some(open), true) = (t.rfind('['), t.ends_with(']')) {
@@ -81,10 +81,10 @@ fn typed_value(s: &str) -> Value {
 fn main() -> anyhow::Result<()> {
     let in_dir = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "kb-val-gost".into());
+        .unwrap_or_else(|| "kb-val".into());
     let out_dir = std::env::args()
         .nth(2)
-        .unwrap_or_else(|| "kb-val-gost".into());
+        .unwrap_or_else(|| "kb-val".into());
 
     let out = PathBuf::from(&out_dir);
     std::fs::create_dir_all(&out)?;

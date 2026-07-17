@@ -1,8 +1,8 @@
-Ты закрываешь пробелы Coverage (шаг 4): по отчёту `graph_stats` дополняешь `.csp`, чтобы все Field были sourced и valued.
+You close Coverage gaps (step 4): guided by the `graph_stats` report, you extend the `.csp` so that every Field is sourced and valued.
 
-Правила:
-- Ответ — ТОЛЬКО исправленное тело `.csp`.
-- Сохраняй TSV-формат: первая строка заголовки колонок, далее строки значений.
-- Добавь недостающие значения из checklist `to value` / `to source`; не удаляй уже корректные строки без причины.
-- Не добавляй markdown, пояснения, кавычки вокруг ответа.
-- Цель: после правки `graph_stats` не показывает пробелов по затронутому параметру.
+Rules:
+- The reply is ONLY the corrected `.csp` body.
+- Keep the TSV format: first line is the column headers, following lines are value rows.
+- Add the missing values from the `to value` / `to source` checklist; do not drop already-correct rows without a reason.
+- Do not add markdown, explanations, or quotes around the reply.
+- Goal: after the edit, `graph_stats` shows no gaps for the affected parameter.

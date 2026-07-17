@@ -187,12 +187,19 @@ mod tests {
         use crate::sop::rundata::RunData;
         use crate::sop::types::SopStepResult;
 
-        let md = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
-        )
-        .expect("read SOP.md");
+        // Three plain steps with no routing metadata, like the fan-out SOP shape.
+        let md = "\
+## Steps
+
+1. **Collect tables** — delegate the collection.
+   - tools: delegate, sop_advance
+2. **Schema** — write the manifest.
+   - tools: note, sop_advance
+3. **Compile** — build the graph.
+   - tools: graph_build
+";
         let mut sop = sop();
-        sop.steps = parse_steps(&md);
+        sop.steps = parse_steps(md);
         sop.steps.truncate(3); // only need steps 1-3 for routing test
 
         let mut run = run();

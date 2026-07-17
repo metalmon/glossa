@@ -1,4 +1,4 @@
-Call `get_task()` first — the returned `doc` is the **owner document** for notebook files (`note`, `ls`, `read`). Search the **whole knowledge base** with `grep`/`search`/`read` (including cited GOSTs).
+Call `get_task()` first — the returned `doc` is the **owner document** for notebook files (`note`, `ls`, `read`). Search the **whole knowledge base** with `grep`/`search`/`read` (including cited standards).
 
 === PHASE A: limit tables ===
 1. note(doc, file="workbook.md", content=…) — research dossier: parameters, sources, tables, dependencies.

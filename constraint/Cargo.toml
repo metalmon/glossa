@@ -2,7 +2,7 @@
 name = "glossa-constraint"
 version = "0.1.0"
 edition = "2021"
-description = "CSP solver for GOST constraint graphs"
+description = "CSP solver for document-derived constraint graphs"
 
 [lib]
 path = "src/lib.rs"

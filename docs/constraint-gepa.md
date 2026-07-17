@@ -75,7 +75,7 @@ Same pattern as main GEPA (`search`/`grep`/`glob`/`read` → one `answer_hotpot`
 | coverage | `ccoverage` | 4 Coverage | `{# GEPA:COVERAGE_* #}` |
 | validate | `cvalidate` | 5 Validate | `{# GEPA:VALIDATE_* #}` |
 
-`gepa-constraint-apply` merges five artifacts into `eval/sops/gost-constraints/SOP.md`. `constraint_validate/system.minijinja` stays a short role + corpus/notebook contract. Anchor marker lines are stripped before the agent sees step body text.
+`gepa-constraint-apply` merges five artifacts into `eval/sops/example/SOP.md`. `constraint_validate/system.minijinja` stays a short role + corpus/notebook contract. Anchor marker lines are stripped before the agent sees step body text.
 
 ### Migration from 3-pool design
 
@@ -142,7 +142,7 @@ Table value recall (`value_recall`, `domain_covers`) remains the core signal for
 ### Compile (step 3)
 
 - Full-set `graph_build` fix loop.
-- Compiler errors → `sed`/`note` → retry until OK.
+- Compiler errors → `note` (replace) → retry until OK.
 
 ### Coverage (step 4)
 
@@ -217,7 +217,7 @@ gepa-constraint-out/
   constraint_validate.prompt.txt
 ```
 
-**Apply** replaces text between matching `{# GEPA:*_START #}` … `{# GEPA:*_END #}` anchors in `eval/sops/gost-constraints/SOP.md`.
+**Apply** replaces text between matching `{# GEPA:*_START #}` … `{# GEPA:*_END #}` anchors in `eval/sops/example/SOP.md`.
 
 **Sanity-check** (full eval, outside loop):
 

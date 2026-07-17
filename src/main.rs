@@ -207,7 +207,7 @@ enum GraphAction {
     /// Find graph nodes by concept (the `glossary` tool) — prints `id [type] label` + edges.
     #[command(visible_aliases = ["search", "find"])]
     Glossary {
-        /// concept in your own words, e.g. "потеря связи"
+        /// concept in your own words, e.g. "connection loss"
         query: String,
         path: Option<PathBuf>,
     },

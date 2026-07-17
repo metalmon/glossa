@@ -16,7 +16,7 @@ pub fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
     }
     // Strip inline Markdown emphasis/code markers so `# **Title**` yields a clean
     // location "Title"; otherwise the `*`/`` ` `` leak into the section id and its
-    // display (e.g. an edge target shown as `path#**КРУГИ ШЛИФОВАЛЬНЫЕ**`).
+    // display (e.g. an edge target shown as `path#**SECTION TITLE**`).
     let title = rest.trim().replace(['*', '`'], "");
     let title = title.trim();
     if title.is_empty() {
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn heading_markdown_emphasis_is_stripped_from_location() {
-        let chunks = chunk_markdown(Path::new("x.docx"), "# **КРУГИ** > `code`\nbody\n", "docx");
-        assert_eq!(chunks[0].location, "КРУГИ > code");
+        let chunks = chunk_markdown(Path::new("x.docx"), "# **РАЗДЕЛ** > `code`\nbody\n", "docx");
+        assert_eq!(chunks[0].location, "РАЗДЕЛ > code");
     }
 }

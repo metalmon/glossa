@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn value_recall_full_and_partial() {
-        let csp = "Тип\n41\n42\n";
+        let csp = "Type\n41\n42\n";
         let gold = vec!["41".into(), "42".into(), "99".into()];
         let r = value_recall(csp, &gold);
         assert!((r - 2.0 / 3.0).abs() < 1e-9);
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn value_recall_ignores_unit_suffix_mismatch() {
-        // Agent wrote marking-style "63 м/с"; gold has bare "63".
+        // Agent wrote marking-style "63 м/с" (Cyrillic unit suffix); gold has bare "63".
         let csp = "V\n63 м/с\n80 м/с\n";
         let gold = vec!["63".into(), "80".into()];
         assert!((value_recall(csp, &gold) - 1.0).abs() < 1e-9);

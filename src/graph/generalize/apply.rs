@@ -402,10 +402,10 @@ strict = false
         // S -CAUSED_BY-> C -RESOLVED_BY-> R  ⇒ closure infers S -RESOLVED_BY-> R
         // S and S2 both MENTION the same section #1 → merge candidate (same type Symptom)
         let nodes = vec![
-            node("sym:s", "Symptom", "Потеря связи"),
-            node("sym:s2", "Symptom", "Потеря связи периодическая"),
-            node("cau:c", "Cause", "Малый maxTsdr"),
-            node("res:r", "Resolution", "Поднять maxTsdr"),
+            node("sym:s", "Symptom", "Connection loss"),
+            node("sym:s2", "Symptom", "Connection loss intermittent"),
+            node("cau:c", "Cause", "maxTsdr too low"),
+            node("res:r", "Resolution", "Increase maxTsdr"),
             node("sec:1", "Section", "doc#1"),
         ];
         let edges = vec![
@@ -447,9 +447,9 @@ strict = false
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT_NO_REASONING).unwrap();
         let nodes = vec![
-            node("sym:s", "Symptom", "Потеря связи"),
-            node("cau:c", "Cause", "Малый maxTsdr"),
-            node("res:r", "Resolution", "Поднять maxTsdr"),
+            node("sym:s", "Symptom", "Connection loss"),
+            node("cau:c", "Cause", "maxTsdr too low"),
+            node("res:r", "Resolution", "Increase maxTsdr"),
         ];
         let edges = vec![
             edge("sym:s", "CAUSED_BY", "cau:c"),
@@ -540,13 +540,13 @@ strict = false
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![
-            node("sym:s", "Symptom", "Потеря связи"),
+            node("sym:s", "Symptom", "Connection loss"),
             node(
                 "sym:s2",
                 "Symptom",
-                "Потеря связи периодическая повторяющаяся",
+                "Connection loss intermittent recurring",
             ),
-            node("res:r", "Resolution", "Поднять maxTsdr"),
+            node("res:r", "Resolution", "Increase maxTsdr"),
             node("sec:1", "Section", "doc#1"),
         ];
         let edges = vec![
@@ -560,10 +560,10 @@ strict = false
         opts.apply_merges = true;
         let rep = generalize(&g, &opts).unwrap();
         assert_eq!(rep.merged_nodes, 1, "one dup symptom collapsed");
-        // canonical = shorter label "Потеря связи" (sym:s); the dup is gone, its alias folded
+        // canonical = shorter label "Connection loss" (sym:s); the dup is gone, its alias folded
         assert!(g.get_node("sym:s2").unwrap().is_none());
         let canon = g.get_node("sym:s").unwrap().unwrap();
-        assert!(canon.aliases.iter().any(|a| a.contains("повторяющаяся")));
+        assert!(canon.aliases.iter().any(|a| a.contains("recurring")));
         // the dup's RESOLVED_BY edge now hangs off the canonical
         assert!(g
             .outgoing("sym:s")

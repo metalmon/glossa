@@ -15,7 +15,7 @@
       "type": "string"
     },
     "source_path": {
-      "description": "GOST document source_path (which document's constraints to load)",
+      "description": "Source document source_path (which document's constraints to load)",
       "type": "string"
     }
   },

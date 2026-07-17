@@ -22,7 +22,7 @@ Deploy a domain overlay at:
 
 Reference implementations:
 - Technical-support knowledge base: [`eval/ontology-support.toml`](../eval/ontology-support.toml).
-- Constraint/CSP validation (GOST, ISO, regulatory): [`eval/ontology-constraint.toml`](../eval/ontology-constraint.toml).
+- Constraint/CSP validation (regulatory and standards documents): [`eval/ontology-constraint.toml`](../eval/ontology-constraint.toml).
 
 ### Entity types (support example)
 
@@ -93,10 +93,19 @@ kb graph stats ./my-corpus
 kb graph glossary "connection loss" ./my-corpus
 kb graph near sym:abc123 ./my-corpus
 kb graph ls -t Symptom ./my-corpus
-kb graph node sym:abc123 ./my-corpus
+kb graph node sym:abc123 ./my-corpus                  # one node: type, label, provenance, outgoing edges
+kb graph path sym:abc123 res:def456 ./my-corpus       # bounded path between two node ids
 ```
 
 MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
+
+### 5. Export, import, prune
+
+```bash
+kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml)
+kb graph import graph.json ./my-corpus     # replace the semantic layer from a graph file (file = source of truth)
+kb graph prune ./my-corpus -t Symptom      # delete all nodes of a type (and edges touching them)
+```
 
 ## Constraint workflow (feature-gated)
 

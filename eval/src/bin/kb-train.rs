@@ -63,7 +63,7 @@ enum Cmd {
         function: String,
         #[arg(long)]
         run: Option<String>,
-        #[arg(long, default_value = "kb-val-gost")]
+        #[arg(long, default_value = "kb-val")]
         val_dir: PathBuf,
         #[arg(long)]
         clickhouse: Option<String>,
@@ -83,11 +83,11 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
-    /// Bootstrap constraint GEPA materialize.jsonl from kb-val-gost gold tables.
+    /// Bootstrap constraint GEPA materialize.jsonl from local gold tables.
     SyntheticConstraint {
-        #[arg(long, default_value = "kb-val-gost")]
+        #[arg(long, default_value = "kb-val")]
         val_dir: PathBuf,
-        #[arg(long, default_value = "gost_r_57978-2017.pdf")]
+        #[arg(long, default_value = "doc.pdf")]
         doc: String,
         #[arg(long, default_value = "eval/fixtures/constraint-research-gold.json")]
         research_gold: PathBuf,
@@ -176,7 +176,7 @@ enum Cmd {
             default_value = "gepa-constraint-out/constraint_materialize.prompt.txt"
         )]
         out: PathBuf,
-        #[arg(long, default_value = "eval/sops/gost-constraints")]
+        #[arg(long, default_value = "eval/sops/example")]
         sop_dir: PathBuf,
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
@@ -223,10 +223,81 @@ enum Cmd {
         #[arg(long, default_value_t = 0.10)]
         w_validate: f64,
     },
+    /// Splice GEPA-optimized prompt slices into SOP.md between `{# GEPA:<TAG>_START/_END #}` anchors.
+    ApplySopSlices {
+        /// SOP pack directory containing SOP.md.
+        #[arg(long, default_value = "eval/sops/example")]
+        sop_dir: PathBuf,
+        /// Directory with `constraint_<tag>.prompt.txt` slice files.
+        #[arg(long, default_value = "gepa-constraint-out")]
+        slices: PathBuf,
+    },
+}
+
+/// Replace each anchored SOP.md region with the matching slice file, keeping the anchors.
+/// Anchors present in the SOP but without a slice file are skipped with a note; at least
+/// one region must be spliced. The previous SOP.md is kept as SOP.md.bak.
+fn apply_sop_slices(sop_dir: &Path, slices: &Path) -> Result<()> {
+    let sop_md = sop_dir.join("SOP.md");
+    let text =
+        std::fs::read_to_string(&sop_md).with_context(|| format!("read {}", sop_md.display()))?;
+    let mut tags: Vec<String> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("{# GEPA:") {
+        let after = &rest[i + "{# GEPA:".len()..];
+        match after.find("_START #}") {
+            Some(j) if after[..j].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                if !tags.contains(&after[..j].to_string()) {
+                    tags.push(after[..j].to_string());
+                }
+                rest = &after[j..];
+            }
+            _ => rest = after,
+        }
+    }
+    anyhow::ensure!(
+        !tags.is_empty(),
+        "no {{# GEPA:<TAG>_START #}} anchors in {}",
+        sop_md.display()
+    );
+    let mut out = text.clone();
+    let mut applied = 0usize;
+    for tag in &tags {
+        let slice = slices.join(format!("constraint_{}.prompt.txt", tag.to_lowercase()));
+        if !slice.exists() {
+            eprintln!("skip {tag}: no {}", slice.display());
+            continue;
+        }
+        let body =
+            std::fs::read_to_string(&slice).with_context(|| format!("read {}", slice.display()))?;
+        let start = format!("{{# GEPA:{tag}_START #}}");
+        let end = format!("{{# GEPA:{tag}_END #}}");
+        let s = out.find(&start).with_context(|| format!("anchor {start} missing"))?;
+        let e = out.find(&end).with_context(|| format!("anchor {end} missing"))?;
+        anyhow::ensure!(e > s, "anchor {end} precedes {start}");
+        out.replace_range(s + start.len()..e, &format!("\n{}\n", body.trim()));
+        applied += 1;
+    }
+    anyhow::ensure!(
+        applied > 0,
+        "no slice files in {} matched anchors ({})",
+        slices.display(),
+        tags.join(", ")
+    );
+    let bak = sop_md.with_extension("md.bak");
+    std::fs::write(&bak, &text).with_context(|| format!("write {}", bak.display()))?;
+    std::fs::write(&sop_md, &out).with_context(|| format!("write {}", sop_md.display()))?;
+    println!(
+        "applied {applied} GEPA slice(s) to {} (backup {})",
+        sop_md.display(),
+        bak.display()
+    );
+    Ok(())
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::ApplySopSlices { sop_dir, slices } => apply_sop_slices(&sop_dir, &slices),
         Cmd::Enrich {
             train,
             work,
@@ -316,8 +387,15 @@ fn main() -> Result<()> {
                 kb_eval::constraint_synthetic::validate_examples_from_materialize(&examples);
             let validate_path = out.join("validate.jsonl");
             kb_eval::constraint_synthetic::write_validate_jsonl(&validate_path, &validate)?;
-            let discover =
-                kb_eval::constraint_synthetic::load_research_grep_examples(&research_gold)?;
+            let discover = if research_gold.exists() {
+                kb_eval::constraint_synthetic::load_research_grep_examples(&research_gold)?
+            } else {
+                eprintln!(
+                    "research gold fixture {} not found (local-only asset) — writing empty discover.jsonl",
+                    research_gold.display()
+                );
+                Vec::new()
+            };
             let discover_path = out.join("discover.jsonl");
             kb_eval::constraint_synthetic::write_discover_jsonl(&discover_path, &discover)?;
             println!(

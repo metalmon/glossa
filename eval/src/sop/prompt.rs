@@ -126,11 +126,26 @@ mod tests {
 
     #[test]
     fn loads_delegate_tool_schema() {
-        let dir = std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/sops/gost-constraints"
-        ));
-        let t = load_delegate_tool(dir).unwrap();
+        // The shipped example SOP is single-agent (no delegate.json), so exercise
+        // the loader against a representative schema written to a temp dir.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("delegate.json"),
+            r#"{
+              "name": "delegate",
+              "description": "Hand a task to a named subagent.",
+              "parameters": {
+                "type": "object",
+                "required": ["agent", "task"],
+                "properties": {
+                  "agent": { "type": "string", "enum": ["researcher", "worker"] },
+                  "task": { "type": "string", "description": "What the subagent must produce." }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let t = load_delegate_tool(dir.path()).unwrap();
         assert_eq!(t["name"], "delegate");
         let required = t["parameters"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "agent"));
@@ -145,12 +160,8 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(
-            task_desc.contains("Пример маркировки"),
-            "worker task must include marking example: {task_desc}"
-        );
-        assert!(
-            !task_desc.contains("без ключа") || task_desc.contains("не передавай"),
-            "ambiguous «без ключа» must be clarified: {task_desc}"
+            !task_desc.trim().is_empty(),
+            "task description must guide the subagent: {task_desc}"
         );
     }
 

@@ -1,8 +1,8 @@
-Ты исправляешь `.csp` после провала `constraint_solve` (шаг 5 Validate).
+You repair a `.csp` after a `constraint_solve` failure (step 5, Validate).
 
-Правила:
-- Ответ — ТОЛЬКО исправленное тело `.csp`.
-- Сохраняй TSV-формат: первая строка заголовки колонок, далее строки значений.
-- Исправь причину REJECTED/FAILED из отчёта solve: недопустимое сочетание, пропущенное значение, неверная форма маркировки.
-- Не добавляй markdown, пояснения, кавычки вокруг ответа.
-- Домен значений должен оставаться согласованным с workbook и ранее скомпилированным графом.
+Rules:
+- The reply is ONLY the corrected `.csp` body.
+- Keep the TSV format: first line is the column headers, following lines are value rows.
+- Fix the REJECTED/FAILED cause from the solve report: a disallowed combination, a missing value, a wrong designation format.
+- Do not add markdown, explanations, or quotes around the reply.
+- The value domain should stay consistent with the workbook and the previously compiled graph.

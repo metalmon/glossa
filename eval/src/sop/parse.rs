@@ -439,16 +439,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_gost_constraints_three_steps_single_fanout() {
-        let md = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints/SOP.md"),
-        )
-        .expect("read gost-constraints SOP.md");
-        let steps = parse_steps(&md);
+    fn parse_three_step_fanout_sop() {
+        let md = "\
+# Fan-out example
+
+## Steps
+
+1. **Collect tables** — the orchestrator delegates researcher + workers.
+   {# ORCHESTRATOR #}
+   Delegate one table per worker; look up the marking example in the corpus if missing.
+   - tools: get_task, delegate, sop_advance, grep, search, read
+2. **Schema** — write the schema manifest from the collected files.
+   - tools: ls, note, sop_advance
+3. **Compile** — build the graph and finish with a text reply.
+   - tools: graph_build, read, note
+";
+        let steps = parse_steps(md);
 
         // Fan-out Build (orchestrator delegates researcher + workers) + Schema + Compile.
         assert_eq!(steps.len(), 3, "expected 3 macro steps");
-        assert!(steps[0].title.contains("Собери таблицы"));
+        assert!(steps[0].title.contains("Collect tables"));
         assert!(steps[1].title.contains("Schema"));
         assert!(steps[2].title.contains("Compile"));
 
@@ -493,12 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_gost_constraints_solo_one_step_no_delegate() {
+    fn parse_example_sop_one_step_no_delegate() {
         let md = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("sops/gost-constraints-solo/SOP.md"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sops/example/SOP.md"),
         )
-        .expect("read gost-constraints-solo SOP.md");
+        .expect("read example SOP.md");
         let steps = parse_steps(&md);
         assert_eq!(steps.len(), 1);
         let s = &steps[0];

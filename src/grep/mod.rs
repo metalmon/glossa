@@ -705,9 +705,9 @@ mod tests {
 
     #[test]
     fn grep_smart_case_default_folds_lowercase_only() {
-        let (_d, idx) = idx_with(&[("d.pdf", "p.1", "pdf", "Контроллер АБАК подключён")]);
-        assert_eq!(grep(&idx, "абак", &GrepOpts::default()).unwrap().len(), 1);
-        assert_eq!(grep(&idx, "Абак", &GrepOpts::default()).unwrap().len(), 0);
+        let (_d, idx) = idx_with(&[("d.pdf", "p.1", "pdf", "Контроллер МОДУЛЬ подключён")]);
+        assert_eq!(grep(&idx, "модуль", &GrepOpts::default()).unwrap().len(), 1);
+        assert_eq!(grep(&idx, "Модуль", &GrepOpts::default()).unwrap().len(), 0);
     }
 
     #[test]
@@ -970,14 +970,14 @@ mod tests {
     #[test]
     fn grep_path_scopes_to_one_document() {
         let (_d, idx) = idx_with(&[
-            ("a.pdf", "p.1", "pdf", "параметр Зернистость F24"),
-            ("b.pdf", "p.1", "pdf", "параметр Зернистость F60"),
+            ("a.pdf", "p.1", "pdf", "параметр Скорость V10"),
+            ("b.pdf", "p.1", "pdf", "параметр Скорость V20"),
         ]);
         let opts = GrepOpts {
             glob: Some(path_to_glob("a.pdf#1")),
             ..Default::default()
         };
-        let h = grep(&idx, "Зернистость", &opts).unwrap();
+        let h = grep(&idx, "Скорость", &opts).unwrap();
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].path, "a.pdf");
     }
@@ -989,7 +989,7 @@ mod tests {
             "d.pdf",
             "p.3",
             "pdf",
-            "Пример  условного   обозначения круга",
+            "Пример  условного   обозначения изделия",
         )]);
         let h = grep(&idx, "Пример условного обозначения", &GrepOpts::default()).unwrap();
         assert_eq!(h.len(), 1, "single-spaced pattern must match double spaces");

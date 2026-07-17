@@ -155,7 +155,7 @@ fn hit_threshold(cfg: &GepaConstraintConfig) -> f64 {
 
 fn materialize_user_message(ex: &MaterializeExample) -> String {
     format!(
-        "Документ: {}\nПараметр: {}\n\n=== WORKBOOK ===\n{}\n\n=== CSP ===\n",
+        "Document: {}\nParameter: {}\n\n=== WORKBOOK ===\n{}\n\n=== CSP ===\n",
         ex.doc, ex.parameter, ex.workbook_excerpt
     )
 }
@@ -200,21 +200,21 @@ fn score_materialize(
 
 fn compile_user_message(ex: &CompileFixExample) -> String {
     format!(
-        "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== COMPILER ERROR ===\n{}\n\n=== FIXED CSP ===\n",
+        "Document: {}\nParameter: {}\n\n=== BROKEN CSP ===\n{}\n\n=== COMPILER ERROR ===\n{}\n\n=== FIXED CSP ===\n",
         ex.doc, ex.parameter, ex.broken_csp, ex.compiler_error
     )
 }
 
 fn coverage_user_message(ex: &CoverageExample) -> String {
     format!(
-        "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== GRAPH STATS REPORT ===\n{}\n\n=== FIXED CSP ===\n",
+        "Document: {}\nParameter: {}\n\n=== BROKEN CSP ===\n{}\n\n=== GRAPH STATS REPORT ===\n{}\n\n=== FIXED CSP ===\n",
         ex.doc, ex.parameter, ex.broken_csp, ex.graph_stats_report
     )
 }
 
 fn validate_user_message(ex: &ValidateExample) -> String {
     format!(
-        "Документ: {}\nПараметр: {}\n\n=== BROKEN CSP ===\n{}\n\n=== SOLVE ERROR ===\n{}\n\n=== FIXED CSP ===\n",
+        "Document: {}\nParameter: {}\n\n=== BROKEN CSP ===\n{}\n\n=== SOLVE ERROR ===\n{}\n\n=== FIXED CSP ===\n",
         ex.doc, ex.parameter, ex.broken_csp, ex.solve_error
     )
 }
@@ -1779,8 +1779,8 @@ mod tests {
             parent_acc: 0.25,
             traces: vec![MaterializeTrace {
                 ok: false,
-                ex: materialize_example("e1", "Обозначение типа"),
-                model_csp: "Обозначение типа\n41\n".to_string(),
+                ex: materialize_example("e1", "Type designation"),
+                model_csp: "Type designation\n41\n".to_string(),
                 recall: 0.5,
             }],
         };
@@ -1789,7 +1789,7 @@ mod tests {
 
         assert!(msg.contains("PARENT SCORES ON MINIBATCH"));
         assert!(msg.contains("materialize=0.250"));
-        assert!(msg.contains("Обозначение типа"));
+        assert!(msg.contains("Type designation"));
         assert!(msg.contains("Gold values: 41, 42"));
         assert!(msg.contains("Recall: 0.500"));
         assert!(msg.contains("(FAIL)"));

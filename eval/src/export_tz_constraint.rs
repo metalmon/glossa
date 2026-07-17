@@ -583,27 +583,27 @@ mod tests {
     fn extracts_constraint_examples_from_transcript() {
         let messages: Vec<Value> = serde_json::from_str(
             r#"[
-              {"role":"assistant","content":[{"type":"tool_call","id":"g1","name":"grep","arguments":{"pattern":"Марка шлифматериала","context":20}}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"g1","name":"grep","arguments":{"pattern":"Марка материала","context":20}}]},
               {"role":"user","content":[{"type":"tool_result","id":"g1","name":"grep","result":"doc.pdf:#7: 14А, 15А"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n1","name":"note","arguments":{"doc":"gost_r_57978-2017.pdf","file":"workbook.md","content":"Марка шлифматериала: 14А, 15А"}}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n1","name":"note","arguments":{"doc":"standard-a.pdf","file":"workbook.md","content":"Марка материала: 14А, 15А"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n1","name":"note","result":"wrote workbook.md"}]},
               {"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":"doc.pdf","n":7}}]},
-              {"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"Марка шлифматериала"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n2","name":"note","arguments":{"doc":"gost_r_57978-2017.pdf","file":"Марка_шлифматериала.csp","content":"Марка шлифматериала\n14А\n15А\n"}}]},
+              {"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"Марка материала"}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n2","name":"note","arguments":{"doc":"standard-a.pdf","file":"Марка_материала.csp","content":"Марка материала\n14А\n15А\n"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n2","name":"note","result":"parsed 1 column, 2 rows"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"b1","name":"graph_build","arguments":{"doc":"gost_r_57978-2017.pdf"}}]},
-              {"role":"user","content":[{"type":"tool_result","id":"b1","name":"graph_build","result":"graph_build FAILED: Марка_шлифматериала.csp line 3"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n3","name":"note","arguments":{"doc":"gost_r_57978-2017.pdf","file":"Марка_шлифматериала.csp","content":"Марка шлифматериала\n14А\n15А\n"}}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"b1","name":"graph_build","arguments":{"doc":"standard-a.pdf"}}]},
+              {"role":"user","content":[{"type":"tool_result","id":"b1","name":"graph_build","result":"graph_build FAILED: Марка_материала.csp line 3"}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n3","name":"note","arguments":{"doc":"standard-a.pdf","file":"Марка_материала.csp","content":"Марка материала\n14А\n15А\n"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n3","name":"note","result":"parsed 1 column, 2 rows"}]}
             ]"#,
         )
         .unwrap();
         let mut gold = HashMap::new();
         gold.insert(
-            "Марка шлифматериала".to_string(),
+            "Марка материала".to_string(),
             GoldParam {
-                parameter: "Марка шлифматериала".to_string(),
-                gold_csp: "Марка шлифматериала\n14А\n15А\n".to_string(),
+                parameter: "Марка материала".to_string(),
+                gold_csp: "Марка материала\n14А\n15А\n".to_string(),
                 gold_values: vec!["14А".into(), "15А".into()],
             },
         );
@@ -611,17 +611,17 @@ mod tests {
         let rows = examples_from_messages("ep1", &messages, &gold);
 
         assert_eq!(rows.materialize.len(), 1);
-        assert_eq!(rows.materialize[0].doc, "gost_r_57978-2017.pdf");
-        assert_eq!(rows.materialize[0].parameter, "Марка шлифматериала");
+        assert_eq!(rows.materialize[0].doc, "standard-a.pdf");
+        assert_eq!(rows.materialize[0].parameter, "Марка материала");
         assert_eq!(
             rows.materialize[0].workbook_excerpt,
-            "Марка шлифматериала: 14А, 15А"
+            "Марка материала: 14А, 15А"
         );
         assert_eq!(rows.materialize[0].gold_values, vec!["14А", "15А"]);
         assert!(!rows.materialize[0].synthetic);
 
         assert_eq!(rows.research.len(), 1);
-        assert_eq!(rows.research[0].grep_pattern, "Марка шлифматериала");
+        assert_eq!(rows.research[0].grep_pattern, "Марка материала");
         assert!(rows.research[0].hit);
         assert_eq!(rows.research_reads.len(), 1);
         assert_eq!(rows.research_reads[0].prefill_source, "read");
@@ -630,15 +630,15 @@ mod tests {
         assert_eq!(rows.compile_fix.len(), 1);
         assert_eq!(
             rows.compile_fix[0].broken_csp,
-            "Марка шлифматериала\n14А\n15А\n"
+            "Марка материала\n14А\n15А\n"
         );
         assert_eq!(
             rows.compile_fix[0].compiler_error,
-            "graph_build FAILED: Марка_шлифматериала.csp line 3"
+            "graph_build FAILED: Марка_материала.csp line 3"
         );
         assert_eq!(
             rows.compile_fix[0].gold_csp,
-            "Марка шлифматериала\n14А\n15А\n"
+            "Марка материала\n14А\n15А\n"
         );
     }
 }

@@ -71,10 +71,12 @@ tools: (build-kb "force")
     {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir {{tzcfg}}
     @echo "regenerated — run 'just gw-restart' to load the new schemas"
 
-# TZ gateway runs from e:/glossa (docker compose cwd); sync generated tool schemas there.
+# TZ gateway runs from the primary checkout (docker compose cwd); sync generated tool schemas there.
+gw_root := env_var_or_default("GLOSSA_GW_ROOT", "../glossa")
+
 tools-glossa: (build-kb "force")
-    {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir e:/glossa/eval/tensorzero/config
-    @echo "regenerated e:/glossa/eval/tensorzero/config — run 'just gw-restart' from e:/glossa/eval/tensorzero"
+    {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir {{gw_root}}/eval/tensorzero/config
+    @echo "regenerated {{gw_root}}/eval/tensorzero/config — run 'just gw-restart' from {{gw_root}}/eval/tensorzero"
 
 # ── enrich → export-tz → GEPA (against {{work}}) ───────────────────────────
 enrich limit="0": build-train
@@ -151,6 +153,7 @@ gepa-reset:
     @echo "gepa-reset: mutations queued — wait ~5s then: just gepa-metrics"
 
 constraint_out := "gepa-constraint-out"
+sop_dir        := "eval/sops/example"              # SOP pack driving the constraint agent
 
 constraint-synthetic: build-train
     {{kb_train_bin}} synthetic-constraint --out {{constraint_out}}
@@ -179,17 +182,8 @@ gepa-constraint-reset:
     @just ch "ALTER TABLE tensorzero.FloatMetricFeedback DELETE WHERE metric_name IN ('gepa_c_baseline_discover','gepa_c_baseline_materialize','gepa_c_baseline_compile','gepa_c_baseline_coverage','gepa_c_baseline_validate','gepa_c_baseline_combined','gepa_c_iter_materialize','gepa_c_iter_combined','gepa_c_combined_acc','gepa_c_final_discover','gepa_c_final_materialize','gepa_c_final_compile','gepa_c_final_coverage','gepa_c_final_validate','gepa_c_final_combined','gepa_c_candidates')"
     @echo "gepa-constraint-reset: mutations queued — wait ~5s then: just gepa-constraint-metrics"
 
-gepa-constraint-apply:
-    @test -f {{constraint_out}}/constraint_discover.prompt.txt || (echo "missing discover prompt" && exit 1)
-    @test -f {{constraint_out}}/constraint_materialize.prompt.txt || (echo "missing materialize prompt" && exit 1)
-    @test -f {{constraint_out}}/constraint_compile.prompt.txt || (echo "missing compile prompt" && exit 1)
-    @test -f {{constraint_out}}/constraint_coverage.prompt.txt || (echo "missing coverage prompt" && exit 1)
-    @test -f {{constraint_out}}/constraint_validate.prompt.txt || (echo "missing validate prompt" && exit 1)
-    {{preface}} \
-    SRC="eval/sops/gost-constraints/SOP.md"; \
-    cp "$SRC" "$SRC.bak"; \
-    python3 eval/scripts/apply_gepa_constraint_slices.py
-    @echo "backup: eval/sops/gost-constraints/SOP.md.bak"
+gepa-constraint-apply: build-train
+    {{preface}}{{kb_train_bin}} apply-sop-slices --sop-dir {{sop_dir}} --slices {{constraint_out}}
 
 # ── eval ────────────────────────────────────────────────────────────────────
 eval dataset func="answer_hotpot" corpus="eval-corpus" run="": build-eval
@@ -240,16 +234,17 @@ constraint-dump episode="" run="" latest="false" out="eval/results/episode-dump.
     echo "wrote {{out}}"
 
 # Full 5-step SOP constraint eval (single episode, continuous conversation).
-# Requires: gateway up (just up), kb-test corpus indexed.
-constraint-eval variant="" run="sop5-baseline" doc="gost_r_57978-2017.docx": build-eval
+# Requires: gateway up (just up), the `work` corpus indexed.
+# Override the target document: `just constraint-eval doc=spec_2019.docx`
+constraint-eval variant="" run="sop5-baseline" doc="spec_2019.docx": build-eval
     {{preface}}cargo build --release -p kb-eval --bin kb-eval-constraint --locked
     {{preface}}run_tag='{{run}}'; run_tag="${run_tag#run=}"; \
     variant_arg='{{variant}}'; variant_arg="${variant_arg#variant=}"; \
     extra=''; [[ -n "$variant_arg" ]] && extra=" --variant $variant_arg"; \
     {{kb_eval_constraint_bin}} \
-      --kb kb-test \
+      --kb {{work}} \
       --doc {{doc}} \
-      --sop-dir eval/sops/gost-constraints \
+      --sop-dir {{sop_dir}} \
       --tag run=$run_tag \
       $extra
 

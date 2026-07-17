@@ -5,7 +5,7 @@
 
 .EXAMPLE
   .\scripts\start-mcp-http.ps1
-  .\scripts\start-mcp-http.ps1 -KbRoot E:\glossa-constraint\kb-gost-docs -Bind 127.0.0.1:8080 -Profile editor
+  .\scripts\start-mcp-http.ps1 -KbRoot C:\path\to\my-corpus -Bind 127.0.0.1:8080 -Profile editor
 #>
 [CmdletBinding()]
 param(
@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $KbRoot) {
-    $KbRoot = Join-Path $repoRoot "kb-gost-docs"
+    $KbRoot = Join-Path $repoRoot "kb-docs"
 }
 $KbRoot = (Resolve-Path -LiteralPath $KbRoot).Path
 

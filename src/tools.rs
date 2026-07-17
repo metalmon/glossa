@@ -879,7 +879,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("АБАК.pdf"),
+            doc_path: PathBuf::from("МОДУЛЬ.pdf"),
             location: "p.7".into(),
             file_type: "pdf".into(),
             text: "параметр maxTsdr равен 3000".into(),
@@ -1078,7 +1078,7 @@ mod tests {
             node("cau:tsdr", "Cause", "Малый maxTsdr"),
             node("res:set", "Resolution", "Изменить maxTsdr в 3000"),
             node("tsk:upd", "Task", "Обновление ПО модулей"),
-            node("tsk:prog", "Task", "Программирование АБАК"),
+            node("tsk:prog", "Task", "Программирование контроллера"),
         ] {
             g.put_node(&n).unwrap();
         }
@@ -1152,7 +1152,7 @@ mod tests {
         assert!(
             out.contains("SIMILAR")
                 && out.contains("Обновление ПО модулей")
-                && out.contains("Программирование АБАК"),
+                && out.contains("Программирование контроллера"),
             "{out}"
         );
         // it must NOT walk the causal spine — that is glossary's job
@@ -1247,7 +1247,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert!(
-            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование АБАК")),
+            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование контроллера")),
             "SIMILAR nodes must not repeat in COMMUNITY: {out}",
         );
     }
@@ -1377,12 +1377,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 
     #[test]
     fn read_is_omnivorous_over_reasoning_node_ids() {
-        let (_d, i) = idx(); // АБАК.pdf #p.7 = "параметр maxTsdr равен 3000"
+        let (_d, i) = idx(); // МОДУЛЬ.pdf #p.7 = "параметр maxTsdr равен 3000"
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
         g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000"))
             .unwrap();
-        g.put_edge(&edge("res:fix", "MENTIONS", "АБАК.pdf#p.7"))
+        g.put_edge(&edge("res:fix", "MENTIONS", "МОДУЛЬ.pdf#p.7"))
             .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
@@ -1392,7 +1392,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "node header: {out}"
         );
         assert!(
-            out.contains("── MENTIONS · АБАК.pdf #7 ──"),
+            out.contains("── MENTIONS · МОДУЛЬ.pdf #7 ──"),
             "attributed evidence header: {out}"
         );
         assert!(
@@ -1400,7 +1400,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "evidence body: {out}"
         );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(_d.path(), &i, Some(&g), "АБАК.pdf", 7, false, &t).text;
+        let doc = read(_d.path(), &i, Some(&g), "МОДУЛЬ.pdf", 7, false, &t).text;
         assert!(
             doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
             "doc read unchanged: {doc}"
@@ -1502,7 +1502,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("БД ДПТК\\doc.pdf"),
+            doc_path: PathBuf::from("Архив БД\\doc.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "body text".into(),
@@ -1513,7 +1513,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             d.path(),
             &i,
             None,
-            "kb-manual\\БД ДПТК\\doc.pdf",
+            "kb-manual\\Архив БД\\doc.pdf",
             1,
             false,
             &t,
@@ -1530,7 +1530,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("БД ДПТК\\Методика повerки АбакПЛК 2025.pdf"),
+            doc_path: PathBuf::from("Архив БД\\Методика поверки МодульПЛК 2025.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
@@ -1541,7 +1541,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             d.path(),
             &i,
             None,
-            "kb-manual\\АбакПЛК 2025.pdf",
+            "kb-manual\\МодульПЛК 2025.pdf",
             1,
             false,
             &t,
@@ -1616,7 +1616,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
             "(no matches)"
         );
-        assert!(glob(&i, "*АБАК*", &t).contains("АБАК.pdf  (7 chunks)"));
+        assert!(glob(&i, "*МОДУЛЬ*", &t).contains("МОДУЛЬ.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 

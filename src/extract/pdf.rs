@@ -204,10 +204,10 @@ mod tests {
         assert!(chunks[2].text.contains("page three"));
     }
 
-    /// Regression: real GOST PDFs have physically blank separator pages (p.4).
+    /// Regression: real-world standards PDFs have physically blank separator pages (p.4).
     #[test]
-    fn gost_57978_extract_includes_blank_page_four() {
-        let path = std::path::Path::new("kb-gost/gost_r_57978-2017.pdf");
+    fn local_sample_extract_includes_blank_page_four() {
+        let path = std::path::Path::new("kb-local/sample_spec.pdf");
         if !path.exists() {
             return;
         }
@@ -232,16 +232,16 @@ mod tests {
     }
 
     #[test]
-    fn gost_57978_reindex_puts_page_four_in_index() {
+    fn local_sample_reindex_puts_page_four_in_index() {
         use crate::index::store::{index_dir, DocIndex};
-        let kb = std::path::Path::new("kb-gost");
-        let pdf = kb.join("gost_r_57978-2017.pdf");
+        let kb = std::path::Path::new("kb-local");
+        let pdf = kb.join("sample_spec.pdf");
         if !pdf.exists() {
             return;
         }
         index_dir(kb, true).unwrap();
         let idx = DocIndex::open_or_create(kb).unwrap();
-        let hit = idx.read_chunk_by_ord("gost_r_57978-2017.pdf", 4).unwrap();
+        let hit = idx.read_chunk_by_ord("sample_spec.pdf", 4).unwrap();
         assert!(hit.is_some(), "ord #4 must exist in index after reindex");
         assert!(hit.unwrap().body.trim().is_empty());
     }

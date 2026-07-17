@@ -148,7 +148,7 @@ If emitted graph violates strict ontology validation, the whole compile fails wi
 
 **Dependent parameters** (domain varies with a trigger): keep **multiple columns on the same rows** in one `.csp` (or shard files with **identical** headers). Conditional detection needs co-occurring values in one row.
 
-Unit columns and metadata (e.g. `мм`) are not parameters unless listed in `[tables.parameter_columns]`; prefer omitting them from headers or add to `[tables.skip_columns]`.
+Unit columns and metadata (e.g. `mm`) are not parameters unless listed in `[tables.parameter_columns]`; prefer omitting them from headers or add to `[tables.skip_columns]`.
 
 ---
 
@@ -162,7 +162,7 @@ kb graph build <CORPUS> \
 
 Default `--tables-dir` = the document's notes mirror (`<CORPUS>/.glossa/notes/<document>/`, full indexed path with extension); the compiler reads every `*.csp` in it.
 
-See [agent-workspace-contract.md](agent-workspace-contract.md) for notebook tools (`note`, `ls`, `cat`, `sed`, `del`).
+See [agent-workspace-contract.md](agent-workspace-contract.md) for notebook tools (`note`, `ls`, `del`; note content is read with `read`).
 
 Post-step in the constraint eval harness runs the same function after a phase-A episode.
 

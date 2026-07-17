@@ -724,7 +724,7 @@ impl TensorZeroBackend {
         let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
         let prompt = format!(
             "You grade a candidate answer against a reference answer for a technical support question \
-             (industrial automation, АБАК PLC).\nQuestion: {question}\nReference (correct) answer: {gold}\n\
+             (industrial automation, PLC documentation).\nQuestion: {question}\nReference (correct) answer: {gold}\n\
              Candidate answer: {answer}\nHow correct is the candidate versus the reference? Reply with ONLY \
              a number from 0.0 (wrong/contradictory) to 1.0 (fully correct/equivalent); partial credit \
              allowed. Number only."
@@ -1309,7 +1309,7 @@ mod tests {
             *r += 1;
             let block = match i {
                 0 | 1 | 3 => {
-                    json!({ "type": "tool_call", "id": format!("c{i}"), "name": "glossary", "arguments": { "concept": "насос" } })
+                    json!({ "type": "tool_call", "id": format!("c{i}"), "name": "glossary", "arguments": { "concept": "pump" } })
                 }
                 2 => {
                     json!({ "type": "tool_call", "id": "u", "name": "graph_upsert", "arguments": {} })

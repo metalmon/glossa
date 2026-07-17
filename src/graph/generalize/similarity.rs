@@ -192,6 +192,8 @@ mod tests {
 
     #[test]
     fn label_jaccard_links_paraphrase_not_unrelated() {
+        // Russian labels are intentional: they exercise the Cyrillic stemming path of the
+        // shared morphology pipeline (word-order/inflection-tolerant term sets).
         let labels = vec![
             ("s1".to_string(), "Потеря связи Modbus".to_string()),
             (
@@ -223,6 +225,8 @@ mod tests {
 
     #[test]
     fn label_bm25_links_paraphrase_not_unrelated() {
+        // Russian labels are intentional: they exercise the multilang (Cyrillic) analyzer
+        // in the in-RAM BM25 index.
         let labels = vec![
             ("s1".to_string(), "Потеря связи Modbus".to_string()),
             (

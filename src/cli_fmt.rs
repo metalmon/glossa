@@ -408,8 +408,8 @@ mod tests {
     #[test]
     fn query_terms_keeps_words_of_len_2_plus() {
         assert_eq!(
-            query_terms("АБАК ПЛК"),
-            vec!["АБАК".to_string(), "ПЛК".to_string()]
+            query_terms("МОДУЛЬ ПЛК"),
+            vec!["МОДУЛЬ".to_string(), "ПЛК".to_string()]
         );
         assert!(query_terms("a .").is_empty());
     }

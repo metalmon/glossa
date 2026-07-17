@@ -44,7 +44,7 @@ pub fn scalar_str(v: &serde_json::Value) -> String {
 }
 
 /// Fold the Cyrillic letters that are visual homoglyphs of a Latin letter to
-/// that Latin letter (input already lowercased). Russian technical data mixes
+/// that Latin letter (input already lowercased). Real-world technical data mixes
 /// scripts freely in codes — a grade "14А" typed with Cyrillic А and "14a" typed
 /// with Latin a are the SAME value, but different Unicode. Folding to one script
 /// makes them compare equal. Only the ~12 look-alikes are touched; any other
@@ -217,7 +217,7 @@ pub fn value_subseteq(agent: &str, gold: &str) -> bool {
 }
 
 /// Canonical form of a scalar for comparison. A decimal written with either a
-/// comma (Russian standards: "0,6", "1,0") or a dot collapses to one numeric
+/// comma (comma-decimal locales: "0,6", "1,0") or a dot collapses to one numeric
 /// form, so "1,0" == "1.0" == "1" and "152,4" == "152.4". Non-numeric values
 /// (e.g. "F46", "23-25", "12a") are trimmed, lowercased, have Cyrillic/Latin
 /// homoglyphs folded to one script ("14А" == "14a", "В" == "b"), and dash variants
@@ -382,7 +382,7 @@ pub fn validate(problem: &Problem, assignment: &[(String, serde_json::Value)]) -
                                 .any(|v| parse_range(v).is_some_and(|(a, b)| a <= n && n <= b))
                         });
                         // Pattern membership: regex alias in the Enum set (e.g. `\d+[A]`
-                        // for any electrocorundum grade). Canon on both sides so Cyrillic
+                        // for a whole family of grades). Canon on both sides so Cyrillic
                         // А in a marking matches Latin A in the pattern.
                         let matches_pattern = values.iter().any(|v| enum_alias_matches(v, &s));
                         if !exact && !in_range && !matches_pattern {
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn values_cover_odd_bands_match_wide_gold_range() {
-        // App Б bands vs п. 4.5 wide range — same odd lattice, full hull.
+        // Narrow adjacent bands vs one wide gold range — same odd lattice, full hull.
         let bands = [
             "25-27", "29-31", "33-35", "37-39", "41-43", "45-49",
         ];
@@ -886,9 +886,9 @@ mod tests {
 
     #[test]
     fn validate_enum_range_label_membership_and_containment() {
-        // A parameter whose allowed values are RANGE LABELS (e.g. sound index).
-        let problem = make_problem(vec![("зи", vec![make_enum(&["23-25", "41-43"])])]);
-        let ok = |v: serde_json::Value| validate(&problem, &[make_assignment("зи", v)]).is_empty();
+        // A parameter whose allowed values are RANGE LABELS.
+        let problem = make_problem(vec![("si", vec![make_enum(&["23-25", "41-43"])])]);
+        let ok = |v: serde_json::Value| validate(&problem, &[make_assignment("si", v)]).is_empty();
         assert!(
             ok(serde_json::json!("41—43")),
             "exact label match, dash variant"
@@ -1075,11 +1075,11 @@ mod tests {
         // Grade "14А" (Cyrillic А) and "14a" (Latin a) are the same value.
         assert_eq!(canon_scalar("14А"), canon_scalar("14a"));
         assert_eq!(canon_scalar("14А"), "14a");
-        // Bond codes: "В"(Cyrillic) == "b", "Р"(Cyrillic) folds to "p" while the
+        // Code letters: "В"(Cyrillic) == "b", "Р"(Cyrillic) folds to "p" while the
         // non-homoglyph "д" is left as-is (so only real look-alikes are touched).
         assert_eq!(canon_scalar("В"), "b");
         assert_eq!(canon_scalar("Рд"), "pд");
-        // Grit with Cyrillic М: "М50" == "m50".
+        // Code with Cyrillic М: "М50" == "m50".
         assert_eq!(canon_scalar("М50"), "m50");
         // A Latin-only value is unchanged (only case folds).
         assert_eq!(canon_scalar("BF"), "bf");

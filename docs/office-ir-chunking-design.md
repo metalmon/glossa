@@ -10,7 +10,7 @@ For **all** Office formats (`docx`/`doc`/`xlsx`/`xls`/`pptx`/`ppt`):
 
 1. Parse via `office_oxide` **DocumentIR** (not `to_markdown()` as the primary path).
 2. **Expand merged cells** (repeat cell value horizontally and vertically into a dense grid).
-3. **Chunk at IR level** with universal, format-agnostic rules (no GOST/bold heuristics).
+3. **Chunk at IR level** with universal, format-agnostic rules (no corpus-specific/bold heuristics).
 4. Emit the same `Chunk { doc_path, location, file_type, text }` as today; agent refs stay `path#N`.
 
 Out of scope: PDF pipeline changes; inventing “pages” for docx; render docx→PDF for paging.
@@ -18,7 +18,7 @@ Out of scope: PDF pipeline changes; inventing “pages” for docx; render docx�
 ## Current state
 
 - `OfficeExtractor` calls `Document::to_markdown()` then `chunk_markdown` (ATX headings only).
-- Headingless docs → one chunk → weak MENTIONS / Marka / speed targeting.
+- Headingless docs → one chunk → weak MENTIONS coverage and parameter/value targeting.
 - `office_oxide` has public `Document::to_ir() → DocumentIR` with `Element::{Heading, Paragraph, Table, …}` and table `col_span` / `row_span`.
 - Library does **not** densify merges: IR skips vMerge continue cells; markdown ignores spans. No expand option.
 
@@ -81,7 +81,7 @@ Empty paragraphs are **not** hard splits before the threshold (avoids exploding 
 ### Glue (never split here)
 
 - Do **not** split between a non-empty paragraph/heading and an immediately following `Table` (keeps captions with tables).
-- Do **not** split between a `Table` and an immediately following non-empty paragraph (keeps notes / «Примечание» under the table).
+- Do **not** split between a `Table` and an immediately following non-empty paragraph (keeps note paragraphs, e.g. "Note — …", under the table).
 - Do **not** split inside a `Table` (table is one element after expand).
 - Glue applies to **at most one** paragraph on each side of the table (caption before, note after). Further paragraphs are normal soft/hard split candidates.
 
@@ -125,16 +125,16 @@ Reuse patterns from office_oxide’s markdown rendering where practical, but **o
 | Multi-section IR (two sheet titles) | ≥2 chunks; locations carry titles |
 | Existing office unit tests | Updated for IR path; no regress on markers |
 
-Eval follow-up (manual / existing qwen35 harness, not blocking unit-test merge): docx Marka 0/3→3/3 without losing grain/T/H table values.
+Eval follow-up (manual / existing small-model harness, not blocking unit-test merge): docx target-parameter retrieval 0/3→3/3 without losing dependent table values.
 
 ## 5. Alternatives considered
 
 | Approach | Why not |
 |----------|---------|
 | Size-fallback only on markdown | No merge expand; empty-para weaker than IR elements; captions harder to glue |
-| PDF as universal page unit | Table extraction quality collapses (grain 0/25) |
+| PDF as universal page unit | Table extraction quality collapses (dense-table value recall drops to ~0) |
 | Always split on every empty paragraph | Explodes into tiny chunks from spacing paras |
-| Bold/ГОСТ heading heuristics | Format-specific, brittle |
+| Bold/corpus-specific heading heuristics | Format-specific, brittle |
 
 **Chosen:** IR + merge expand + hard section/heading splits + soft empty-para (post-threshold) + caption glue.
 
@@ -142,6 +142,6 @@ Eval follow-up (manual / existing qwen35 harness, not blocking unit-test merge):
 
 1. Office extractor never calls whole-doc `to_markdown()` for indexing.
 2. Merged cells appear densified in chunk text (H and V repeat).
-3. Headingless multi-thousand-char Office docs produce multiple chunks without GOST-specific rules.
+3. Headingless multi-thousand-char Office docs produce multiple chunks without corpus-specific rules.
 4. Table captions immediately preceding tables, and one note paragraph immediately following, are not stranded across a size split.
 5. Unit tests cover expand + chunk rules; existing fixtures still pass.

@@ -63,7 +63,7 @@ struct ResearchGoldExample {
 }
 
 #[derive(Debug, Deserialize)]
-struct KbValGostFile {
+struct KbValFile {
     tables: Vec<KbValTable>,
 }
 
@@ -74,7 +74,7 @@ struct KbValTable {
 
 pub fn load_gold_param(path: &Path) -> anyhow::Result<(String, Vec<String>)> {
     let text = std::fs::read_to_string(path)?;
-    let v: KbValGostFile = serde_json::from_str(&text)?;
+    let v: KbValFile = serde_json::from_str(&text)?;
     let table = v.tables.first().context("no tables")?;
     let first_row = table.rows.first().context("no rows")?;
     let (key, _) = first_row.iter().next().context("empty row")?;
@@ -296,9 +296,9 @@ mod tests {
         MaterializeExample {
             episode_id: "synthetic-doc-param".to_string(),
             doc: "doc.pdf".to_string(),
-            parameter: "Марка".to_string(),
+            parameter: "Grade".to_string(),
             workbook_excerpt: "workbook".to_string(),
-            gold_csp: "Марка\nA\nB\nC\nD\n".to_string(),
+            gold_csp: "Grade\nA\nB\nC\nD\n".to_string(),
             gold_values: vec!["A".into(), "B".into(), "C".into(), "D".into()],
             synthetic: true,
         }
@@ -306,13 +306,16 @@ mod tests {
 
     #[test]
     fn load_gold_param_from_fixture() {
-        let path = Path::new("kb-val-gost/Тип.json");
-        if !path.exists() {
-            return; // skip if kb-val-gost not present locally
-        }
-        let (param, values) = load_gold_param(path).unwrap();
-        assert_eq!(param, "Обозначение типа");
-        assert!(values.contains(&"41".to_string()) || values.contains(&"42".to_string()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Type.json");
+        std::fs::write(
+            &path,
+            r#"{"tables":[{"rows":[{"Type":"A"},{"Type":"B"}]}]}"#,
+        )
+        .unwrap();
+        let (param, values) = load_gold_param(&path).unwrap();
+        assert_eq!(param, "Type");
+        assert_eq!(values, vec!["A".to_string(), "B".to_string()]);
     }
 
     #[test]
@@ -323,13 +326,13 @@ mod tests {
         let ex = &examples[0];
         assert_eq!(ex.episode_id, "synthetic-doc-param");
         assert_eq!(ex.doc, "doc.pdf");
-        assert_eq!(ex.parameter, "Марка");
-        assert_eq!(ex.broken_csp, "Марка\nA\n");
+        assert_eq!(ex.parameter, "Grade");
+        assert_eq!(ex.broken_csp, "Grade\nA\n");
         assert_eq!(
             ex.compiler_error,
-            "graph_build FAILED: incomplete domain for parameter \"Марка\""
+            "graph_build FAILED: incomplete domain for parameter \"Grade\""
         );
-        assert_eq!(ex.gold_csp, "Марка\nA\nB\nC\nD\n");
+        assert_eq!(ex.gold_csp, "Grade\nA\nB\nC\nD\n");
         assert_eq!(ex.gold_values, vec!["A", "B", "C", "D"]);
         assert!(ex.synthetic);
     }

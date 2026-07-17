@@ -125,7 +125,7 @@ mkdir -p ./my-corpus/.glossa
 cp eval/ontology-support.toml ./my-corpus/.glossa/ontology.toml
 ```
 
-For constraint/CSP validation (GOST, ISO, regulatory), requires `--features constraint`:
+For constraint/CSP validation (regulatory and standards documents), requires `--features constraint`:
 
 ```bash
 cp eval/ontology-constraint.toml ./my-corpus/.glossa/ontology.toml

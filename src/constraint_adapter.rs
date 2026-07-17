@@ -11,7 +11,7 @@ use glossa_constraint::{Constraint, FieldConstraints, Problem};
 #[allow(dead_code)]
 const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_EXPRESSION"];
 
-/// Load a constraint problem from the graph for a given GOST document.
+/// Load a constraint problem from the graph for a given source document.
 ///
 /// 1. Finds all Field nodes with the given source_path.
 /// 2. For each Field, follows CONSTRAINED_BY → constraint nodes.
@@ -22,9 +22,9 @@ const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_EXPRESS
 ///
 /// `source_path`:
 /// - `Some(path)` — only Field nodes citing that document (multi-tenant isolation:
-///   several products/GOSTs share one base, keep them apart). The MCP tool uses this.
+///   several products/standards share one base, keep them apart). The MCP tool uses this.
 /// - `None` — every Field in the graph. A single product's constraints are now
-///   assembled from several standards (the main GOST + the ones it references),
+///   assembled from several standards (the main standard + the ones it references),
 ///   so the eval unions across all source documents.
 pub fn load_problem(
     g: &GraphStore,
@@ -82,7 +82,7 @@ pub fn load_problem(
 /// Re-key an assignment onto the graph's actual Field labels using glossa's
 /// morphology-aware resolver (`GraphStore::resolve`, the same one graph_upsert
 /// uses for edge endpoints). A value keyed by a paraphrase of a parameter name
-/// ("h, высота") still lands on the Field the agent created ("высота" / "Высота Т"),
+/// ("d, глубина") still lands on the Field the agent created ("глубина" / "Глубина паза"),
 /// so a faithful domain isn't silently skipped over a wording difference.
 /// Keys that already match a Field, or resolve to no Field, pass through
 /// unchanged (the latter then surface as NOT CHECKED in the feedback).
@@ -609,18 +609,18 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:x", "Field", "X", "gost.pdf");
-        insert_node(&g, "lit:0", "Literal", "0", "gost.pdf");
-        insert_node(&g, "lit:100", "Literal", "100", "gost.pdf");
-        insert_edge(&g, "fld:x", "HAS_LITERAL", "lit:0", "gost.pdf");
-        insert_edge(&g, "fld:x", "HAS_LITERAL", "lit:100", "gost.pdf");
+        insert_node(&g, "fld:x", "Field", "X", "spec.pdf");
+        insert_node(&g, "lit:0", "Literal", "0", "spec.pdf");
+        insert_node(&g, "lit:100", "Literal", "100", "spec.pdf");
+        insert_edge(&g, "fld:x", "HAS_LITERAL", "lit:0", "spec.pdf");
+        insert_edge(&g, "fld:x", "HAS_LITERAL", "lit:100", "spec.pdf");
         // The model stores constraints via CONSTRAINED_BY + constraint node
-        insert_node(&g, "fld:x-rng", "Range", "X range", "gost.pdf");
-        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "fld:x-rng", "gost.pdf");
-        insert_edge(&g, "fld:x-rng", "HAS_MIN", "lit:0", "gost.pdf");
-        insert_edge(&g, "fld:x-rng", "HAS_MAX", "lit:100", "gost.pdf");
+        insert_node(&g, "fld:x-rng", "Range", "X range", "spec.pdf");
+        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "fld:x-rng", "spec.pdf");
+        insert_edge(&g, "fld:x-rng", "HAS_MIN", "lit:0", "spec.pdf");
+        insert_edge(&g, "fld:x-rng", "HAS_MAX", "lit:100", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
         assert_eq!(problem.fields.len(), 1);
         assert_eq!(problem.fields[0].name, "X");
         assert_eq!(problem.fields[0].constraints.len(), 1);
@@ -639,18 +639,18 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:t", "Field", "Type", "gost.pdf");
+        insert_node(&g, "fld:t", "Field", "Type", "spec.pdf");
         insert_node_aliases(
             &g,
             "fld:t-enum",
             "Enum",
             "Type enum",
             &["A", "B"],
-            "gost.pdf",
+            "spec.pdf",
         );
-        insert_edge(&g, "fld:t", "CONSTRAINED_BY", "fld:t-enum", "gost.pdf");
+        insert_edge(&g, "fld:t", "CONSTRAINED_BY", "fld:t-enum", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
         assert_eq!(problem.fields.len(), 1);
         assert_eq!(
             problem.fields[0].constraints[0],
@@ -661,30 +661,30 @@ params = ["condition_field", "condition_value"]
     }
 
     #[test]
-    fn load_multiple_gosts_isolated() {
+    fn load_multiple_sources_isolated() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        // GOST 1
-        insert_node(&g, "fld:x1", "Field", "X", "gost1.pdf");
-        insert_node(&g, "fld:x1-rng", "Range", "X range", "gost1.pdf");
-        insert_node(&g, "lit:0", "Literal", "0", "gost1.pdf");
-        insert_node(&g, "lit:10", "Literal", "10", "gost1.pdf");
-        insert_edge(&g, "fld:x1", "CONSTRAINED_BY", "fld:x1-rng", "gost1.pdf");
-        insert_edge(&g, "fld:x1-rng", "HAS_MIN", "lit:0", "gost1.pdf");
-        insert_edge(&g, "fld:x1-rng", "HAS_MAX", "lit:10", "gost1.pdf");
+        // Source document 1
+        insert_node(&g, "fld:x1", "Field", "X", "spec1.pdf");
+        insert_node(&g, "fld:x1-rng", "Range", "X range", "spec1.pdf");
+        insert_node(&g, "lit:0", "Literal", "0", "spec1.pdf");
+        insert_node(&g, "lit:10", "Literal", "10", "spec1.pdf");
+        insert_edge(&g, "fld:x1", "CONSTRAINED_BY", "fld:x1-rng", "spec1.pdf");
+        insert_edge(&g, "fld:x1-rng", "HAS_MIN", "lit:0", "spec1.pdf");
+        insert_edge(&g, "fld:x1-rng", "HAS_MAX", "lit:10", "spec1.pdf");
 
-        // GOST 2 — same field name, different range
-        insert_node(&g, "fld:x2", "Field", "X", "gost2.pdf");
-        insert_node(&g, "fld:x2-rng", "Range", "X range", "gost2.pdf");
-        insert_node(&g, "lit:100", "Literal", "100", "gost2.pdf");
-        insert_node(&g, "lit:200", "Literal", "200", "gost2.pdf");
-        insert_edge(&g, "fld:x2", "CONSTRAINED_BY", "fld:x2-rng", "gost2.pdf");
-        insert_edge(&g, "fld:x2-rng", "HAS_MIN", "lit:100", "gost2.pdf");
-        insert_edge(&g, "fld:x2-rng", "HAS_MAX", "lit:200", "gost2.pdf");
+        // Source document 2 — same field name, different range
+        insert_node(&g, "fld:x2", "Field", "X", "spec2.pdf");
+        insert_node(&g, "fld:x2-rng", "Range", "X range", "spec2.pdf");
+        insert_node(&g, "lit:100", "Literal", "100", "spec2.pdf");
+        insert_node(&g, "lit:200", "Literal", "200", "spec2.pdf");
+        insert_edge(&g, "fld:x2", "CONSTRAINED_BY", "fld:x2-rng", "spec2.pdf");
+        insert_edge(&g, "fld:x2-rng", "HAS_MIN", "lit:100", "spec2.pdf");
+        insert_edge(&g, "fld:x2-rng", "HAS_MAX", "lit:200", "spec2.pdf");
 
-        let p1 = make_adapter_problem(&g, &ont, "gost1.pdf");
+        let p1 = make_adapter_problem(&g, &ont, "spec1.pdf");
         assert_eq!(p1.fields.len(), 1);
         if let Constraint::Range { min, max } = p1.fields[0].constraints[0] {
             assert_eq!(min, 0.0);
@@ -693,7 +693,7 @@ params = ["condition_field", "condition_value"]
             panic!("expected Range");
         }
 
-        let p2 = make_adapter_problem(&g, &ont, "gost2.pdf");
+        let p2 = make_adapter_problem(&g, &ont, "spec2.pdf");
         assert_eq!(p2.fields.len(), 1);
         if let Constraint::Range { min, max } = p2.fields[0].constraints[0] {
             assert_eq!(min, 100.0);
@@ -709,15 +709,15 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:a", "Field", "A", "gost.pdf");
-        insert_node(&g, "fld:a-req", "Required", "A required", "gost.pdf");
-        insert_edge(&g, "fld:a", "CONSTRAINED_BY", "fld:a-req", "gost.pdf");
+        insert_node(&g, "fld:a", "Field", "A", "spec.pdf");
+        insert_node(&g, "fld:a-req", "Required", "A required", "spec.pdf");
+        insert_edge(&g, "fld:a", "CONSTRAINED_BY", "fld:a-req", "spec.pdf");
 
-        insert_node(&g, "fld:b", "Field", "B", "gost.pdf");
-        insert_node(&g, "fld:b-forb", "Forbidden", "B forbidden", "gost.pdf");
-        insert_edge(&g, "fld:b", "CONSTRAINED_BY", "fld:b-forb", "gost.pdf");
+        insert_node(&g, "fld:b", "Field", "B", "spec.pdf");
+        insert_node(&g, "fld:b-forb", "Forbidden", "B forbidden", "spec.pdf");
+        insert_edge(&g, "fld:b", "CONSTRAINED_BY", "fld:b-forb", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
         assert_eq!(problem.fields.len(), 2);
         assert!(problem
             .fields
@@ -737,22 +737,22 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:d", "Field", "Наружный диаметр", "gost.pdf");
+        insert_node(&g, "fld:d", "Field", "Диаметр", "spec.pdf");
         insert_node_aliases(
             &g,
             "enum:d",
             "Enum",
-            "Наружный диаметр enum",
-            &["125", "150", "115"],
-            "gost.pdf",
+            "Диаметр enum",
+            &["25", "40", "60"],
+            "spec.pdf",
         );
-        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "enum:d", "gost.pdf");
+        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "enum:d", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
         let f = problem
             .fields
             .iter()
-            .find(|f| f.name == "Наружный диаметр")
+            .find(|f| f.name == "Диаметр")
             .unwrap();
         let values = f
             .constraints
@@ -762,17 +762,17 @@ params = ["condition_field", "condition_value"]
                 _ => None,
             })
             .expect("Enum constraint from aliases");
-        assert_eq!(values, vec!["125", "150", "115"]);
+        assert_eq!(values, vec!["25", "40", "60"]);
 
-        // The solver honours it: 150 passes, 137 (in-between) is rejected.
+        // The solver honours it: 40 passes, 37 (in-between) is rejected.
         assert!(glossa_constraint::solver::validate(
             &problem,
-            &[("Наружный диаметр".into(), serde_json::json!(150))]
+            &[("Диаметр".into(), serde_json::json!(40))]
         )
         .is_empty());
         assert!(!glossa_constraint::solver::validate(
             &problem,
-            &[("Наружный диаметр".into(), serde_json::json!(137))]
+            &[("Диаметр".into(), serde_json::json!(37))]
         )
         .is_empty());
     }
@@ -786,27 +786,27 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        // Agent named the field "Высота Т"; the assignment keys it "h, высота".
-        insert_node(&g, "fld:h", "Field", "Высота Т", "gost.pdf");
+        // Agent named the field "Глубина паза"; the assignment keys it "d, глубина".
+        insert_node(&g, "fld:h", "Field", "Глубина паза", "spec.pdf");
         insert_node_aliases(
             &g,
             "enum:h",
             "Enum",
-            "Высота Т enum",
+            "Глубина паза enum",
             &["0,6", "0,8", "1,2"],
-            "gost.pdf",
+            "spec.pdf",
         );
-        insert_edge(&g, "fld:h", "CONSTRAINED_BY", "enum:h", "gost.pdf");
+        insert_edge(&g, "fld:h", "CONSTRAINED_BY", "enum:h", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
-        let raw = vec![("h, высота".to_string(), serde_json::json!("99"))];
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
+        let raw = vec![("d, глубина".to_string(), serde_json::json!("99"))];
 
         // Without resolution the key misses the field and the bad value passes.
         assert!(glossa_constraint::solver::validate(&problem, &raw).is_empty());
 
-        // With resolution it re-keys onto "Высота Т" and the enum rejects 99.
+        // With resolution it re-keys onto "Глубина паза" and the enum rejects 99.
         let resolved = resolve_assignment_fields(&g, &problem, &raw);
-        assert_eq!(resolved[0].0, "Высота Т");
+        assert_eq!(resolved[0].0, "Глубина паза");
         assert!(
             !glossa_constraint::solver::validate(&problem, &resolved).is_empty(),
             "99 ∉ {{0,6; 0,8; 1,2}} must be caught after resolution"
@@ -821,19 +821,19 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:x", "Field", "X", "gost.pdf");
-        insert_node(&g, "cond:x", "Conditional", "X when mode=41", "gost.pdf");
-        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "cond:x", "gost.pdf");
+        insert_node(&g, "fld:x", "Field", "X", "spec.pdf");
+        insert_node(&g, "cond:x", "Conditional", "X when mode=7", "spec.pdf");
+        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "cond:x", "spec.pdf");
 
-        insert_node(&g, "lit:field", "Literal", "mode", "gost.pdf");
-        insert_node(&g, "lit:value", "Literal", "41", "gost.pdf");
-        insert_edge(&g, "cond:x", "IF_FIELD", "lit:field", "gost.pdf");
-        insert_edge(&g, "cond:x", "IF_VALUE", "lit:value", "gost.pdf");
+        insert_node(&g, "lit:field", "Literal", "mode", "spec.pdf");
+        insert_node(&g, "lit:value", "Literal", "7", "spec.pdf");
+        insert_edge(&g, "cond:x", "IF_FIELD", "lit:field", "spec.pdf");
+        insert_edge(&g, "cond:x", "IF_VALUE", "lit:value", "spec.pdf");
 
-        insert_node(&g, "req:x", "Required", "X required", "gost.pdf");
-        insert_edge(&g, "cond:x", "HAS_CONSTRAINT", "req:x", "gost.pdf");
+        insert_node(&g, "req:x", "Required", "X required", "spec.pdf");
+        insert_edge(&g, "cond:x", "HAS_CONSTRAINT", "req:x", "spec.pdf");
 
-        let problem = make_adapter_problem(&g, &ont, "gost.pdf");
+        let problem = make_adapter_problem(&g, &ont, "spec.pdf");
         let x = problem
             .fields
             .iter()
@@ -853,13 +853,13 @@ params = ["condition_field", "condition_value"]
         });
         let (cf, cv, inner) = cond.expect("Conditional must be reconstructed, not dropped");
         assert_eq!(cf, "mode");
-        assert_eq!(cv, serde_json::Value::String("41".into()));
+        assert_eq!(cv, serde_json::Value::String("7".into()));
         assert_eq!(*inner, Constraint::Required);
 
         // The condition actually gates validation end-to-end.
         let v_active = glossa_constraint::solver::validate(
             &problem,
-            &[("mode".to_string(), serde_json::json!(41))],
+            &[("mode".to_string(), serde_json::json!(7))],
         );
         assert!(
             v_active
@@ -883,15 +883,15 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:d", "Field", "D", "gost.pdf");
-        insert_node(&g, "cond:41", "Conditional", "D when type=41", "gost.pdf");
-        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "cond:41", "gost.pdf");
-        insert_node(&g, "lit:f", "Literal", "type", "gost.pdf");
-        insert_node(&g, "lit:v", "Literal", "41", "gost.pdf");
-        insert_edge(&g, "cond:41", "IF_FIELD", "lit:f", "gost.pdf");
-        insert_edge(&g, "cond:41", "IF_VALUE", "lit:v", "gost.pdf");
-        insert_node_aliases(&g, "enum:41", "Enum", "D41", &["50", "63"], "gost.pdf");
-        insert_edge(&g, "cond:41", "HAS_CONSTRAINT", "enum:41", "gost.pdf");
+        insert_node(&g, "fld:d", "Field", "D", "spec.pdf");
+        insert_node(&g, "cond:a", "Conditional", "D when type=7", "spec.pdf");
+        insert_edge(&g, "fld:d", "CONSTRAINED_BY", "cond:a", "spec.pdf");
+        insert_node(&g, "lit:f", "Literal", "type", "spec.pdf");
+        insert_node(&g, "lit:v", "Literal", "7", "spec.pdf");
+        insert_edge(&g, "cond:a", "IF_FIELD", "lit:f", "spec.pdf");
+        insert_edge(&g, "cond:a", "IF_VALUE", "lit:v", "spec.pdf");
+        insert_node_aliases(&g, "enum:a", "Enum", "D enum", &["10", "20"], "spec.pdf");
+        insert_edge(&g, "cond:a", "HAS_CONSTRAINT", "enum:a", "spec.pdf");
 
         assert!(field_has_materialized_constraints(&g, "fld:d", &ont).unwrap());
     }
@@ -902,9 +902,9 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:x", "Field", "X", "gost.pdf");
-        insert_node_aliases(&g, "enum:x", "Enum", "X enum", &[], "gost.pdf");
-        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "enum:x", "gost.pdf");
+        insert_node(&g, "fld:x", "Field", "X", "spec.pdf");
+        insert_node_aliases(&g, "enum:x", "Enum", "X enum", &[], "spec.pdf");
+        insert_edge(&g, "fld:x", "CONSTRAINED_BY", "enum:x", "spec.pdf");
 
         assert!(!field_has_materialized_constraints(&g, "fld:x", &ont).unwrap());
     }
@@ -915,39 +915,39 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:d", "Field", "D", "gost.pdf");
-        for (suffix, vals) in [("41", &["50", "63"][..]), ("42", &["80", "100"][..])] {
+        insert_node(&g, "fld:d", "Field", "D", "spec.pdf");
+        for (suffix, vals) in [("1", &["10", "20"][..]), ("2", &["30", "40"][..])] {
             let cid = format!("cond:{suffix}");
             insert_node(
                 &g,
                 &cid,
                 "Conditional",
                 &format!("D type={suffix}"),
-                "gost.pdf",
+                "spec.pdf",
             );
-            insert_edge(&g, "fld:d", "CONSTRAINED_BY", &cid, "gost.pdf");
+            insert_edge(&g, "fld:d", "CONSTRAINED_BY", &cid, "spec.pdf");
             insert_node(
                 &g,
                 &format!("lit:f:{suffix}"),
                 "Literal",
                 "type",
-                "gost.pdf",
+                "spec.pdf",
             );
             insert_node(
                 &g,
                 &format!("lit:v:{suffix}"),
                 "Literal",
                 suffix,
-                "gost.pdf",
+                "spec.pdf",
             );
-            insert_edge(&g, &cid, "IF_FIELD", &format!("lit:f:{suffix}"), "gost.pdf");
-            insert_edge(&g, &cid, "IF_VALUE", &format!("lit:v:{suffix}"), "gost.pdf");
+            insert_edge(&g, &cid, "IF_FIELD", &format!("lit:f:{suffix}"), "spec.pdf");
+            insert_edge(&g, &cid, "IF_VALUE", &format!("lit:v:{suffix}"), "spec.pdf");
             let eid = format!("enum:{suffix}");
-            insert_node_aliases(&g, &eid, "Enum", "D enum", vals, "gost.pdf");
-            insert_edge(&g, &cid, "HAS_CONSTRAINT", &eid, "gost.pdf");
+            insert_node_aliases(&g, &eid, "Enum", "D enum", vals, "spec.pdf");
+            insert_edge(&g, &cid, "HAS_CONSTRAINT", &eid, "spec.pdf");
         }
 
-        let mdm: std::collections::BTreeSet<String> = ["50", "63", "80", "100"]
+        let mdm: std::collections::BTreeSet<String> = ["10", "20", "30", "40"]
             .iter()
             .map(|s| s.to_string())
             .collect();

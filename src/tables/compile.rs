@@ -357,7 +357,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Связка\tСопроводительный документ\nB\tGOST\nBF\tGOST\n",
+            "Binder\tCertificate\nA1\tS\nA2\tS\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();
@@ -376,7 +376,7 @@ mod tests {
             .iter()
             .any(|l| l.contains(PATTERN_INDEPENDENT_ENUM)));
         let problem = crate::constraint_adapter::load_problem(&g, &ont, Some(doc)).unwrap();
-        assert!(problem.fields.iter().any(|f| f.name == "Связка"));
+        assert!(problem.fields.iter().any(|f| f.name == "Binder"));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         let doc = "test_doc.pdf";
         fixture_store(
             dir.path(),
-            "Обозначение типа\tНаружный диаметр\tСопроводительный документ\n41\t50\tG\n41\t63\tG\n42\t80\tG\n",
+            "Type\tOuter diameter\tCertificate\n1\t10\tS\n1\t20\tS\n2\t30\tS\n",
             doc,
         );
         let g = GraphStore::open(dir.path()).unwrap();
@@ -403,7 +403,7 @@ mod tests {
         let d = problem
             .fields
             .iter()
-            .find(|f| f.name == "Наружный диаметр")
+            .find(|f| f.name == "Outer diameter")
             .unwrap();
         assert!(
             d.constraints
@@ -420,7 +420,7 @@ mod tests {
         let doc = "test_doc.pdf";
         let tables = crate::notebook::notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&tables).unwrap();
-        std::fs::write(tables.join("bond.csp"), "Связка\nB\nBF\n").unwrap();
+        std::fs::write(tables.join("bond.csp"), "Binder\nA1\nA2\n").unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
             doc_path: doc.into(),
@@ -437,7 +437,7 @@ mod tests {
             .all_nodes()
             .unwrap()
             .into_iter()
-            .find(|n| n.node_type == "Field" && n.label == "Связка")
+            .find(|n| n.node_type == "Field" && n.label == "Binder")
             .expect("compiled Field")
             .id;
         let mention_to = format!("{doc}#1");
@@ -456,7 +456,7 @@ mod tests {
         })
         .unwrap();
 
-        std::fs::write(tables.join("bond.csp"), "Связка\nB\n").unwrap();
+        std::fs::write(tables.join("bond.csp"), "Binder\nA1\n").unwrap();
         tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
 
         let mentions: Vec<_> = g
@@ -476,8 +476,8 @@ mod tests {
         let bond = problem
             .fields
             .iter()
-            .find(|f| f.name == "Связка")
-            .expect("Связка field");
+            .find(|f| f.name == "Binder")
+            .expect("Binder field");
         assert_eq!(
             bond.constraints.len(),
             1,
@@ -495,7 +495,7 @@ mod tests {
         let write_csp = |body: &str| {
             std::fs::write(tables.join("d.csp"), body).unwrap();
         };
-        write_csp("Обозначение типа\tНаружный диаметр\n41\t50\n41\t63\n42\t80\n");
+        write_csp("Type\tOuter diameter\n1\t10\n1\t20\n2\t30\n");
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
             doc_path: doc.into(),
@@ -509,7 +509,7 @@ mod tests {
         tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
         let before = g.all_nodes().unwrap().len();
 
-        write_csp("Обозначение типа\tНаружный диаметр\n41\t50\n");
+        write_csp("Type\tOuter diameter\n1\t10\n");
         let report = tables_to_graph(&idx, &g, &ont, doc, &tables).unwrap();
         assert!(
             report.lines.iter().any(|l| l.contains("replaced:")),
@@ -520,7 +520,7 @@ mod tests {
         let d = problem
             .fields
             .iter()
-            .find(|f| f.name == "Наружный диаметр")
+            .find(|f| f.name == "Outer diameter")
             .unwrap();
         assert_eq!(
             d.constraints.len(),

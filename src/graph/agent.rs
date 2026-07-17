@@ -182,7 +182,8 @@ fn resolve_node_ref(g: &GraphStore, reference: &str) -> anyhow::Result<Vec<Strin
 
 /// On a no-match, suggest the closest existing node labels — fuzzy and inflection-tolerant via the
 /// BM25 node index (`GraphStore::resolve`), so the caller can fix a typo or rephrase instead of
-/// looping on a label that doesn't exist (e.g. delete "питаниЕ…" → "did you mean: «питаниЯ…»").
+/// looping on a label that doesn't exist (e.g. deleting an inflected variant of a stored label →
+/// "did you mean: «the stored label»").
 /// Returns "" when nothing is close. The exact-normalized label is excluded (it would have matched).
 fn did_you_mean(g: &GraphStore, reference: &str) -> String {
     let norm = crate::graph::store::normalize_label(reference);
@@ -407,13 +408,13 @@ strict = true
             node(
                 "sym:fibas-loss-1",
                 "Symptom",
-                "Профибас потеря связи",
+                "Fieldbus connection loss",
                 "case1.docx",
             ),
             node(
                 "res:restart-1",
                 "Resolution",
-                "Перезагрузка модуля",
+                "Module restart",
                 "case1.docx",
             ),
         ];
@@ -430,13 +431,13 @@ strict = true
             node(
                 "sym:fibas-loss-2",
                 "Symptom",
-                "профибас  потеря связи",
+                "fieldbus  connection loss",
                 "case2.docx",
             ),
             node(
                 "res:check-cable-2",
                 "Resolution",
-                "Проверка кабеля",
+                "Cable check",
                 "case2.docx",
             ),
         ];
@@ -479,8 +480,8 @@ strict = true
 
         // Build a small Symptom→Resolution graph
         let nodes = vec![
-            node("sym:test", "Symptom", "Тестовый симптом", "test.docx"),
-            node("res:test", "Resolution", "Тестовое решение", "test.docx"),
+            node("sym:test", "Symptom", "Test symptom", "test.docx"),
+            node("res:test", "Resolution", "Test resolution", "test.docx"),
         ];
         let edges = vec![edge_spec(
             "sym:test",
@@ -494,7 +495,7 @@ strict = true
         assert_eq!(g.edge_count().unwrap(), 1);
 
         // Delete the Symptom by label
-        apply_delete(&g, vec!["Тестовый симптом".into()], vec![]).unwrap();
+        apply_delete(&g, vec!["Test symptom".into()], vec![]).unwrap();
 
         // Symptom node is gone
         let all = g.all_nodes().unwrap();
@@ -521,7 +522,7 @@ strict = true
         apply_upsert(
             &g,
             &ont,
-            vec![node("sym:test", "Symptom", "Тестовый симптом", "test.docx")],
+            vec![node("sym:test", "Symptom", "Test symptom", "test.docx")],
             vec![],
             1,
         )
@@ -541,8 +542,10 @@ strict = true
     #[test]
     fn apply_delete_no_match_suggests_closest_label() {
         // The model deletes an inflected/typo'd label that doesn't exact-match the stored one
-        // (the «питаниЯ» vs «питаниЕ» churn). The note must point it at the real label so it can fix
-        // the call instead of looping. Suggestion comes from the inflection-tolerant BM25 resolve.
+        // (the agent kept retrying an inflected form of the stored label). The note must point it at
+        // the real label so it can fix the call instead of looping. Suggestion comes from the
+        // inflection-tolerant BM25 resolve. Russian test data is intentional: it exercises the
+        // Cyrillic stemming path (the inflections differ only in Russian endings).
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();

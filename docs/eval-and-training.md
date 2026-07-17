@@ -106,6 +106,8 @@ just gw-restart
 
 Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/derived/train.json`** + **`synthetic-train.json`**.
 
+> **Local prerequisites:** the `kb-val/derived/*.json` case registries, `eval-corpus/`, and `gepa-out/` are local, git-ignored data — they do not ship with the repo. Recipes that reference them require generating or providing this data locally first.
+
 ### Index once
 
 Build or rebuild the search index **before** eval or GEPA (not per question):

@@ -298,9 +298,9 @@ mod tests {
 
     #[test]
     fn parse_full_csp() {
-        let text = "Тип\tD\n41\t50\n42\t63\n";
+        let text = "Type\tD\n1\t50\n2\t63\n";
         let r = parse_csp(text).unwrap();
-        assert_eq!(r.headers, vec!["Тип", "D"]);
+        assert_eq!(r.headers, vec!["Type", "D"]);
         assert_eq!(r.rows.len(), 2);
         assert_eq!(r.rows[0][1], "50");
     }
@@ -318,14 +318,14 @@ mod tests {
 
     #[test]
     fn overwide_row_error_shows_header_cell_layout() {
-        let err = parse_csp("Тип\tD\tСкорость\n41\t\t50\t80\n")
+        let err = parse_csp("Type\tD\tSpeed\n1\t\t50\t80\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("row 2 has 4 cells for 3 headers"), "{err}");
         assert!(err.contains("exactly 2 tab characters"), "{err}");
-        assert!(err.contains("Тип=41"), "{err}");
+        assert!(err.contains("Type=1"), "{err}");
         assert!(err.contains("D=(empty)"), "{err}");
-        assert!(err.contains("Скорость=50"), "{err}");
+        assert!(err.contains("Speed=50"), "{err}");
         assert!(err.contains("EXTRA=80"), "{err}");
     }
 
@@ -342,12 +342,12 @@ mod tests {
         #[test]
         fn load_csp_dir_error_uses_notebook_path() {
             let dir = tempfile::tempdir().unwrap();
-            let doc = "gost.pdf";
+            let doc = "spec.pdf";
             std::fs::write(dir.path().join("bad.csp"), "a\tb\n1\t2\t3\n").unwrap();
             let err = load_csp_dir(dir.path(), CSP_DELIMITER, Some(doc))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("gost.pdf/bad.csp"), "{err}");
+            assert!(err.contains("spec.pdf/bad.csp"), "{err}");
         }
 
         #[test]
@@ -366,14 +366,14 @@ mod tests {
         fn load_csp_dir_different_headers_column_union_sparse() {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("D.csp"), "D\n50\n63\n").unwrap();
-            std::fs::write(dir.path().join("F.csp"), "F\nF16\nF24\n").unwrap();
+            std::fs::write(dir.path().join("Grade.csp"), "Grade\nA1\nA2\n").unwrap();
             let t = load_csp_dir(dir.path(), CSP_DELIMITER, None).unwrap();
-            assert_eq!(t.headers, vec!["D", "F"]);
+            assert_eq!(t.headers, vec!["D", "Grade"]);
             assert_eq!(t.rows.len(), 4);
             assert_eq!(t.rows[0], vec!["50", ""]);
             assert_eq!(t.rows[1], vec!["63", ""]);
-            assert_eq!(t.rows[2], vec!["", "F16"]);
-            assert_eq!(t.rows[3], vec!["", "F24"]);
+            assert_eq!(t.rows[2], vec!["", "A1"]);
+            assert_eq!(t.rows[3], vec!["", "A2"]);
         }
 
         #[test]

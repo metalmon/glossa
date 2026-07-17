@@ -1,12 +1,13 @@
 # rtf2docx — reconvert an RTF to a clean .docx via Microsoft Word (COM).
 #
-# Standalone data-prep tool, kept OUT of the glossa core: some RTFs (e.g. GOSTs
-# exported from other systems) reach us as .doc/.docx that lost their table and
-# section structure, and pure-Rust RTF crates only give flat text without tables.
-# Word re-authors the RTF faithfully — tables and styles intact — so glossa's
-# office_oxide extractor sees real tables again.
+# Standalone data-prep tool, kept OUT of the glossa core: some RTFs (e.g.
+# standards documents exported from legacy systems) reach us as .doc/.docx that
+# lost their table and section structure, and pure-Rust RTF crates only give
+# flat text without tables. Word re-authors the RTF faithfully — tables and
+# styles intact — so glossa's office_oxide extractor sees real tables again.
 #
 # Usage:   pwsh tools/rtf2docx/rtf2docx.ps1 <input.rtf> [output.docx]
+#          e.g. pwsh tools/rtf2docx/rtf2docx.ps1 spec_2019.rtf
 #          (output defaults to the input path with a .docx extension)
 param(
     [Parameter(Mandatory = $true)][string]$Source,

@@ -44,6 +44,9 @@ fn csp_dup_removed_suffix(dup_removed: usize) -> String {
 }
 
 fn header_looks_like_commentary(h: &str) -> bool {
+    // The Cyrillic substrings are Russian citation markers commonly pasted into
+    // headers from Russian source tables: "из пун[кта]" = "from clause",
+    // "из табл[ицы]" = "from table".
     h.chars().count() > 35
         || h.contains(" - ")
         || h.contains(" — ")
@@ -57,6 +60,9 @@ fn cell_looks_like_prose(cell: &str) -> bool {
     if n > 45 {
         return true;
     }
+    // The Cyrillic substrings are Russian prose connectors that betray a sentence
+    // rather than a bare value: " для " = " for ", " из " = " from ",
+    // " и мельче" = " and finer", " и крупнее" = " and coarser".
     cell.contains('(')
         || cell.contains('—')
         || cell.contains(" - ")
@@ -79,7 +85,7 @@ pub fn csp_tutor_hints(table: &CspTable) -> Vec<String> {
     {
         hints.push(
             "column headers look long — source tables usually name the parameter alone \
-             (e.g. «Наружный диаметр», «Связка»)"
+             (e.g. «Диаметр», «Материал»)"
                 .into(),
         );
     }
@@ -567,15 +573,15 @@ mod tests {
             dir.path(),
             &idx,
             "doc.pdf",
-            "Высота Т",
-            &format!("D{TAB}T\n50{TAB}0,6\n"),
+            "Глубина паза",
+            &format!("a{TAB}b\n1{TAB}2\n"),
             false,
         );
         assert!(msg.contains("REJECTED"), "{msg}");
         assert!(msg.contains("no extension"), "{msg}");
-        assert!(msg.contains("Высота Т.csp"), "{msg}");
+        assert!(msg.contains("Глубина паза.csp"), "{msg}");
         assert!(
-            !dir.path().join(".glossa/notes/doc.pdf/Высота Т").exists(),
+            !dir.path().join(".glossa/notes/doc.pdf/Глубина паза").exists(),
             "must not save the extensionless file"
         );
         // The same content with `.csp` is accepted.
@@ -583,8 +589,8 @@ mod tests {
             dir.path(),
             &idx,
             "doc.pdf",
-            "Высота Т.csp",
-            &format!("D{TAB}T\n50{TAB}0,6\n"),
+            "Глубина паза.csp",
+            &format!("a{TAB}b\n1{TAB}2\n"),
             false,
         );
         assert!(ok.contains("data row"), "{ok}");
@@ -918,16 +924,16 @@ mod tests {
 
     #[test]
     fn csp_tutor_hints_clean_grid_is_silent() {
-        let table = parse_csp(&format!("Связка{TAB}Зернистость\nBF{TAB}F24\nR{TAB}F30\n")).unwrap();
+        let table = parse_csp(&format!("Материал{TAB}Плотность\nM1{TAB}P1\nM2{TAB}P2\n")).unwrap();
         assert!(csp_tutor_hints(&table).is_empty());
     }
 
     #[test]
     fn csp_tutor_hints_prose_cells_and_long_header() {
         let table = parse_csp(
-            "Связка (bond type) - из пункта 4.4\n\
-             B (бакелитовая)\n\
-             BF (с упрочняющими)\n",
+            "Материал (material type) - из пункта 4.4\n\
+             A (первый тип)\n\
+             AB (второй тип)\n",
         )
         .unwrap();
         let hints = csp_tutor_hints(&table);
@@ -946,9 +952,9 @@ mod tests {
             dir.path(),
             &idx,
             "doc.pdf",
-            "bond.csp",
-            "Связка (bond type) - из пункта 4.4\n\
-             B (бакелитовая)\n",
+            "material.csp",
+            "Материал (material type) - из пункта 4.4\n\
+             A (первый тип)\n",
             false,
         );
         assert!(msg.contains("  · "), "{msg}");

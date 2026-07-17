@@ -28,6 +28,7 @@ eval/tensorzero/.env
 # Local-only eval assets (corpus-specific SOPs — never commit); example/ ships
 eval/sops/*
 !eval/sops/example/
+eval/fixtures/constraint-research-gold.json
 new-episode.txt
 *.rtf.orig
 

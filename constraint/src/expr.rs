@@ -1,4 +1,4 @@
-//! Simple mathematical expression evaluator for GOST formulas.
+//! Simple mathematical expression evaluator for constraint formulas.
 //!
 //! Supported: +, -, *, /, comparisons (==, !=, <, <=, >, >=),
 //! parentheses, unary minus, constants (pi, e), variables.
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn gost_formula_typical() {
+    fn typical_standard_formula() {
         let mut vars = HashMap::new();
         vars.insert("A".into(), 10.0);
         vars.insert("B".into(), 5.0);

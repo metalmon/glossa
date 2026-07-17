@@ -10,6 +10,10 @@ The `kb mcp` server speaks MCP (JSON-RPC 2.0, protocol `2025-06-18`) over two tr
 TLS, OAuth2/OIDC/mTLS and rate-limiting are terminated by a **reverse proxy / API gateway** in
 front; the binary itself is HTTP-plaintext and expects to sit behind it.
 
+For a local streamable-http quickstart, [`scripts/start-mcp-http.sh`](../../scripts/start-mcp-http.sh) /
+[`scripts/start-mcp-http.ps1`](../../scripts/start-mcp-http.ps1) start the server against a corpus and print
+ready-to-paste Cursor `mcpServers` JSON.
+
 ## Topology: one process per (base × profile)
 
 The corpus root (a positional arg) and the `--profile` decide what a process is. Run several

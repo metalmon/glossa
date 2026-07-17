@@ -14,8 +14,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// List the knowledge base's documents and pick a primary. A product's
-/// constraints are now assembled from several standards (the main GOST + the ones
-/// it references), so solving unions across ALL of them (`load_problem(None)`);
+/// constraints are now assembled from several standards (the main standard + the
+/// ones it references), so solving unions across ALL of them (`load_problem(None)`);
 /// the primary is only a representative label for reference provenance and the
 /// prompt. `--doc` pins the primary to a specific indexed document.
 fn resolve_source_doc(idx: &DocIndex, requested: Option<&str>) -> Result<(String, Vec<String>)> {
@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, default_value = "kb-test")]
     kb: PathBuf,
     /// Directory with reference validation tables (xlsx-converted JSON).
-    #[arg(long, default_value = "kb-val-gost")]
+    #[arg(long, default_value = "kb-val")]
     val_dir: PathBuf,
     /// Source document (indexed path) constraints are extracted from.
     /// Defaults to the single document in the KB; required when the KB has several.
@@ -100,7 +100,7 @@ struct Cli {
 #[derive(Clone)]
 struct ColInfo {
     /// Human-readable parameter name (from the sheet header row / attribute
-    /// dictionary) — this is what the agent can plausibly derive from the GOST.
+    /// dictionary) — this is what the agent can plausibly derive from the standard.
     /// MDM GUIDs are translation keys only and never leave the loader.
     name: String,
     valid: Vec<String>,
@@ -514,7 +514,7 @@ fn exec_get_task(doc: &str) -> String {
 }
 
 fn default_eval_sop_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sops/gost-constraints")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sops/example")
 }
 
 /// Tool executor for an agent episode.
@@ -1072,8 +1072,8 @@ fn run_subagent(
     // The subagent returns its OWN answer (final text) — as in prod delegation.
     match outcome {
         Ok(o) if !o.answer.trim().is_empty() => o.answer,
-        Ok(o) => format!("(субагент завершил без текста, ended={})", o.done),
-        Err(e) => format!("(субагент прервался: {e})"),
+        Ok(o) => format!("(subagent finished without text, ended={})", o.done),
+        Err(e) => format!("(subagent aborted: {e})"),
     }
 }
 
@@ -1193,8 +1193,8 @@ fn exec_graph_update(g: &GraphStore, args: &Value) -> String {
 // ── Compare agent graph vs reference ──
 
 /// Metric-side label normalisation: glossa's normalize_label plus stripping a
-/// trailing bracketed unit — the MDM export writes "Наружный диаметр [мм]" and
-/// "125 [мм]" where the GOST (and hence the agent) has "Наружный диаметр" / "125".
+/// trailing bracketed unit — the MDM export writes "Diameter [mm]" and
+/// "125 [mm]" where the standard (and hence the agent) has "Diameter" / "125".
 fn norm_metric(s: &str) -> String {
     let s = glossa::graph::store::normalize_label(s);
     match s.rfind('[') {
@@ -1236,7 +1236,10 @@ fn strip_trailing_unit_if_numeric(s: &str) -> String {
             return left.to_string();
         }
     }
-    // No space: "63м/с" — peel a trailing unit run off a numeric prefix.
+    // No space: "63м/с" — peel a trailing unit run off a numeric prefix. A single
+    // trailing letter ("14A", "25А") is a designation-code suffix, not a unit —
+    // only multi-char runs (or a bare "°") qualify here; with a space the
+    // whitespace branch above still strips single-letter units.
     let unit_start = s
         .char_indices()
         .rev()
@@ -1246,7 +1249,9 @@ fn strip_trailing_unit_if_numeric(s: &str) -> String {
     if let Some(i) = unit_start {
         if i > 0 {
             let (num, unit) = s.split_at(i);
-            if is_unit_token(unit) && looks_numeric(num) {
+            let unit_is_single_letter =
+                unit.chars().count() == 1 && unit.chars().all(|c| c.is_alphabetic());
+            if is_unit_token(unit) && !unit_is_single_letter && looks_numeric(num) {
                 return num.to_string();
             }
         }
@@ -1345,9 +1350,9 @@ fn compare_graphs(agent_g: &GraphStore, ref_json: &Value) -> (f64, f64, f64) {
     let agent_nodes = agent_g.all_nodes().unwrap_or_default();
     let agent_edges = agent_g.all_edges().unwrap_or_default();
 
-    // Field coverage BY DOMAIN, not by name: the GOST and the MDM reference name
-    // the same parameter differently ("предельная рабочая скорость" vs "максимальная
-    // скорость вращения"), so a name match under-counts. Instead a reference
+    // Field coverage BY DOMAIN, not by name: the standard and the MDM reference name
+    // the same parameter differently ("limit working speed" vs "maximum rotation
+    // speed"), so a name match under-counts. Instead a reference
     // parameter counts as covered when some agent Enum reproduces the majority of
     // its allowed-value set — the domain identifies the parameter, the label doesn't.
     let ref_id_enum: std::collections::HashMap<&str, BTreeSet<String>> = ref_nodes
@@ -1701,7 +1706,7 @@ fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentT
 }
 
 /// Normalize a parameter/header name for matching: lowercase, trim, and drop a
-/// trailing short code token (e.g. "высота T" -> "высота", "диаметр D" -> "диаметр").
+/// trailing short code token (e.g. "height T" -> "height", "diameter D" -> "diameter").
 fn norm_name(s: &str) -> String {
     let s = s.trim().to_lowercase();
     match s.rsplit_once(' ') {
@@ -1895,7 +1900,7 @@ fn compare_relations(
 /// value-set greed. Gold param at position `i` in `canon_order` is scored against
 /// the agent `.csp` named by `files[i]` (same index). Multi-column files contribute
 /// the dependent column (header matched to the param, else the last column —
-/// SOP `(ключ, поле)`). Without an agent schema, falls back to domain-greedy
+/// SOP `(key, field)` form). Without an agent schema, falls back to domain-greedy
 /// assignment (legacy / tests without a manifest).
 fn compare_tables_by_domain(
     agent_g_dir: &std::path::Path,
@@ -2073,7 +2078,7 @@ fn param_domain_from_table(
 }
 
 /// Which column holds the slot's own values: name match to gold/hint, else last
-/// column (SOP two-column form is `(ключ, поле)`).
+/// column (SOP two-column form is `(key, field)`).
 fn pick_param_column(
     headers: &[String],
     gold_param: &str,
@@ -2432,7 +2437,7 @@ fn main() -> Result<()> {
         };
 
         let t1 = std::time::Instant::now();
-        // 12 rounds starved the agent: reading the GOST + batched upserts for ~10
+        // 12 rounds starved the agent: reading the standard + batched upserts for ~10
         // fields with hundreds of literals + solve needs room to work.
         let outcome = if cli.score_only {
             // No run — score the existing notes. Zero outcome; downstream reads
@@ -2633,7 +2638,7 @@ fn main() -> Result<()> {
         );
 
         // ── VALIDATION: sweep EVERY row through the AGENT graph (algorithmic, no LLM) ──
-        // The GOST (agent) and MDM (rows) use different names for a parameter, so map
+        // The standard (agent) and MDM (rows) use different names for a parameter, so map
         // each MDM column to the agent field whose constraint domain matches it, then re-key
         // the row before solving.
         let ont_v = Ontology::load_or_default(&agent_g_dir);
@@ -2955,7 +2960,7 @@ mod tests {
 
     #[test]
     fn relation_range_bands_cover_wide_gold() {
-        // Gold: wide §4.5 ranges per bond. Agent: App Б odd bands — equivalent under
+        // Gold: one wide range per key. Agent: narrow odd bands — equivalent under
         // range cover (odd lattice, matching hull).
         let rt = RefTable {
             name: "ЗИ".into(),
@@ -3062,16 +3067,17 @@ mod tests {
     }
 
     #[test]
-    fn compile_step_number_is_three() {
+    fn compile_is_owned_by_last_default_sop_step() {
         use kb_eval::sop::{load_sop, types::SopExecutionMode};
         let sop = load_sop(&default_eval_sop_dir(), SopExecutionMode::Auto).expect("load sop");
+        assert!(!sop.steps.is_empty(), "default SOP has steps");
+        // Whatever the step layout, the step owning graph_build is the terminal one.
         let compile = sop
             .steps
             .iter()
-            .find(|s| s.title.contains("Compile"))
-            .expect("Compile step");
-        // Fan-out Build is step 1, Schema step 2, so Compile is step 3.
-        assert_eq!(compile.number, 3);
+            .find(|s| s.suggested_tools.contains(&"graph_build".to_string()))
+            .expect("a step owning graph_build");
+        assert_eq!(compile.number as usize, sop.steps.len());
     }
 
     #[test]
@@ -3095,7 +3101,7 @@ mod tests {
     #[test]
     fn export_agent_notes_copies_mirror() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
@@ -3109,7 +3115,7 @@ mod tests {
     fn relations_score_row_recall() {
         use glossa::notebook::{mirror_dir_for_doc, notes_root};
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
         // Agent multi-column table with 2 of the 3 reference combinations.
@@ -3141,7 +3147,7 @@ mod tests {
     fn relations_max_matching_beats_greedy() {
         use glossa::notebook::{mirror_dir_for_doc, notes_root};
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
         // Column 0 ("AllVals") is a value superset {1,2,3,4}; column 1 ("Narrow")
@@ -3197,7 +3203,7 @@ mod tests {
     #[test]
     fn wipe_agent_glossa_removes_notes_and_graph() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
@@ -3212,7 +3218,7 @@ mod tests {
     #[test]
     fn tables_domain_compare_matches_by_values_not_names() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
@@ -3244,7 +3250,7 @@ mod tests {
     #[test]
     fn tables_domain_compare_regex_alias_covers_values() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
@@ -3270,7 +3276,7 @@ mod tests {
             name: "X".into(),
             valid: vec!["1".into()],
         }];
-        let report = compare_tables_by_domain(dir.path(), "kb-gost/none.pdf", &cols, &[]);
+        let report = compare_tables_by_domain(dir.path(), "kb/none.pdf", &cols, &[]);
         assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 0);
         assert_eq!(report.values_covered, 0);
     }
@@ -3278,7 +3284,7 @@ mod tests {
     #[test]
     fn tables_domain_compare_exclusive_assignment_no_parasite() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
@@ -3317,7 +3323,7 @@ mod tests {
     #[test]
     fn tables_domain_compare_threshold_bite_at_half() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = "kb-gost/test.pdf";
+        let doc = "kb/test.pdf";
         let mirror = glossa::notebook::notes_root(dir.path())
             .join(glossa::notebook::mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();

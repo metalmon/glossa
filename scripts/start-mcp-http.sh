@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-KB_ROOT="${1:-$REPO_ROOT/kb-gost-docs}"
+KB_ROOT="${1:-$REPO_ROOT/kb-docs}"
 BIND="${BIND:-127.0.0.1:8080}"
 PROFILE="${PROFILE:-editor}"
 SERVER_NAME="${SERVER_NAME:-glossa-kb}"

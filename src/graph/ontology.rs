@@ -533,7 +533,7 @@ params = ["pattern"]
     fn meta_and_patterns_parsed() {
         let toml = r#"
 [meta]
-domain = "gost-regulatory"
+domain = "regulatory"
 description = "Test."
 
 [patterns.foo]
@@ -544,7 +544,7 @@ example = "human only"
 description = "entity"
 "#;
         let o = Ontology::parse(toml).unwrap();
-        assert_eq!(o.meta().domain.as_deref(), Some("gost-regulatory"));
+        assert_eq!(o.meta().domain.as_deref(), Some("regulatory"));
         let p = o.patterns().get("foo").unwrap();
         assert_eq!(p.description, "A pattern.");
         assert_eq!(p.example.as_deref(), Some("human only"));
