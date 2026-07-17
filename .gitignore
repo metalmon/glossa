@@ -47,3 +47,4 @@ gepa-out/gepa-long.current
 .cursor/
 
 tmp/
+.claude/settings.local.json
