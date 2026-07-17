@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-17
+
+### Added
+
+- **PDF stack on `pdf_oxide`**: native text extraction, merged-table-cell densification, embedded images in `read`, and `read(page_image: true)` — rendered page PNG (200 DPI) for vision models.
+- **Office IR chunking**: Word/Excel/PowerPoint indexed through `office_oxide` DocumentIR — heading/section-aware chunks, merged-cell densify, captions glued to tables.
+- **Constraint tables compiler** (`constraint` cargo feature): notebook `.csp` tables compile into a typed constraint graph via `graph_build`; new `glossa-constraint` CSP solver crate; `constraint_solve` and `get_ontology` MCP tools.
+- **`graph_stats` doc-owned inventory**: ontology-free listing of a document's nodes and outgoing edges.
+- **Eval harness**: SOP-driven constraint eval (`kb-eval-constraint`), GEPA prompt optimization for the constraint pipeline, `kb-train apply-sop-slices` (anchor-driven GEPA slice splicing), and a corpus-agnostic example SOP pack in `eval/sops/example/`.
+- **Streamable-HTTP helpers**: `scripts/start-mcp-http.sh` / `.ps1` launchers.
+
+### Changed
+
+- **English-only public surface**: all comments, prompts, and docs translated; corpus-specific assets are local-only; multilingual (ru+en) search remains a supported engine feature.
+- **Docs**: MCP tool table corrected (removed stale `cat`/`sed`, added `get_ontology`/`constraint_solve`/`page_image`); documented `kb graph dump/import/prune/path/node` and `kb mcp dump-tz-tools`.
+
+### Removed
+
+- Python helper scripts: GEPA slice applier ported to Rust; one-off graph-path and DICL experiments dropped.
+
 ## [0.1.1] — 2026-07-17
 
 ### Fixed

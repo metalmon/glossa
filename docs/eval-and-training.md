@@ -266,7 +266,7 @@ Combined: weighted macro-average of per-task val accuracies (`gepa_combined_acc`
 | Column | Meaning |
 |--------|---------|
 | `search` / `grep` / `glob` / `read` | Absolute macro-accuracy per micro-task on **full val** (not weighted). |
-| `final` / `baseline` | Weighted combined using the run's `w_*` tags (stored from v1.2.1+; older runs: infer weights or compare per-task only). |
+| `final` / `baseline` | Weighted combined using the run's `w_*` tags (stored from v0.2.0+; older runs: infer weights or compare per-task only). |
 | `iter_avg` | Mean of `gepa_iter_combined` — **D_pareto subset**, not full val; can exceed `final` and must not be compared to per-task columns. |
 
 Recompute combined from per-task: `(w_search·search + w_grep·grep + w_glob·glob + w_read·read) / (w_search + w_grep + w_glob + w_read)` using weights from TZ tags (`w_search`, …) or the `just gepa` recipe defaults.
