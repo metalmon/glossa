@@ -81,7 +81,25 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: dist/*
+      # Publish with retry: the GitHub release API intermittently returns a
+      # transient HTML error page instead of JSON (this failed the v0.1.1 run
+      # after all four archives had already built). Create the release on first
+      # run, upload/clobber assets on retries, up to five attempts.
+      - name: Publish release (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              if gh release upload "$TAG" dist/* --clobber; then exit 0; fi
+            else
+              if gh release create "$TAG" dist/* --generate-notes; then exit 0; fi
+            fi
+            echo "publish failed (attempt ${attempt}/5), retrying in 15s..."
+            sleep 15
+          done
+          echo "publish failed after 5 attempts" >&2
+          exit 1
