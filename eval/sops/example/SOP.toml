@@ -1,0 +1,8 @@
+[sop]
+name = "example"
+description = "Single-agent designation-code study: .csp files + schema + graph_build (no subagents)"
+version = "0.1.0"
+execution_mode = "auto"
+cooldown_secs = 0
+max_concurrent = 1
+deterministic = false

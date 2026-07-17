@@ -2,11 +2,9 @@
 docs/superpowers/
 /target
 
-# Local debug knowledge base (real data — never commit)
-kb-test/
-kb-test-docs/
+# Local debug knowledge bases (real data — never commit)
+kb-*/
 kb-val*/
-kb-gost*/
 # Local index/manifest caches
 .glossa/
 
@@ -27,8 +25,9 @@ eval/tensorzero/.env
 /wiki-corpus/
 /eval-data/*.tar.bz2
 
-# Local-only eval assets (corpus-specific SOPs — never commit)
-eval/sops/gost-*/
+# Local-only eval assets (corpus-specific SOPs — never commit); example/ ships
+eval/sops/*
+!eval/sops/example/
 new-episode.txt
 *.rtf.orig
 
