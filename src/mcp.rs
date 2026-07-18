@@ -301,7 +301,7 @@ struct SearchArgs {
         description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex"
     )]
     query: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
     #[schemars(description = "max hits (default 50)")]
     limit: Option<usize>,
     #[serde(default)]
@@ -326,14 +326,15 @@ struct GlobArgs {
 struct ReadArgs {
     #[schemars(description = "document path, exactly as shown in a search result")]
     path: String,
+    #[serde(deserialize_with = "crate::json_util::deserialize_u32_loose")]
     #[schemars(
         description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)"
     )]
     n: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(description = "include embedded images (default true)")]
     include_images: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text."
     )]
@@ -344,12 +345,12 @@ struct ReadArgs {
 struct SourceFileArgs {
     #[schemars(description = "document path, exactly as shown in a search/grep result")]
     path: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u32_loose")]
     #[schemars(
         description = "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page"
     )]
     n: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u64_loose")]
     #[schemars(
         description = "maximum delivered size in bytes (default 10 MB, matching the ACP client cap)"
     )]
@@ -368,7 +369,7 @@ struct NeighborsArgs {
         description = "document path, exactly as shown in a search result (use with `n` instead of `node`)"
     )]
     path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u64_loose")]
     #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
     n: Option<u64>,
 }
@@ -483,15 +484,15 @@ struct GrepArgs {
         description = "Search only this document — the same path `glob`/`read`/`search` show (a trailing `#chunk` is ignored). Omit to search the whole base."
     )]
     path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(description = "case-insensitive matching (-i)")]
     ignore_case: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F)."
     )]
     fixed: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(description = "match whole words only (-w)")]
     word: Option<bool>,
     #[serde(default)]
@@ -502,36 +503,36 @@ struct GrepArgs {
     #[serde(default)]
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
     #[schemars(
         description = "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C)."
     )]
     context: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
     #[schemars(description = "emit N context lines before each match (-B)")]
     before: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
     #[schemars(description = "emit N context lines after each match (-A)")]
     after: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "print only the matched substring(s), one per line, not the whole line (-o)"
     )]
     only_matching: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n)."
     )]
     line_number: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "output only a count of matching lines per chunk, not the lines (-c)"
     )]
     count: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
     #[schemars(description = "stop after N matching lines per chunk (-m)")]
     max_count: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(
         description = "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)"
     )]
@@ -1159,6 +1160,35 @@ impl ServerHandler for GlossaServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arg_structs_accept_stringified_primitives() {
+        // LLM/MCP clients sometimes JSON-encode primitives as strings; every arg field must coerce.
+        let r: ReadArgs =
+            serde_json::from_str(r#"{"path":"a.pdf","n":"8","page_image":"true"}"#).unwrap();
+        assert_eq!(r.n, 8);
+        assert_eq!(r.page_image, Some(true));
+
+        let s: SourceFileArgs =
+            serde_json::from_str(r#"{"path":"a.pdf","n":"3","max_bytes":"1024"}"#).unwrap();
+        assert_eq!(s.n, Some(3));
+        assert_eq!(s.max_bytes, Some(1024));
+
+        let se: SearchArgs = serde_json::from_str(r#"{"query":"x","limit":"5"}"#).unwrap();
+        assert_eq!(se.limit, Some(5));
+
+        let g: GrepArgs = serde_json::from_str(
+            r#"{"pattern":"x","ignore_case":"true","context":"20","multiline":"1"}"#,
+        )
+        .unwrap();
+        assert_eq!(g.ignore_case, Some(true));
+        assert_eq!(g.context, Some(20));
+        assert_eq!(g.multiline, Some(true));
+
+        // Native JSON types still deserialize; absent optionals stay None.
+        let r2: ReadArgs = serde_json::from_str(r#"{"path":"a.pdf","n":2}"#).unwrap();
+        assert_eq!((r2.n, r2.page_image), (2, None));
+    }
 
     #[test]
     fn empty_param_schema_has_properties() {
