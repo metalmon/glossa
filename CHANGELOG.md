@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-18
+
+### Fixed
+
+- **MCP tool args tolerate string-encoded primitives**: LLM/MCP clients often JSON-encode numbers and booleans as strings (`"n": "8"`, `"page_image": "true"`), which strict deserialization rejected (`invalid type: string "8", expected u32`). Every primitive field across the tool arg structs (`search`, `read`, `get_source_file`, `neighbors`, `grep`, …) now accepts both native and string forms; the advertised schema stays `integer`/`boolean`.
+
 ## [0.2.0] — 2026-07-17
 
 ### Added
