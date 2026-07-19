@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Offline, file-first knowledge base with a reasoning graph and MCP server for LLM agents.<br/>
+  Offline, file-first document toolkit for LLM agents — a <code>grep</code>/<code>cat</code> that reads PDF &amp; Office, plus a reasoning-graph MCP server.<br/>
   One Rust binary (<code>kb</code>); no external services required for core operation.
 </p>
 
@@ -19,6 +19,7 @@ glossa indexes documents on disk, serves ranked search and ripgrep-style tools, 
 
 ## Why glossa
 
+- **CLI *or* MCP** — shell out to `kb cat` / `kb grep` / `kb read` as a Unix-composable tool that reads Office & PDF (the `grep`/`cat` your agent is missing), or run it as an MCP server for a persistent, graph-backed corpus. Same binary, same extractors.
 - **Native corpora** — PDF and Office (Word, Excel, PowerPoint) indexed in place; no markdown conversion step.
 - **File-first graph** — files stay authoritative; `.glossa/` is a rebuildable overlay with provenance-stamped reasoning nodes.
 - **Agent retrieval loop** — BM25 `search`, exact `grep`, chunk `read`, then `glossary` → `neighbors` over solved-case chains.
@@ -39,6 +40,14 @@ glossa indexes documents on disk, serves ranked search and ripgrep-style tools, 
 Details: [architecture.md](docs/architecture.md), [mcp.md](docs/mcp.md).
 
 ## Quickstart
+
+**As your agent's CLI** — no server, no setup; point it at files and read or search them:
+
+```bash
+kb cat report.docx              # full text of a Word / Excel / PowerPoint / PDF file
+kb grep "revenue" reports/      # ripgrep, but inside every .docx / .xlsx / .pdf
+kb search "connection timeout"  # BM25-ranked search over a folder of documents
+```
 
 **Operators** — install from [GitHub Releases](https://github.com/metalmon/glossa/releases) (no Rust required):
 
