@@ -71,6 +71,12 @@ enum Cmd {
         /// Optional location (heading / "p.N") to narrow to.
         location: Option<String>,
     },
+    /// Print a file's full extracted text — a `cat` that understands Office and PDF. Reads the file
+    /// directly: no index, no `.glossa`. Pipe it to your agent or grep it.
+    Cat {
+        /// Path to a document file (.pdf, .docx, .xlsx, .pptx, .md, …).
+        target: PathBuf,
+    },
     /// Build or update the on-disk index for ranked search.
     Index { path: Option<PathBuf> },
     /// Rebuild the index from scratch.
@@ -569,6 +575,13 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             Ok(())
+        }
+        Cmd::Cat { target } => {
+            // A `cat` for Office/PDF: extract the whole file's text straight from disk (no index).
+            if !target.exists() {
+                anyhow::bail!("no such file: {}", target.display());
+            }
+            print_read(&target, None)
         }
         Cmd::Read { target, location } => {
             // Precedence: existing path beats result-number beats fallback path open.

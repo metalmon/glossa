@@ -58,6 +58,32 @@ fn search_then_read_by_number() {
 }
 
 #[test]
+fn kb_cat_dumps_full_file_text_without_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("doc.md");
+    fs::write(&f, b"# Title\nfirst section\n\n# Two\nsecond section\n").unwrap();
+
+    // `cat` prints the whole extracted text (every section), directly from the file.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["cat", f.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("first section").and(contains("second section")));
+    // ...and it does not build an index (no `.glossa` litter) — a true one-shot read.
+    assert!(!dir.path().join(".glossa").exists(), "cat must not create an index");
+}
+
+#[test]
+fn kb_cat_missing_file_errors() {
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["cat", "does-not-exist.pdf"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn zero_hit_search_preserves_last_search() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
