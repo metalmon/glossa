@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-19
+
+### Added
+
+- **`kb cat <file>`**: print a document's whole extracted text straight from disk — a `cat` that understands PDF, Word, Excel, and PowerPoint. No index, no `.glossa`; deliberately file-only (unlike `read`, which also resolves result numbers, graph nodes, and notebook notes).
+- **CLI-for-agents positioning**: README now leads with the dual **CLI or MCP** story, plus a new [cli-for-agents.md](docs/cli-for-agents.md) guide — shell out to `kb cat` / `kb grep` / `kb read` as the `grep`/`cat` an agent lacks for Office & PDF, or run the MCP server for a persistent graph-backed corpus.
+
 ## [0.2.1] — 2026-07-18
 
 ### Fixed

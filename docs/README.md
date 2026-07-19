@@ -8,6 +8,7 @@ User-facing documentation for the glossa knowledge-base engine.
 |----------|----------|---------|
 | [install.md](install.md) | **Operators** | Download release binary, first index |
 | [connect-to-agents.md](connect-to-agents.md) | **Operators** | Attach your documents to Claude, Cursor, MCP |
+| [cli-for-agents.md](cli-for-agents.md) | Agent integrators | Use `kb` as a CLI tool — `cat`/`grep`/`read` for Office & PDF |
 | [integrations/zeroclaw.md](integrations/zeroclaw.md) | ZeroClaw users | `config.toml` MCP wiring |
 | [getting-started.md](getting-started.md) | Developers | Build from source, CLI workflow |
 | [architecture.md](architecture.md) | Developers | File-first design, index, graph, derived layer |

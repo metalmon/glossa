@@ -10,6 +10,7 @@
 <p align="center">
   <a href="docs/install.md">Install</a> ·
   <a href="docs/connect-to-agents.md">Connect to agents</a> ·
+  <a href="docs/cli-for-agents.md">CLI for agents</a> ·
   <a href="docs/mcp.md">MCP tools</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="LICENSE">MIT</a>
