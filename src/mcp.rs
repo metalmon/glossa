@@ -355,10 +355,11 @@ struct SourceFileArgs {
         description = "maximum delivered size in bytes (default 10 MB, matching the ACP client cap)"
     )]
     max_bytes: Option<u64>,
-    /// Return the untouched original file instead of the default PDF conversion (currently
-    /// only affects DOCX, which is delivered as PDF by default). Default: false.
-    #[serde(default)]
-    pub raw: Option<bool>,
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(
+        description = "return the untouched original file instead of the default PDF conversion (currently only affects DOCX, delivered as PDF by default); default false"
+    )]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1180,9 +1181,11 @@ mod tests {
         assert_eq!(r.page_image, Some(true));
 
         let s: SourceFileArgs =
-            serde_json::from_str(r#"{"path":"a.pdf","n":"3","max_bytes":"1024"}"#).unwrap();
+            serde_json::from_str(r#"{"path":"a.pdf","n":"3","max_bytes":"1024","raw":"true"}"#)
+                .unwrap();
         assert_eq!(s.n, Some(3));
         assert_eq!(s.max_bytes, Some(1024));
+        assert_eq!(s.raw, Some(true));
 
         let se: SearchArgs = serde_json::from_str(r#"{"query":"x","limit":"5"}"#).unwrap();
         assert_eq!(se.limit, Some(5));
