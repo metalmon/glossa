@@ -30,8 +30,12 @@ pub fn docx_to_pdf(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 /// Best-effort page count of an in-memory PDF, for the delivery note. Returns `None` if the
 /// PDF can't be parsed (the note then omits the count rather than failing).
 pub fn pdf_page_count(pdf: &[u8]) -> Option<usize> {
-    let doc = pdf_oxide::PdfDocument::from_bytes(pdf.to_vec()).ok()?;
-    doc.page_count().ok()
+    let owned = pdf.to_vec();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        pdf_oxide::PdfDocument::from_bytes(owned).ok()?.page_count().ok()
+    }))
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

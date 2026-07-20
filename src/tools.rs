@@ -978,7 +978,7 @@ pub fn get_source_file(
     let mut convert_note: Option<String> = None;
     if ext == "docx" && !raw {
         match crate::convert::docx_pdf::docx_to_pdf(&bytes) {
-            Ok(pdf) => {
+            Ok(pdf) if (pdf.len() as u64) <= max_bytes => {
                 let stem = name.strip_suffix(".docx").unwrap_or(&name).to_string();
                 let pages = crate::convert::docx_pdf::pdf_page_count(&pdf)
                     .map(|p| format!("{p} pages"))
@@ -988,6 +988,14 @@ pub fn get_source_file(
                 ));
                 bytes = pdf;
                 name = format!("{stem}.pdf");
+            }
+            Ok(_) => {
+                // The converted PDF is over the cap. Don't deliver an over-cap artifact; keep the
+                // original .docx so the under-cap whole-file path can still deliver it (the file
+                // was deliverable before this feature). raw: true always returns the original.
+                convert_note = Some(format!(
+                    "{real} converted to a PDF larger than the {max_bytes}-byte cap; delivering the original .docx instead. Pass raw: true to always get the original."
+                ));
             }
             Err(e) => {
                 convert_note = Some(format!(
@@ -1124,6 +1132,26 @@ mod tests {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         );
         assert!(out.text.contains("whole file"));
+    }
+
+    #[test]
+    fn get_source_file_over_cap_conversion_falls_back_to_original_docx() {
+        let (d, i) = docx_corpus();
+        let docx = std::fs::read(d.path().join("report.docx")).unwrap();
+        let pdf = crate::convert::docx_pdf::docx_to_pdf(&docx).unwrap();
+        // Only meaningful when the converted PDF is heavier than the source docx.
+        if pdf.len() as u64 > docx.len() as u64 {
+            let max = docx.len() as u64; // PDF over cap, original docx fits (==)
+            let out = get_source_file(&i, None, "report.docx", None, max, false);
+            let f = out.file.expect("original docx delivered as fallback");
+            assert_eq!(f.filename, "report.docx");
+            assert_eq!(
+                f.mime,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            );
+            assert!(f.bytes.starts_with(b"PK"), "docx is a zip archive");
+            assert!(out.text.contains("original .docx"));
+        }
     }
 
     #[test]
