@@ -21,6 +21,7 @@ regex-syntax = "0.8"
 globset = "0.4"
 office_oxide = "0.1"
 pdf_oxide = { version = "0.3", default-features = false, features = ["rendering"] }
+rdocx = "0.1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

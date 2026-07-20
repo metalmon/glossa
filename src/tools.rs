@@ -932,6 +932,7 @@ pub fn get_source_file(
     path: &str,
     n: Option<u64>,
     max_bytes: u64,
+    raw: bool,
 ) -> SourceFileOut {
     let err = |text: String| SourceFileOut { text, file: None };
 
@@ -956,7 +957,7 @@ pub fn get_source_file(
     };
 
     let doc_path = idx.doc_file(&real);
-    let bytes = match std::fs::read(&doc_path) {
+    let mut bytes = match std::fs::read(&doc_path) {
         Ok(b) => b,
         Err(e) => {
             return err(format!(
@@ -964,19 +965,53 @@ pub fn get_source_file(
             ))
         }
     };
-    let name = real.rsplit(['\\', '/']).next().unwrap_or(&real).to_string();
+    let mut name = real.rsplit(['\\', '/']).next().unwrap_or(&real).to_string();
     let ext = std::path::Path::new(&real)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let size = bytes.len() as u64;
     let page_note = n.map(|p| format!(" (cited page {p})")).unwrap_or_default();
 
-    // Whole file when it fits.
+    // DOCX is delivered as PDF by default — many clients render .docx inconsistently. `raw`
+    // opts out. A conversion error is non-fatal: fall back to the original bytes with a note.
+    let mut convert_note: Option<String> = None;
+    if ext == "docx" && !raw {
+        match crate::convert::docx_pdf::docx_to_pdf(&bytes) {
+            Ok(pdf) if (pdf.len() as u64) <= max_bytes => {
+                let stem = name.strip_suffix(".docx").unwrap_or(&name).to_string();
+                let pages = crate::convert::docx_pdf::pdf_page_count(&pdf)
+                    .map(|p| format!("{p} pages"))
+                    .unwrap_or_else(|| "the full document".to_string());
+                convert_note = Some(format!(
+                    "{real} was converted to PDF for delivery (source format renders inconsistently across clients). Returned: {stem}.pdf, {pages}. To get the untouched original file, call again with raw: true."
+                ));
+                bytes = pdf;
+                name = format!("{stem}.pdf");
+            }
+            Ok(_) => {
+                // The converted PDF is over the cap. Don't deliver an over-cap artifact; keep the
+                // original .docx so the under-cap whole-file path can still deliver it (the file
+                // was deliverable before this feature). raw: true always returns the original.
+                convert_note = Some(format!(
+                    "{real} converted to a PDF larger than the {max_bytes}-byte cap; delivering the original .docx instead. Pass raw: true to always get the original."
+                ));
+            }
+            Err(e) => {
+                convert_note = Some(format!(
+                    "PDF conversion of {real} failed; returning the original .docx bytes unchanged. Reason: {e}."
+                ));
+            }
+        }
+    }
+    let size = bytes.len() as u64;
+
+    // Whole file when it fits. After a successful conversion `name` ends in .pdf, so
+    // `source_mime` yields application/pdf; the delivered bytes are the generated PDF.
     if size <= max_bytes {
         return SourceFileOut {
-            text: format!("delivered whole file: {real}{page_note}"),
+            text: convert_note
+                .unwrap_or_else(|| format!("delivered whole file: {real}{page_note}")),
             file: Some(SourceBlob { mime: source_mime(&name).to_string(), filename: name, bytes }),
         };
     }
@@ -1062,10 +1097,67 @@ mod tests {
         (d, i)
     }
 
+    fn docx_corpus() -> (tempfile::TempDir, DocIndex) {
+        let d = tempfile::tempdir().unwrap();
+        let mut doc = rdocx::Document::new();
+        doc.add_paragraph("Integration fixture paragraph one.");
+        doc.add_paragraph("Integration fixture paragraph two.");
+        let bytes = doc.to_bytes().unwrap();
+        std::fs::write(d.path().join("report.docx"), &bytes).unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        (d, i)
+    }
+
+    #[test]
+    fn get_source_file_converts_docx_to_pdf_by_default() {
+        let (_d, i) = docx_corpus();
+        let out = get_source_file(&i, None, "report.docx", None, DEFAULT_SOURCE_MAX_BYTES, false);
+        let f = out.file.expect("file delivered");
+        assert_eq!(f.mime, "application/pdf");
+        assert!(f.filename.ends_with(".pdf"));
+        assert!(f.bytes.starts_with(b"%PDF"));
+        assert!(out.text.contains("converted"));
+        assert!(out.text.contains("raw: true"));
+    }
+
+    #[test]
+    fn get_source_file_raw_returns_original_docx() {
+        let (_d, i) = docx_corpus();
+        let out = get_source_file(&i, None, "report.docx", None, DEFAULT_SOURCE_MAX_BYTES, true);
+        let f = out.file.expect("file delivered");
+        assert_eq!(f.filename, "report.docx");
+        assert_eq!(
+            f.mime,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert!(out.text.contains("whole file"));
+    }
+
+    #[test]
+    fn get_source_file_over_cap_conversion_falls_back_to_original_docx() {
+        let (d, i) = docx_corpus();
+        let docx = std::fs::read(d.path().join("report.docx")).unwrap();
+        let pdf = crate::convert::docx_pdf::docx_to_pdf(&docx).unwrap();
+        // Only meaningful when the converted PDF is heavier than the source docx.
+        if pdf.len() as u64 > docx.len() as u64 {
+            let max = docx.len() as u64; // PDF over cap, original docx fits (==)
+            let out = get_source_file(&i, None, "report.docx", None, max, false);
+            let f = out.file.expect("original docx delivered as fallback");
+            assert_eq!(f.filename, "report.docx");
+            assert_eq!(
+                f.mime,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            );
+            assert!(f.bytes.starts_with(b"PK"), "docx is a zip archive");
+            assert!(out.text.contains("original .docx"));
+        }
+    }
+
     #[test]
     fn get_source_file_delivers_whole_pdf_under_cap() {
         let (_d, i) = pdf_corpus();
-        let out = get_source_file(&i, None, "sample.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES);
+        let out = get_source_file(&i, None, "sample.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES, false);
         let f = out.file.expect("file delivered");
         assert_eq!(f.filename, "sample.pdf");
         assert_eq!(f.mime, "application/pdf");
@@ -1095,7 +1187,7 @@ mod tests {
         // Only assert the slice-delivery branch when the fixture allows it (a single page smaller
         // than the whole file); the slicer itself is covered above regardless.
         if slice_len < whole {
-            let out = get_source_file(&i, None, "sample.pdf", Some(1), slice_len);
+            let out = get_source_file(&i, None, "sample.pdf", Some(1), slice_len, false);
             let f = out.file.expect("page slice delivered");
             assert_eq!(f.mime, "application/pdf");
             assert!(f.filename.ends_with("-p1.pdf"));
@@ -1108,7 +1200,7 @@ mod tests {
     fn get_source_file_cap_below_page_size_errs_not_panics() {
         let (_d, i) = pdf_corpus();
         // A cap smaller than even one extracted page → structured error, no file (never a panic).
-        let out = get_source_file(&i, None, "sample.pdf", Some(1), 10);
+        let out = get_source_file(&i, None, "sample.pdf", Some(1), 10, false);
         assert!(out.file.is_none());
         assert!(out.text.contains("cap"));
     }
@@ -1116,7 +1208,7 @@ mod tests {
     #[test]
     fn get_source_file_over_cap_pdf_without_page_asks_for_one() {
         let (_d, i) = pdf_corpus();
-        let out = get_source_file(&i, None, "sample.pdf", None, 10);
+        let out = get_source_file(&i, None, "sample.pdf", None, 10, false);
         assert!(out.file.is_none());
         assert!(out.text.contains("cited page"));
     }
@@ -1127,7 +1219,7 @@ mod tests {
         std::fs::write(d.path().join("notes.md"), "# Title\n\nplenty of text here\n").unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        let out = get_source_file(&i, None, "notes.md", Some(1), 4);
+        let out = get_source_file(&i, None, "notes.md", Some(1), 4, false);
         assert!(out.file.is_none());
         assert!(out.text.contains("not a PDF"));
     }
@@ -1135,7 +1227,7 @@ mod tests {
     #[test]
     fn get_source_file_unknown_path_errs() {
         let (_d, i) = pdf_corpus();
-        let out = get_source_file(&i, None, "nope.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES);
+        let out = get_source_file(&i, None, "nope.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES, false);
         assert!(out.file.is_none());
         assert!(out.text.contains("no document indexed"));
     }

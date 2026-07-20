@@ -1,4 +1,5 @@
 pub mod cli_fmt;
+pub mod convert;
 pub mod extract;
 pub mod glob;
 pub mod graph;
