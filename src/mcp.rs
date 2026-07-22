@@ -77,7 +77,7 @@ const GRAPH_TOOLS: &[&str] = &[
 ];
 
 impl GlossaServer {
-    pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool) -> Self {
+    pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool, no_image: bool) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
             for t in EDITOR_TOOLS
@@ -97,11 +97,39 @@ impl GlossaServer {
                 router.disable_route(*t);
             }
         }
+        if no_image {
+            if let Some(route) = router.map.get_mut("read") {
+                let mut schema: serde_json::Value =
+                    serde_json::to_value(&*route.attr.input_schema)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                if let Some(obj) = schema.as_object_mut() {
+                    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                        props.remove("page_image");
+                        props.remove("include_images");
+                    }
+                    if let Some(req) = obj.get_mut("required").and_then(|r| r.as_array_mut()) {
+                        req.retain(|v| {
+                            v.as_str()
+                                .map(|s| s != "page_image" && s != "include_images")
+                                .unwrap_or(true)
+                        });
+                    }
+                }
+                let new_schema: rmcp::model::JsonObject =
+                    serde_json::from_value(schema).unwrap_or_default();
+                route.attr.input_schema = Arc::new(new_schema);
+            }
+        }
         #[cfg(not(feature = "notebook"))]
         {
             for t in NOTEBOOK_READ_TOOLS.iter().chain(NOTEBOOK_WRITE_TOOLS) {
                 router.disable_route(*t);
             }
+        }
+        #[cfg(not(feature = "constraint"))]
+        {
+            router.disable_route("constraint_solve");
+            router.disable_route("graph_build");
         }
         let trace = if trace {
             crate::trace::TraceLog::to_dir(&root)
@@ -119,6 +147,14 @@ impl GlossaServer {
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn open_index_graph(
+        &self,
+    ) -> Result<(crate::index::store::DocIndex, Option<GraphStore>), McpError> {
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.root).ok();
+        Ok((idx, g))
     }
 
     /// Return the list of enabled tools (for config generation — not test-only).
@@ -643,6 +679,39 @@ impl GraphUpdateArgs {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn read_common(
+    root: &std::path::Path,
+    idx: &crate::index::store::DocIndex,
+    g: Option<&GraphStore>,
+    path: &str,
+    n: u64,
+    page_image: bool,
+    include_images: bool,
+    trace: &crate::trace::TraceLog,
+) -> CallToolResult {
+    let out = crate::tools::read(root, idx, g, path, n, page_image, trace);
+    let mut content = Vec::new();
+    if page_image {
+        if !out.text.is_empty() {
+            content.push(Content::text(out.text));
+        }
+        for img in out.images {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+            content.push(Content::image(b64, img.mime));
+        }
+    } else {
+        content.push(Content::text(out.text));
+        if include_images {
+            for img in out.images {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+                content.push(Content::image(b64, img.mime));
+            }
+        }
+    }
+    CallToolResult::success(content)
+}
+
 #[tool_router]
 impl GlossaServer {
     #[tool(
@@ -670,37 +739,19 @@ impl GlossaServer {
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).ok();
+        let (idx, g) = self.open_index_graph()?;
         let page_image = a.page_image.unwrap_or(false);
-        let out = crate::tools::read(
+        let include_images = a.include_images.unwrap_or(true);
+        Ok(read_common(
             &self.root,
             &idx,
             g.as_ref(),
             &a.path,
             a.n as u64,
             page_image,
+            include_images,
             &self.trace,
-        );
-        let mut content = Vec::new();
-        if page_image {
-            if !out.text.is_empty() {
-                content.push(Content::text(out.text));
-            }
-            for img in out.images {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
-                content.push(Content::image(b64, img.mime));
-            }
-        } else {
-            content.push(Content::text(out.text));
-            if a.include_images.unwrap_or(true) {
-                for img in out.images {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
-                    content.push(Content::image(b64, img.mime));
-                }
-            }
-        }
-        Ok(CallToolResult::success(content))
+        ))
     }
 
     #[tool(
@@ -848,8 +899,6 @@ impl GlossaServer {
 
             let assignment: Vec<(String, serde_json::Value)> =
                 a.assignment.unwrap_or_default().into_iter().collect();
-            // Re-key onto the graph's Field labels via the morphology resolver, so a
-            // value keyed by a paraphrase of a parameter name still hits its constraint.
             let assignment =
                 crate::constraint_adapter::resolve_assignment_fields(&g, &problem, &assignment);
 
@@ -1265,7 +1314,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         let path = "d.md".to_string(); // canonical key: corpus-root-relative
 
         let out = srv
@@ -1290,7 +1339,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nmaxTsdr 3000\n# B\nother\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         let out = srv
             .grep(Parameters(GrepArgs {
                 pattern: "maxTsdr".into(),
@@ -1325,7 +1374,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("Other.md"), "# A\nраз\n".as_bytes()).unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
@@ -1349,7 +1398,7 @@ mod tests {
         )
         .unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
@@ -1377,7 +1426,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // pre-cancelled → the loop must return promptly, not hang
         tokio::time::timeout(
@@ -1414,7 +1463,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         srv.run_generalize();
         let g = GraphStore::open(dir.path()).unwrap();
         assert!(
@@ -1428,7 +1477,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nhello world\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
         assert!(srv.readiness(), "index + graph open → ready");
         let m = srv.metrics_text();
         assert!(m.contains("glossa_up 1"), "metrics: {m}");
@@ -1462,7 +1511,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
 
         // Another editor holds the cross-process generalize lock.
         let lock_path = dir.path().join(".glossa").join("generalize.lock");
@@ -1504,7 +1553,7 @@ mod tests {
     #[test]
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
-        let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false).enabled_tools();
+        let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false, false).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         assert!(reader.contains(&"ls".to_string()));
         assert!(
@@ -1517,7 +1566,7 @@ mod tests {
         );
         assert!(!reader.contains(&"write".to_string()));
 
-        let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false).enabled_tools();
+        let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false, false).enabled_tools();
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(
@@ -1543,7 +1592,7 @@ mod tests {
             "reader cannot graph_stats"
         );
 
-        let full = GlossaServer::new(root.clone(), Profile::Full, false, false).enabled_tools();
+        let full = GlossaServer::new(root.clone(), Profile::Full, false, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
@@ -1555,7 +1604,7 @@ mod tests {
             );
         }
 
-        let ng = GlossaServer::new(root, Profile::Editor, false, true).enabled_tools();
+        let ng = GlossaServer::new(root, Profile::Editor, false, true, false).enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
         assert!(
             !ng.contains(&"neighbors".to_string())

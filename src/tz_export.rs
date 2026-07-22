@@ -115,6 +115,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         crate::mcp::Profile::Full,
         false,
         false,
+        false,
     );
     let mut full_tools = full_srv.tool_specs();
     full_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -123,6 +124,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     let reader_srv = crate::mcp::GlossaServer::new(
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Reader,
+        false,
         false,
         false,
     );
@@ -134,6 +136,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     let editor_srv = crate::mcp::GlossaServer::new(
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Editor,
+        false,
         false,
         false,
     );

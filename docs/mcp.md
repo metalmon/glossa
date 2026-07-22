@@ -22,7 +22,9 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 
 `--no-graph` hides all graph and index tools (search + read only) for eval control arms.
 
-`resolve`, `get_ontology`, and `constraint_solve` are available in every profile (`constraint_solve` returns an error unless the binary was built with `--features constraint`).
+`--noimage` / `-N` (or `GLOSSA_NO_IMAGE=1`) disables all image output: `read` strips `page_image` and `include_images` from its schema and never returns `Content::image`. `get_source_file` is unaffected.
+
+`resolve`, `get_ontology`, and `constraint_solve` are available in every profile. `constraint_solve` and `graph_build` are only registered when the binary is built with `--features constraint` — without it, these tools are absent from the tool list.
 
 ## Tools
 
@@ -31,20 +33,20 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
-| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models |
+| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models. With `--noimage`, image params are removed from the schema and responses contain text only |
 | `get_source_file` | ✓ | ✓ | ✓ | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
 | `neighbors` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
 | `resolve` | ✓ | ✓ | ✓ | Entity resolution by name |
 | `get_ontology` | ✓ | ✓ | ✓ | Knowledge-base ontology as JSON: parameters, constraints, relations, graph-building patterns |
-| `constraint_solve` | ✓ | ✓ | ✓ | CSP solver over the constraint graph (`validate` / `infer` / `check`); requires a build with the `constraint` cargo feature |
+| `constraint_solve` | ✓* | ✓* | ✓* | CSP solver over the constraint graph (`validate` / `infer` / `check`); only available with `--features constraint` |
 | `ls` | ✓ | ✓ | ✓ | List notebook notes (agent workspace); read note content with `read` |
 | `note` | | ✓ | ✓ | Create/replace — or with `append: true` extend — a notebook note (`doc`, `file`, `content`; `.csp` = validated limit table) |
 | `del` | | ✓ | ✓ | Delete a notebook note |
 | `index` | | ✓ | ✓ | Incremental index |
 | `reindex` | | ✓ | ✓ | Full rebuild |
 | `graph_upsert` | | ✓ | ✓ | Create/update reasoning nodes and edges |
-| `graph_build` | | ✓ | ✓ | Compile `.csp` limit tables into constraint graph |
+| `graph_build` | | ✓* | ✓* | Compile `.csp` limit tables into constraint graph; only available with `--features constraint` |
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
 | `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive) |
@@ -52,6 +54,8 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `purge` | | | ✓ | Delete entire `.glossa/` |
 
 Source of truth: [`src/mcp.rs`](../src/mcp.rs).
+
+\* Only available when built with `cargo build --features constraint`. Without it, these tools are absent from the tool list.
 
 ## Typical agent workflow
 

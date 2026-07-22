@@ -202,7 +202,7 @@ fn read_node(
                 format_chunk_body(*ord, &c.body)
             ));
         }
-        images.extend(crate::read::extract_images(&idx.doc_file(p), *ord, 4).unwrap_or_default());
+        images.extend(crate::read::extract_images(&idx.doc_file(p), *ord, usize::MAX).unwrap_or_default());
     }
     ReadOut { text, images }
 }
@@ -344,7 +344,7 @@ pub fn read(
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(&doc_path, resolved_ord, 4).unwrap_or_default();
+    let images = crate::read::extract_images(&doc_path, resolved_ord, usize::MAX).unwrap_or_default();
     let body = format_chunk_body(resolved_ord, &chunk.body);
     ReadOut {
         text: format!("{}{}", body, footer),

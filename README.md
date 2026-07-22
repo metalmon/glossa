@@ -30,7 +30,7 @@ glossa indexes documents on disk, serves ranked search and ripgrep-style tools, 
 
 | Feature | What it does |
 |---------|----------------|
-| **Native document ingest** | Drop PDF/Office files into the corpus folder — glossa extracts text and chunks them (`p.N` for PDF, sections for Office). Embedded images in `read` for vision-capable agents. No LibreOffice, pandoc, or separate ETL. |
+| **Native document ingest** | Drop PDF/Office files into the corpus folder — glossa extracts text and chunks them (`p.N` for PDF, sections for Office). Embedded images in `read` for vision-capable agents; `--noimage` for text-only mode. No LibreOffice, pandoc, or separate ETL. |
 | **Auto-indexing** | `ensure_fresh` before MCP/CLI reads — new or changed files are indexed automatically. Cheap stat-scan when nothing changed; safe across concurrent reader/editor instances. |
 | **Auto-generalize** | Editor MCP runs a debounced `graph_generalize` after index changes — SIMILAR links, communities, centrality without agent action. Cross-process lock on `.glossa/generalize.lock`. |
 | **Graph without embeddings** | Reasoning types and relations from `ontology.toml`; derived layer (closure, SIMILAR, communities) is deterministic — no vector DB, no model calls. |

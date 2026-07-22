@@ -256,9 +256,7 @@ pub fn merge_append_rows(
     let mut added = 0usize;
     let mut dup_ignored = 0usize;
     for row in new_rows {
-        if known.contains(&row) {
-            dup_ignored += 1;
-        } else if !seen_in_chunk.insert(row.clone()) {
+        if known.contains(&row) || !seen_in_chunk.insert(row.clone()) {
             dup_ignored += 1;
         } else {
             known.insert(row.clone());

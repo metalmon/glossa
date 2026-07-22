@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-07-22
+
+### Added
+
+- **`--noimage` / `-N` flag**: disable all image output in MCP tools — `read` strips `page_image` and `include_images` from its schema and disables image content in responses. `get_source_file` is unaffected. Also settable via `GLOSSA_NO_IMAGE=1` env var.
+
+### Changed
+
+- **Image extraction limit removed**: `read` now extracts *all* embedded images by default (previously capped at 4). The `max` parameter was hardcoded and not user-facing; the limit is gone.
+- **Shared read logic**: `read` handler delegates to `read_common()` — image/no-image is a single flag controlled by schema stripping, not duplicated handlers.
+
+### Removed
+
+- **`constraint_solve` and `graph_build` tools hidden when feature disabled**: these tools are now excluded from the tool list when the binary is built without `--features constraint` (previously they were always visible and returned a runtime error).
+
 ## [0.2.2] — 2026-07-19
 
 ### Added

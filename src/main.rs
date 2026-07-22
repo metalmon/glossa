@@ -162,6 +162,9 @@ enum Cmd {
         /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
         #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
+        /// Disable image output in MCP tools (text-only read tool, no Content::image in responses).
+        #[arg(short = 'N', long = "noimage", env = "GLOSSA_NO_IMAGE")]
+        no_image: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
         #[arg(
             long,
@@ -328,6 +331,7 @@ pub(crate) struct ServeParams {
     pub profile: glossa::mcp::Profile,
     pub trace: bool,
     pub no_graph: bool,
+    pub no_image: bool,
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
@@ -342,7 +346,7 @@ pub(crate) fn run_serve(
     handle_signals: bool,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
-    let server = glossa::mcp::GlossaServer::new(p.path, p.profile, p.trace, p.no_graph);
+    let server = glossa::mcp::GlossaServer::new(p.path, p.profile, p.trace, p.no_graph, p.no_image);
     // Freshness runs on EVERY instance (readers stay current). The heavy generalize loop runs ONLY on
     // the indexer (editor/full); among multiple editors it is further serialized by generalize.lock.
     let run_maintenance = p.profile != glossa::mcp::Profile::Reader;
@@ -735,6 +739,7 @@ fn main() -> anyhow::Result<()> {
             profile,
             trace,
             no_graph,
+            no_image,
             transport,
             bind,
             allowed_hosts,
@@ -756,6 +761,7 @@ fn main() -> anyhow::Result<()> {
                     profile: glossa::mcp::Profile::parse(&profile),
                     trace,
                     no_graph,
+                    no_image,
                     transport,
                     bind,
                     allowed_hosts,
