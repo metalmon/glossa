@@ -47,6 +47,8 @@ pub struct GlossaServer {
     last_change: Arc<AtomicU64>,
     /// True while a background `ensure_fresh` is running — concurrent `kick_freshen` calls bail out.
     indexing: Arc<AtomicBool>,
+    /// When true, `read` tool strips all image content from responses.
+    no_image: bool,
 }
 
 #[allow(dead_code)] // read tools stay enabled for Reader; listed for profile documentation
@@ -146,6 +148,7 @@ impl GlossaServer {
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicBool::new(false)),
+            no_image,
         }
     }
 
@@ -740,8 +743,8 @@ impl GlossaServer {
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.kick_freshen();
         let (idx, g) = self.open_index_graph()?;
-        let page_image = a.page_image.unwrap_or(false);
-        let include_images = a.include_images.unwrap_or(true);
+        let page_image = !self.no_image && a.page_image.unwrap_or(false);
+        let include_images = !self.no_image && a.include_images.unwrap_or(true);
         Ok(read_common(
             &self.root,
             &idx,
