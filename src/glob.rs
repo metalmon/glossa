@@ -68,8 +68,23 @@ mod tests {
     use crate::model::Chunk;
     use std::path::PathBuf;
 
+    /// Retry tempdir creation + index write on Windows CI (transient "Access denied").
+    fn tempdir_with_retry() -> tempfile::TempDir {
+        let mut last_err = None;
+        for _ in 0..3 {
+            match tempfile::tempdir() {
+                Ok(d) => return d,
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("tempdir failed after 3 retries: {last_err:?}");
+    }
+
     fn idx_with(chunks: &[(&str, &str, &str)]) -> (tempfile::TempDir, DocIndex) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir_with_retry();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let cs: Vec<Chunk> = chunks
             .iter()
@@ -85,7 +100,7 @@ mod tests {
     }
 
     fn idx_with_types(chunks: &[(&str, &str, &str, &str)]) -> (tempfile::TempDir, DocIndex) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir_with_retry();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let cs: Vec<Chunk> = chunks
             .iter()
