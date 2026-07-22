@@ -31,7 +31,15 @@ On Windows, `just` invokes **`kb-eval.exe`** and **`kb-train.exe`**. After pulli
 - **CI** (`.github/workflows/ci.yml`): push/PR → tests on Ubuntu + Windows, `cargo check` on Ubuntu.
 - **Releases** (`.github/workflows/release.yml`): push a tag `v1.0.0` → GitHub Release with `kb` for Linux, Windows, macOS (arm64 + x64).
 
+Release workflow (CI and Release are independent — push commit first, then tag):
+
 ```bash
+# 1. Push commit to master — CI runs tests
+git push origin master
+
+# 2. Wait for CI to pass (gh run watch)
+
+# 3. Push tag — Release builds binaries (no duplicate tests)
 git tag v1.0.0
 git push origin v1.0.0
 ```
