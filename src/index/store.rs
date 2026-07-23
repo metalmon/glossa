@@ -526,28 +526,41 @@ impl DocIndex {
     /// the model prepends even though search results omit it). Returns the exact path only when
     /// exactly one indexed document matches — never guesses between ambiguous candidates.
     pub fn resolve_path(&self, input: &str) -> anyhow::Result<Option<String>> {
-        fn norm(s: &str) -> String {
-            // Collapse runs of whitespace AND of path separators, and unify `/` and `\` to `\`, so
-            // a model that double-escapes (`\\`) or swaps separators still resolves to the real path.
+        /// Normalize path separators: collapse runs of `/` or `\` into one,
+        /// replace with host OS separator.
+        fn normalize_path(s: &str) -> String {
             let mut out = String::with_capacity(s.len());
-            let mut prev_sep = false;
-            let mut prev_ws = false;
-            for c in s.chars() {
-                if c == '/' || c == '\\' {
-                    if !prev_sep {
-                        out.push('\\');
+            let mut chars = s.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' || c == '/' {
+                    // Skip any following separators (collapse runs)
+                    while chars.peek() == Some(&'\\') || chars.peek() == Some(&'/') {
+                        chars.next();
                     }
-                    prev_sep = true;
-                    prev_ws = false;
-                } else if c.is_whitespace() {
+                    // Emit the host separator
+                    #[cfg(windows)]
+                    out.push('\\');
+                    #[cfg(not(windows))]
+                    out.push('/');
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        fn norm(s: &str) -> String {
+            // Normalize separators first, then collapse whitespace.
+            let normalized = normalize_path(s);
+            let mut out = String::with_capacity(normalized.len());
+            let mut prev_ws = false;
+            for c in normalized.chars() {
+                if c.is_whitespace() {
                     if !prev_ws && !out.is_empty() {
                         out.push(' ');
                     }
                     prev_ws = true;
-                    prev_sep = false;
                 } else {
                     out.push(c);
-                    prev_sep = false;
                     prev_ws = false;
                 }
             }
