@@ -364,7 +364,6 @@ struct GlobArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadArgs {
     #[schemars(description = "document path, exactly as shown in a search result")]
-    #[serde(deserialize_with = "crate::json_util::deserialize_str_loose")]
     path: String,
     #[serde(deserialize_with = "crate::json_util::deserialize_u32_loose")]
     #[schemars(
@@ -384,7 +383,6 @@ struct ReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SourceFileArgs {
     #[schemars(description = "document path, exactly as shown in a search/grep result")]
-    #[serde(deserialize_with = "crate::json_util::deserialize_str_loose")]
     path: String,
     #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u32_loose")]
     #[schemars(
@@ -446,7 +444,6 @@ struct Empty {}
 #[allow(dead_code)]
 struct ConstraintSolveArgs {
     #[schemars(description = "Source document source_path (which document's constraints to load)")]
-    #[serde(deserialize_with = "crate::json_util::deserialize_str_loose")]
     source_path: String,
     #[schemars(description = "mode: validate | infer | check")]
     mode: String,
@@ -510,7 +507,6 @@ struct NotebookPathArgs {
     #[schemars(
         description = "Notebook path from ls (<document>/<file>; document includes extension)"
     )]
-    #[serde(deserialize_with = "crate::json_util::deserialize_str_loose")]
     path: String,
 }
 
@@ -530,7 +526,7 @@ struct GrepArgs {
     #[schemars(
         description = "Search only this document — the same path `glob`/`read`/`search` show (a trailing `#chunk` is ignored). Omit to search the whole base."
     )]
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_str_loose")]
+    #[serde(default)]
     path: Option<String>,
     #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
     #[schemars(description = "case-insensitive matching (-i)")]

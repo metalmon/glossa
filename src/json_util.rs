@@ -1,7 +1,6 @@
 //! Loose coercions for LLM tool-call JSON (bools as strings, etc.).
 
 use serde::de::{self, Deserializer, Visitor};
-use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
@@ -172,63 +171,6 @@ where
     }
 }
 
-/// Normalize a path string by collapsing double backslashes (`\\` → `\`).
-///
-/// Handles MCP clients that double-escape backslashes in JSON: the JSON `\\\\`
-/// (four chars) deserializes to `\\` (two chars), which this function collapses
-/// back to `\` (one char) — the correct Windows path separator.
-fn normalize_path_escapes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' && chars.peek() == Some(&'\\') {
-            out.push('\\');
-            chars.next(); // skip the second backslash
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Serde helper for `String` path fields that normalizes double-escaped backslashes.
-/// Use with `#[serde(deserialize_with = "crate::json_util::deserialize_str_loose")]`.
-pub fn deserialize_str_loose<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct StrVisitor;
-
-    impl<'de> Visitor<'de> for StrVisitor {
-        type Value = String;
-
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a string")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            Ok(normalize_path_escapes(v))
-        }
-
-        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-            Ok(normalize_path_escapes(&v))
-        }
-    }
-
-    deserializer.deserialize_any(StrVisitor)
-}
-
-/// `Option<String>` variant — normalizes double-escaped backslashes; absent/empty → `None`.
-pub fn deserialize_opt_str_loose<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match Option::<String>::deserialize(deserializer)? {
-        Some(s) if !s.is_empty() => Ok(Some(normalize_path_escapes(&s))),
-        _ => Ok(None),
-    }
-}
-
 /// Required-`u32` variant: accepts a JSON integer or numeric string; rejects null/empty.
 /// Use with `#[serde(deserialize_with = "crate::json_util::deserialize_u32_loose")]` on a
 /// non-optional field (absent → serde's normal "missing field" error).
@@ -308,43 +250,4 @@ mod tests {
         assert!(serde_json::from_str::<T>(r#"{}"#).is_err());
     }
 
-    #[test]
-    fn str_loose_normalizes_double_backslashes() {
-        #[derive(Deserialize)]
-        struct T {
-            #[serde(deserialize_with = "deserialize_str_loose")]
-            path: String,
-            #[serde(default, deserialize_with = "deserialize_opt_str_loose")]
-            opt_path: Option<String>,
-        }
-        // Double-escaped backslashes → single
-        let t: T =
-            serde_json::from_str(r#"{"path":"a\\\\b\\\\c.pdf"}"#).unwrap();
-        assert_eq!(t.path, r"a\b\c.pdf");
-        // Single backslash passes through unchanged
-        let t: T =
-            serde_json::from_str(r#"{"path":"a\\b.pdf"}"#).unwrap();
-        assert_eq!(t.path, r"a\b.pdf");
-        // No backslashes at all
-        let t: T =
-            serde_json::from_str(r#"{"path":"hello.pdf"}"#).unwrap();
-        assert_eq!(t.path, "hello.pdf");
-        // Cyrillic + backslash
-        let t: T = serde_json::from_str(
-            r#"{"path":"Доп.данные\\Обновлённые руководства\\guide.pdf"}"#,
-        )
-        .unwrap();
-        assert_eq!(t.path, "Доп.данные\\Обновлённые руководства\\guide.pdf");
-        // Optional: present with double escapes
-        let t: T =
-            serde_json::from_str(r#"{"path":"x","opt_path":"a\\\\b"}"#).unwrap();
-        assert_eq!(t.opt_path, Some(r"a\b".to_string()));
-        // Optional: absent → None
-        let t: T = serde_json::from_str(r#"{"path":"x"}"#).unwrap();
-        assert_eq!(t.opt_path, None);
-        // Optional: empty string → None
-        let t: T =
-            serde_json::from_str(r#"{"path":"x","opt_path":""}"#).unwrap();
-        assert_eq!(t.opt_path, None);
-    }
 }
