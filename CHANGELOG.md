@@ -18,7 +18,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Image extraction limit removed**: `read` now extracts *all* embedded images by default (previously capped at 4). The `max` parameter was hardcoded and not user-facing; the limit is gone.
 - **Shared read logic**: `read` handler delegates to `read_common()` — image/no-image is a single flag controlled by schema stripping, not duplicated handlers.
 - **`--noimage` enforces override**: `no_image` flag now stored in `GlossaServer` and forces both `page_image` and `include_images` to `false` in the `read` handler (previously only hid the parameters from the tool schema).
-- **Path string deserializer**: `read`, `get_source_file`, `notebook`, and `grep` (optional `path`) now normalize double-escaped backslashes from MCP clients at the deserialization level (`\\` → `\`). Prevents "path not found" when a client double-escapes Windows backslashes.
+- **Path normalization (SRP)**: all path separator normalization (`/` ↔ `\`, collapsing double-escaped backslashes, host-OS conversion) is now a single `normalize_path()` function called from `resolve_path()`. Removed `deserialize_str_loose` serde helpers — normalization happens at resolve time, not deserialization time.
 
 ### Removed
 
