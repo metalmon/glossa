@@ -161,7 +161,7 @@ where
     let gold_c = canon_scalar(gold);
     let agents: Vec<String> = agent_vals
         .into_iter()
-        .map(|s| canon_scalar(s))
+        .map(canon_scalar)
         .collect();
     if agents.iter().any(|a| a == &gold_c) {
         return true;
