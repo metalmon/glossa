@@ -27,6 +27,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **Cross-process index lock**: `index_dir` now holds an advisory `.glossa/index.lock` for the whole (re)build. When two processes (editor instances, the MCP server, a CLI `reindex`) index the same base at once, one used to clear `.glossa/index` while the other opened it — an "Access is denied" race on Windows. The lock serializes the rebuild: the first holder proceeds, the rest skip with a no-op stat (the index is cooperative, so whoever wins leaves it correct). RAII guard releases on function exit.
+- **Transient Windows write retry**: tantivy index writes (`write_chunks`, `delete_path`, `index_dir`) now retry past a transient "Access is denied (os error 5)" — a just-created or mmap'd index file briefly held by Windows Defender or a lingering reader handle. A short bounded backoff clears it; only permission-denied IO errors retry, real failures propagate immediately. Fixes intermittent Windows CI test failures.
 
 ## [0.2.2] — 2026-07-19
 

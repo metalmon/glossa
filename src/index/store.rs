@@ -169,7 +169,6 @@ impl RankedHit {
 
 impl DocIndex {
     pub fn write_chunks(&self, chunks: &[Chunk]) -> anyhow::Result<()> {
-        let mut writer = self.index.writer(50_000_000)?;
         // Delete existing docs for every distinct path so re-calling is idempotent.
         let mut distinct_paths: Vec<String> = chunks
             .iter()
@@ -177,31 +176,39 @@ impl DocIndex {
             .collect();
         distinct_paths.sort();
         distinct_paths.dedup();
-        for path_str in &distinct_paths {
-            writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
-        }
-        for (i, c) in chunks.iter().enumerate() {
-            let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
-            // A heading-less chunk has no location, which would make its section id a
-            // bare "<path>#" — meaningless and, to the agent, indistinguishable from a
-            // broken empty path. Fall back to the chunk's ordinal so every section has a
-            // real id ("<path>#<ord>") that matches how the agent references it (#n) and
-            // resolves the same way in the section node, resolve_section_ref, and read.
-            let location = if c.location.is_empty() {
-                ord.to_string()
-            } else {
-                c.location.clone()
-            };
-            writer.add_document(doc!(
-                self.fields.body => c.text.clone(),
-                self.fields.body_trigrams => c.text.clone(),
-                self.fields.path => c.doc_path.to_string_lossy().to_string(),
-                self.fields.location => location,
-                self.fields.file_type => c.file_type.clone(),
-                self.fields.ord => ord,
-            ))?;
-        }
-        writer.commit()?;
+        // The whole write (open writer → delete → add → commit) runs under a transient-IO retry:
+        // on Windows a just-created index file is briefly locked (Defender scan, lingering reader)
+        // and opening the writer can fail with "Access is denied (os error 5)". The transaction is
+        // idempotent (delete-by-path then re-add), so retrying the whole thing is safe.
+        with_writer_retry(|| {
+            let mut writer = self.index.writer(50_000_000)?;
+            for path_str in &distinct_paths {
+                writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
+            }
+            for (i, c) in chunks.iter().enumerate() {
+                let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
+                // A heading-less chunk has no location, which would make its section id a
+                // bare "<path>#" — meaningless and, to the agent, indistinguishable from a
+                // broken empty path. Fall back to the chunk's ordinal so every section has a
+                // real id ("<path>#<ord>") that matches how the agent references it (#n) and
+                // resolves the same way in the section node, resolve_section_ref, and read.
+                let location = if c.location.is_empty() {
+                    ord.to_string()
+                } else {
+                    c.location.clone()
+                };
+                writer.add_document(doc!(
+                    self.fields.body => c.text.clone(),
+                    self.fields.body_trigrams => c.text.clone(),
+                    self.fields.path => c.doc_path.to_string_lossy().to_string(),
+                    self.fields.location => location,
+                    self.fields.file_type => c.file_type.clone(),
+                    self.fields.ord => ord,
+                ))?;
+            }
+            writer.commit()?;
+            Ok(())
+        })?;
         self.reader.reload()?;
         Ok(())
     }
@@ -713,9 +720,12 @@ impl DocIndex {
     }
 
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
-        let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
-        writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
-        writer.commit()?;
+        with_writer_retry(|| {
+            let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
+            writer.commit()?;
+            Ok(())
+        })?;
         self.reader.reload()?;
         Ok(())
     }
@@ -787,6 +797,30 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
     )
 }
 
+/// Retry a tantivy index-write past a transient Windows filesystem error. A file that was just
+/// created (or is still mmap'd by an open reader) can be briefly held by the OS — Windows Defender
+/// scanning it, a lingering handle — so opening the writer or committing occasionally fails with
+/// "Access is denied (os error 5)" (`ErrorKind::PermissionDenied`). A short bounded backoff clears
+/// it; on other platforms the first attempt succeeds. Only permission-denied IO errors retry — a
+/// real failure (LockFailure, NotFound, …) propagates immediately.
+fn with_writer_retry<T>(mut op: impl FnMut() -> tantivy::Result<T>) -> tantivy::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Err(e) if attempt < 4 && is_transient_fs(&e) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(40 * attempt)));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// True for a transient Windows "Access is denied (os error 5)" IO error — safe to retry.
+fn is_transient_fs(e: &TantivyError) -> bool {
+    matches!(e, TantivyError::IoError(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
@@ -838,7 +872,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
     }
 
-    let mut writer = idx.index.writer(50_000_000)?;
+    let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
     let mut stats = IndexStats::default();
     let mut next = Manifest::default();
 
@@ -1573,6 +1607,48 @@ mod search_tests {
             "expected updated content, got: {}",
             d_hits[0].snippet
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn perm_denied() -> TantivyError {
+        // Windows surfaces "Access is denied. (os error 5)" as ErrorKind::PermissionDenied.
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Access is denied. (os error 5)",
+        )
+        .into()
+    }
+
+    #[test]
+    fn with_writer_retry_recovers_from_transient_permission_denied() {
+        let calls = Cell::new(0u32);
+        let out: tantivy::Result<u32> = with_writer_retry(|| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n < 3 {
+                Err(perm_denied())
+            } else {
+                Ok(n)
+            }
+        });
+        assert_eq!(out.unwrap(), 3, "succeeds after the transient failures clear");
+        assert_eq!(calls.get(), 3, "retried both permission-denied failures");
+    }
+
+    #[test]
+    fn with_writer_retry_propagates_non_transient_error() {
+        let calls = Cell::new(0u32);
+        let out: tantivy::Result<u32> = with_writer_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into())
+        });
+        assert!(out.is_err(), "a non-permission-denied error propagates");
+        assert_eq!(calls.get(), 1, "a non-transient error is not retried");
     }
 }
 
