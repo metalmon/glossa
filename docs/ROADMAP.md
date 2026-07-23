@@ -10,29 +10,21 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 
 ---
 
-## Shipped in v1.0
+## Shipped
 
-- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors.
+- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors; HTML `<img>` tag extraction (v0.2.5).
 - **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
 - **CLI:** `kb search|grep|glob|read|index|reindex|graph …|mcp` — scripting-first, not a TUI.
 - **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `neighbors`, formatted `graph_upsert` responses (Written / Merged / REJECTED).
-
-## Shipped in v1.1.0
-
 - **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks).
 - **Dev pipeline:** `justfile` recipes; Windows-friendly eval tooling.
-
-## Shipped in v1.2.0
-
-- **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick. **Graph tools (`glossary`, `neighbors`) not in the scoring loop yet** — see Eval harness.
+- **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick.
 - **export-tz:** four jsonl streams (`search`, `grep`, `glob`, `read`); synthetic grep/glob rows when episodes lack those tool calls; `TrainCase.source` gold join when present.
-- **Eval harness:** TensorZero `rebuild_corpus_each_question=false`; glossa-train JSON without mandatory `context`; tagged eval runs (`just eval … run-tag`); `case_id` tags on TensorZero episodes.
-- **Prod prompt:** refined retrieval fallback in `answer_hotpot/system.minijinja` (glob → scoped search/grep → read).
-- **justfile:** Windows `.exe` for `kb-eval` / `kb-train`; `gepa-reset` / `eval-reset`; default judge in `just eval`.
-- **Docs:** [eval-and-training.md](eval-and-training.md) playbook, [CHANGELOG.md](../CHANGELOG.md).
+- **Constraint graph (CSP):** solver in `constraint/solver.rs` (validate/infer/check, 1223 lines), `constraint_solve` MCP tool — behind `--features constraint`.
+- **`--noimage` / `-N` flag:** disable image output in MCP tools; enforces override in read handler (v0.2.5).
 
 See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [benchmarks.md](benchmarks.md) for HotpotQA numbers.
 
