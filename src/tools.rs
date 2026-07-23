@@ -1824,7 +1824,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "resolved despite collapsed double space: {}",
             out.text
         );
-        // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve.
+        // Doubled / swapped separators (model over-escapes `\\` or uses `\`) also resolve
+        // via normalize_path() inside resolve_path.
         let out2 = read(
             d.path(),
             &i,
