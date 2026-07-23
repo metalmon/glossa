@@ -161,6 +161,7 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
             }])
         }
         "pdf" => extract_pdf_page_images(path, page, max),
+        "htm" | "html" => extract_html_images(path, max),
         _ => extract_zip_media(path, max),
     }
 }
@@ -271,6 +272,59 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
     Ok(out)
 }
 
+/// Extract images referenced by `<img>` tags in an HTML file.
+///
+/// Only local file paths are resolved; remote URLs (http/https/ftp) and
+/// inline data URIs are silently skipped. Relative paths are resolved
+/// relative to the HTML file's parent directory.
+fn extract_html_images(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
+    if max == 0 {
+        return Ok(Vec::new());
+    }
+    let html = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    // Match <img ... src="..."> — captures the src attribute value.
+    for cap in regex_captures_iter(r#"<img[^>]+src="([^"]+)""#, &html) {
+        if out.len() >= max {
+            break;
+        }
+        let src = &cap[1];
+        // Skip remote URLs and inline data URIs.
+        if src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("ftp://")
+            || src.starts_with("data:")
+        {
+            continue;
+        }
+        let img_path = if std::path::Path::new(src).is_absolute() {
+            std::path::PathBuf::from(src)
+        } else {
+            dir.join(src)
+        };
+        let Some(mime) = mime_for(img_path.to_str().unwrap_or("")) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&img_path) else {
+            continue;
+        };
+        out.push(DocImage {
+            mime: mime.into(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+fn regex_captures_iter<'a>(pat: &'a str, text: &'a str) -> Vec<regex::Captures<'a>> {
+    let re = regex::Regex::new(pat).unwrap();
+    re.captures_iter(text).collect()
+}
+
 #[cfg(test)]
 mod image_tests {
     use super::*;
@@ -349,5 +403,71 @@ mod image_tests {
     #[test]
     fn extract_images_from_pdf_soft_fails() {
         assert!(extract_images(&sample_pdf(), 1, 4).is_ok());
+    }
+
+    #[test]
+    fn extract_html_images_returns_local_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\nfake-png";
+        std::fs::write(dir.path().join("photo.png"), png).unwrap();
+        std::fs::write(
+            dir.path().join("page.htm"),
+            r#"<html><body><img src="photo.png"></body></html>"#,
+        )
+        .unwrap();
+        let imgs = extract_images(&dir.path().join("page.htm"), 1, 10).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].mime, "image/png");
+        assert_eq!(imgs[0].bytes, png);
+    }
+
+    #[test]
+    fn extract_html_images_skips_remote_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("page.html"),
+            r#"<img src="https://example.com/a.png"><img src="local.png">"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("local.png"), b"LOCAL").unwrap();
+        let imgs = extract_images(&dir.path().join("page.html"), 1, 10).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].bytes, b"LOCAL");
+    }
+
+    #[test]
+    fn extract_html_images_skips_data_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.htm"),
+            r#"<img src="data:image/png;base64,abc">"#,
+        )
+        .unwrap();
+        assert!(extract_images(&dir.path().join("p.htm"), 1, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn extract_html_images_max_zero_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"PNG").unwrap();
+        std::fs::write(dir.path().join("p.htm"), r#"<img src="a.png">"#).unwrap();
+        assert!(extract_images(&dir.path().join("p.htm"), 1, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn extract_html_images_missing_file_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.htm"),
+            r#"<img src="nope.png"><img src="also-nope.jpg">"#,
+        )
+        .unwrap();
+        assert!(extract_images(&dir.path().join("p.htm"), 1, 10)
+            .unwrap()
+            .is_empty());
     }
 }
