@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-07-02**. Version **1.2.0** (tag `v1.2.0`; `master` may be one commit ahead with eval test fixes).
+Status as of **2026-07-23**. Version **0.2.5** (tag `v0.2.5`; `master` may be one commit ahead with eval test fixes).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -61,7 +61,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Item | Status | Notes |
 |------|--------|-------|
 | Markdown heading-scoped chunks | **Shipped** | `chunk_markdown` / `A > B` locations |
-| HTML / CSV / text streaming | **Partial** | Basic `html`, `csv`/`tsv` (100 rows/chunk), encoding sniff + binary skip in `text` |
+| HTML / CSV / text streaming | **Partial** | Basic `html`, `csv`/`tsv` (100 rows/chunk), encoding sniff + binary skip in `text`; HTML image extraction (`<img>` tags) shipped in v0.2.5 |
 | Image files (png, …) | **Partial** | Filename/folder label chunk; vision at `read` time for embedded office images, not scanned PDF pages |
 | Image-only / scanned PDFs | **Partial** | One `(no-text)` filename chunk when no text layer — not per-page, no OCR |
 | Indexing UX | **Partial** | `+ path` per file on reindex; no bar/counters/ETA |
@@ -84,14 +84,14 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Cross-process `graph_upsert` lock | **Open** | Advisory `.glossa/graph.lock` (fs4), like `generalize.lock` / `notebook.lock`; today only in-process Mutex on SQLite |
 | Glossary `--expand` | **Open** | Term/co-occurrence layer not built; `CO_OCCURS` declared, no lexical indexer |
 | Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents; see [graph-reasoning-directions.md](graph-reasoning-directions.md) |
-| Tailored ontology error messages | **Open** | e.g. explain Task → CAUSED_BY → Cause is invalid |
+| Tailored ontology error messages | **Partial** | `edge_validation_hint()` in `ontology.rs` covers constraint fields; domain-specific messages (e.g. Task → CAUSED_BY → Cause) not yet added |
 
 ### Constraint graph (CSP)
 
 | Item | Status | Notes |
 |------|--------|-------|
-| CSP solver in `kb` | **Open** | Not in main binary; eval TZ config has forward-looking `constraint_validate` / tool stubs only |
-| `constraint_solve` MCP tool | **Open** | Planned — see Track C |
+| CSP solver in `kb` | **Shipped** | `constraint/solver.rs` (validate/infer/check, 1223 lines); behind `--features constraint` |
+| `constraint_solve` MCP tool | **Shipped** | Registered when built with `--features constraint`; reads graph subgraph → solver Problem |
 | Structured table tools (`table_add_row`, `table_get`, …) | **Open** | Agents build `.csp` tables as free-form `note` TSV today, which is error-prone on wide/joint tables. Give models first-class ops — add/edit/delete a row, read a table back structured, and pull a table out of a source document — so complex tables are manipulated as data, not hand-formatted text. At minimum: build these tools and add eval coverage that they behave. |
 
 **Planned behavior:** agent models constraints via **`graph_upsert`** (`Field` → `CONSTRAINED_BY` → Range/Enum/Regex/…); **`constraint_solve`** reads that subgraph only (no table extraction from the index).
@@ -102,7 +102,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | **infer** | what values are still allowed per field? |
 | **check** | is the constraint model itself consistent? |
 
-**Open work:** ship solver + constraint ontology in `kb`, cross-field formulas/conditionals, operator CLI, standards mini-corpus eval, solver scaling for large enums.
+**Open work:** cross-field formulas/conditionals, operator CLI, standards mini-corpus eval, solver scaling for large enums.
 
 ### MCP and product
 
@@ -170,7 +170,7 @@ Normative corpora (ISO, IEC, internal standards, datasheets): retrieval → cons
 
 | Milestone | Status |
 |-----------|--------|
-| CSP solver + `constraint_solve` in `kb` | **Open** |
+| CSP solver + `constraint_solve` in `kb` | **Shipped** — v0.2.5, behind `--features constraint` |
 | Constraint ontology overlay | **Open** |
 | Standards mini-corpus eval | **Open** |
 
