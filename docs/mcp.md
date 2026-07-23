@@ -33,7 +33,7 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
-| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models. With `--noimage`, image params are removed from the schema and responses contain text only |
+| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models. For HTML files, images referenced by `<img>` tags are extracted and returned alongside the text. With `--noimage`, image params are removed from the schema and responses contain text only |
 | `get_source_file` | ✓ | ✓ | ✓ | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
 | `neighbors` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
