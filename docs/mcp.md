@@ -147,6 +147,8 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 
 Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `del`) use `.glossa/notebook.lock` the same way.
 
+Index (re)builds are serialized across processes by `.glossa/index.lock`: `index`, `reindex` and the `ensure_fresh` background scan hold it for the whole rebuild. If another process already holds it, the call skips with a no-op stat instead of racing it — clearing and reopening `.glossa/index` concurrently would otherwise fail on Windows ("Access is denied"). The index is cooperative, so whoever wins the lock leaves it correct.
+
 ## Regenerate external tool schemas
 
 After changing MCP tools:

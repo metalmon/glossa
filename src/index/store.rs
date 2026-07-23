@@ -791,6 +791,18 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
 pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
+    // Cross-process guard: index_dir clears and rewrites `.glossa/index`, which collides with
+    // another process doing the same on Windows ("Access is denied"). Hold `.glossa/index.lock`
+    // for the whole rebuild; if another process already holds it, skip with a default (no-op)
+    // stat rather than racing it — the index is cooperative, so whoever wins leaves it correct.
+    // The guard drops at function exit, releasing the lock (RAII).
+    let _lock = match crate::index::lock::try_index_lock(dir) {
+        Some(guard) => guard,
+        None => {
+            eprintln!("index_dir: another process is indexing, skipping");
+            return Ok(IndexStats::default());
+        }
+    };
     // force = true rebuilds the DOCUMENT-DERIVED layer from scratch: clear the tantivy index and
     // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
     // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
@@ -1178,6 +1190,39 @@ mod incremental_tests {
             .unwrap()
             .iter()
             .any(|h| h.path.ends_with("a.md")));
+    }
+
+    #[test]
+    fn index_dir_skips_when_index_lock_held() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
+
+        // Stand in for another process that is already indexing this base.
+        let held = crate::index::lock::try_index_lock(dir.path());
+        assert!(held.is_some(), "the test itself holds the index lock");
+
+        // Under contention index_dir must SKIP: no work reported, nothing written.
+        let stats = index_dir(dir.path(), false).unwrap();
+        assert_eq!(
+            stats,
+            IndexStats::default(),
+            "contended index_dir returns default stats"
+        );
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("alpha", 10).unwrap().is_empty(),
+            "no document indexed while the lock was held"
+        );
+
+        // Once the holder releases, the lock is free and indexing proceeds normally.
+        drop(held);
+        let stats2 = index_dir(dir.path(), false).unwrap();
+        assert_eq!(stats2.added, 1, "released: index_dir indexes the file");
+        let idx2 = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            !idx2.search("alpha", 10).unwrap().is_empty(),
+            "document searchable after the lock is released"
+        );
     }
 
     #[test]
