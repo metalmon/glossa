@@ -6,10 +6,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Cross-process index lock**: `index_dir` now holds an advisory `.glossa/index.lock` for the whole (re)build. When two processes (editor instances, the MCP server, a CLI `reindex`) index the same base at once, one used to clear `.glossa/index` while the other opened it — an "Access is denied" race on Windows. The lock serializes the rebuild: the first holder proceeds, the rest skip with a no-op stat (the index is cooperative, so whoever wins leaves it correct). RAII guard releases on function exit.
-
 ## [0.2.5] — 2026-07-22
 
 ### Added
@@ -27,6 +23,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 
 - **`constraint_solve` and `graph_build` tools hidden when feature disabled**: these tools are now excluded from the tool list when the binary is built without `--features constraint` (previously they were always visible and returned a runtime error).
+
+### Fixed
+
+- **Cross-process index lock**: `index_dir` now holds an advisory `.glossa/index.lock` for the whole (re)build. When two processes (editor instances, the MCP server, a CLI `reindex`) index the same base at once, one used to clear `.glossa/index` while the other opened it — an "Access is denied" race on Windows. The lock serializes the rebuild: the first holder proceeds, the rest skip with a no-op stat (the index is cooperative, so whoever wins leaves it correct). RAII guard releases on function exit.
 
 ## [0.2.2] — 2026-07-19
 
