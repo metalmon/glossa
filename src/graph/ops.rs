@@ -181,6 +181,7 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
 /// on the token naming a declared type, so ordinary multi-word labels are never mangled.
 /// Returns None when nothing matches.
 fn resolve_endpoint_label(
+    idx: &DocIndex,
     g: &GraphStore,
     ont: &Ontology,
     label_to_id: &std::collections::HashMap<String, String>,
@@ -194,6 +195,17 @@ fn resolve_endpoint_label(
     }
     if g.get_node(label).ok().flatten().is_some() {
         return Some(label.to_string());
+    }
+    // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
+    // separators ("docs/foo.docx"), but the stored Document node id uses the host
+    // separator ("docs\foo.docx"). Resolve it through the SAME path normalization as
+    // section refs (canonical_document_path) so it matches without the caller hand-
+    // writing backslashes. A non-path label (e.g. a Reference "ГОСТ Р ИСО/ТО 10013")
+    // resolves to no indexed document and falls through to label matching below.
+    if let Some(p) = idx.canonical_document_path(label) {
+        if g.get_node(&p).ok().flatten().is_some() {
+            return Some(p);
+        }
     }
     // When the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a Field, `to`
     // an Enum) and a Field and its Enum share this label, pick the existing node of the
@@ -500,6 +512,7 @@ pub fn graph_upsert(
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolve_endpoint_label(
+                        idx,
                         g,
                         ont,
                         &label_to_id,
@@ -537,6 +550,7 @@ pub fn graph_upsert(
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolve_endpoint_label(
+                        idx,
                         g,
                         ont,
                         &label_to_id,
@@ -1220,6 +1234,56 @@ strict = true
         );
     }
 
+    /// A Document endpoint (e.g. DEPENDS_ON doc->doc) written with the agent's forward
+    /// slashes must resolve to the Document node stored with the host separator — without
+    /// the caller hand-writing backslashes. Regression: `get_node` is an exact match, so a
+    /// `docs/foo.docx` endpoint missed the stored `docs\foo.docx` id and fell through to the
+    /// fuzzy label match, grabbing a token-overlapping reasoning node instead.
+    #[test]
+    fn edge_endpoint_document_path_normalizes_separators() {
+        use crate::index::manifest::FileSig;
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        idx.write_chunks(&[crate::model::Chunk {
+            doc_path: "docs\\case1.docx".into(),
+            location: "1".into(),
+            file_type: "docx".into(),
+            text: "hello".into(),
+        }])
+        .unwrap();
+        crate::graph::build::build_document(&g, "docs\\case1.docx", FileSig { mtime_secs: 0, size: 0 })
+            .unwrap();
+        // A reasoning node whose label shares tokens with the path — the fuzzy fallback
+        // could grab THIS instead of the Document without separator normalization.
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "case1 docx", "docs\\case1.docx")],
+            vec![],
+            1_000_000,
+        );
+        assert!(!out.rejected, "setup node written: {}", out.message);
+
+        let got = resolve_endpoint_label(
+            &idx,
+            &g,
+            &ont,
+            &Default::default(),
+            &Default::default(),
+            &std::collections::HashSet::new(),
+            "docs/case1.docx",
+            &[],
+        );
+        assert_eq!(
+            got,
+            Some("docs\\case1.docx".to_string()),
+            "forward-slash Document endpoint should resolve to the stored Document id"
+        );
+    }
+
     /// The model routinely prefixes an endpoint label with the node's TYPE
     /// ("Symptom Connection loss" for the node labelled "Connection loss"); the edge used
     /// to drop and the agent retried forever. Strip the type token and resolve.
@@ -1260,6 +1324,7 @@ strict = true
         // An ordinary multi-word label whose first word is NOT a type is untouched:
         // "Connection loss" itself still resolves as before (no mangling).
         let ok = resolve_endpoint_label(
+            &idx,
             &g,
             &ont,
             &Default::default(),
