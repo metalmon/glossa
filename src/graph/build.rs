@@ -89,7 +89,7 @@ pub fn build_document(g: &GraphStore, path: &str, sig: FileSig) -> anyhow::Resul
 }
 
 /// Put one Section node + CONTAINS edge for a chunk.
-pub fn build_section(g: &GraphStore, chunk: &Chunk, sig: FileSig) -> anyhow::Result<()> {
+pub fn build_section(g: &GraphStore, chunk: &Chunk, ord: u64, sig: FileSig) -> anyhow::Result<()> {
     let path = chunk.doc_path.to_string_lossy().to_string();
     let created_at = now_secs();
     let prov = Provenance {
@@ -100,7 +100,10 @@ pub fn build_section(g: &GraphStore, chunk: &Chunk, sig: FileSig) -> anyhow::Res
         confidence: 1.0,
         created_at,
     };
-    let sec_id = section_id(&path, &chunk.location);
+    // Section id is the 1-based ordinal (`#n` — the same key read/grep/search show the
+    // agent), so a numeric `path#n` from resolve_section_ref always matches. The heading
+    // stays as the node label (and prov range) for display and hierarchy breadcrumbs.
+    let sec_id = section_id(&path, &ord.to_string());
     g.put_node(&Node {
         id: sec_id.clone(),
         node_type: "Section".into(),

@@ -649,7 +649,9 @@ pub fn neighbors(
         // programming habit. Tolerate it instead of erroring so it doesn't loop guessing.
         let nn = if nn == 0 { 1 } else { nn };
         match idx.location_for_ord(p, nn) {
-            Ok(Some(loc)) => crate::graph::build::section_id(p, &loc),
+            // Section ids are the ordinal (see build_section); location_for_ord only
+            // confirms the chunk exists here — build the id from the ordinal `nn`.
+            Ok(Some(_)) => crate::graph::build::section_id(p, &nn.to_string()),
             Ok(None) => {
                 return format!(
                     "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"

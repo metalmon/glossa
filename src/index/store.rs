@@ -910,12 +910,11 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             }
             seq += 1;
             let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
-            // A heading-less chunk has no location, which makes its section id a bare
-            // "<path>#" — meaningless, and to the agent indistinguishable from a broken
-            // empty path. Fall back to the ordinal so every section has a real id
-            // ("<path>#<ord>"). Set it here, at the single indexing boundary and AFTER
-            // ord is computed, so the index, the structural graph (build_section /
-            // section_id below) and resolve_section_ref all speak the same form.
+            // Section ids are always the ordinal now (see build_section), so `path#n`
+            // from resolve_section_ref/neighbors always matches. A heading-less chunk
+            // still has an empty location, which reads back as a blank node label /
+            // index field — fall back to the ordinal so it shows something. This only
+            // affects the label/location field, not the (already ordinal) section id.
             if c.location.is_empty() {
                 c.location = ord.to_string();
             }
@@ -927,8 +926,8 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 idx.fields.file_type => c.file_type.clone(),
                 idx.fields.ord => ord,
             ));
-            let _ = crate::graph::build::build_section(&graph, &c, sig);
-            let cur_id = crate::graph::build::section_id(&path_str, &c.location);
+            let _ = crate::graph::build::build_section(&graph, &c, ord, sig);
+            let cur_id = crate::graph::build::section_id(&path_str, &ord.to_string());
             if let Some(prev) = prev_sec.as_deref() {
                 let _ = crate::graph::build::link_sequential(&graph, prev, &cur_id, sig, &path_str);
             }
@@ -1027,9 +1026,11 @@ mod incremental_tests {
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
         let p = "a.md".to_string(); // canonical key: corpus-root-relative
-        let a = section_id(&p, "A");
-        let ab = section_id(&p, "A > B");
-        let ac = section_id(&p, "A > C");
+        // Section ids are the 1-based ordinal now (heading "A"/"A > B"/"A > C" stays the
+        // node label; hierarchy is still built from the heading breadcrumb).
+        let a = section_id(&p, "1");
+        let ab = section_id(&p, "2");
+        let ac = section_id(&p, "3");
         // sequential: A -> A>B -> A>C reachable from A's section via outgoing edges
         let na = crate::graph::traverse::neighbors(&g, &a, None, 1).unwrap();
         assert!(

@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-07-26
+
+### Fixed
+
+- **Section node ids unified to the 1-based ordinal**: structural `Section` nodes are now keyed by their ordinal (`<path>#<n>` — the same `#n` that `read`/`grep`/`search` show), not by the chunk's heading text. Previously `build_section` derived the id from `chunk.location`, which is a heading breadcrumb for most chunks but a bare number for others, so section ids were a mix of `foo.docx#18` and `foo.docx#**Содержание**`. Meanwhile `resolve_section_ref` and `neighbors` always address a section as `<path>#<ordinal>`; when a chunk's stored id was heading-based, an agent's `graph_upsert` edge anchored to `<path>#n` resolved to a section id that did not exist as a node, its endpoint type came back empty, and ontology validation rejected the edge with a misleading `relation '…' endpoints ->X not allowed`. Now every section is `<path>#<ordinal>`, so `path#n` endpoints resolve whether or not the chunk has a heading (PDF page refs like `spec.pdf#4` included). The heading is preserved as the node **label** and as the hierarchy breadcrumb (`CHILD`/`PARENT` still built from `location`), so `glossary`/`search`/`node_ref` are unaffected. Existing corpora need a `reindex` to migrate their section ids.
+
 ## [0.2.5] — 2026-07-22
 
 ### Added
