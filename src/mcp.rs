@@ -488,11 +488,11 @@ struct NoteArgs {
     #[schemars(description = "Indexed document path from grep/read (#n stripped server-side)")]
     doc: String,
     #[schemars(
-        description = "Note filename with extension. `.csp` = a limit table (tab-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note"
+        description = "Note filename with extension — free-form; choose any extension that fits the content (e.g. `.md` for a report or table, `.txt` for a jotting). Special case: `.csp` is a validated limit table (tab-separated rows, first line = column headers) used only by the constraint-graph workflow (graph_build) — do not reach for it for ordinary notes"
     )]
     file: String,
     #[schemars(
-        description = "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing"
+        description = "Full file content (replaces the note if it exists, unless append=true). Free-form content is stored as-is. Only a `.csp` note is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing"
     )]
     content: String,
     #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
@@ -1119,7 +1119,7 @@ impl GlossaServer {
 
     #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
     #[tool(
-        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Without append, an existing file is OVERWRITTEN — to add rows to a `.csp` table you already wrote, pass append=true. A `.csp` file is a limit table (tab-separated rows, first line = column headers) — the reply echoes the parsed columns and row count. Use ls/read/del with paths from ls afterward."
+        description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Notes are free-form: pick any extension (e.g. `.md`) that fits the content. Without append, an existing file is OVERWRITTEN; pass append=true to add to it. The `.csp` extension is a special validated limit-table format (tab-separated rows, first line = column headers) used only by the constraint-graph workflow — don't use it for ordinary notes. Use ls/read/del with paths from ls afterward."
     )]
     async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "notebook")]
