@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-07-26
+
+### Fixed
+
+- **Notebook notes for documents in subdirectories**: `note`/`ls`/`read`/`del` now work for any indexed document, not only those at the corpus root. The notebook mirrors the corpus tree under `.glossa/notes/<document path>/<file>`, but two places assumed the mirror was a single path segment: (1) `list_note_paths` built its `ls(doc)` filter from `canonical_document_path`, which returns the host-OS separator (backslash on Windows), and compared it with `starts_with` against listed paths that `walk_notes` had normalized to `/` — so for a document like `work/spec.docx` the filter never matched and `ls(doc)` silently returned nothing; (2) `resolve_note_by_path` split the notebook path at the *first* `/` and required that segment to carry a file extension, so a nested document's mirror (`work/spec.docx`) was truncated to `work` and `read`/`del` failed. Both are fixed: the mirror is normalized to `/` on write and in the list filter, and the document/file boundary is now resolved against the index (the longest `/`-prefix that is an indexed document is the mirror, the remainder is the note file). This also supports nested note filenames. Root-only corpora were unaffected, which is why it went unnoticed.
+
 ## [0.2.6] — 2026-07-26
 
 ### Fixed

@@ -47,12 +47,6 @@ pub fn normalize_note_file(file: &str) -> anyhow::Result<String> {
     Ok(file.trim_matches('/').to_string())
 }
 
-/// Top-level notebook path component must be a full indexed document path (with extension).
-fn is_notebook_mirror_segment(mirror: &str) -> bool {
-    let p = Path::new(mirror);
-    p.extension().is_some()
-}
-
 fn reject_corpus_only_path(rel: &str) -> anyhow::Result<()> {
     if !rel.contains('/') {
         anyhow::bail!(
@@ -92,26 +86,33 @@ fn canonical_document(idx: &DocIndex, doc: &str) -> anyhow::Result<String> {
 }
 
 fn mirror_for_document(idx: &DocIndex, doc: &str) -> anyhow::Result<String> {
-    canonical_document(idx, doc)
+    // `canonical_document_path` returns the indexed path with host-OS separators
+    // (backslash on Windows). Notebook `rel_path`s are always `/`-joined and
+    // `walk_notes` normalizes listed paths to `/`, so the mirror MUST be `/`-based
+    // too — otherwise the `ls(doc)` filter (`rel.starts_with("{mirror}/")`) never
+    // matches a note whose document lives in a subdirectory (e.g. `work/x.docx`).
+    // A root-only corpus has no separator in the mirror, which is why this went
+    // unnoticed until documents were nested under folders.
+    Ok(canonical_document(idx, doc)?.replace('\\', "/"))
 }
 
-fn split_notebook_path(rel: &str) -> anyhow::Result<(&str, &str)> {
-    let (mirror, rest) = rel
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("path must be <document>/<file> (got {rel})"))?;
-    if !is_notebook_mirror_segment(mirror) {
-        anyhow::bail!(
-            "notebook path must start with a full indexed document path (with extension), got mirror '{mirror}'"
-        );
+/// Split a notebook `rel` (`<document>/<file>`) into (mirror, file) using the index
+/// as the source of truth. The document may span several `/`-segments (it lives in a
+/// corpus subdirectory) and the note file may itself be nested, so we cannot just cut
+/// at the first `/`. Instead we try each `/`-prefix from longest to shortest and take
+/// the longest one that is an indexed document — the remainder is the note file.
+fn split_notebook_path<'a>(idx: &DocIndex, rel: &'a str) -> anyhow::Result<(&'a str, &'a str)> {
+    let mut boundaries: Vec<usize> = rel.match_indices('/').map(|(i, _)| i).collect();
+    boundaries.reverse();
+    for b in boundaries {
+        let candidate = &rel[..b];
+        if idx.canonical_document_path(candidate).is_some() {
+            return Ok((candidate, &rel[b + 1..]));
+        }
     }
-    Ok((mirror, rest))
-}
-
-fn validate_mirror_indexed(idx: &DocIndex, mirror: &str) -> anyhow::Result<()> {
-    if idx.canonical_document_path(mirror).is_none() {
-        anyhow::bail!("unknown notebook document '{mirror}'; copy full path from grep/read");
-    }
-    Ok(())
+    anyhow::bail!(
+        "notebook path must be <indexed document>/<file>; no prefix of '{rel}' is an indexed document — copy the path from ls"
+    )
 }
 
 /// Resolve `note(doc, file)` → storage path with KB validation.
@@ -142,8 +143,9 @@ pub fn resolve_note_by_path(root: &Path, idx: &DocIndex, path: &str) -> anyhow::
     if rel.is_empty() {
         anyhow::bail!("path must not be empty");
     }
-    let (mirror, _) = split_notebook_path(&rel)?;
-    validate_mirror_indexed(idx, mirror)?;
+    // Validates that some prefix of `rel` is an indexed document (guards against a
+    // hallucinated path) and locates the document/file boundary.
+    let _ = split_notebook_path(idx, &rel)?;
     let abs_path = storage_abs(root, &rel)?;
     Ok(NotePath {
         rel_path: rel,
@@ -228,5 +230,40 @@ mod tests {
         assert_eq!(normalize_note_file("limits.csp").unwrap(), "limits.csp");
         assert_eq!(normalize_note_file("./notes.txt").unwrap(), "notes.txt");
         assert!(normalize_note_file("../x.csp").is_err());
+    }
+
+    /// Regression: a document nested in a subdirectory (e.g. `work/x.docx`) must
+    /// round-trip through note → ls(doc). Before the mirror was `/`-normalized,
+    /// `canonical_document_path` returned a backslash mirror on Windows and the
+    /// `ls(doc)` filter silently matched nothing (root-only corpora hid the bug).
+    #[test]
+    fn note_roundtrips_for_subdirectory_document() {
+        use crate::model::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("work/sub doc.docx"),
+            location: "p.1".into(),
+            file_type: "docx".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        let root = dir.path();
+
+        // write a note bound to the nested document
+        let np = resolve_note_by_document(root, &idx, "work/sub doc.docx", "n.md").unwrap();
+        assert_eq!(np.rel_path, "work/sub doc.docx/n.md", "rel_path must be /-joined");
+        std::fs::create_dir_all(np.abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&np.abs_path, b"hi").unwrap();
+
+        // ls WITH the doc filter must find it (the regression)
+        let filtered = list_note_paths(root, &idx, Some("work/sub doc.docx")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].rel_path, "work/sub doc.docx/n.md");
+
+        // ls without filter, and the ls-path resolver, agree
+        assert_eq!(list_note_paths(root, &idx, None).unwrap().len(), 1);
+        let by_path = resolve_note_by_path(root, &idx, "work/sub doc.docx/n.md").unwrap();
+        assert_eq!(by_path.abs_path, np.abs_path);
     }
 }
