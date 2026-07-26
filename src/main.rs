@@ -885,7 +885,14 @@ fn main() -> anyhow::Result<()> {
                     Some(types.as_slice())
                 };
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
-                    println!("{id}");
+                    // Section ids are opaque ordinals (`<path>#<n>`); print the node label
+                    // (heading) alongside so the output stays human-readable.
+                    match g.get_node(&id)? {
+                        Some(n) if !n.label.is_empty() && n.label != id => {
+                            println!("{id}  {}", n.label)
+                        }
+                        _ => println!("{id}"),
+                    }
                 }
                 Ok(())
             }
