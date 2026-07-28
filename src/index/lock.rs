@@ -7,10 +7,9 @@
 //! index is cooperative — whoever wins leaves it correct, so a skip is safe and idempotent).
 
 use std::fs::{File, OpenOptions};
-use std::io;
 use std::path::Path;
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 
 /// RAII holder of `.glossa/index.lock`. Releases the advisory lock on drop, so the lock lives
 /// exactly as long as the `index_dir` call that took it.
@@ -39,10 +38,8 @@ pub fn try_index_lock(root: &Path) -> Option<IndexLockGuard> {
         .truncate(false)
         .open(&lock_path)
         .ok()?;
-    match file.try_lock_exclusive() {
-        Ok(true) => Some(IndexLockGuard { file }),
-        Ok(false) => None,
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => None,
+    match file.try_lock() {
+        Ok(()) => Some(IndexLockGuard { file }),
         Err(_) => None,
     }
 }

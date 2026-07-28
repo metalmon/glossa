@@ -1,10 +1,9 @@
 //! Cross-process advisory lock for notebook write operations.
 
 use std::fs::OpenOptions;
-use std::io;
 use std::path::Path;
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 
 pub const LOCK_BUSY_MSG: &str = "another process is editing the notebook — retry";
 
@@ -22,10 +21,9 @@ pub fn with_notebook_write_lock<R>(
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    match lock_file.try_lock_exclusive() {
-        Ok(true) => {}
-        Ok(false) => anyhow::bail!(LOCK_BUSY_MSG),
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => anyhow::bail!(LOCK_BUSY_MSG),
+    match lock_file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(LOCK_BUSY_MSG),
         Err(e) => return Err(e.into()),
     }
     let result = f();

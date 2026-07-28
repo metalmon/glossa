@@ -37,9 +37,9 @@ pub fn detect(prefix: &[u8]) -> Option<&'static Encoding> {
     if std::str::from_utf8(prefix).is_ok() {
         return Some(UTF_8);
     }
-    let mut det = chardetng::EncodingDetector::new();
+    let mut det = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
     det.feed(prefix, true);
-    Some(det.guess(None, true))
+    Some(det.guess(None, chardetng::Utf8Detection::Allow))
 }
 
 /// Decode a whole buffer to UTF-8 text, or None if it looks binary.

@@ -499,7 +499,7 @@ fn delete_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<String
 mod tests {
     use super::*;
     use crate::model::Chunk;
-    use fs4::fs_std::FileExt;
+    use fs4::FileExt;
 
     const TAB: &str = "\t";
 
@@ -740,7 +740,7 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .unwrap();
-        assert!(FileExt::try_lock_exclusive(&holder).unwrap());
+        FileExt::try_lock(&holder).unwrap();
         let msg = note(dir.path(), &idx, "doc.pdf", "parameters.md", "x\n", false);
         assert!(
             msg.contains("REJECTED") && msg.contains(LOCK_BUSY_MSG),

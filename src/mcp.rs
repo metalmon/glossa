@@ -231,7 +231,7 @@ impl GlossaServer {
     /// skipped (the holder refreshes the shared graph for everyone). The lock releases when `_lock`
     /// drops (function exit / process death).
     fn run_generalize(&self) {
-        use fs4::fs_std::FileExt;
+        use fs4::FileExt;
         let lock_path = self.root.join(".glossa").join("generalize.lock");
         let Ok(_lock) = std::fs::OpenOptions::new()
             .create(true)
@@ -241,9 +241,9 @@ impl GlossaServer {
         else {
             return;
         };
-        match _lock.try_lock_exclusive() {
-            Ok(true) => {} // acquired — we are the one editor running the pass this round
-            _ => return,   // held by another editor (false) or lock error → skip
+        match _lock.try_lock() {
+            Ok(()) => {} // acquired — we are the one editor running the pass this round
+            Err(_) => return, // held or lock error → skip
         }
         let Ok(g) = GraphStore::open(&self.root) else {
             return;
@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn run_generalize_skips_when_lock_held() {
         use crate::graph::store::{Node, Provenance};
-        use fs4::fs_std::FileExt;
+        use fs4::FileExt;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
         index_dir(dir.path(), true).unwrap();
@@ -1524,10 +1524,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        assert!(
-            FileExt::try_lock_exclusive(&holder).unwrap(),
-            "test acquires the lock"
-        );
+        FileExt::try_lock(&holder).unwrap();
 
         // Lock held → this instance must SKIP the pass (no derived layer written).
         srv.run_generalize();
