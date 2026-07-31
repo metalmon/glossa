@@ -1080,6 +1080,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("index notes: skip {rel}: {e}");
+                    delta.next.notes.remove(rel);
                     continue;
                 }
             };
