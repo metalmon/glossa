@@ -16,6 +16,11 @@ fn default_index_schema_version() -> u32 {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub files: BTreeMap<String, FileSig>,
+    /// Notebook note files under `.glossa/notes`, keyed by path relative to the notes root
+    /// (`doc.md/limits.csp`). `#[serde(default)]` so manifests written before this field existed
+    /// still load. Lets `scan_delta` notice notes written outside `note()`.
+    #[serde(default)]
+    pub notes: BTreeMap<String, FileSig>,
     #[serde(default = "default_index_schema_version")]
     pub index_schema_version: u32,
 }
@@ -24,6 +29,7 @@ impl Default for Manifest {
     fn default() -> Self {
         Self {
             files: BTreeMap::new(),
+            notes: BTreeMap::new(),
             index_schema_version: default_index_schema_version(),
         }
     }
@@ -104,5 +110,32 @@ mod tests {
                 size: 1
             }
         ));
+    }
+
+    #[test]
+    fn notes_roundtrip_and_default_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::default();
+        m.notes.insert(
+            "doc.md/limits.csp".into(),
+            FileSig {
+                mtime_secs: 7,
+                size: 9,
+            },
+        );
+        m.save(dir.path()).unwrap();
+        let loaded = Manifest::load(dir.path());
+        assert_eq!(loaded.notes.len(), 1);
+        assert_eq!(
+            loaded.notes.get("doc.md/limits.csp"),
+            Some(&FileSig {
+                mtime_secs: 7,
+                size: 9
+            })
+        );
+        // A manifest written before the field existed still parses (notes = empty).
+        let old = r#"{"files":{"a.md":{"mtime_secs":1,"size":2}},"index_schema_version":2}"#;
+        let parsed: Manifest = serde_json::from_str(old).unwrap();
+        assert!(parsed.notes.is_empty());
     }
 }
