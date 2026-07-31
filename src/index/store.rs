@@ -457,6 +457,42 @@ impl DocIndex {
         Ok(!top.is_empty())
     }
 
+    /// The stored `file_type` of the first chunk indexed under `path`, or `None` if no chunk has
+    /// that exact path. Tells a notebook note chunk (`file_type == "note"`) from a corpus document,
+    /// and reads the type of a note's owner document. Mirrors `last_chunk_ord`'s single-term lookup.
+    pub fn file_type_of(&self, path: &str) -> anyhow::Result<Option<String>> {
+        use tantivy::query::TermQuery;
+        let searcher = self.reader.searcher();
+        let q = TermQuery::new(
+            tantivy::Term::from_field_text(self.fields.path, path),
+            IndexRecordOption::Basic,
+        );
+        let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score())?;
+        match top.first() {
+            Some((_score, addr)) => {
+                let d: TantivyDocument = searcher.doc(*addr)?;
+                Ok(d.get_first(self.fields.file_type)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The corpus document a notebook note belongs to: the longest `/`-prefix of `rel` that is
+    /// itself an indexed, non-note document (the note's mirror directory). `None` for corpus
+    /// paths, paths with no indexed prefix, or paths whose only indexed prefix is another note.
+    /// Equivalent to the index-authority rule in `crate::notebook::paths::split_notebook_path`.
+    pub fn note_owner(&self, rel: &str) -> anyhow::Result<Option<String>> {
+        for (i, _) in rel.match_indices('/').rev() {
+            let candidate = &rel[..i];
+            if self.has_document(candidate)? && self.file_type_of(candidate)? != Some("note".into()) {
+                return Ok(Some(candidate.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve a `location` string to the chunk number (`ord`) stored in the index for `path`.
     /// Mirrors `read_chunk` (path+location BooleanQuery) but returns the `ord` field.
     /// Returns `None` when no chunk matches that (path, location) pair.
@@ -1607,6 +1643,52 @@ mod search_tests {
             d_hits[0].snippet.contains("beta") || d_hits[0].snippet.contains("updated"),
             "expected updated content, got: {}",
             d_hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn file_type_of_and_note_owner() {
+        use crate::model::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: "doc.pdf".into(),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "stub".into(),
+            },
+            Chunk {
+                doc_path: "doc.pdf/limits.csp".into(),
+                location: "note".into(),
+                file_type: "note".into(),
+                text: "D\n50".into(),
+            },
+        ])
+        .unwrap();
+        assert_eq!(idx.file_type_of("doc.pdf").unwrap().as_deref(), Some("pdf"));
+        assert_eq!(
+            idx.file_type_of("doc.pdf/limits.csp").unwrap().as_deref(),
+            Some("note")
+        );
+        assert_eq!(idx.file_type_of("missing").unwrap(), None);
+        assert_eq!(
+            idx.note_owner("doc.pdf/limits.csp").unwrap().as_deref(),
+            Some("doc.pdf")
+        );
+        // A corpus path (no `/` to split, or the path itself) has no note owner.
+        assert_eq!(idx.note_owner("doc.pdf").unwrap(), None);
+        // A nested note file: the longest indexed prefix wins.
+        idx.write_chunks(&[Chunk {
+            doc_path: "doc.pdf/sub/values.csp".into(),
+            location: "note".into(),
+            file_type: "note".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        assert_eq!(
+            idx.note_owner("doc.pdf/sub/values.csp").unwrap().as_deref(),
+            Some("doc.pdf")
         );
     }
 }
