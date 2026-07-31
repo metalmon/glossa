@@ -937,6 +937,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     } else if schema_migrate {
         let _ = std::fs::remove_dir_all(dir.join(".glossa").join("index"));
         manifest.files.clear();
+        manifest.notes.clear();
     }
     let idx = DocIndex::open_or_create(dir)?;
     let graph = crate::graph::store::GraphStore::open(dir)?;
@@ -944,17 +945,21 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         graph.delete_auto()?;
     }
 
-    // Cheap hot-path gate: on an incremental run, if nothing changed on disk, do NO work — don't
-    // open the writer, don't commit, don't rewrite the manifest. Keeps `ensure_fresh` ~free.
-    if !force {
-        let delta = scan_delta(dir, &manifest)?;
-        if delta.changed.is_empty() && delta.removed.is_empty() {
-            return Ok(IndexStats {
-                added: 0,
-                removed: 0,
-                unchanged: delta.next.files.len(),
-            });
-        }
+    // Compute the delta once, up front: the hot-path gate uses it to skip all work when nothing
+    // changed, and the notes pass below reuses the same `notes_changed`/`notes_removed`. Under
+    // `force` the manifest was reset, so every note shows up as changed and is re-added.
+    let mut delta = scan_delta(dir, &manifest)?;
+    if !force
+        && delta.changed.is_empty()
+        && delta.removed.is_empty()
+        && delta.notes_changed.is_empty()
+        && delta.notes_removed.is_empty()
+    {
+        return Ok(IndexStats {
+            added: 0,
+            removed: 0,
+            unchanged: delta.next.files.len() + delta.next.notes.len(),
+        });
     }
 
     let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
@@ -1063,6 +1068,37 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 }
             }
         }
+    }
+    // Notebook notes: index every changed note as a single `"note"` chunk (delete-by-path is
+    // idempotent, so a note that was also written through in-process re-adds cleanly), and drop
+    // removed notes. Notes never create graph nodes (§6 of the spec) — only search chunks.
+    #[cfg(feature = "notebook")]
+    {
+        let notes_root = dir.join(".glossa").join("notes");
+        for rel in &delta.notes_changed {
+            let body = match std::fs::read_to_string(notes_root.join(rel)) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("index notes: skip {rel}: {e}");
+                    continue;
+                }
+            };
+            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, rel));
+            let _ = writer.add_document(doc!(
+                idx.fields.body => body.clone(),
+                idx.fields.body_trigrams => body.clone(),
+                idx.fields.path => rel.clone(),
+                idx.fields.location => "note",
+                idx.fields.file_type => "note",
+                idx.fields.ord => 1u64,
+            ));
+            stats.added += 1;
+        }
+        for rel in &delta.notes_removed {
+            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, rel));
+            stats.removed += 1;
+        }
+        next.notes = std::mem::take(&mut delta.next.notes);
     }
     writer.commit()?;
     next.index_schema_version = INDEX_SCHEMA_VERSION;
@@ -1775,6 +1811,48 @@ mod search_tests {
         assert!(
             d.notes_removed.contains(&"doc.md/limits.csp".to_string()),
             "{d:?}"
+        );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn index_dir_indexes_removes_and_reindexes_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.md"), b"# Doc\nplaceholder\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+
+        let note_dir = dir.path().join(".glossa/notes/doc.md");
+        fs::create_dir_all(&note_dir).unwrap();
+        fs::write(note_dir.join("limits.csp"), b"D\n50\n63\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("63", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "note indexed by delta"
+        );
+
+        // Deleting the note file removes its chunk.
+        fs::remove_file(note_dir.join("limits.csp")).unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            !idx.search("63", 10).unwrap().iter().any(|h| h.path == "doc.md/limits.csp"),
+            "note chunk removed"
+        );
+
+        // Force reindex keeps notes present on disk.
+        fs::write(note_dir.join("limits.csp"), b"D\n50\n63\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("63", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "force reindex preserves notes"
         );
     }
 }
