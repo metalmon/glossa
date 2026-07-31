@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn read_page_image_returns_pdf_page_png_without_chunk_body() {
+    fn read_page_image_returns_pdf_page_jpeg_without_chunk_body() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("sample.pdf"),
@@ -1258,8 +1258,8 @@ mod tests {
         assert_eq!(out.text, "page_image sample.pdf #1");
         assert!(!out.text.contains("glossa sample"));
         assert_eq!(out.images.len(), 1);
-        assert_eq!(out.images[0].mime, "image/png");
-        assert!(out.images[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(out.images[0].mime, "image/jpeg");
+        assert!(out.images[0].bytes.starts_with(b"\xff\xd8"));
     }
 
     #[test]
@@ -1285,7 +1285,7 @@ mod tests {
 
         assert_eq!(out.text, "page_image sample.pdf #1");
         assert_eq!(out.images.len(), 1);
-        assert_eq!(out.images[0].mime, "image/png");
+        assert_eq!(out.images[0].mime, "image/jpeg");
     }
 
     #[test]

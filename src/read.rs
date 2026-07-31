@@ -209,9 +209,13 @@ fn extract_pdf_page_images(
     Ok(out)
 }
 
-/// Rasterize one PDF page (1-based) to PNG @ 200 DPI. Empty on failure.
+/// Render one PDF page (1-based) to an image.
+///
+/// A page that is a single full-bleed embedded scan is returned byte-for-byte
+/// from the source PDF (original JPEG, no re-encode). Everything else is
+/// rasterized to JPEG @ 200 DPI. Empty on failure.
 pub fn render_pdf_page(path: &Path, page: u64) -> anyhow::Result<Option<DocImage>> {
-    use pdf_oxide::rendering::{render_page, RenderOptions};
+    use pdf_oxide::rendering::{render_page, ImageFormat, RenderOptions};
     use pdf_oxide::PdfDocument;
 
     let Some(page_index) = page.checked_sub(1).and_then(|p| usize::try_from(p).ok()) else {
@@ -220,14 +224,51 @@ pub fn render_pdf_page(path: &Path, page: u64) -> anyhow::Result<Option<DocImage
     let Ok(document) = PdfDocument::open(path) else {
         return Ok(None);
     };
-    let options = RenderOptions::with_dpi(200);
+    if let Some(image) = full_bleed_scan(&document, page_index) {
+        return Ok(Some(image));
+    }
+    let mut options = RenderOptions::with_dpi(200);
+    options.format = ImageFormat::Jpeg;
     let Ok(image) = render_page(&document, page_index, &options) else {
         return Ok(None);
     };
     Ok(Some(DocImage {
-        mime: "image/png".into(),
+        mime: "image/jpeg".into(),
         bytes: image.data,
     }))
+}
+
+/// If the page is exactly one image filling the media box, return it as-is.
+fn full_bleed_scan(document: &pdf_oxide::PdfDocument, page_index: usize) -> Option<DocImage> {
+    use pdf_oxide::extractors::ImageData;
+
+    let images = document.extract_images(page_index).ok()?;
+    if images.len() != 1 {
+        return None;
+    }
+    let image = &images[0];
+    if image.rotation_degrees() != 0 {
+        return None;
+    }
+    let bbox = image.bbox()?;
+    let media = document.get_page_media_box(page_index).ok()?;
+    let (x0, y0, x1, y1) = media;
+    // Tolerate rounding to the point: bbox must cover the media box.
+    const EPS: f32 = 1.0;
+    let covers = bbox.x <= x0 + EPS
+        && bbox.y <= y0 + EPS
+        && bbox.x + bbox.width >= x1 - EPS
+        && bbox.y + bbox.height >= y1 - EPS;
+    if !covers {
+        return None;
+    }
+    let ImageData::Jpeg(bytes) = image.data() else {
+        return None;
+    };
+    Some(DocImage {
+        mime: "image/jpeg".into(),
+        bytes: bytes.to_vec(),
+    })
 }
 
 fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
@@ -328,6 +369,7 @@ fn regex_captures_iter<'a>(pat: &'a str, text: &'a str) -> Vec<regex::Captures<'
 #[cfg(test)]
 mod image_tests {
     use super::*;
+    use base64::Engine;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
@@ -386,18 +428,59 @@ mod image_tests {
     }
 
     #[test]
-    fn render_pdf_page_returns_png_magic() {
+    fn render_pdf_page_returns_jpeg_magic() {
         let image = render_pdf_page(&sample_pdf(), 1)
             .unwrap()
             .expect("sample PDF page 1 should render");
-        assert_eq!(image.mime, "image/png");
-        assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(image.mime, "image/jpeg");
+        assert!(image.bytes.starts_with(b"\xff\xd8"));
         assert!(image.bytes.len() > 100);
     }
 
     #[test]
     fn render_pdf_page_missing_page_is_none() {
         assert_eq!(render_pdf_page(&sample_pdf(), 99).unwrap(), None);
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn full_bleed_scan_passes_original_jpeg_through() {
+        let p = fixture("order365.pdf");
+        let rendered = render_pdf_page(&p, 1)
+            .unwrap()
+            .expect("scan page 1 should render");
+        assert_eq!(rendered.mime, "image/jpeg");
+        assert!(rendered.bytes.starts_with(b"\xff\xd8"));
+        // The page is one full-page JPEG scan; the original bytes must be
+        // returned verbatim (not re-rasterized/re-encoded).
+        let extracted = extract_images(&p, 1, 1).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(rendered.bytes, extracted[0].bytes);
+    }
+
+    #[test]
+    fn full_bleed_scan_page_fits_under_mcp_line_limit() {
+        // Regression: 200 DPI PNG renders of these scan pages exceeded the
+        // 4 MiB MCP stdio line limit and hung page_image calls.
+        let cap_bytes = 4 * 1024 * 1024;
+        for name in ["order365.pdf", "order455.pdf", "pril1.pdf"] {
+            let p = fixture(name);
+            let rendered = render_pdf_page(&p, 1)
+                .unwrap()
+                .expect("scan page 1 should render");
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&rendered.bytes);
+            assert!(
+                b64.len() < cap_bytes,
+                "{name}: base64 page image {len} bytes exceeds {cap_bytes}",
+                len = b64.len()
+            );
+        }
     }
 
     #[test]
