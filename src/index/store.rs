@@ -775,6 +775,10 @@ impl DocIndex {
 pub struct Delta {
     pub changed: Vec<String>,
     pub removed: Vec<String>,
+    /// Notebook notes (path relative to `.glossa/notes`) that are new or modified.
+    pub notes_changed: Vec<String>,
+    /// Notebook notes in the saved manifest that are gone from disk.
+    pub notes_removed: Vec<String>,
     pub next: Manifest,
 }
 
@@ -799,7 +803,48 @@ pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
         .filter(|k| !d.next.files.contains_key(*k))
         .cloned()
         .collect();
+    #[cfg(feature = "notebook")]
+    scan_notes_delta(dir, manifest, &mut d)?;
     Ok(d)
+}
+
+/// Notes half of `scan_delta`: walk `.glossa/notes` and diff each note's signature against
+/// `manifest.notes`. Walking the notes root directly (with `respect_ignore=false`) is safe:
+/// the `.glossa` skip in `walk_files` only matches entries *named* `.glossa`, and `false`
+/// disables hidden/gitignore filtering that would otherwise hide `.glossa` itself.
+#[cfg(feature = "notebook")]
+fn scan_notes_delta(dir: &Path, manifest: &Manifest, d: &mut Delta) -> anyhow::Result<()> {
+    let notes_root = dir.join(".glossa").join("notes");
+    if !notes_root.is_dir() {
+        // The whole notes tree is gone → every saved note is removed.
+        d.notes_removed = manifest.notes.keys().cloned().collect();
+        return Ok(());
+    }
+    crate::walk::walk_files(&notes_root, None, false, &mut |path| {
+        let rel = path
+            .strip_prefix(&notes_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if rel.is_empty() {
+            return Ok(());
+        }
+        let sig = match file_sig(path) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        if manifest.notes.get(&rel) != Some(&sig) {
+            d.notes_changed.push(rel.clone());
+        }
+        d.next.notes.insert(rel, sig);
+        Ok(())
+    })?;
+    d.notes_removed = manifest
+        .notes
+        .keys()
+        .filter(|k| !d.next.notes.contains_key(*k))
+        .cloned()
+        .collect();
+    Ok(())
 }
 
 /// Bring the on-disk index/graph up to date with the filesystem — cheap and concurrency-safe.
@@ -811,11 +856,15 @@ pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
 pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
     let manifest = Manifest::load(dir);
     let delta = scan_delta(dir, &manifest)?;
-    if delta.changed.is_empty() && delta.removed.is_empty() {
+    if delta.changed.is_empty()
+        && delta.removed.is_empty()
+        && delta.notes_changed.is_empty()
+        && delta.notes_removed.is_empty()
+    {
         return Ok(IndexStats {
             added: 0,
             removed: 0,
-            unchanged: delta.next.files.len(),
+            unchanged: delta.next.files.len() + delta.next.notes.len(),
         });
     }
     match index_dir(dir, false) {
@@ -1320,6 +1369,7 @@ mod incremental_tests {
 #[cfg(test)]
 mod search_tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     fn chunk(path: &str, text: &str) -> Chunk {
@@ -1689,6 +1739,42 @@ mod search_tests {
         assert_eq!(
             idx.note_owner("doc.pdf/sub/values.csp").unwrap().as_deref(),
             Some("doc.pdf")
+        );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn scan_delta_picks_up_and_drops_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.md"), b"# Doc\nplaceholder\n").unwrap();
+
+        let manifest = Manifest::default();
+        let d = scan_delta(dir.path(), &manifest).unwrap();
+        assert!(!d.changed.is_empty(), "corpus changed: {d:?}");
+        assert!(d.notes_changed.is_empty(), "no notes yet: {d:?}");
+
+        // A note created outside `note()` (e.g. an external editor) shows up as notes_changed.
+        let note_dir = dir.path().join(".glossa/notes/doc.md");
+        fs::create_dir_all(&note_dir).unwrap();
+        fs::write(note_dir.join("limits.csp"), b"D\n50\n63\n").unwrap();
+        let d = scan_delta(dir.path(), &manifest).unwrap();
+        assert!(
+            d.notes_changed.contains(&"doc.md/limits.csp".to_string()),
+            "{d:?}"
+        );
+        assert!(d.next.notes.contains_key("doc.md/limits.csp"), "{d:?}");
+
+        // A saved note that disappears from disk lands in notes_removed.
+        let mut m = Manifest::default();
+        m.notes.insert(
+            "doc.md/limits.csp".into(),
+            file_sig(note_dir.join("limits.csp").as_path()).unwrap(),
+        );
+        fs::remove_file(note_dir.join("limits.csp")).unwrap();
+        let d = scan_delta(dir.path(), &m).unwrap();
+        assert!(
+            d.notes_removed.contains(&"doc.md/limits.csp".to_string()),
+            "{d:?}"
         );
     }
 }
