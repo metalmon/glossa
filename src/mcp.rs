@@ -37,15 +37,12 @@ pub struct GlossaServer {
     root: PathBuf,
     tool_router: ToolRouter<Self>,
     trace: crate::trace::TraceLog,
-    /// Epoch-ms of the last file-first freshness scan, shared across cloned handlers. Throttles
-    /// `ensure_fresh` so bursty tool calls don't each re-scan the corpus (see `kick_freshen`).
-    last_fresh: Arc<AtomicU64>,
-    /// Set when background freshen reindexed something — derived layer (closure/SIMILAR +
+    /// Set when a freshen reindexed something — derived layer (closure/SIMILAR +
     /// community/centrality) is stale until debounced `generalize` runs (off the read hot path).
     dirty: Arc<AtomicBool>,
     /// Epoch-ms of the last indexing change — the debounce clock for the maintenance loop.
     last_change: Arc<AtomicU64>,
-    /// True while a background `ensure_fresh` is running — concurrent `kick_freshen` calls bail out.
+    /// True while a background `ensure_fresh` is running.
     indexing: Arc<AtomicBool>,
     /// When true, `read` tool strips all image content from responses.
     no_image: bool,
@@ -138,13 +135,10 @@ impl GlossaServer {
         } else {
             crate::trace::TraceLog::disabled()
         };
-        // Seed `last_fresh` to "now" so bursty first calls don't each scan — `run_serve` kicks one
-        // background freshen after the transport is up. Keeps `new()` free of filesystem access.
         Self {
             root,
             tool_router: router,
             trace,
-            last_fresh: Arc::new(AtomicU64::new(crate::trace::now_ms())),
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicBool::new(false)),
@@ -165,48 +159,21 @@ impl GlossaServer {
         self.tool_router.list_all()
     }
 
-    /// File-first freshness off the read hot path: schedule `ensure_fresh` in the background when
-    /// the throttle window allows. Read tools call this (no await) and serve the current on-disk
-    /// index immediately. Best-effort: indexing errors never fail the tool.
-    pub fn kick_freshen(&self) {
-        const FRESH_WINDOW_MS: u64 = 1500;
-        if self.indexing.load(Ordering::Acquire) {
-            return;
-        }
-        let now = crate::trace::now_ms();
-        let last = self.last_fresh.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < FRESH_WINDOW_MS {
-            return;
-        }
-        if self
-            .last_fresh
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        if self
-            .indexing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
+    /// Synchronous, sublinear freshness before serving a read: gate a full scan behind the cheap
+    /// directory-mtime signature, index under the cross-process lock if the tree changed, then serve.
+    /// Best-effort — indexing errors never fail the tool. Runs on the blocking pool so the async
+    /// worker is not stalled, but the handler awaits it so the served index reflects the current tree.
+    pub async fn freshen_now(&self) {
         let root = self.root.clone();
-        let dirty = self.dirty.clone();
-        let last_change = self.last_change.clone();
-        let indexing = self.indexing.clone();
-        tokio::spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || crate::index::store::ensure_fresh(&root)).await;
-            indexing.store(false, Ordering::Release);
-            if let Ok(Ok(stats)) = result {
-                if stats.added + stats.removed > 0 {
-                    last_change.store(crate::trace::now_ms(), Ordering::Relaxed);
-                    dirty.store(true, Ordering::Relaxed);
-                }
+        let res = tokio::task::spawn_blocking(move || {
+            crate::index::store::freshen_blocking(&root, std::time::Duration::from_secs(3))
+        })
+        .await;
+        if let Ok(Ok(stats)) = res {
+            if stats.added + stats.removed > 0 {
+                self.mark_dirty();
             }
-        });
+        }
     }
 
     /// Mark the derived graph layer stale (a freshen reindexed something) and stamp the change time —
@@ -724,7 +691,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let (body, _hits) = crate::tools::search(
             &idx,
@@ -741,7 +708,7 @@ impl GlossaServer {
         description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI PNG instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let (idx, g) = self.open_index_graph()?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
@@ -764,7 +731,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<SourceFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
         let max = a.max_bytes.unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
@@ -793,7 +760,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<NameArg>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
@@ -809,7 +776,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<NeighborsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -965,7 +932,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphUpsertArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
@@ -989,7 +956,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphDeleteArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a
@@ -1075,7 +1042,7 @@ impl GlossaServer {
         description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
     )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let opts = crate::grep::GrepOpts {
             ignore_case: a.ignore_case.unwrap_or(false),
@@ -1110,7 +1077,7 @@ impl GlossaServer {
         description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text)."
     )]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
-        self.kick_freshen();
+        self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::glob(&idx, &a.pattern, &self.trace),
@@ -1152,6 +1119,7 @@ impl GlossaServer {
         description = "List notebook notes. Optional doc filter. Paths in the output are arguments for read/del."
     )]
     async fn ls(&self, Parameters(a): Parameters<LsArgs>) -> Result<CallToolResult, McpError> {
+        self.freshen_now().await;
         #[cfg(feature = "notebook")]
         {
             let idx =
@@ -1611,5 +1579,29 @@ mod tests {
                 && !ng.contains(&"graph_upsert".to_string())
                 && !ng.contains(&"index".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn search_sees_a_file_added_after_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+
+        // File added AFTER the server exists (as an external agent would).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
+
+        let out = srv
+            .search(Parameters(SearchArgs {
+                query: "bravo".into(),
+                limit: None,
+                glob: None,
+                file_type: None,
+            }))
+            .await
+            .unwrap();
+        let text = format!("{out:?}");
+        assert!(text.contains("b.md"), "search must reflect the newly added file: {text}");
     }
 }
