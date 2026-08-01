@@ -129,8 +129,10 @@ pub fn resolve_note_by_document(
     Ok(NotePath { rel_path, abs_path })
 }
 
-/// Resolve notebook `path` from `ls` (validates document prefix is indexed).
-pub fn resolve_note_by_path(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<NotePath> {
+/// Trim, un-backslash, strip a leading section anchor / `./` / `.glossa/notes/` prefix,
+/// and reject an empty result. Shared normalization for both the indexed-document
+/// resolver and the orphan fallback below — neither does its own ad-hoc parsing.
+fn normalize_notebook_rel(path: &str) -> anyhow::Result<String> {
     let mut rel = path.trim().replace('\\', "/");
     rel = crate::index::store::strip_section_anchor(&rel);
     while rel.starts_with("./") {
@@ -143,9 +145,30 @@ pub fn resolve_note_by_path(root: &Path, idx: &DocIndex, path: &str) -> anyhow::
     if rel.is_empty() {
         anyhow::bail!("path must not be empty");
     }
+    Ok(rel)
+}
+
+/// Resolve notebook `path` from `ls` (validates document prefix is indexed).
+pub fn resolve_note_by_path(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<NotePath> {
+    let rel = normalize_notebook_rel(path)?;
     // Validates that some prefix of `rel` is an indexed document (guards against a
     // hallucinated path) and locates the document/file boundary.
     let _ = split_notebook_path(idx, &rel)?;
+    let abs_path = storage_abs(root, &rel)?;
+    Ok(NotePath {
+        rel_path: rel,
+        abs_path,
+    })
+}
+
+/// Resolve a note path directly under the notes root, WITHOUT requiring the owning
+/// document to still be indexed. Only for the `del` orphan fallback (owner document was
+/// removed from the index but its note file may remain on disk) — reuses the exact same
+/// normalization and `storage_abs` containment guard as `resolve_note_by_path` (rejects
+/// any `..` component and verifies the resolved path stays under the notes root), so this
+/// cannot be used to escape `.glossa/notes` and reach an arbitrary file.
+pub(crate) fn resolve_orphan_note_path(root: &Path, path: &str) -> anyhow::Result<NotePath> {
+    let rel = normalize_notebook_rel(path)?;
     let abs_path = storage_abs(root, &rel)?;
     Ok(NotePath {
         rel_path: rel,

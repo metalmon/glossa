@@ -487,21 +487,19 @@ pub fn read_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<(Str
 }
 
 fn delete_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<String> {
-    // Normal path: resolve via the indexed owner. Fallback: an orphan (owner deleted) is no longer
-    // resolvable that way, but its file may still exist under the notes root — resolve it directly.
+    // Normal path: resolve via the indexed owner. Fallback: an orphan (owner deleted) is no
+    // longer resolvable that way, but its file may still exist under the notes root — resolve
+    // it through `resolve_orphan_note_path`, which applies the SAME `..`-rejection and
+    // containment-under-notes-root guard as the normal resolver (just without the "owner must
+    // be indexed" requirement). This is load-bearing: a raw `root.join(".glossa/notes").join(path)`
+    // here would let a caller-supplied `path` like `../../secret.txt` escape the notes root and
+    // delete an arbitrary file outside it.
     let NotePath { rel_path, abs_path } = match resolve_note_by_path(root, idx, path) {
         Ok(np) => np,
-        Err(e) => {
-            let abs = root.join(".glossa").join("notes").join(path);
-            if abs.is_file() {
-                NotePath {
-                    rel_path: path.to_string(),
-                    abs_path: abs,
-                }
-            } else {
-                return Err(e);
-            }
-        }
+        Err(e) => match paths::resolve_orphan_note_path(root, path) {
+            Ok(np) if np.abs_path.is_file() => np,
+            _ => return Err(e),
+        },
     };
     if !abs_path.is_file() {
         anyhow::bail!("no such note at {rel_path}");
@@ -565,6 +563,19 @@ mod tests {
             !dir.path().join(".glossa").join("notes").join("doc.pdf").join("n.csp").is_file(),
             "orphan note file is removed from disk"
         );
+    }
+
+    #[test]
+    fn del_rejects_path_traversal_outside_notes_root() {
+        // Regression: the orphan fallback in `delete_note` must not let a caller-supplied
+        // path with `..` components escape `.glossa/notes` and delete an arbitrary file.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let outside = dir.path().join("evil.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        let out = del(dir.path(), &idx, "../../evil.txt");
+        assert!(out.starts_with("REJECTED"), "traversal must be rejected: {out}");
+        assert!(outside.is_file(), "file outside the notes root must not be deleted");
     }
 
     #[test]
