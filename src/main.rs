@@ -700,11 +700,15 @@ fn main() -> anyhow::Result<()> {
                 }
             } else {
                 let notes_root = root.join(".glossa").join("notes");
+                let mut removed = 0usize;
                 for o in &orphans {
-                    let _ = std::fs::remove_file(notes_root.join(o));
+                    match std::fs::remove_file(notes_root.join(o)) {
+                        Ok(()) => removed += 1,
+                        Err(e) => eprintln!("prune: failed to remove {o}: {e}"),
+                    }
                 }
                 glossa::index::store::ensure_fresh(&root)?;
-                println!("pruned {} orphaned note(s)", orphans.len());
+                println!("pruned {removed} orphaned note(s)");
             }
             Ok(())
         }
