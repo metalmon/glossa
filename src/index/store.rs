@@ -846,6 +846,20 @@ fn collect_dir_mtimes(
     }
 }
 
+/// True iff a `/`-prefix of `rel` is an indexed corpus document in this pass. `files` contains only
+/// corpus documents (never notes), so a hit means the note's owner is present.
+#[cfg(feature = "notebook")]
+fn owner_in(files: &BTreeMap<String, FileSig>, rel: &str) -> bool {
+    let mut cut = rel.rfind('/');
+    while let Some(i) = cut {
+        if files.contains_key(&rel[..i]) {
+            return true;
+        }
+        cut = rel[..i].rfind('/');
+    }
+    false
+}
+
 pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
     let mut d = Delta::default();
     let root = abs_root(dir);
@@ -891,6 +905,9 @@ fn scan_notes_delta(dir: &Path, manifest: &Manifest, d: &mut Delta) -> anyhow::R
             .unwrap_or_default();
         if rel.is_empty() {
             return Ok(());
+        }
+        if !owner_in(&d.next.files, &rel) {
+            return Ok(()); // orphan: not a live note → falls into notes_removed, chunk dropped; file kept
         }
         let sig = match file_sig(path) {
             Ok(s) => s,
@@ -1986,6 +2003,48 @@ mod search_tests {
         assert!(
             d.notes_removed.contains(&"doc.md/limits.csp".to_string()),
             "{d:?}"
+        );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn note_is_dropped_when_owner_removed_and_restored_when_owner_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        // A note mirrored under .glossa/notes/doc.md/limits.csp
+        let notes_dir = dir.path().join(".glossa").join("notes").join("doc.md");
+        fs::create_dir_all(&notes_dir).unwrap();
+        fs::write(notes_dir.join("limits.csp"), b"note body here").unwrap();
+
+        let m = crate::index::manifest::Manifest::load(dir.path());
+        let d = scan_delta(dir.path(), &m).unwrap();
+        assert!(
+            d.notes_changed.iter().any(|r| r == "doc.md/limits.csp"),
+            "owned note is picked up"
+        );
+
+        // Remove the owner document; the note file stays on disk.
+        fs::remove_file(dir.path().join("doc.md")).unwrap();
+        index_dir(dir.path(), false).unwrap(); // absorbs the changed corpus + note
+        let m2 = crate::index::manifest::Manifest::load(dir.path());
+        let d2 = scan_delta(dir.path(), &m2).unwrap();
+        assert!(
+            !d2.next.notes.contains_key("doc.md/limits.csp"),
+            "orphan not tracked as a live note"
+        );
+        assert!(
+            notes_dir.join("limits.csp").is_file(),
+            "orphan file stays on disk (reversible)"
+        );
+
+        // Restore the owner → note is picked up again.
+        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        let m3 = crate::index::manifest::Manifest::load(dir.path());
+        let d3 = scan_delta(dir.path(), &m3).unwrap();
+        assert!(
+            d3.next.notes.contains_key("doc.md/limits.csp"),
+            "note re-tracked once owner returns"
         );
     }
 
