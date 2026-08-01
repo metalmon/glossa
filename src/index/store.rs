@@ -1200,6 +1200,32 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     Ok(stats)
 }
 
+/// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
+/// Fast path: if `.glossa/dirsig` already equals the current signature, return immediately. Else
+/// take `index.lock` and index; if another process holds it, poll until either the persisted
+/// signature reaches what we observed (the peer indexed it) or `timeout` elapses (serve current).
+pub fn freshen_blocking(dir: &Path, timeout: std::time::Duration) -> anyhow::Result<IndexStats> {
+    let cur = dir_mtime_signature(dir)?;
+    if read_dirsig(dir) == Some(cur) {
+        return Ok(IndexStats::default());
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(_guard) = crate::index::lock::try_index_lock(dir) {
+            // We own the lock: index the current tree (index_dir_locked records dirsig). Fresh on return.
+            return index_dir_locked(dir, false);
+        }
+        // Another process is indexing. If it already reached our observed state, we are fresh.
+        if read_dirsig(dir) == Some(cur) {
+            return Ok(IndexStats::default());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(IndexStats::default());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
@@ -2107,5 +2133,44 @@ mod tests {
         assert!(idx.index.schema().get_field("body_trigrams").is_ok());
         let hits = idx.search("hello", 5).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn freshen_blocking_picks_up_new_file_and_is_noop_when_fresh() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nhello\n").unwrap();
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.search("hello", 10).unwrap().iter().any(|h| h.path.ends_with("a.md")));
+
+        // Nothing changed → no work, signature already matches.
+        let cur = dir_mtime_signature(dir.path()).unwrap();
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+        assert_eq!(read_dirsig(dir.path()), Some(cur));
+
+        // Add a file → next freshen makes it searchable.
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\nworld\n").unwrap();
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx.search("world", 10).unwrap().iter().any(|h| h.path.ends_with("b.md")));
+    }
+
+    #[test]
+    fn freshen_blocking_degrades_when_lock_held_until_deadline() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\ny\n").unwrap(); // pending delta
+
+        let _held = crate::index::lock::try_index_lock(dir.path()).expect("hold the lock");
+        let start = std::time::Instant::now();
+        // Lock is held by us on this thread; freshen must not hang — it returns by the deadline.
+        freshen_blocking(dir.path(), Duration::from_millis(200)).unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(200), "waited for the deadline");
+        assert!(start.elapsed() < Duration::from_secs(2), "did not hang");
     }
 }
