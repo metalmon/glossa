@@ -2012,39 +2012,62 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        // A note mirrored under .glossa/notes/doc.md/limits.csp
+
+        // A note mirrored under .glossa/notes/doc.md/limits.csp, created and committed while
+        // the owner still exists — so it is a genuinely live, persisted note, not just a
+        // one-off delta.
         let notes_dir = dir.path().join(".glossa").join("notes").join("doc.md");
         fs::create_dir_all(&notes_dir).unwrap();
-        fs::write(notes_dir.join("limits.csp"), b"note body here").unwrap();
+        fs::write(notes_dir.join("limits.csp"), b"sentinel note text").unwrap();
+        index_dir(dir.path(), false).unwrap();
 
         let m = crate::index::manifest::Manifest::load(dir.path());
-        let d = scan_delta(dir.path(), &m).unwrap();
         assert!(
-            d.notes_changed.iter().any(|r| r == "doc.md/limits.csp"),
-            "owned note is picked up"
+            m.notes.contains_key("doc.md/limits.csp"),
+            "note committed into the persisted manifest"
+        );
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "note is searchable while owner exists"
         );
 
-        // Remove the owner document; the note file stays on disk.
+        // Remove the owner document; the note file stays on disk. Reindexing must drop the
+        // now-orphaned chunk from the live (persisted, previously-committed) index.
         fs::remove_file(dir.path().join("doc.md")).unwrap();
-        index_dir(dir.path(), false).unwrap(); // absorbs the changed corpus + note
-        let m2 = crate::index::manifest::Manifest::load(dir.path());
-        let d2 = scan_delta(dir.path(), &m2).unwrap();
+        index_dir(dir.path(), false).unwrap();
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
-            !d2.next.notes.contains_key("doc.md/limits.csp"),
-            "orphan not tracked as a live note"
+            !idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "orphan chunk removed from the index"
         );
         assert!(
             notes_dir.join("limits.csp").is_file(),
             "orphan file stays on disk (reversible)"
         );
-
-        // Restore the owner → note is picked up again.
-        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
-        let m3 = crate::index::manifest::Manifest::load(dir.path());
-        let d3 = scan_delta(dir.path(), &m3).unwrap();
+        let m2 = crate::index::manifest::Manifest::load(dir.path());
         assert!(
-            d3.next.notes.contains_key("doc.md/limits.csp"),
-            "note re-tracked once owner returns"
+            !m2.notes.contains_key("doc.md/limits.csp"),
+            "orphan not tracked as a live note in the persisted manifest"
+        );
+
+        // Restore the owner → note is picked up and re-indexed again.
+        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "note re-indexed once owner returns"
         );
     }
 
