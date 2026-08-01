@@ -2,6 +2,7 @@ use crate::index::manifest::{FileSig, Manifest};
 use crate::index::multilang::{default_detector, multilang_analyzer};
 use crate::model::Chunk;
 use anyhow::Context;
+use ignore::WalkBuilder;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -791,10 +792,10 @@ pub struct Delta {
 pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
     let root = abs_root(dir);
     let mut map: BTreeMap<String, u128> = BTreeMap::new();
-    collect_dir_mtimes(&root, &root, true, &mut map);
+    collect_dir_mtimes(&root, true, "c", &mut map);
     let notes_root = dir.join(".glossa").join("notes");
     if notes_root.is_dir() {
-        collect_dir_mtimes(&notes_root, &notes_root, false, &mut map);
+        collect_dir_mtimes(&notes_root, false, "n", &mut map);
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for (k, v) in &map {
@@ -804,29 +805,44 @@ pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
     Ok(h.finish())
 }
 
-/// Recurse `cur`, recording each directory's path (relative to `base`, prefixed to keep corpus and
-/// notes trees distinct) and its mtime in nanoseconds. `skip_glossa` skips a child named `.glossa`
-/// (the corpus pass; the notes pass walks inside `.glossa/notes` directly).
-fn collect_dir_mtimes(base: &Path, cur: &Path, skip_glossa: bool, map: &mut BTreeMap<String, u128>) {
-    let nanos = std::fs::metadata(cur)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let rel = cur.strip_prefix(base).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-    let key = format!("{}:{}", if skip_glossa { "c" } else { "n" }, rel);
-    map.insert(key, nanos);
-    let Ok(rd) = std::fs::read_dir(cur) else { return };
-    for entry in rd.flatten() {
+/// Walk `base` with the same `WalkBuilder` configuration `walk_files` (`src/walk.rs`) uses for
+/// indexing — gitignore/hidden-aware when `respect_ignore`, skipping `.glossa`, not following
+/// symlinks — so the signature tracks exactly what gets indexed (no `.git` churn, no symlink
+/// cycles) and stays consistent between the two callers (corpus pass vs. `.glossa/notes` pass,
+/// which mirrors how `scan_notes_delta` walks notes with `respect_ignore=false`). Records each
+/// directory entry's path (relative to `base`, prefixed with `key_prefix` to keep corpus and notes
+/// trees distinct in the combined map) and its mtime in nanoseconds.
+fn collect_dir_mtimes(
+    base: &Path,
+    respect_ignore: bool,
+    key_prefix: &str,
+    map: &mut BTreeMap<String, u128>,
+) {
+    let mut wb = WalkBuilder::new(base);
+    wb.standard_filters(respect_ignore);
+    wb.require_git(!respect_ignore);
+    wb.filter_entry(|e| e.file_name() != ".glossa");
+    for result in wb.build() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
         let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if skip_glossa && entry.file_name() == std::ffi::OsStr::new(".glossa") {
-            continue;
-        }
-        collect_dir_mtimes(base, &path, skip_glossa, map);
+        let nanos = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let rel = path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let key = format!("{key_prefix}:{rel}");
+        map.insert(key, nanos);
     }
 }
 
@@ -1466,6 +1482,31 @@ mod incremental_tests {
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub").join("c.md"), b"# C\nz\n").unwrap();
         assert_ne!(s2, dir_mtime_signature(dir.path()).unwrap(), "new subdir + file changes the signature");
+    }
+
+    #[test]
+    fn dir_signature_ignores_hidden_dir_but_tracks_real_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("head"), b"placeholder\n").unwrap();
+        let s1 = dir_mtime_signature(dir.path()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join(".git").join("index"), b"placeholder\n").unwrap();
+        assert_eq!(
+            s1,
+            dir_mtime_signature(dir.path()).unwrap(),
+            "a hidden dir like .git must not perturb the signature"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\ny\n").unwrap();
+        assert_ne!(
+            s1,
+            dir_mtime_signature(dir.path()).unwrap(),
+            "a real corpus file add still changes the signature"
+        );
     }
 }
 
