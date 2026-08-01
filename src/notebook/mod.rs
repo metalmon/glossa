@@ -487,11 +487,27 @@ pub fn read_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<(Str
 }
 
 fn delete_note(root: &Path, idx: &DocIndex, path: &str) -> anyhow::Result<String> {
-    let NotePath { rel_path, abs_path } = resolve_note_by_path(root, idx, path)?;
+    // Normal path: resolve via the indexed owner. Fallback: an orphan (owner deleted) is no longer
+    // resolvable that way, but its file may still exist under the notes root — resolve it directly.
+    let NotePath { rel_path, abs_path } = match resolve_note_by_path(root, idx, path) {
+        Ok(np) => np,
+        Err(e) => {
+            let abs = root.join(".glossa").join("notes").join(path);
+            if abs.is_file() {
+                NotePath {
+                    rel_path: path.to_string(),
+                    abs_path: abs,
+                }
+            } else {
+                return Err(e);
+            }
+        }
+    };
     if !abs_path.is_file() {
         anyhow::bail!("no such note at {rel_path}");
     }
     std::fs::remove_file(&abs_path)?;
+    let _ = idx.delete_path(&rel_path); // drop the chunk immediately (idempotent, best-effort)
     Ok(rel_path)
 }
 
@@ -533,6 +549,22 @@ mod tests {
         assert!(body.contains("A\nB"));
         del(dir.path(), &idx, "doc.pdf/parameters.md");
         assert!(read_note(dir.path(), &idx, "doc.pdf/parameters.md").is_err());
+    }
+
+    #[test]
+    fn del_removes_orphan_note_after_owner_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "n.csp", "body\n", false);
+        // Owner disappears from the index (simulate deletion + reindex).
+        idx.delete_path("doc.pdf").unwrap();
+        // The note file still exists on disk; del must still remove it.
+        let out = del(dir.path(), &idx, "doc.pdf/n.csp");
+        assert!(!out.starts_with("REJECTED"), "del must accept an orphan: {out}");
+        assert!(
+            !dir.path().join(".glossa").join("notes").join("doc.pdf").join("n.csp").is_file(),
+            "orphan note file is removed from disk"
+        );
     }
 
     #[test]
