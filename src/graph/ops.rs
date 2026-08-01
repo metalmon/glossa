@@ -824,10 +824,7 @@ pub struct DocOwnedInventory {
 }
 
 /// `None` when the document owns no non-structural nodes yet.
-pub fn doc_owned_inventory(
-    g: &GraphStore,
-    doc: &str,
-) -> anyhow::Result<Option<DocOwnedInventory>> {
+pub fn doc_owned_inventory(g: &GraphStore, doc: &str) -> anyhow::Result<Option<DocOwnedInventory>> {
     let nodes = g.all_nodes()?;
     let edges = g.all_edges()?;
     let structural: std::collections::HashSet<&str> =
@@ -866,11 +863,7 @@ pub fn doc_owned_inventory(
                     }
                 })
                 .collect();
-            outgoing.sort_by(|a, b| {
-                a.edge_type
-                    .cmp(&b.edge_type)
-                    .then_with(|| a.to.cmp(&b.to))
-            });
+            outgoing.sort_by(|a, b| a.edge_type.cmp(&b.edge_type).then_with(|| a.to.cmp(&b.to)));
             outgoing.dedup();
             OwnedNodeView {
                 id: n.id.clone(),
@@ -971,7 +964,9 @@ mod tests {
             .find(|n| n.id == "fld:hgt-a")
             .expect("height");
         assert!(
-            hgt.outgoing.iter().any(|e| e.edge_type == "MENTIONS" && e.to == "section 1"),
+            hgt.outgoing
+                .iter()
+                .any(|e| e.edge_type == "MENTIONS" && e.to == "section 1"),
             "MENTIONS resolves Section to label: {:?}",
             hgt.outgoing
         );
@@ -994,11 +989,7 @@ mod tests {
             "DEPENDS_ON must surface: {:?}",
             prm.outgoing
         );
-        let wid = inv
-            .nodes
-            .iter()
-            .find(|n| n.label == "width")
-            .unwrap();
+        let wid = inv.nodes.iter().find(|n| n.label == "width").unwrap();
         assert!(wid.outgoing.is_empty());
 
         assert!(doc_owned_inventory(&g, "zzz.docx").unwrap().is_none());
@@ -1256,8 +1247,15 @@ strict = true
             text: "hello".into(),
         }])
         .unwrap();
-        crate::graph::build::build_document(&g, "docs\\case1.docx", FileSig { mtime_secs: 0, size: 0 })
-            .unwrap();
+        crate::graph::build::build_document(
+            &g,
+            "docs\\case1.docx",
+            FileSig {
+                mtime_secs: 0,
+                size: 0,
+            },
+        )
+        .unwrap();
         // A reasoning node whose label shares tokens with the path — the fuzzy fallback
         // could grab THIS instead of the Document without separator normalization.
         let out = graph_upsert(

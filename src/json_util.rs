@@ -128,7 +128,9 @@ where
             if v >= 0.0 && v.fract() == 0.0 {
                 Ok(Some(v as u64))
             } else {
-                Err(de::Error::custom(format!("expected a whole non-negative number, got {v}")))
+                Err(de::Error::custom(format!(
+                    "expected a whole non-negative number, got {v}"
+                )))
             }
         }
 
@@ -179,8 +181,9 @@ where
     D: Deserializer<'de>,
 {
     match deserialize_opt_u64_loose(deserializer)? {
-        Some(v) => u32::try_from(v)
-            .map_err(|_| de::Error::custom(format!("{v} is out of range for u32"))),
+        Some(v) => {
+            u32::try_from(v).map_err(|_| de::Error::custom(format!("{v} is out of range for u32")))
+        }
         None => Err(de::Error::custom("expected an integer")),
     }
 }
@@ -249,5 +252,4 @@ mod tests {
         assert!(serde_json::from_str::<T>(r#"{"n":"4294967296"}"#).is_err());
         assert!(serde_json::from_str::<T>(r#"{}"#).is_err());
     }
-
 }

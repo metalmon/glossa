@@ -66,10 +66,7 @@ pub fn csp_column_values(
 /// `csp_column_values` (which unions columns across files), this keeps each file
 /// as its own table — needed to match a multi-column table against a reference
 /// relation without collapsing combination rows.
-pub fn csp_tables_per_file(
-    root: &Path,
-    doc: &str,
-) -> anyhow::Result<Vec<(String, CspTable)>> {
+pub fn csp_tables_per_file(root: &Path, doc: &str) -> anyhow::Result<Vec<(String, CspTable)>> {
     let tables_dir = notes_root(root).join(mirror_dir_for_doc(doc));
     let mut out = Vec::new();
     if !tables_dir.is_dir() {

@@ -562,13 +562,7 @@ fn build_conditional_grit_graph(g: &GraphStore) {
 
     insert_node(g, "fld:grit", "Field", "grit", STD_SRC);
 
-    insert_node(
-        g,
-        "cond:grit_f",
-        "Conditional",
-        "grit when F",
-        STD_SRC,
-    );
+    insert_node(g, "cond:grit_f", "Conditional", "grit when F", STD_SRC);
     insert_node(g, "lit:field", "Literal", "grit_type", STD_SRC);
     insert_node(g, "lit:val_f", "Literal", "F", STD_SRC);
     insert_edge(g, "cond:grit_f", "IF_FIELD", "lit:field", STD_SRC);
@@ -584,13 +578,7 @@ fn build_conditional_grit_graph(g: &GraphStore) {
     insert_edge(g, "cond:grit_f", "HAS_CONSTRAINT", "enum:grit_f", STD_SRC);
     insert_edge(g, "fld:grit", "CONSTRAINED_BY", "cond:grit_f", STD_SRC);
 
-    insert_node(
-        g,
-        "cond:grit_m",
-        "Conditional",
-        "grit when M",
-        STD_SRC,
-    );
+    insert_node(g, "cond:grit_m", "Conditional", "grit when M", STD_SRC);
     insert_node(g, "lit:val_m", "Literal", "M", STD_SRC);
     insert_edge(g, "cond:grit_m", "IF_FIELD", "lit:field", STD_SRC);
     insert_edge(g, "cond:grit_m", "IF_VALUE", "lit:val_m", STD_SRC);
@@ -670,11 +658,7 @@ fn conditional_enum_adapter_roundtrip() {
 
     let problem = glossa::constraint_adapter::load_problem(&g, &ont, Some(STD_SRC)).unwrap();
     assert_eq!(problem.fields.len(), 2);
-    let grit = problem
-        .fields
-        .iter()
-        .find(|f| f.name == "grit")
-        .unwrap();
+    let grit = problem.fields.iter().find(|f| f.name == "grit").unwrap();
     assert_eq!(
         grit.constraints.len(),
         2,

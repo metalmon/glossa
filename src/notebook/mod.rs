@@ -561,7 +561,14 @@ mod tests {
     fn note_is_searchable_immediately_via_write_through() {
         let dir = tempfile::tempdir().unwrap();
         let idx = idx_with_doc(dir.path(), "doc.pdf");
-        note(dir.path(), &idx, "doc.pdf", "n.csp", "peculiar-token-xyz\n", false);
+        note(
+            dir.path(),
+            &idx,
+            "doc.pdf",
+            "n.csp",
+            "peculiar-token-xyz\n",
+            false,
+        );
         let hits = idx.search("peculiar-token-xyz", 10).unwrap();
         assert!(
             hits.iter().any(|h| h.path == "doc.pdf/n.csp"),
@@ -579,9 +586,17 @@ mod tests {
         idx.delete_path("doc.pdf").unwrap();
         // The note file still exists on disk; del must still remove it.
         let out = del(dir.path(), &idx, "doc.pdf/n.csp");
-        assert!(!out.starts_with("REJECTED"), "del must accept an orphan: {out}");
         assert!(
-            !dir.path().join(".glossa").join("notes").join("doc.pdf").join("n.csp").is_file(),
+            !out.starts_with("REJECTED"),
+            "del must accept an orphan: {out}"
+        );
+        assert!(
+            !dir.path()
+                .join(".glossa")
+                .join("notes")
+                .join("doc.pdf")
+                .join("n.csp")
+                .is_file(),
             "orphan note file is removed from disk"
         );
     }
@@ -595,8 +610,14 @@ mod tests {
         let outside = dir.path().join("evil.txt");
         std::fs::write(&outside, b"secret").unwrap();
         let out = del(dir.path(), &idx, "../../evil.txt");
-        assert!(out.starts_with("REJECTED"), "traversal must be rejected: {out}");
-        assert!(outside.is_file(), "file outside the notes root must not be deleted");
+        assert!(
+            out.starts_with("REJECTED"),
+            "traversal must be rejected: {out}"
+        );
+        assert!(
+            outside.is_file(),
+            "file outside the notes root must not be deleted"
+        );
     }
 
     #[test]
@@ -645,7 +666,9 @@ mod tests {
         assert!(msg.contains("no extension"), "{msg}");
         assert!(msg.contains("Глубина паза.csp"), "{msg}");
         assert!(
-            !dir.path().join(".glossa/notes/doc.pdf/Глубина паза").exists(),
+            !dir.path()
+                .join(".glossa/notes/doc.pdf/Глубина паза")
+                .exists(),
             "must not save the extensionless file"
         );
         // The same content with `.csp` is accepted.
@@ -789,7 +812,10 @@ mod tests {
             .join(".glossa/notes/doc.docx/parameters.md")
             .is_file());
         let (rel, body) = read_note(dir.path(), &idx, "doc.pdf/parameters.md").unwrap();
-        assert_eq!((rel.as_str(), body.as_str()), ("doc.pdf/parameters.md", "pdf\n"));
+        assert_eq!(
+            (rel.as_str(), body.as_str()),
+            ("doc.pdf/parameters.md", "pdf\n")
+        );
     }
 
     #[test]

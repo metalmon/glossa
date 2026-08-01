@@ -489,7 +489,8 @@ impl DocIndex {
     pub fn note_owner(&self, rel: &str) -> anyhow::Result<Option<String>> {
         for (i, _) in rel.match_indices('/').rev() {
             let candidate = &rel[..i];
-            if self.has_document(candidate)? && self.file_type_of(candidate)? != Some("note".into()) {
+            if self.has_document(candidate)? && self.file_type_of(candidate)? != Some("note".into())
+            {
                 return Ok(Some(candidate.to_string()));
             }
         }
@@ -1319,8 +1320,8 @@ mod incremental_tests {
         index_dir(dir.path(), true).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
         let p = "a.md".to_string(); // canonical key: corpus-root-relative
-        // Section ids are the 1-based ordinal now (heading "A"/"A > B"/"A > C" stays the
-        // node label; hierarchy is still built from the heading breadcrumb).
+                                    // Section ids are the 1-based ordinal now (heading "A"/"A > B"/"A > C" stays the
+                                    // node label; hierarchy is still built from the heading breadcrumb).
         let a = section_id(&p, "1");
         let ab = section_id(&p, "2");
         let ac = section_id(&p, "3");
@@ -1578,17 +1579,28 @@ mod incremental_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         let s1 = dir_mtime_signature(dir.path()).unwrap();
-        assert_eq!(s1, dir_mtime_signature(dir.path()).unwrap(), "signature is stable when nothing changes");
+        assert_eq!(
+            s1,
+            dir_mtime_signature(dir.path()).unwrap(),
+            "signature is stable when nothing changes"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(dir.path().join("b.md"), b"# B\ny\n").unwrap(); // same dir, new file
         let s2 = dir_mtime_signature(dir.path()).unwrap();
-        assert_ne!(s1, s2, "adding a file in an existing dir must change the signature");
+        assert_ne!(
+            s1, s2,
+            "adding a file in an existing dir must change the signature"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub").join("c.md"), b"# C\nz\n").unwrap();
-        assert_ne!(s2, dir_mtime_signature(dir.path()).unwrap(), "new subdir + file changes the signature");
+        assert_ne!(
+            s2,
+            dir_mtime_signature(dir.path()).unwrap(),
+            "new subdir + file changes the signature"
+        );
     }
 
     #[test]
@@ -2136,7 +2148,10 @@ mod search_tests {
         index_dir(dir.path(), false).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
-            !idx.search("63", 10).unwrap().iter().any(|h| h.path == "doc.md/limits.csp"),
+            !idx.search("63", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
             "note chunk removed"
         );
 
@@ -2180,7 +2195,11 @@ mod retry_tests {
                 Ok(n)
             }
         });
-        assert_eq!(out.unwrap(), 3, "succeeds after the transient failures clear");
+        assert_eq!(
+            out.unwrap(),
+            3,
+            "succeeds after the transient failures clear"
+        );
         assert_eq!(calls.get(), 3, "retried both permission-denied failures");
     }
 
@@ -2264,7 +2283,11 @@ mod tests {
         std::fs::write(dir.path().join("a.md"), b"# A\nhello\n").unwrap();
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        assert!(idx.search("hello", 10).unwrap().iter().any(|h| h.path.ends_with("a.md")));
+        assert!(idx
+            .search("hello", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("a.md")));
 
         // Nothing changed → no work, signature already matches.
         let cur = dir_mtime_signature(dir.path()).unwrap();
@@ -2276,7 +2299,11 @@ mod tests {
         std::fs::write(dir.path().join("b.md"), b"# B\nworld\n").unwrap();
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        assert!(idx.search("world", 10).unwrap().iter().any(|h| h.path.ends_with("b.md")));
+        assert!(idx
+            .search("world", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("b.md")));
     }
 
     #[test]
@@ -2292,7 +2319,10 @@ mod tests {
         let start = std::time::Instant::now();
         // Lock is held by us on this thread; freshen must not hang — it returns by the deadline.
         freshen_blocking(dir.path(), Duration::from_millis(200)).unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(200), "waited for the deadline");
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "waited for the deadline"
+        );
         assert!(start.elapsed() < Duration::from_secs(2), "did not hang");
     }
 }

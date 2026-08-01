@@ -77,7 +77,13 @@ const GRAPH_TOOLS: &[&str] = &[
 ];
 
 impl GlossaServer {
-    pub fn new(root: PathBuf, profile: Profile, trace: bool, no_graph: bool, no_image: bool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        profile: Profile,
+        trace: bool,
+        no_graph: bool,
+        no_image: bool,
+    ) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
             for t in EDITOR_TOOLS
@@ -99,9 +105,8 @@ impl GlossaServer {
         }
         if no_image {
             if let Some(route) = router.map.get_mut("read") {
-                let mut schema: serde_json::Value =
-                    serde_json::to_value(&*route.attr.input_schema)
-                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                let mut schema: serde_json::Value = serde_json::to_value(&*route.attr.input_schema)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
                 if let Some(obj) = schema.as_object_mut() {
                     if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
                         props.remove("page_image");
@@ -212,7 +217,7 @@ impl GlossaServer {
             return;
         };
         match _lock.try_lock() {
-            Ok(()) => {} // acquired — we are the one editor running the pass this round
+            Ok(()) => {}      // acquired — we are the one editor running the pass this round
             Err(_) => return, // held or lock error → skip
         }
         let Ok(g) = GraphStore::open(&self.root) else {
@@ -310,7 +315,10 @@ struct SearchArgs {
         description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex"
     )]
     query: String,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
     #[schemars(description = "max hits (default 50)")]
     limit: Option<usize>,
     #[serde(default)]
@@ -340,10 +348,16 @@ struct ReadArgs {
         description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)"
     )]
     n: u32,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(description = "include embedded images (default true)")]
     include_images: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text."
     )]
@@ -354,17 +368,26 @@ struct ReadArgs {
 struct SourceFileArgs {
     #[schemars(description = "document path, exactly as shown in a search/grep result")]
     path: String,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u32_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u32_loose"
+    )]
     #[schemars(
         description = "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page"
     )]
     n: Option<u32>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u64_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
+    )]
     #[schemars(
         description = "maximum delivered size in bytes (default 10 MB, matching the ACP client cap)"
     )]
     max_bytes: Option<u64>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "return the untouched original file instead of the default PDF conversion (currently only affects DOCX, delivered as PDF by default); default false"
     )]
@@ -383,7 +406,10 @@ struct NeighborsArgs {
         description = "document path, exactly as shown in a search result (use with `n` instead of `node`)"
     )]
     path: Option<String>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_u64_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
+    )]
     #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
     n: Option<u64>,
 }
@@ -465,7 +491,10 @@ struct NoteArgs {
         description = "Full file content (replaces the note if it exists, unless append=true). Free-form content is stored as-is. Only a `.csp` note is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing"
     )]
     content: String,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is. Pass JSON boolean true (string \"true\" is also accepted)."
     )]
@@ -498,15 +527,24 @@ struct GrepArgs {
     )]
     #[serde(default)]
     path: Option<String>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(description = "case-insensitive matching (-i)")]
     ignore_case: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "Match the pattern as literal characters, with no regex meaning (`|`, `.`, `*` match themselves). Usually leave this off — use it only to find text that itself contains regex symbols (-F)."
     )]
     fixed: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(description = "match whole words only (-w)")]
     word: Option<bool>,
     #[serde(default)]
@@ -517,36 +555,60 @@ struct GrepArgs {
     #[serde(default)]
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
     #[schemars(
         description = "Return N lines around each match — this turns a grep into a focused window read. To pull a value's whole table, grep one of its values (or the parameter name) with context ~20-40, instead of reading the whole document. Both sides; -A/-B override a side (-C)."
     )]
     context: Option<usize>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
     #[schemars(description = "emit N context lines before each match (-B)")]
     before: Option<usize>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
     #[schemars(description = "emit N context lines after each match (-A)")]
     after: Option<usize>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "print only the matched substring(s), one per line, not the whole line (-o)"
     )]
     only_matching: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "Show each match's line number within the chunk — the position of the hit, so you can point at where a value sits or read a window around that line (-n)."
     )]
     line_number: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "output only a count of matching lines per chunk, not the lines (-c)"
     )]
     count: Option<bool>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_usize_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
     #[schemars(description = "stop after N matching lines per chunk (-m)")]
     max_count: Option<usize>,
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(
         description = "let the pattern span lines: `.` matches newlines, matched against the whole chunk (-U)"
     )]
@@ -737,7 +799,9 @@ impl GlossaServer {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
-        let max = a.max_bytes.unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
+        let max = a
+            .max_bytes
+            .unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
         let out = crate::tools::get_source_file(
             &idx,
             g.as_ref(),
@@ -1023,8 +1087,15 @@ impl GlossaServer {
         let doc = a
             .doc
             .as_deref()
-            .map(|d| idx.canonical_document_path(d).unwrap_or_else(|| d.to_string()))
-            .or_else(|| a.node.as_deref().and_then(|s| idx.canonical_document_path(s)));
+            .map(|d| {
+                idx.canonical_document_path(d)
+                    .unwrap_or_else(|| d.to_string())
+            })
+            .or_else(|| {
+                a.node
+                    .as_deref()
+                    .and_then(|s| idx.canonical_document_path(s))
+            });
         if let Some(doc) = doc {
             let mut out = crate::tools::graph_stats(&g);
             out.push('\n');
@@ -1067,13 +1138,15 @@ impl GlossaServer {
             line_cap: None,
             path: a.path,
         };
-        Ok(CallToolResult::success(vec![Content::text(crate::tools::grep(
-            &self.root,
-            &idx,
-            &a.pattern,
-            &opts.with_default_context(),
-            &self.trace,
-        ))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::grep(
+                &self.root,
+                &idx,
+                &a.pattern,
+                &opts.with_default_context(),
+                &self.trace,
+            ),
+        )]))
     }
 
     #[tool(
@@ -1288,7 +1361,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         let path = "d.md".to_string(); // canonical key: corpus-root-relative
 
         let out = srv
@@ -1313,7 +1392,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nmaxTsdr 3000\n# B\nother\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         let out = srv
             .grep(Parameters(GrepArgs {
                 pattern: "maxTsdr".into(),
@@ -1348,7 +1433,13 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("Other.md"), "# A\nраз\n".as_bytes()).unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
@@ -1372,7 +1463,13 @@ mod tests {
         )
         .unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
@@ -1400,7 +1497,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // pre-cancelled → the loop must return promptly, not hang
         tokio::time::timeout(
@@ -1437,7 +1540,13 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         srv.run_generalize();
         let g = GraphStore::open(dir.path()).unwrap();
         assert!(
@@ -1451,7 +1560,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nhello world\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
         assert!(srv.readiness(), "index + graph open → ready");
         let m = srv.metrics_text();
         assert!(m.contains("glossa_up 1"), "metrics: {m}");
@@ -1485,7 +1600,13 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
 
         // Another editor holds the cross-process generalize lock.
         let lock_path = dir.path().join(".glossa").join("generalize.lock");
@@ -1524,12 +1645,11 @@ mod tests {
     #[test]
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
-        let reader = GlossaServer::new(root.clone(), Profile::Reader, false, false, false).enabled_tools();
+        let reader =
+            GlossaServer::new(root.clone(), Profile::Reader, false, false, false).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         assert!(reader.contains(&"ls".to_string()));
-        assert!(
-            !reader.contains(&"note".to_string()) && !reader.contains(&"del".to_string())
-        );
+        assert!(!reader.contains(&"note".to_string()) && !reader.contains(&"del".to_string()));
         assert!(
             !reader.contains(&"index".to_string())
                 && !reader.contains(&"graph_upsert".to_string())
@@ -1537,7 +1657,8 @@ mod tests {
         );
         assert!(!reader.contains(&"write".to_string()));
 
-        let editor = GlossaServer::new(root.clone(), Profile::Editor, false, false, false).enabled_tools();
+        let editor =
+            GlossaServer::new(root.clone(), Profile::Editor, false, false, false).enabled_tools();
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(
@@ -1563,7 +1684,8 @@ mod tests {
             "reader cannot graph_stats"
         );
 
-        let full = GlossaServer::new(root.clone(), Profile::Full, false, false, false).enabled_tools();
+        let full =
+            GlossaServer::new(root.clone(), Profile::Full, false, false, false).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
@@ -1589,7 +1711,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
 
         // File added AFTER the server exists (as an external agent would).
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1605,6 +1733,9 @@ mod tests {
             .await
             .unwrap();
         let text = format!("{out:?}");
-        assert!(text.contains("b.md"), "search must reflect the newly added file: {text}");
+        assert!(
+            text.contains("b.md"),
+            "search must reflect the newly added file: {text}"
+        );
     }
 }

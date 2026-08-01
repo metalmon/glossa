@@ -749,11 +749,7 @@ params = ["condition_field", "condition_value"]
         insert_edge(&g, "fld:d", "CONSTRAINED_BY", "enum:d", "spec.pdf");
 
         let problem = make_adapter_problem(&g, &ont, "spec.pdf");
-        let f = problem
-            .fields
-            .iter()
-            .find(|f| f.name == "Диаметр")
-            .unwrap();
+        let f = problem.fields.iter().find(|f| f.name == "Диаметр").unwrap();
         let values = f
             .constraints
             .iter()

@@ -1,5 +1,5 @@
-use crate::extract::Extractor;
 use crate::extract::pdf_table::{expand_table, table_to_markdown};
+use crate::extract::Extractor;
 use crate::model::Chunk;
 use std::path::Path;
 
@@ -118,8 +118,7 @@ mod tests {
             ),
         ];
         objects.extend((0..page_count).map(|_| {
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <<>> >>"
-                .to_string()
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <<>> >>".to_string()
         }));
 
         let mut bytes = b"%PDF-1.4\n".to_vec();
@@ -155,7 +154,10 @@ mod tests {
         assert_eq!(chunks.len(), 3, "expected physical page stubs: {chunks:?}");
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.location, format!("p.{}", i + 1));
-            assert!(chunk.text.is_empty(), "blank page must stay empty: {chunk:?}");
+            assert!(
+                chunk.text.is_empty(),
+                "blank page must stay empty: {chunk:?}"
+            );
         }
     }
 

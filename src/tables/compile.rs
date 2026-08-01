@@ -355,11 +355,7 @@ mod tests {
     fn compiles_independent_enum() {
         let dir = tempfile::tempdir().unwrap();
         let doc = "test_doc.pdf";
-        fixture_store(
-            dir.path(),
-            "Binder\tCertificate\nA1\tS\nA2\tS\n",
-            doc,
-        );
+        fixture_store(dir.path(), "Binder\tCertificate\nA1\tS\nA2\tS\n", doc);
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = eval_ontology();

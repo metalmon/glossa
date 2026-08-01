@@ -36,7 +36,10 @@ pub fn parse_schema_order(text: &str) -> SchemaOrder {
     match toml::from_str::<SchemaFile>(text) {
         Ok(s) => {
             let o = s.order.unwrap_or_default();
-            SchemaOrder { params: o.params, files: o.files }
+            SchemaOrder {
+                params: o.params,
+                files: o.files,
+            }
         }
         Err(_) => SchemaOrder::default(),
     }
@@ -82,7 +85,10 @@ mod tests {
     #[test]
     fn missing_file_or_section_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_schema_order(&dir.path().join("nope.toml")), SchemaOrder::default());
+        assert_eq!(
+            read_schema_order(&dir.path().join("nope.toml")),
+            SchemaOrder::default()
+        );
         let p = dir.path().join("s.toml");
         std::fs::write(&p, "doc = \"x\"\n").unwrap();
         assert_eq!(read_schema_order(&p), SchemaOrder::default());

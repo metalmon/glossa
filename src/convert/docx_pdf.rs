@@ -17,7 +17,9 @@ pub fn docx_to_pdf(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         move || -> anyhow::Result<Vec<u8>> {
             let doc = rdocx::Document::from_bytes(&owned)
                 .map_err(|e| anyhow::anyhow!("parse docx: {e}"))?;
-            let pdf = doc.to_pdf().map_err(|e| anyhow::anyhow!("render pdf: {e}"))?;
+            let pdf = doc
+                .to_pdf()
+                .map_err(|e| anyhow::anyhow!("render pdf: {e}"))?;
             Ok(pdf)
         },
     ));
@@ -32,7 +34,10 @@ pub fn docx_to_pdf(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub fn pdf_page_count(pdf: &[u8]) -> Option<usize> {
     let owned = pdf.to_vec();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        pdf_oxide::PdfDocument::from_bytes(owned).ok()?.page_count().ok()
+        pdf_oxide::PdfDocument::from_bytes(owned)
+            .ok()?
+            .page_count()
+            .ok()
     }))
     .ok()
     .flatten()
@@ -55,12 +60,18 @@ mod tests {
         let docx = tiny_docx();
         let pdf = docx_to_pdf(&docx).expect("convert docx to pdf");
         assert!(pdf.starts_with(b"%PDF"), "output must be a real PDF");
-        assert!(pdf_page_count(&pdf).unwrap_or(0) >= 1, "PDF must have at least one page");
+        assert!(
+            pdf_page_count(&pdf).unwrap_or(0) >= 1,
+            "PDF must have at least one page"
+        );
     }
 
     #[test]
     fn malformed_docx_is_err_not_panic() {
         let junk = b"this is definitely not a docx archive";
-        assert!(docx_to_pdf(junk).is_err(), "garbage input must return Err, never panic");
+        assert!(
+            docx_to_pdf(junk).is_err(),
+            "garbage input must return Err, never panic"
+        );
     }
 }

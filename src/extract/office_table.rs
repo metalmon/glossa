@@ -175,12 +175,7 @@ pub fn table_to_markdown(table: &Table) -> String {
         return String::new();
     }
 
-    let col_count = table
-        .rows
-        .iter()
-        .map(|r| r.cells.len())
-        .max()
-        .unwrap_or(0);
+    let col_count = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
     if col_count == 0 {
         return String::new();
     }

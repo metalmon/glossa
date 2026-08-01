@@ -3,13 +3,8 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-pub const GEPA_SLICE_TAGS: &[&str] = &[
-    "DISCOVER",
-    "MATERIALIZE",
-    "COMPILE",
-    "COVERAGE",
-    "VALIDATE",
-];
+pub const GEPA_SLICE_TAGS: &[&str] =
+    &["DISCOVER", "MATERIALIZE", "COMPILE", "COVERAGE", "VALIDATE"];
 
 /// Extract optimizable text between `{# GEPA:TAG_START #}` … `{# GEPA:TAG_END #}`.
 pub fn extract_gepa_slice(md: &str, tag: &str) -> Result<String> {
@@ -54,9 +49,7 @@ pub fn load_all_gepa_seeds(sop_dir: &Path) -> Result<Vec<(String, String)>> {
     let md = load_sop_md(sop_dir)?;
     GEPA_SLICE_TAGS
         .iter()
-        .map(|tag| {
-            extract_gepa_slice(&md, tag).map(|body| (tag.to_string(), body))
-        })
+        .map(|tag| extract_gepa_slice(&md, tag).map(|body| (tag.to_string(), body)))
         .collect()
 }
 

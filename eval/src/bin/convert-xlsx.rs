@@ -79,12 +79,8 @@ fn typed_value(s: &str) -> Value {
 }
 
 fn main() -> anyhow::Result<()> {
-    let in_dir = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "kb-val".into());
-    let out_dir = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "kb-val".into());
+    let in_dir = std::env::args().nth(1).unwrap_or_else(|| "kb-val".into());
+    let out_dir = std::env::args().nth(2).unwrap_or_else(|| "kb-val".into());
 
     let out = PathBuf::from(&out_dir);
     std::fs::create_dir_all(&out)?;

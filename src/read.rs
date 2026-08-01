@@ -166,11 +166,7 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
     }
 }
 
-fn extract_pdf_page_images(
-    path: &Path,
-    page: u64,
-    max: usize,
-) -> anyhow::Result<Vec<DocImage>> {
+fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
     use pdf_oxide::extractors::ImageData;
     use pdf_oxide::PdfDocument;
 

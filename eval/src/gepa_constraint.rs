@@ -499,7 +499,11 @@ fn pool_weights(cfg: &GepaConstraintConfig) -> [f64; POOL_COUNT] {
     ]
 }
 
-fn combined_acc_from_pools(have: [bool; POOL_COUNT], accs: [f64; POOL_COUNT], cfg: &GepaConstraintConfig) -> f64 {
+fn combined_acc_from_pools(
+    have: [bool; POOL_COUNT],
+    accs: [f64; POOL_COUNT],
+    cfg: &GepaConstraintConfig,
+) -> f64 {
     let weights = pool_weights(cfg);
     let mut w = 0.0;
     let mut sum = 0.0;
@@ -879,7 +883,11 @@ fn sample_slice<T: Clone>(items: &[T], n: usize, rng: &mut StdRng) -> Vec<T> {
         .collect()
 }
 
-fn weighted_slots(minibatch: usize, have: [bool; POOL_COUNT], weights: [f64; POOL_COUNT]) -> [usize; POOL_COUNT] {
+fn weighted_slots(
+    minibatch: usize,
+    have: [bool; POOL_COUNT],
+    weights: [f64; POOL_COUNT],
+) -> [usize; POOL_COUNT] {
     let active = have.iter().filter(|&&h| h).count();
     if minibatch == 0 || active == 0 {
         return [0; POOL_COUNT];
@@ -1283,13 +1291,7 @@ pub fn run(
         let mut selected = None;
         for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
             let batch = sample_quintuple_batch(
-                &cfg,
-                &train_d,
-                &train_m,
-                &train_c,
-                &train_cov,
-                &train_v,
-                &mut rng,
+                &cfg, &train_d, &train_m, &train_c, &train_cov, &train_v, &mut rng,
             );
             let (d_out, m_out, c_out, cov_out, v_out) = score_quintuple(
                 &cfg,
@@ -1433,8 +1435,9 @@ pub fn run(
     let mut best_cov_acc = 0.0;
     let mut best_v_acc = 0.0;
     for candidate in &pool {
-        let (d, m, c, cov, v) =
-            score_quintuple(&cfg, candidate, &val_d, &val_m, &val_c, &val_cov, &val_v, &idx)?;
+        let (d, m, c, cov, v) = score_quintuple(
+            &cfg, candidate, &val_d, &val_m, &val_c, &val_cov, &val_v, &idx,
+        )?;
         let d_acc = discover_acc(&d);
         let m_acc = csp_acc(&m);
         let c_acc = csp_acc(&c);
@@ -1470,12 +1473,7 @@ pub fn run(
     post_feedback(&cfg, "final", "gepa_c_final_coverage", best_cov_acc);
     post_feedback(&cfg, "final", "gepa_c_final_validate", best_v_acc);
     post_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
-    post_feedback(
-        &cfg,
-        "final",
-        "gepa_c_candidates",
-        pool.len() as f64,
-    );
+    post_feedback(&cfg, "final", "gepa_c_candidates", pool.len() as f64);
     println!(
         "TZ final: episode={} discover={best_d_acc:.3} materialize={best_m_acc:.3} compile={best_c_acc:.3} coverage={best_cov_acc:.3} validate={best_v_acc:.3} combined={best_acc:.3} (baseline was {baseline_acc:.3})",
         cfg.episode_id,
@@ -1651,12 +1649,7 @@ pub fn run_materialize(
 
     post_feedback(&cfg, "final", "gepa_c_final_materialize", best_acc);
     post_feedback(&cfg, "final", "gepa_c_combined_acc", best_acc);
-    post_feedback(
-        &cfg,
-        "final",
-        "gepa_c_candidates",
-        pool.len() as f64,
-    );
+    post_feedback(&cfg, "final", "gepa_c_candidates", pool.len() as f64);
     println!(
         "TZ final: episode={} materialize={best_acc:.3} (baseline was {baseline_acc:.3})",
         cfg.episode_id,
@@ -1745,11 +1738,7 @@ mod tests {
     #[test]
     fn weighted_slots_respects_five_pool_weights() {
         let cfg = test_cfg();
-        let slots = weighted_slots(
-            10,
-            [true, true, true, true, true],
-            pool_weights(&cfg),
-        );
+        let slots = weighted_slots(10, [true, true, true, true, true], pool_weights(&cfg));
         assert_eq!(slots.iter().sum::<usize>(), 10);
         assert!(slots[1] >= slots[0]); // materialize weight >= discover
         assert!(slots[1] >= slots[4]); // materialize weight >= validate

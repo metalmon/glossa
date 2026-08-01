@@ -159,10 +159,7 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let gold_c = canon_scalar(gold);
-    let agents: Vec<String> = agent_vals
-        .into_iter()
-        .map(canon_scalar)
-        .collect();
+    let agents: Vec<String> = agent_vals.into_iter().map(canon_scalar).collect();
     if agents.iter().any(|a| a == &gold_c) {
         return true;
     }
@@ -845,9 +842,7 @@ mod tests {
     #[test]
     fn values_cover_odd_bands_match_wide_gold_range() {
         // Narrow adjacent bands vs one wide gold range — same odd lattice, full hull.
-        let bands = [
-            "25-27", "29-31", "33-35", "37-39", "41-43", "45-49",
-        ];
+        let bands = ["25-27", "29-31", "33-35", "37-39", "41-43", "45-49"];
         assert!(values_cover(bands.iter().copied(), "25—49"));
         assert!(values_cover(["25-49"].iter().copied(), "25-49"));
         // Missing an interior odd band → gap on step-2 lattice.

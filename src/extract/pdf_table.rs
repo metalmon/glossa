@@ -123,21 +123,12 @@ pub fn table_to_markdown(table: &Table) -> String {
         return String::new();
     }
 
-    let col_count = table
-        .rows
-        .iter()
-        .map(|r| r.cells.len())
-        .max()
-        .unwrap_or(0);
+    let col_count = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
     if col_count == 0 {
         return String::new();
     }
 
-    let has_header = table.has_header
-        || table
-            .rows
-            .first()
-            .is_some_and(|row| row.is_header);
+    let has_header = table.has_header || table.rows.first().is_some_and(|row| row.is_header);
 
     let mut result = String::new();
 
@@ -238,10 +229,7 @@ mod tests {
         // col0: X rowspan 2; col1: Y / Z
         let table = Table {
             rows: vec![
-                text_row(
-                    vec![span_cell("X", 1, 2), text_cell("Y", false)],
-                    false,
-                ),
+                text_row(vec![span_cell("X", 1, 2), text_cell("Y", false)], false),
                 text_row(vec![text_cell("Z", false)], false),
             ],
             ..Default::default()
@@ -260,10 +248,7 @@ mod tests {
     fn expand_2x2_block_repeats_value() {
         let table = Table {
             rows: vec![
-                text_row(
-                    vec![span_cell("M", 2, 2), text_cell("R1", false)],
-                    false,
-                ),
+                text_row(vec![span_cell("M", 2, 2), text_cell("R1", false)], false),
                 text_row(vec![text_cell("R2", false)], false),
             ],
             ..Default::default()

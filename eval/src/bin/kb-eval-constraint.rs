@@ -146,7 +146,12 @@ struct RefTable {
     rows: Vec<Vec<String>>,
 }
 
-type ValidationData = (Vec<ColInfo>, Vec<BTreeMap<String, String>>, Vec<RefTable>, Vec<String>);
+type ValidationData = (
+    Vec<ColInfo>,
+    Vec<BTreeMap<String, String>>,
+    Vec<RefTable>,
+    Vec<String>,
+);
 
 /// Load the reference tables. The JSON is produced by `convert-xlsx`, which cuts
 /// MDM UID columns and keys every column by its human-readable name — so this is
@@ -215,7 +220,11 @@ fn load_validation_data(val_dir: &std::path::Path) -> Result<ValidationData> {
             // (rows ends up empty) — an empty table would otherwise render as
             // spuriously "covered" downstream.
             if !rows.is_empty() {
-                ref_tables.push(RefTable { name: stem, params, rows });
+                ref_tables.push(RefTable {
+                    name: stem,
+                    params,
+                    rows,
+                });
             }
         }
     }
@@ -589,7 +598,11 @@ fn make_exec(
                 let doc = args
                     .get("doc")
                     .and_then(|v| v.as_str())
-                    .map(|d| idx_kb.canonical_document_path(d).unwrap_or_else(|| d.to_string()))
+                    .map(|d| {
+                        idx_kb
+                            .canonical_document_path(d)
+                            .unwrap_or_else(|| d.to_string())
+                    })
                     .or_else(|| {
                         args.get("node")
                             .and_then(|v| v.as_str())
@@ -668,7 +681,6 @@ fn episode_id_for_report(fallback: &str, outcome: Option<&EpisodeOutcome>) -> St
         .unwrap_or(fallback)
         .to_string()
 }
-
 
 /// SOP-driven discovery as ONE continuous agent conversation (context kept across
 /// steps). The agent finishes a step with `sop_advance(status, output)` and receives
@@ -768,7 +780,10 @@ fn run_sop_conversation(
                 if let Some(msg) = spawn_capped(n, WORKER_CAP_PER_STEP) {
                     return (msg.to_string(), vec![], vec![]);
                 }
-                let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("worker");
+                let agent = args
+                    .get("agent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("worker");
                 let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
                 let prompt = sop::fanout::format_agent_prompt(&fanout_body, agent, task);
                 let answer = run_subagent(
@@ -801,7 +816,10 @@ fn run_sop_conversation(
             }
 
             llm_rounds_step_exec.store(0, Relaxed);
-            let status = args.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
+            let status = args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed");
             let output = args
                 .get("output")
                 .and_then(|v| v.as_str())
@@ -1333,7 +1351,10 @@ fn relation_agent_row_hit(agent: &[String], gold_tuples: &BTreeSet<Vec<String>>)
     }
     gold_tuples.iter().any(|g| {
         g.len() == agent.len()
-            && agent.iter().zip(g.iter()).all(|(a, gv)| glossa_constraint::value_subseteq(a, gv))
+            && agent
+                .iter()
+                .zip(g.iter())
+                .all(|(a, gv)| glossa_constraint::value_subseteq(a, gv))
     })
 }
 
@@ -1516,8 +1537,7 @@ impl TablesReport {
         self.params
             .iter()
             .filter(|p| {
-                p.recall_total > 0
-                    && p.recall_hit as f64 / p.recall_total as f64 >= threshold
+                p.recall_total > 0 && p.recall_hit as f64 / p.recall_total as f64 >= threshold
             })
             .count()
     }
@@ -1556,7 +1576,13 @@ fn format_param_table(report: &TablesReport, threshold: f64) -> String {
 }
 
 fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
-    let f1 = |p: f64, r: f64| if p + r == 0.0 { 0.0 } else { 2.0 * p * r / (p + r) };
+    let f1 = |p: f64, r: f64| {
+        if p + r == 0.0 {
+            0.0
+        } else {
+            2.0 * p * r / (p + r)
+        }
+    };
     let mut out = String::new();
     let (rh, rt_, ah, at_) = (
         report.rows_hit(),
@@ -1564,8 +1590,16 @@ fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
         report.agent_rows_hit(),
         report.agent_rows_total(),
     );
-    let recall = if rt_ == 0 { 1.0 } else { rh as f64 / rt_ as f64 };
-    let precision = if at_ == 0 { 0.0 } else { ah as f64 / at_ as f64 };
+    let recall = if rt_ == 0 {
+        1.0
+    } else {
+        rh as f64 / rt_ as f64
+    };
+    let precision = if at_ == 0 {
+        0.0
+    } else {
+        ah as f64 / at_ as f64
+    };
     out.push_str(&format!(
         "  relations: {}/{} tables | recall {rh}/{rt_} ({recall:.2}) | precision {ah}/{at_} ({precision:.2}) | F1 {:.2}\n",
         report.tables_covered(threshold),
@@ -1574,11 +1608,19 @@ fn format_relation_report(report: &RelationReport, threshold: f64) -> String {
     ));
     for t in &report.tables {
         if t.agent_file.is_none() {
-            out.push_str(&format!("     {:<28} [{}] —\n", t.ref_name, t.params.join("×")));
+            out.push_str(&format!(
+                "     {:<28} [{}] —\n",
+                t.ref_name,
+                t.params.join("×")
+            ));
             continue;
         }
         let file = t.agent_file.as_deref().unwrap_or("—");
-        let recall = if t.rows_total == 0 { 1.0 } else { t.rows_hit as f64 / t.rows_total as f64 };
+        let recall = if t.rows_total == 0 {
+            1.0
+        } else {
+            t.rows_hit as f64 / t.rows_total as f64
+        };
         let precision = if t.agent_rows_total == 0 {
             0.0
         } else {
@@ -1684,8 +1726,7 @@ struct AgentTbl {
 /// Load each agent `.csp` for `src_doc` as an `AgentTbl`, with a normalized
 /// value-set per column.
 fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentTbl> {
-    let agent_raw =
-        glossa::tables::csp_tables_per_file(agent_g_dir, src_doc).unwrap_or_default();
+    let agent_raw = glossa::tables::csp_tables_per_file(agent_g_dir, src_doc).unwrap_or_default();
     agent_raw
         .into_iter()
         .map(|(file, t)| {
@@ -1700,7 +1741,12 @@ fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentT
                         .collect()
                 })
                 .collect();
-            AgentTbl { file, headers, rows: t.rows, col_vals }
+            AgentTbl {
+                file,
+                headers,
+                rows: t.rows,
+                col_vals,
+            }
         })
         .collect()
 }
@@ -1710,7 +1756,9 @@ fn load_agent_tables(agent_g_dir: &std::path::Path, src_doc: &str) -> Vec<AgentT
 fn norm_name(s: &str) -> String {
     let s = s.trim().to_lowercase();
     match s.rsplit_once(' ') {
-        Some((head, tail)) if tail.chars().count() <= 2 && !head.is_empty() => head.trim().to_string(),
+        Some((head, tail)) if tail.chars().count() <= 2 && !head.is_empty() => {
+            head.trim().to_string()
+        }
         _ => s,
     }
 }
@@ -1737,13 +1785,23 @@ fn score_relations(
     let mut out = Vec::new();
     for rt in ref_tables {
         let ref_col_vals: Vec<BTreeSet<String>> = (0..rt.params.len())
-            .map(|pi| rt.rows.iter().filter_map(|r| r.get(pi)).map(|c| norm_value(c)).collect())
+            .map(|pi| {
+                rt.rows
+                    .iter()
+                    .filter_map(|r| r.get(pi))
+                    .map(|c| norm_value(c))
+                    .collect()
+            })
             .collect();
 
-        let discriminating: Vec<usize> =
-            (0..rt.params.len()).filter(|&pi| ref_col_vals[pi].len() >= 2).collect();
-        let required: Vec<usize> =
-            if discriminating.is_empty() { (0..rt.params.len()).collect() } else { discriminating };
+        let discriminating: Vec<usize> = (0..rt.params.len())
+            .filter(|&pi| ref_col_vals[pi].len() >= 2)
+            .collect();
+        let required: Vec<usize> = if discriminating.is_empty() {
+            (0..rt.params.len()).collect()
+        } else {
+            discriminating
+        };
 
         // Positional binding via the two schema.toml manifests. A gold param maps
         // to its position in the reference order (`canon_order`); the agent field
@@ -1819,7 +1877,10 @@ fn score_relations(
                 .collect();
             let mapping = max_bipartite_matching(required.len(), at.col_vals.len(), &adj);
             let score = mapping.iter().filter(|&&ci| ci != usize::MAX).count();
-            if best.as_ref().is_none_or(|(_, _, s, ps)| (score, pos_score) > (*s, *ps)) {
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, s, ps)| (score, pos_score) > (*s, *ps))
+            {
                 best = Some((ai, mapping, score, pos_score));
             }
         }
@@ -1891,9 +1952,18 @@ fn compare_relations(
 ) -> RelationReport {
     let agent = load_agent_tables(agent_g_dir, src_doc);
     let agent_order = glossa::tables::read_schema_order(
-        &agent_g_dir.join(".glossa/notes").join(src_doc).join("schema.toml"),
+        &agent_g_dir
+            .join(".glossa/notes")
+            .join(src_doc)
+            .join("schema.toml"),
     );
-    score_relations(ref_tables, &agent, canon_order, &agent_order.params, &agent_order.files)
+    score_relations(
+        ref_tables,
+        &agent,
+        canon_order,
+        &agent_order.params,
+        &agent_order.files,
+    )
 }
 
 /// Tables comparison bound by marking-order manifests (`schema.toml`), not by
@@ -2006,8 +2076,11 @@ fn compare_tables_by_domain(
             let dom = &ref_doms[ri];
             match &assigned[ri] {
                 Some((label, ad)) => {
-                    let missing: Vec<String> =
-                        dom.iter().filter(|v| !domain_covers(ad, v)).cloned().collect();
+                    let missing: Vec<String> = dom
+                        .iter()
+                        .filter(|v| !domain_covers(ad, v))
+                        .cloned()
+                        .collect();
                     ParamCoverage {
                         ref_name: c.name.clone(),
                         agent_col: Some(label.clone()),
@@ -2529,7 +2602,10 @@ fn main() -> Result<()> {
             }
             println!("TABLES agent  params={pc}/{pt}  values={vc}/{vt}  csp={csp_count}");
             let rel_report = compare_relations(&agent_g_dir, &src_doc, &ref_tables, &canon_order);
-            print!("{}", format_relation_report(&rel_report, PARAM_COVERED_THRESHOLD));
+            print!(
+                "{}",
+                format_relation_report(&rel_report, PARAM_COVERED_THRESHOLD)
+            );
             print!("{}", format_param_table(&report, PARAM_COVERED_THRESHOLD));
             println!(
                 "TABLES episode={reported_eid}  done={was_done} rounds={rounds} tz={tz_ms}ms  agent_dir={}",
@@ -2786,10 +2862,7 @@ mod tests {
         assert!(spawn_capped(30, 30).is_none());
         // First spawn past the cap is refused with a stop-and-advance message.
         let over = spawn_capped(31, 30).expect("31 > 30 must be capped");
-        assert!(
-            over.to_lowercase().contains("sop_advance"),
-            "{over}"
-        );
+        assert!(over.to_lowercase().contains("sop_advance"), "{over}");
         assert!(spawn_capped(1000, 30).is_some());
         // Degenerate cap of 0: even the first spawn is refused.
         assert!(spawn_capped(1, 0).is_some());
@@ -2830,21 +2903,27 @@ mod tests {
                 {"h":"0,6","D":150,"Doc":"G"},
                 {"h":"0,8","D":125,"Doc":"G"}
             ]}]}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Flat table: one varying column.
         std::fs::write(
             dir.path().join("Grit.json"),
             r#"{"tables":[{"rows":[{"Grit":"F16"},{"Grit":"F20"}]}]}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Metadata file (underscore) is ignored.
-        std::fs::write(dir.path().join("_meta.json"), r#"{"tables":[{"rows":[{"x":"1"}]}]}"#).unwrap();
+        std::fs::write(
+            dir.path().join("_meta.json"),
+            r#"{"tables":[{"rows":[{"x":"1"}]}]}"#,
+        )
+        .unwrap();
 
         let (_cols, _rows, refs, _canon) = load_validation_data(dir.path()).unwrap();
         assert_eq!(refs.len(), 1, "only the dependent table is relational");
         let h = &refs[0];
         assert_eq!(h.name, "Height");
         assert_eq!(h.params, vec!["D".to_string(), "h".to_string()]); // name-sorted
-        // rows projected to (D, h), deduped: (125,0,6) (150,0,6) (125,0,8)
+                                                                      // rows projected to (D, h), deduped: (125,0,6) (150,0,6) (125,0,8)
         assert_eq!(h.rows.len(), 3);
         assert!(h.rows.contains(&vec!["125".to_string(), "0,6".to_string()]));
         assert!(h.rows.contains(&vec!["150".to_string(), "0,6".to_string()]));
@@ -2858,7 +2937,11 @@ mod tests {
             r#"{"tables":[{"rows":[{"D":"1","h":"2"}]}]}"#,
         )
         .unwrap();
-        std::fs::write(dir.path().join("schema.toml"), "[order]\nparams = [\"Тип\", \"Высота\"]\n").unwrap();
+        std::fs::write(
+            dir.path().join("schema.toml"),
+            "[order]\nparams = [\"Тип\", \"Высота\"]\n",
+        )
+        .unwrap();
         let (_cols, _rows, _refs, canon) = load_validation_data(dir.path()).unwrap();
         assert_eq!(canon, vec!["Тип".to_string(), "Высота".into()]);
     }
@@ -2914,7 +2997,12 @@ mod tests {
             vec!["125".to_string(), "0,8".to_string()],
         ];
         let col_vals: Vec<BTreeSet<String>> = (0..2)
-            .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+            .map(|i| {
+                rows.iter()
+                    .filter_map(|r| r.get(i))
+                    .map(|c| norm_value(c))
+                    .collect()
+            })
             .collect();
         let agent = vec![AgentTbl {
             file: "D_h.csp".into(),
@@ -2925,7 +3013,11 @@ mod tests {
         // Empty manifests → value-overlap fallback (the constant-param path).
         let rep = score_relations(&[rt], &agent, &[], &[], &[]);
         let t = &rep.tables[0];
-        assert_eq!(t.agent_file.as_deref(), Some("D_h.csp"), "matched despite constant тип");
+        assert_eq!(
+            t.agent_file.as_deref(),
+            Some("D_h.csp"),
+            "matched despite constant тип"
+        );
         assert_eq!(t.rows_hit, 3, "all 3 gold rows covered on (D,h)");
         assert_eq!(t.rows_total, 3);
     }
@@ -2936,7 +3028,10 @@ mod tests {
         let rt = RefTable {
             name: "Grit".into(),
             params: vec!["F".into(), "K".into()],
-            rows: vec![vec!["F30".into(), "1".into()], vec!["F30".into(), "2".into()]],
+            rows: vec![
+                vec!["F30".into(), "1".into()],
+                vec!["F30".into(), "2".into()],
+            ],
         };
         let agent = vec![AgentTbl {
             file: "F_K.csp".into(),
@@ -2986,7 +3081,12 @@ mod tests {
             }
         }
         let col_vals: Vec<BTreeSet<String>> = (0..2)
-            .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+            .map(|i| {
+                rows.iter()
+                    .filter_map(|r| r.get(i))
+                    .map(|c| norm_value(c))
+                    .collect()
+            })
             .collect();
         let agent = vec![AgentTbl {
             file: "zi.csp".into(),
@@ -2995,9 +3095,15 @@ mod tests {
             col_vals,
         }];
         let t = &score_relations(&[rt], &agent, &[], &[], &[]).tables[0];
-        assert_eq!(t.rows_hit, 4, "each gold (bond, wide range) covered by bands");
+        assert_eq!(
+            t.rows_hit, 4,
+            "each gold (bond, wide range) covered by bands"
+        );
         assert_eq!(t.rows_total, 4);
-        assert_eq!(t.agent_rows_hit, t.agent_rows_total, "every band ⊆ some gold range");
+        assert_eq!(
+            t.agent_rows_hit, t.agent_rows_total,
+            "every band ⊆ some gold range"
+        );
         assert!(t.agent_rows_total > 4, "agent has many band rows");
     }
 
@@ -3022,13 +3128,23 @@ mod tests {
         let rt = RefTable {
             name: "Высота".into(),
             params: vec!["Наружный диаметр".into(), "Высота".into()],
-            rows: vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]],
+            rows: vec![
+                vec!["125".into(), "10".into()],
+                vec!["150".into(), "13".into()],
+            ],
         };
         let mk = |file: &str, headers: [&str; 2]| {
-            let rows: Vec<Vec<String>> =
-                vec![vec!["125".into(), "10".into()], vec!["150".into(), "13".into()]];
+            let rows: Vec<Vec<String>> = vec![
+                vec!["125".into(), "10".into()],
+                vec!["150".into(), "13".into()],
+            ];
             let col_vals: Vec<BTreeSet<String>> = (0..2)
-                .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| norm_value(c)).collect())
+                .map(|i| {
+                    rows.iter()
+                        .filter_map(|r| r.get(i))
+                        .map(|c| norm_value(c))
+                        .collect()
+                })
                 .collect();
             AgentTbl {
                 file: file.into(),
@@ -3051,7 +3167,11 @@ mod tests {
         let (rt, agent, canon) = hbore_setup();
         let agent_params = vec!["D".to_string(), "T".into()];
         let t = &score_relations(&[rt], &agent, &canon, &agent_params, &[]).tables[0];
-        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by field-name position");
+        assert_eq!(
+            t.agent_file.as_deref(),
+            Some("D_T.csp"),
+            "bound by field-name position"
+        );
     }
 
     #[test]
@@ -3063,7 +3183,11 @@ mod tests {
         }
         let agent_files = vec!["D_T.csp".to_string(), "D_T.csp".into()];
         let t = &score_relations(&[rt], &agent, &canon, &[], &agent_files).tables[0];
-        assert_eq!(t.agent_file.as_deref(), Some("D_T.csp"), "bound by file-name position");
+        assert_eq!(
+            t.agent_file.as_deref(),
+            Some("D_T.csp"),
+            "bound by file-name position"
+        );
     }
 
     #[test]
@@ -3241,7 +3365,10 @@ mod tests {
         ];
         let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
         assert_eq!(
-            (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
+            (
+                report.params_covered(PARAM_COVERED_THRESHOLD),
+                report.params_total()
+            ),
             (1, 2)
         );
         assert_eq!((report.values_covered, report.values_total), (2, 4));
@@ -3263,7 +3390,10 @@ mod tests {
         }];
         let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
         assert_eq!(
-            (report.params_covered(PARAM_COVERED_THRESHOLD), report.params_total()),
+            (
+                report.params_covered(PARAM_COVERED_THRESHOLD),
+                report.params_total()
+            ),
             (1, 1)
         );
         assert_eq!((report.values_covered, report.values_total), (2, 2));
@@ -3302,18 +3432,33 @@ mod tests {
         let cols = vec![
             ColInfo {
                 name: "Наружный диаметр".into(),
-                valid: vec!["50".into(), "63".into(), "80".into(), "100".into(), "125".into()],
+                valid: vec![
+                    "50".into(),
+                    "63".into(),
+                    "80".into(),
+                    "100".into(),
+                    "125".into(),
+                ],
             },
             ColInfo {
                 name: "Скорость".into(),
                 valid: vec![
-                    "32".into(), "50".into(), "63".into(), "80".into(), "100".into(), "125".into(),
+                    "32".into(),
+                    "50".into(),
+                    "63".into(),
+                    "80".into(),
+                    "100".into(),
+                    "125".into(),
                 ],
             },
         ];
         let canon = vec!["Наружный диаметр".into(), "Скорость".into()];
         let report = compare_tables_by_domain(dir.path(), doc, &cols, &canon);
-        let speed = report.params.iter().find(|p| p.ref_name == "Скорость").unwrap();
+        let speed = report
+            .params
+            .iter()
+            .find(|p| p.ref_name == "Скорость")
+            .unwrap();
         assert_eq!(speed.agent_col.as_deref(), Some("speed.csp"));
         assert_eq!((speed.recall_hit, speed.recall_total), (3, 6));
         assert_eq!(report.params_covered(PARAM_COVERED_THRESHOLD), 1);

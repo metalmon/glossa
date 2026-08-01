@@ -275,7 +275,10 @@ mod tests {
 
         // write a note bound to the nested document
         let np = resolve_note_by_document(root, &idx, "work/sub doc.docx", "n.md").unwrap();
-        assert_eq!(np.rel_path, "work/sub doc.docx/n.md", "rel_path must be /-joined");
+        assert_eq!(
+            np.rel_path, "work/sub doc.docx/n.md",
+            "rel_path must be /-joined"
+        );
         std::fs::create_dir_all(np.abs_path.parent().unwrap()).unwrap();
         std::fs::write(&np.abs_path, b"hi").unwrap();
 

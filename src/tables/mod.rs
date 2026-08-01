@@ -22,8 +22,8 @@ mod wiring;
 
 #[cfg(feature = "constraint")]
 pub use compile::tables_to_graph;
-pub use schema::{parse_schema_order, read_schema_order, SchemaOrder};
 #[cfg(feature = "constraint")]
 pub use coverage::{count_csp_files, csp_column_values, csp_tables_per_file};
 #[cfg(feature = "constraint")]
 pub use report::format_graph_build_output;
+pub use schema::{parse_schema_order, read_schema_order, SchemaOrder};

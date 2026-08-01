@@ -129,7 +129,8 @@ worker B";
 
     #[test]
     fn format_agent_prompt_selects_block_by_name() {
-        let body = "{# SHARED #}\nBoth.\n{# RESEARCHER #}\nHang MENTIONS.\n{# WORKER #}\nBuild csp.";
+        let body =
+            "{# SHARED #}\nBoth.\n{# RESEARCHER #}\nHang MENTIONS.\n{# WORKER #}\nBuild csp.";
         let r = format_agent_prompt(body, "researcher", "T1");
         assert!(r.contains("Hang MENTIONS.") && !r.contains("Build csp."));
         assert!(r.contains("Both.") && r.contains("T1"));
@@ -139,7 +140,8 @@ worker B";
 
     #[test]
     fn roles_work_without_shared_block() {
-        let body = "{# ORCHESTRATOR #}\nOnly orch.\n{# RESEARCHER #}\nOnly res.\n{# WORKER #}\nOnly work.";
+        let body =
+            "{# ORCHESTRATOR #}\nOnly orch.\n{# RESEARCHER #}\nOnly res.\n{# WORKER #}\nOnly work.";
         let s = split_role_sections(body);
         assert!(s.shared.trim().is_empty());
         assert_eq!(s.orchestrator.trim(), "Only orch.");

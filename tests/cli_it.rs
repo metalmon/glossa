@@ -71,7 +71,10 @@ fn kb_cat_dumps_full_file_text_without_index() {
         .success()
         .stdout(contains("first section").and(contains("second section")));
     // ...and it does not build an index (no `.glossa` litter) — a true one-shot read.
-    assert!(!dir.path().join(".glossa").exists(), "cat must not create an index");
+    assert!(
+        !dir.path().join(".glossa").exists(),
+        "cat must not create an index"
+    );
 }
 
 #[test]

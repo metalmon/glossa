@@ -1,8 +1,9 @@
 //! Export constraint GEPA supervision datasets from `constraint_validate` TensorZero episodes.
 
 use crate::constraint_synthetic::{
-    coverage_examples_from_materialize, gold_csp_tsv, load_gold_param, CompileFixExample,
-    CoverageExample, MaterializeExample, ValidateExample, validate_examples_from_materialize,
+    coverage_examples_from_materialize, gold_csp_tsv, load_gold_param,
+    validate_examples_from_materialize, CompileFixExample, CoverageExample, MaterializeExample,
+    ValidateExample,
 };
 use crate::export_tz::{GrepExample, ReadExample, ReadPick};
 use anyhow::{Context, Result};
@@ -636,9 +637,6 @@ mod tests {
             rows.compile_fix[0].compiler_error,
             "graph_build FAILED: Марка_материала.csp line 3"
         );
-        assert_eq!(
-            rows.compile_fix[0].gold_csp,
-            "Марка материала\n14А\n15А\n"
-        );
+        assert_eq!(rows.compile_fix[0].gold_csp, "Марка материала\n14А\n15А\n");
     }
 }

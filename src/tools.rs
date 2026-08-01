@@ -88,12 +88,22 @@ fn grep_notebook_body(rel: &str, body: &str, pattern: &str, opts: &GrepOpts) -> 
 /// ripgrep-style literal/regex search; model text only. Also serves notebook files
 /// (feature-gated): a doc-scoped `opts.path` like `<doc>/<file>` is probed against the agent's
 /// on-disk notebook before falling through to the corpus grep below.
-pub fn grep(root: &std::path::Path, idx: &DocIndex, pattern: &str, opts: &GrepOpts, trace: &TraceLog) -> String {
+pub fn grep(
+    root: &std::path::Path,
+    idx: &DocIndex,
+    pattern: &str,
+    opts: &GrepOpts,
+    trace: &TraceLog,
+) -> String {
     #[cfg(feature = "notebook")]
     if let Some(p) = opts.path.as_deref() {
         if looks_like_notebook_path(p) {
             if let Ok((rel, body)) = crate::notebook::read_note(root, idx, p) {
-                trace.log("grep", json!({ "notebook": p, "pattern": pattern }), json!({ "notebook": rel }));
+                trace.log(
+                    "grep",
+                    json!({ "notebook": p, "pattern": pattern }),
+                    json!({ "notebook": rel }),
+                );
                 return grep_notebook_body(&rel, &body, pattern, opts);
             }
         }
@@ -202,7 +212,9 @@ fn read_node(
                 format_chunk_body(*ord, &c.body)
             ));
         }
-        images.extend(crate::read::extract_images(&idx.doc_file(p), *ord, usize::MAX).unwrap_or_default());
+        images.extend(
+            crate::read::extract_images(&idx.doc_file(p), *ord, usize::MAX).unwrap_or_default(),
+        );
     }
     ReadOut { text, images }
 }
@@ -223,7 +235,9 @@ pub fn format_chunk_body(ord: u64, body: &str) -> String {
 pub fn looks_like_notebook_path(path: &str) -> bool {
     path.contains('/')
         && matches!(
-            std::path::Path::new(path).extension().and_then(|e| e.to_str()),
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str()),
             Some("csp" | "md" | "txt" | "json")
         )
 }
@@ -251,8 +265,15 @@ pub fn read(
             };
         }
         if let Ok((rel, body)) = crate::notebook::read_note(root, idx, path) {
-            trace.log("read", json!({ "notebook": path }), json!({ "notebook": rel }));
-            return ReadOut { text: format!("{rel}\n{body}"), images: Vec::new() };
+            trace.log(
+                "read",
+                json!({ "notebook": path }),
+                json!({ "notebook": rel }),
+            );
+            return ReadOut {
+                text: format!("{rel}\n{body}"),
+                images: Vec::new(),
+            };
         }
     }
     // Omnivorous: a REASONING node id off a glossary line reads as the node + its evidence. A
@@ -300,17 +321,32 @@ pub fn read(
                             Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
                             _ => path_not_found(idx, path),
                         };
-                        return ReadOut { text, images: Vec::new() };
+                        return ReadOut {
+                            text,
+                            images: Vec::new(),
+                        };
                     }
                 },
-                None => return ReadOut {
-                    text: path_not_found(idx, path),
-                    images: Vec::new(),
-                },
+                None => {
+                    return ReadOut {
+                        text: path_not_found(idx, path),
+                        images: Vec::new(),
+                    }
+                }
             },
-            Err(e) => return ReadOut { text: format!("no chunk #{n} in {path} (range lookup failed: {e})"), images: Vec::new() },
+            Err(e) => {
+                return ReadOut {
+                    text: format!("no chunk #{n} in {path} (range lookup failed: {e})"),
+                    images: Vec::new(),
+                }
+            }
         },
-        Err(e) => return ReadOut { text: format!("read error: {e}"), images: Vec::new() },
+        Err(e) => {
+            return ReadOut {
+                text: format!("read error: {e}"),
+                images: Vec::new(),
+            }
+        }
     };
     let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
@@ -344,7 +380,8 @@ pub fn read(
         (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
         (None, None) => String::new(),
     };
-    let images = crate::read::extract_images(&doc_path, resolved_ord, usize::MAX).unwrap_or_default();
+    let images =
+        crate::read::extract_images(&doc_path, resolved_ord, usize::MAX).unwrap_or_default();
     let body = format_chunk_body(resolved_ord, &chunk.body);
     ReadOut {
         text: format!("{}{}", body, footer),
@@ -849,10 +886,7 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
 
 /// Doc-scoped inventory for `graph_stats(doc=…)`: non-structural nodes owned by
 /// `doc` (`source_path`) with all outgoing edges. Ontology-independent.
-pub fn checklist_coverage_report(
-    g: &crate::graph::store::GraphStore,
-    doc: &str,
-) -> String {
+pub fn checklist_coverage_report(g: &crate::graph::store::GraphStore, doc: &str) -> String {
     match crate::graph::ops::doc_owned_inventory(g, doc) {
         Ok(Some(inv)) => {
             let mut lines = vec![format!("owned({doc}): {} nodes", inv.nodes.len())];
@@ -1014,7 +1048,11 @@ pub fn get_source_file(
         return SourceFileOut {
             text: convert_note
                 .unwrap_or_else(|| format!("delivered whole file: {real}{page_note}")),
-            file: Some(SourceBlob { mime: source_mime(&name).to_string(), filename: name, bytes }),
+            file: Some(SourceBlob {
+                mime: source_mime(&name).to_string(),
+                filename: name,
+                bytes,
+            }),
         };
     }
 
@@ -1114,7 +1152,14 @@ mod tests {
     #[test]
     fn get_source_file_converts_docx_to_pdf_by_default() {
         let (_d, i) = docx_corpus();
-        let out = get_source_file(&i, None, "report.docx", None, DEFAULT_SOURCE_MAX_BYTES, false);
+        let out = get_source_file(
+            &i,
+            None,
+            "report.docx",
+            None,
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
         let f = out.file.expect("file delivered");
         assert_eq!(f.mime, "application/pdf");
         assert!(f.filename.ends_with(".pdf"));
@@ -1126,7 +1171,14 @@ mod tests {
     #[test]
     fn get_source_file_raw_returns_original_docx() {
         let (_d, i) = docx_corpus();
-        let out = get_source_file(&i, None, "report.docx", None, DEFAULT_SOURCE_MAX_BYTES, true);
+        let out = get_source_file(
+            &i,
+            None,
+            "report.docx",
+            None,
+            DEFAULT_SOURCE_MAX_BYTES,
+            true,
+        );
         let f = out.file.expect("file delivered");
         assert_eq!(f.filename, "report.docx");
         assert_eq!(
@@ -1159,7 +1211,14 @@ mod tests {
     #[test]
     fn get_source_file_delivers_whole_pdf_under_cap() {
         let (_d, i) = pdf_corpus();
-        let out = get_source_file(&i, None, "sample.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES, false);
+        let out = get_source_file(
+            &i,
+            None,
+            "sample.pdf",
+            Some(1),
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
         let f = out.file.expect("file delivered");
         assert_eq!(f.filename, "sample.pdf");
         assert_eq!(f.mime, "application/pdf");
@@ -1218,7 +1277,11 @@ mod tests {
     #[test]
     fn get_source_file_over_cap_non_pdf_errs() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("notes.md"), "# Title\n\nplenty of text here\n").unwrap();
+        std::fs::write(
+            d.path().join("notes.md"),
+            "# Title\n\nplenty of text here\n",
+        )
+        .unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let out = get_source_file(&i, None, "notes.md", Some(1), 4, false);
@@ -1229,7 +1292,14 @@ mod tests {
     #[test]
     fn get_source_file_unknown_path_errs() {
         let (_d, i) = pdf_corpus();
-        let out = get_source_file(&i, None, "nope.pdf", Some(1), DEFAULT_SOURCE_MAX_BYTES, false);
+        let out = get_source_file(
+            &i,
+            None,
+            "nope.pdf",
+            Some(1),
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
         assert!(out.file.is_none());
         assert!(out.text.contains("no document indexed"));
     }
@@ -1373,7 +1443,11 @@ mod tests {
             false,
             &TraceLog::disabled(),
         );
-        assert!(out.text.contains("50") && out.text.contains("63"), "got: {}", out.text);
+        assert!(
+            out.text.contains("50") && out.text.contains("63"),
+            "got: {}",
+            out.text
+        );
         // a non-notebook, non-corpus path still errors as before
         let miss = read(
             dir.path(),
@@ -1384,7 +1458,11 @@ mod tests {
             false,
             &TraceLog::disabled(),
         );
-        assert!(miss.text.contains("no document indexed") || miss.text.contains("not found"), "got: {}", miss.text);
+        assert!(
+            miss.text.contains("no document indexed") || miss.text.contains("not found"),
+            "got: {}",
+            miss.text
+        );
     }
 
     fn prov() -> Provenance {
@@ -1593,7 +1671,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert!(
-            !community_lines.iter().any(|l| l.contains("Обновление ПО модулей") || l.contains("Программирование контроллера")),
+            !community_lines
+                .iter()
+                .any(|l| l.contains("Обновление ПО модулей")
+                    || l.contains("Программирование контроллера")),
             "SIMILAR nodes must not repeat in COMMUNITY: {out}",
         );
     }
@@ -1958,9 +2039,22 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn grep_and_glob_render() {
         let (d, i) = idx();
         let t = TraceLog::disabled();
-        assert!(grep(d.path(), &i, "maxTsdr", &crate::grep::GrepOpts::default(), &t).contains(":#7:"));
+        assert!(grep(
+            d.path(),
+            &i,
+            "maxTsdr",
+            &crate::grep::GrepOpts::default(),
+            &t
+        )
+        .contains(":#7:"));
         assert_eq!(
-            grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t),
+            grep(
+                d.path(),
+                &i,
+                "nomatchzzz",
+                &crate::grep::GrepOpts::default(),
+                &t
+            ),
             "(no matches)"
         );
         assert!(glob(&i, "*МОДУЛЬ*", &t).contains("МОДУЛЬ.pdf  (7 chunks)"));
@@ -1987,8 +2081,14 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             ..Default::default()
         };
         let out = grep(dir.path(), &idx, "63", &opts, &TraceLog::disabled());
-        assert!(out.contains("63"), "notebook grep should find the line; got: {out}");
-        assert!(!out.contains("no document indexed"), "must not error on a notebook path");
+        assert!(
+            out.contains("63"),
+            "notebook grep should find the line; got: {out}"
+        );
+        assert!(
+            !out.contains("no document indexed"),
+            "must not error on a notebook path"
+        );
         // a non-matching pattern still renders "(no matches)", not an index error
         let none = grep(dir.path(), &idx, "nomatchzzz", &opts, &TraceLog::disabled());
         assert_eq!(none, "(no matches)");

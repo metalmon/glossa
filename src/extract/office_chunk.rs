@@ -310,8 +310,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let chunks =
-            chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 10_000);
+        let chunks = chunk_ir_with_threshold(Path::new("a.docx"), &ir, "docx", 10_000);
         assert_eq!(chunks.len(), 1);
 
         let ir = DocumentIR {
@@ -372,10 +371,7 @@ mod tests {
                     && chunk.text.contains("Note under")
             }),
             "expected glued caption+table+note chunk, got {:?}",
-            chunks
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>()
+            chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
         );
         assert!(
             !chunks.iter().any(|chunk| {
@@ -447,7 +443,11 @@ mod tests {
         };
         let chunks = chunk_ir(Path::new("slides.pptx"), &ir, "pptx");
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].text.contains("slide body"), "{:?}", chunks[0].text);
+        assert!(
+            chunks[0].text.contains("slide body"),
+            "{:?}",
+            chunks[0].text
+        );
     }
 
     #[test]

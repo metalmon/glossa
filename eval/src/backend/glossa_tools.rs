@@ -60,7 +60,10 @@ pub fn run_grep(
     opts: glossa::grep::GrepOpts,
     trace: &TraceLog,
 ) -> (String, Vec<String>) {
-    (glossa::tools::grep(root, idx, pattern, &opts, trace), Vec::new())
+    (
+        glossa::tools::grep(root, idx, pattern, &opts, trace),
+        Vec::new(),
+    )
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).

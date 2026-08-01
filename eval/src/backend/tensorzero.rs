@@ -296,8 +296,10 @@ where
                     messages.push(
                         json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }),
                     );
-                    messages.push(json!({ "role": "user", "content": [{ "type": "text", "text":
-                        format!("Not finished — {reject}") }] }));
+                    messages.push(
+                        json!({ "role": "user", "content": [{ "type": "text", "text":
+                        format!("Not finished — {reject}") }] }),
+                    );
                     continue;
                 }
                 return Ok(EpisodeOutcome {
@@ -885,11 +887,18 @@ mod tests {
             let mut r = round.borrow_mut();
             *r += 1;
             let block = match *r {
-                1 | 2 | 4 => json!({ "type": "tool_call", "id": "c", "name": "ls", "arguments": { "path": "wb.md" } }),
-                3 => json!({ "type": "tool_call", "id": "n", "name": "note", "arguments": { "file": "wb.md", "content": "x" } }),
+                1 | 2 | 4 => {
+                    json!({ "type": "tool_call", "id": "c", "name": "ls", "arguments": { "path": "wb.md" } })
+                }
+                3 => {
+                    json!({ "type": "tool_call", "id": "n", "name": "note", "arguments": { "file": "wb.md", "content": "x" } })
+                }
                 _ => json!({ "type": "tool_call", "id": "d", "name": "done", "arguments": {} }),
             };
-            Ok(TzTurn { content: vec![block], episode_id: "ep".into() })
+            Ok(TzTurn {
+                content: vec![block],
+                episode_id: "ep".into(),
+            })
         };
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_c = Arc::clone(&calls);
@@ -897,14 +906,20 @@ mod tests {
             calls_c.lock().unwrap().push(name.to_string());
             ("ok".to_string(), Vec::new(), Vec::new())
         };
-        let policy = EpisodePolicy { stop_on_done: true, dedup_readonly: true };
+        let policy = EpisodePolicy {
+            stop_on_done: true,
+            dedup_readonly: true,
+        };
         let out = run_episode(chat, "q", exec, 8, policy).unwrap();
         assert!(out.done);
         let executed = calls.lock().unwrap().clone();
         let lss = executed.iter().filter(|n| n.as_str() == "ls").count();
         let notes = executed.iter().filter(|n| n.as_str() == "note").count();
         // round-2 ls deduped; round-4 ls re-runs because `note` invalidated the notebook read.
-        assert_eq!(lss, 2, "ls should run r1 and r4 (post-note), skip r2; got {executed:?}");
+        assert_eq!(
+            lss, 2,
+            "ls should run r1 and r4 (post-note), skip r2; got {executed:?}"
+        );
         assert_eq!(notes, 1);
     }
 
@@ -1156,7 +1171,11 @@ mod tests {
         };
         let out = run_episode(chat, "q", exec, 4, EpisodePolicy::answer()).unwrap();
         assert_eq!(out.answer, "ANSWER: recovered");
-        let got = exec_args.lock().unwrap().clone().expect("exec must run after heal");
+        let got = exec_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("exec must run after heal");
         assert_eq!(got["doc"], "a.docx");
         assert_eq!(got["file"], "x.csp");
         assert_eq!(got["content"], "oops");

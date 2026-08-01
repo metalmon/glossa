@@ -246,7 +246,11 @@ fn apply_sop_slices(sop_dir: &Path, slices: &Path) -> Result<()> {
     while let Some(i) = rest.find("{# GEPA:") {
         let after = &rest[i + "{# GEPA:".len()..];
         match after.find("_START #}") {
-            Some(j) if after[..j].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+            Some(j)
+                if after[..j]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
                 if !tags.contains(&after[..j].to_string()) {
                     tags.push(after[..j].to_string());
                 }
@@ -272,8 +276,12 @@ fn apply_sop_slices(sop_dir: &Path, slices: &Path) -> Result<()> {
             std::fs::read_to_string(&slice).with_context(|| format!("read {}", slice.display()))?;
         let start = format!("{{# GEPA:{tag}_START #}}");
         let end = format!("{{# GEPA:{tag}_END #}}");
-        let s = out.find(&start).with_context(|| format!("anchor {start} missing"))?;
-        let e = out.find(&end).with_context(|| format!("anchor {end} missing"))?;
+        let s = out
+            .find(&start)
+            .with_context(|| format!("anchor {start} missing"))?;
+        let e = out
+            .find(&end)
+            .with_context(|| format!("anchor {end} missing"))?;
         anyhow::ensure!(e > s, "anchor {end} precedes {start}");
         out.replace_range(s + start.len()..e, &format!("\n{}\n", body.trim()));
         applied += 1;
