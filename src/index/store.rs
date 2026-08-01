@@ -970,6 +970,26 @@ fn is_transient_fs(e: &TantivyError) -> bool {
     matches!(e, TantivyError::IoError(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
+/// The directory signature the on-disk index was last built from (`.glossa/dirsig`), or `None`.
+pub fn read_dirsig(dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(dir.join(".glossa").join("dirsig"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Persist the directory signature atomically (temp + rename), so a concurrent reader never sees a
+/// half-written value. Best-effort: failure to record it just means the next read re-scans.
+fn write_dirsig(dir: &Path, sig: u64) {
+    let glossa = dir.join(".glossa");
+    if std::fs::create_dir_all(&glossa).is_err() {
+        return;
+    }
+    let tmp = glossa.join("dirsig.tmp");
+    if std::fs::write(&tmp, sig.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, glossa.join("dirsig"));
+    }
+}
+
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
@@ -986,6 +1006,13 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             return Ok(IndexStats::default());
         }
     };
+    index_dir_locked(dir, force)
+}
+
+/// Body of `index_dir` assuming `index.lock` is already held by the caller. Records `.glossa/dirsig`
+/// = the current directory signature on every return, so a reader's `freshen_blocking` can tell the
+/// index reflects the current tree even when the delta was empty (e.g. a temp file came and went).
+pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     // force = true rebuilds the DOCUMENT-DERIVED layer from scratch: clear the tantivy index and
     // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
     // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
@@ -1019,6 +1046,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         && delta.notes_changed.is_empty()
         && delta.notes_removed.is_empty()
     {
+        write_dirsig(dir, dir_mtime_signature(dir).unwrap_or(0));
         return Ok(IndexStats {
             added: 0,
             removed: 0,
@@ -1168,6 +1196,7 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     writer.commit()?;
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(dir)?;
+    write_dirsig(dir, dir_mtime_signature(dir).unwrap_or(0));
     Ok(stats)
 }
 
@@ -1175,6 +1204,18 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
 mod incremental_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn index_dir_writes_dirsig_matching_current_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nhello\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        assert_eq!(
+            read_dirsig(dir.path()),
+            Some(dir_mtime_signature(dir.path()).unwrap()),
+            "after indexing, the persisted signature equals the current directory signature"
+        );
+    }
 
     #[test]
     fn index_dir_builds_structural_graph() {
