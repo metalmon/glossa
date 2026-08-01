@@ -174,95 +174,108 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
     Ok(None)
 }
 
-/// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a fuzzy
-/// morphology match against existing reasoning nodes (the small model often paraphrases its own
-/// label — a truncation or wording variant). As a last resort, strip a leading node-TYPE token the
-/// model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234") — gated
-/// on the token naming a declared type, so ordinary multi-word labels are never mangled.
-/// Returns None when nothing matches.
-fn resolve_endpoint_label(
-    idx: &DocIndex,
-    g: &GraphStore,
-    ont: &Ontology,
-    label_to_id: &std::collections::HashMap<String, String>,
-    label_type_to_id: &std::collections::HashMap<(String, String), String>,
-    batch_ids: &std::collections::HashSet<String>,
-    label: &str,
-    prefer_types: &[String],
-) -> Option<String> {
-    if batch_ids.contains(label) {
-        return Some(label.to_string());
-    }
-    if g.get_node(label).ok().flatten().is_some() {
-        return Some(label.to_string());
-    }
-    // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
-    // separators ("docs/foo.docx"), but the stored Document node id uses the host
-    // separator ("docs\foo.docx"). Resolve it through the SAME path normalization as
-    // section refs (canonical_document_path) so it matches without the caller hand-
-    // writing backslashes. A non-path label (e.g. a Reference "ГОСТ Р ИСО/ТО 10013")
-    // resolves to no indexed document and falls through to label matching below.
-    if let Some(p) = idx.canonical_document_path(label) {
-        if g.get_node(&p).ok().flatten().is_some() {
-            return Some(p);
+/// Shared resolution context for `EndpointResolver::resolve` — the index, graph, ontology,
+/// and the batch-local lookup maps that every endpoint resolution needs, grouped so the
+/// resolver takes two arguments (`label`, `prefer_types`) instead of eight.
+struct EndpointResolver<'a> {
+    idx: &'a DocIndex,
+    g: &'a GraphStore,
+    ont: &'a Ontology,
+    label_to_id: &'a std::collections::HashMap<String, String>,
+    label_type_to_id: &'a std::collections::HashMap<(String, String), String>,
+    batch_ids: &'a std::collections::HashSet<String>,
+}
+
+impl EndpointResolver<'_> {
+    /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a
+    /// fuzzy morphology match against existing reasoning nodes (the small model often paraphrases
+    /// its own label — a truncation or wording variant). As a last resort, strip a leading
+    /// node-TYPE token the model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234")
+    /// — gated on the token naming a declared type, so ordinary multi-word labels are never
+    /// mangled. Returns None when nothing matches.
+    fn resolve(&self, label: &str, prefer_types: &[String]) -> Option<String> {
+        let Self {
+            idx,
+            g,
+            ont,
+            label_to_id,
+            label_type_to_id,
+            batch_ids,
+        } = self;
+        if batch_ids.contains(label) {
+            return Some(label.to_string());
         }
-    }
-    // When the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a Field, `to`
-    // an Enum) and a Field and its Enum share this label, pick the existing node of the
-    // wanted type so the two do not collide onto one node (the Enum->Enum rejection).
-    if !prefer_types.is_empty() {
-        let norm = normalize_label(label);
-        for t in prefer_types {
-            if let Some(id) = label_type_to_id.get(&(norm.clone(), t.clone())) {
-                return Some(id.clone());
+        if g.get_node(label).ok().flatten().is_some() {
+            return Some(label.to_string());
+        }
+        // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
+        // separators ("docs/foo.docx"), but the stored Document node id uses the host
+        // separator ("docs\foo.docx"). Resolve it through the SAME path normalization as
+        // section refs (canonical_document_path) so it matches without the caller hand-
+        // writing backslashes. A non-path label (e.g. a Reference "Some External Reference")
+        // resolves to no indexed document and falls through to label matching below.
+        if let Some(p) = idx.canonical_document_path(label) {
+            if g.get_node(&p).ok().flatten().is_some() {
+                return Some(p);
             }
         }
-        if let Ok(ids) = g.ids_by_label_norm(label) {
-            for id in ids {
-                if let Ok(Some(n)) = g.get_node(&id) {
-                    if prefer_types.iter().any(|t| t == &n.node_type) {
-                        return Some(id);
+        // When the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a Field, `to`
+        // an Enum) and a Field and its Enum share this label, pick the existing node of the
+        // wanted type so the two do not collide onto one node (the Enum->Enum rejection).
+        if !prefer_types.is_empty() {
+            let norm = normalize_label(label);
+            for t in prefer_types {
+                if let Some(id) = label_type_to_id.get(&(norm.clone(), t.clone())) {
+                    return Some(id.clone());
+                }
+            }
+            if let Ok(ids) = g.ids_by_label_norm(label) {
+                for id in ids {
+                    if let Ok(Some(n)) = g.get_node(&id) {
+                        if prefer_types.iter().any(|t| t == &n.node_type) {
+                            return Some(id);
+                        }
                     }
                 }
             }
         }
-    }
-    if let Some(id) = label_to_id.get(&normalize_label(label)) {
-        return Some(id.clone());
-    }
-    if let Some((first, rest)) = label.split_once(char::is_whitespace) {
-        let rest = rest.trim();
-        let is_type = !rest.is_empty()
-            && (ont
-                .entity_types()
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(first))
-                || ["Document", "Section", "Term", "Topic"]
+        if let Some(id) = label_to_id.get(&normalize_label(label)) {
+            return Some(id.clone());
+        }
+        if let Some((first, rest)) = label.split_once(char::is_whitespace) {
+            let rest = rest.trim();
+            let is_type = !rest.is_empty()
+                && (ont
+                    .entity_types()
                     .iter()
-                    .any(|t| t.eq_ignore_ascii_case(first)));
-        if is_type {
-            if let Some(id) = label_to_id.get(&normalize_label(rest)) {
-                return Some(id.clone());
-            }
-            if let Some(id) = g.ids_by_label_norm(rest).ok()?.into_iter().next() {
-                return Some(id);
+                    .any(|t| t.eq_ignore_ascii_case(first))
+                    || ["Document", "Section", "Term", "Topic"]
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(first)));
+            if is_type {
+                if let Some(id) = label_to_id.get(&normalize_label(rest)) {
+                    return Some(id.clone());
+                }
+                if let Some(id) = g.ids_by_label_norm(rest).ok()?.into_iter().next() {
+                    return Some(id);
+                }
             }
         }
+        // Exact match against EXISTING nodes via the label_norm index (replaces the old prebuilt
+        // all_nodes map — same unfiltered "first exact" semantics, but O(log N) instead of O(N)).
+        if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
+            return Some(id);
+        }
+        const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
+        let ids = g.resolve(label).ok()?;
+        ids.into_iter()
+            .filter_map(|id| g.get_node(&id).ok().flatten())
+            .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
+            // all morphology matches contain the query's terms; the SHORTEST label is the closest
+            // superset of the model's (often truncated) reference.
+            .min_by_key(|n| n.label.split_whitespace().count())
+            .map(|n| n.id)
     }
-    // Exact match against EXISTING nodes via the label_norm index (replaces the old prebuilt
-    // all_nodes map — same unfiltered "first exact" semantics, but O(log N) instead of O(N)).
-    if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
-        return Some(id);
-    }
-    const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
-    let ids = g.resolve(label).ok()?;
-    ids.into_iter()
-        .filter_map(|id| g.get_node(&id).ok().flatten())
-        .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
-        // all morphology matches contain the query's terms; the SHORTEST label is the closest
-        // superset of the model's (often truncated) reference.
-        .min_by_key(|n| n.label.split_whitespace().count())
-        .map(|n| n.id)
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -436,6 +449,14 @@ pub fn graph_upsert(
         nodespecs.iter().map(|n| n.id.clone()).collect();
 
     // (4) resolve edges
+    let resolver = EndpointResolver {
+        idx,
+        g,
+        ont,
+        label_to_id: &label_to_id,
+        label_type_to_id: &label_type_to_id,
+        batch_ids: &batch_ids,
+    };
     let mut edgespecs: Vec<EdgeSpec> = Vec::new();
     for ue in &edges {
         let (of, ot, oet) = (ue.from.clone(), ue.to.clone(), ue.edge_type.clone());
@@ -511,16 +532,7 @@ pub fn graph_upsert(
                 }
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
-                    match resolve_endpoint_label(
-                        idx,
-                        g,
-                        ont,
-                        &label_to_id,
-                        &label_type_to_id,
-                        &batch_ids,
-                        &from_ep,
-                        &from_types,
-                    ) {
+                    match resolver.resolve(&from_ep, &from_types) {
                         Some(id) => from_resolved = Some(id),
                         None => {
                             errs.push(format!(
@@ -549,16 +561,7 @@ pub fn graph_upsert(
                 }
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
-                    match resolve_endpoint_label(
-                        idx,
-                        g,
-                        ont,
-                        &label_to_id,
-                        &label_type_to_id,
-                        &batch_ids,
-                        &to_ep,
-                        &to_types,
-                    ) {
+                    match resolver.resolve(&to_ep, &to_types) {
                         Some(id) => to_resolved = Some(id),
                         None => {
                             errs.push(format!(
@@ -1267,16 +1270,15 @@ strict = true
         );
         assert!(!out.rejected, "setup node written: {}", out.message);
 
-        let got = resolve_endpoint_label(
-            &idx,
-            &g,
-            &ont,
-            &Default::default(),
-            &Default::default(),
-            &std::collections::HashSet::new(),
-            "docs/case1.docx",
-            &[],
-        );
+        let resolver = EndpointResolver {
+            idx: &idx,
+            g: &g,
+            ont: &ont,
+            label_to_id: &Default::default(),
+            label_type_to_id: &Default::default(),
+            batch_ids: &std::collections::HashSet::new(),
+        };
+        let got = resolver.resolve("docs/case1.docx", &[]);
         assert_eq!(
             got,
             Some("docs\\case1.docx".to_string()),
@@ -1323,16 +1325,15 @@ strict = true
 
         // An ordinary multi-word label whose first word is NOT a type is untouched:
         // "Connection loss" itself still resolves as before (no mangling).
-        let ok = resolve_endpoint_label(
-            &idx,
-            &g,
-            &ont,
-            &Default::default(),
-            &Default::default(),
-            &std::collections::HashSet::new(),
-            "Connection loss",
-            &[],
-        );
+        let resolver = EndpointResolver {
+            idx: &idx,
+            g: &g,
+            ont: &ont,
+            label_to_id: &Default::default(),
+            label_type_to_id: &Default::default(),
+            batch_ids: &std::collections::HashSet::new(),
+        };
+        let ok = resolver.resolve("Connection loss", &[]);
         assert_eq!(ok, Some(sym_id));
     }
 
