@@ -436,6 +436,14 @@ fn write_note(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&abs_path, &full)?;
+    // Write-through: index the note now so it is searchable in this session without waiting for a
+    // read to freshen. Best-effort — a busy index (LockFailure) is fine; the delta pass catches up.
+    let _ = idx.write_chunks(&[crate::model::Chunk {
+        doc_path: std::path::PathBuf::from(&rel_path),
+        location: "note".into(),
+        file_type: "note".into(),
+        text: full.clone(),
+    }]);
     let lines = full.lines().count();
     // For `schema.toml`, flag any file listed in `[order].files` that is not yet
     // in the document's notebook — so the agent gets actionable feedback.
@@ -547,6 +555,19 @@ mod tests {
         assert!(body.contains("A\nB"));
         del(dir.path(), &idx, "doc.pdf/parameters.md");
         assert!(read_note(dir.path(), &idx, "doc.pdf/parameters.md").is_err());
+    }
+
+    #[test]
+    fn note_is_searchable_immediately_via_write_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        note(dir.path(), &idx, "doc.pdf", "n.csp", "peculiar-token-xyz\n", false);
+        let hits = idx.search("peculiar-token-xyz", 10).unwrap();
+        assert!(
+            hits.iter().any(|h| h.path == "doc.pdf/n.csp"),
+            "note content is indexed at write time: {:?}",
+            hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
     }
 
     #[test]
