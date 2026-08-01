@@ -928,6 +928,29 @@ fn scan_notes_delta(dir: &Path, manifest: &Manifest, d: &mut Delta) -> anyhow::R
     Ok(())
 }
 
+/// Notes-root-relative paths of every note file whose owner document is not in the corpus.
+#[cfg(feature = "notebook")]
+pub fn orphan_notes(dir: &Path) -> anyhow::Result<Vec<String>> {
+    let manifest = Manifest::load(dir);
+    let delta = scan_delta(dir, &manifest)?;
+    let files = &delta.next.files;
+    let notes_root = dir.join(".glossa").join("notes");
+    let mut orphans = Vec::new();
+    if notes_root.is_dir() {
+        crate::walk::walk_files(&notes_root, None, false, &mut |path| {
+            let rel = path
+                .strip_prefix(&notes_root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if !rel.is_empty() && !owner_in(files, &rel) {
+                orphans.push(rel);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(orphans)
+}
+
 /// Bring the on-disk index/graph up to date with the filesystem — cheap and concurrency-safe.
 /// A lock-free `stat` pre-scan short-circuits the common "nothing changed" case with zero writes.
 /// Only when a delta exists does it call `index_dir` (which takes the tantivy writer lock + commits).
@@ -2004,6 +2027,23 @@ mod search_tests {
             d.notes_removed.contains(&"doc.md/limits.csp".to_string()),
             "{d:?}"
         );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn orphan_notes_lists_only_owner_less_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("live.md"), b"# Live\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let notes = dir.path().join(".glossa").join("notes");
+        std::fs::create_dir_all(notes.join("live.md")).unwrap();
+        std::fs::write(notes.join("live.md").join("n.csp"), b"kept").unwrap();
+        std::fs::create_dir_all(notes.join("gone.md")).unwrap();
+        std::fs::write(notes.join("gone.md").join("o.csp"), b"orphan").unwrap();
+
+        let mut got = orphan_notes(dir.path()).unwrap();
+        got.sort();
+        assert_eq!(got, vec!["gone.md/o.csp".to_string()]);
     }
 
     #[cfg(feature = "notebook")]

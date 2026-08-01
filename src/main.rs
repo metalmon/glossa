@@ -81,6 +81,14 @@ enum Cmd {
     Index { path: Option<PathBuf> },
     /// Rebuild the index from scratch.
     Reindex { path: Option<PathBuf> },
+    /// Delete notebook notes whose owner document no longer exists in the corpus.
+    #[cfg(feature = "notebook")]
+    Prune {
+        path: Option<PathBuf>,
+        /// List what would be deleted without touching anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Inspect the knowledge graph.
     Graph {
         #[command(subcommand)]
@@ -675,6 +683,29 @@ fn main() -> anyhow::Result<()> {
                 "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
                 r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
             );
+            Ok(())
+        }
+        #[cfg(feature = "notebook")]
+        Cmd::Prune { path, dry_run } => {
+            let root = glossa::root::resolve_root(path);
+            let orphans = glossa::index::store::orphan_notes(&root)?;
+            if orphans.is_empty() {
+                println!("no orphaned notes");
+                return Ok(());
+            }
+            if dry_run {
+                println!("would prune {} orphaned note(s):", orphans.len());
+                for o in &orphans {
+                    println!("  {o}");
+                }
+            } else {
+                let notes_root = root.join(".glossa").join("notes");
+                for o in &orphans {
+                    let _ = std::fs::remove_file(notes_root.join(o));
+                }
+                glossa::index::store::ensure_fresh(&root)?;
+                println!("pruned {} orphaned note(s)", orphans.len());
+            }
             Ok(())
         }
         Cmd::Grep {
