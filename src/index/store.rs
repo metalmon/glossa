@@ -2,6 +2,8 @@ use crate::index::manifest::{FileSig, Manifest};
 use crate::index::multilang::{default_detector, multilang_analyzer};
 use crate::model::Chunk;
 use anyhow::Context;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -782,6 +784,52 @@ pub struct Delta {
     pub next: Manifest,
 }
 
+/// Stable hash of every directory's mtime under the corpus (skipping `.glossa`) plus every
+/// directory under `.glossa/notes`. Adding/removing/renaming a file bumps its parent dir's mtime
+/// (and new/removed dirs change the set), so the hash changes; an in-place content edit does not.
+/// Uses nanosecond mtime so a same-second add is still detected. O(dirs), not O(files).
+pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
+    let root = abs_root(dir);
+    let mut map: BTreeMap<String, u128> = BTreeMap::new();
+    collect_dir_mtimes(&root, &root, true, &mut map);
+    let notes_root = dir.join(".glossa").join("notes");
+    if notes_root.is_dir() {
+        collect_dir_mtimes(&notes_root, &notes_root, false, &mut map);
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (k, v) in &map {
+        k.hash(&mut h);
+        v.hash(&mut h);
+    }
+    Ok(h.finish())
+}
+
+/// Recurse `cur`, recording each directory's path (relative to `base`, prefixed to keep corpus and
+/// notes trees distinct) and its mtime in nanoseconds. `skip_glossa` skips a child named `.glossa`
+/// (the corpus pass; the notes pass walks inside `.glossa/notes` directly).
+fn collect_dir_mtimes(base: &Path, cur: &Path, skip_glossa: bool, map: &mut BTreeMap<String, u128>) {
+    let nanos = std::fs::metadata(cur)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let rel = cur.strip_prefix(base).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let key = format!("{}:{}", if skip_glossa { "c" } else { "n" }, rel);
+    map.insert(key, nanos);
+    let Ok(rd) = std::fs::read_dir(cur) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if skip_glossa && entry.file_name() == std::ffi::OsStr::new(".glossa") {
+            continue;
+        }
+        collect_dir_mtimes(base, &path, skip_glossa, map);
+    }
+}
+
 pub fn scan_delta(dir: &Path, manifest: &Manifest) -> anyhow::Result<Delta> {
     let mut d = Delta::default();
     let root = abs_root(dir);
@@ -1400,6 +1448,24 @@ mod incremental_tests {
                 .any(|h| h.path.ends_with("profibus.png")),
             "loose image is searchable by name"
         );
+    }
+
+    #[test]
+    fn dir_signature_changes_on_file_add_and_ignores_pure_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        let s1 = dir_mtime_signature(dir.path()).unwrap();
+        assert_eq!(s1, dir_mtime_signature(dir.path()).unwrap(), "signature is stable when nothing changes");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\ny\n").unwrap(); // same dir, new file
+        let s2 = dir_mtime_signature(dir.path()).unwrap();
+        assert_ne!(s1, s2, "adding a file in an existing dir must change the signature");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("c.md"), b"# C\nz\n").unwrap();
+        assert_ne!(s2, dir_mtime_signature(dir.path()).unwrap(), "new subdir + file changes the signature");
     }
 }
 
