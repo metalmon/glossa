@@ -374,7 +374,7 @@ pub(crate) fn run_serve(
                 if let Some(f) = on_transport_ready {
                     f();
                 }
-                freshen_srv.freshen_now().await;
+                tokio::spawn(async move { freshen_srv.freshen_now().await });
                 let _ = service.waiting().await; // client-driven: exit on stdin EOF
                 cancel.cancel();
             }
@@ -474,7 +474,7 @@ async fn serve_streamable_http(
     if let Some(f) = on_transport_ready {
         f();
     }
-    freshen_srv.freshen_now().await;
+    tokio::spawn(async move { freshen_srv.freshen_now().await });
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;

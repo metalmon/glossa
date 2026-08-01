@@ -42,7 +42,8 @@ pub struct GlossaServer {
     dirty: Arc<AtomicBool>,
     /// Epoch-ms of the last indexing change — the debounce clock for the maintenance loop.
     last_change: Arc<AtomicU64>,
-    /// True while a background `ensure_fresh` is running.
+    /// True while a synchronous `freshen_now` is running (e.g. mid-await inside a read tool, or
+    /// the fire-and-forget startup warm-up) — surfaced as the `glossa_indexing` metrics gauge.
     indexing: Arc<AtomicBool>,
     /// When true, `read` tool strips all image content from responses.
     no_image: bool,
@@ -164,11 +165,13 @@ impl GlossaServer {
     /// Best-effort — indexing errors never fail the tool. Runs on the blocking pool so the async
     /// worker is not stalled, but the handler awaits it so the served index reflects the current tree.
     pub async fn freshen_now(&self) {
+        self.indexing.store(true, Ordering::Release);
         let root = self.root.clone();
         let res = tokio::task::spawn_blocking(move || {
             crate::index::store::freshen_blocking(&root, std::time::Duration::from_secs(3))
         })
         .await;
+        self.indexing.store(false, Ordering::Release);
         if let Ok(Ok(stats)) = res {
             if stats.added + stats.removed > 0 {
                 self.mark_dirty();
@@ -256,7 +259,7 @@ impl GlossaServer {
              # TYPE glossa_graph_edges gauge\nglossa_graph_edges {edges}\n\
              # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
              # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n\
-             # HELP glossa_indexing Background ensure_fresh in progress (1) or idle (0)\n\
+             # HELP glossa_indexing A freshen (freshen_now) is in progress (1) or idle (0)\n\
              # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n"
         )
     }
