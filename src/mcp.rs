@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +47,14 @@ pub struct GlossaServer {
     indexing: Arc<AtomicBool>,
     /// When true, `read` tool strips all image content from responses.
     no_image: bool,
+    /// In-process cache of `manifest.json`, invalidated by the file's mtime.
+    manifest_cache: Arc<Mutex<ManifestCache>>,
+}
+
+#[derive(Default)]
+struct ManifestCache {
+    manifest: crate::index::manifest::Manifest,
+    mtime_nanos: Option<u128>,
 }
 
 #[allow(dead_code)] // read tools stay enabled for Reader; listed for profile documentation
@@ -147,7 +155,26 @@ impl GlossaServer {
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicBool::new(false)),
             no_image,
+            manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         }
+    }
+
+    /// Manifest signature for `rel`, via an in-process cache invalidated by `manifest.json`'s mtime.
+    /// Steady state: one `stat` (O(1)); a full parse only when the mtime advanced (someone reindexed).
+    #[allow(dead_code)] // consumed by the in-place-edit check landing in a follow-up task
+    fn baseline_sig(&self, rel: &str) -> Option<crate::index::manifest::FileSig> {
+        let p = self.root.join(".glossa").join("manifest.json");
+        let cur = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos());
+        let mut cache = self.manifest_cache.lock().unwrap();
+        if cur != cache.mtime_nanos {
+            cache.manifest = crate::index::manifest::Manifest::load(&self.root);
+            cache.mtime_nanos = cur;
+        }
+        cache.manifest.files.get(rel).copied()
     }
 
     fn open_index_graph(
@@ -1364,6 +1391,33 @@ mod tests {
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].label, "a");
         assert!(a.edges.is_empty());
+    }
+
+    #[test]
+    fn baseline_sig_caches_until_manifest_mtime_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        let s1 = srv.baseline_sig("a.md");
+        assert!(s1.is_some(), "known file has a baseline sig");
+        assert_eq!(srv.baseline_sig("a.md"), s1, "repeat lookup is stable");
+        assert_eq!(srv.baseline_sig("missing.md"), None, "unknown file -> None");
+        // After a real reindex the manifest mtime advances → cache picks up the new sig.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("a.md"), b"# A\nx changed bigger\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        assert_eq!(
+            srv.baseline_sig("a.md"),
+            Some(crate::index::store::file_sig(&dir.path().join("a.md")).unwrap()),
+            "cache reloaded after mtime bump"
+        );
     }
 
     #[test]
