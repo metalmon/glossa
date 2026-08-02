@@ -1401,6 +1401,7 @@ pub fn reindex_dirs_locked(
         };
         let mut wb = WalkBuilder::new(&base);
         wb.standard_filters(true);
+        wb.require_git(false);
         wb.max_depth(Some(1));
         wb.filter_entry(|e| e.file_name() != ".glossa");
         for entry in wb.build().flatten() {
@@ -2219,6 +2220,63 @@ mod incremental_tests {
         );
         // delete the referenced doc (sub/c.md) — a.md's edge to it must be gone in BOTH
         // (covered by remove-file above, since a.md -> sub/c.md).
+    }
+
+    #[test]
+    fn reindex_dirs_respects_gitignore_without_a_git_repo() {
+        // Regression: the scoped per-dir walk in `reindex_dirs_locked` must set `require_git(false)`
+        // like the reference walkers (`walk::walk_files`, `collect_dir_mtimes`) do — `require_git`
+        // defaults to `true` in the `ignore` crate, so `.gitignore` is honored only inside a git
+        // repo. No `.git` dir is created here on purpose: the bug only shows on a non-git corpus.
+        let build = |scoped: bool| -> (Vec<String>, u64, Vec<(String, String)>) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(".gitignore"), b"ignored.md\n").unwrap();
+            std::fs::write(dir.path().join("a.md"), b"# A\nkeep\n").unwrap();
+            std::fs::write(dir.path().join("ignored.md"), b"# X\nshould not appear\n").unwrap();
+            index_dir(dir.path(), true).unwrap();
+            let before = dir_mtime_map(dir.path()).unwrap();
+            // Touch the root dir (which also contains ignored.md) so the scoped pass rescans it.
+            std::fs::write(dir.path().join("b.md"), b"# B\nother\n").unwrap();
+            let after = dir_mtime_map(dir.path()).unwrap();
+            if scoped {
+                let (changed, added, removed) = diff_dir_maps(&before, &after);
+                let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+                reindex_dirs_locked(dir.path(), &after, &changed, &added, &removed, false).unwrap();
+            } else {
+                index_dir(dir.path(), false).unwrap();
+            }
+            let idx = DocIndex::open_or_create(dir.path()).unwrap();
+            assert!(
+                idx.search("appear", 10).unwrap().is_empty(),
+                "gitignored file must not be indexed even without a .git dir (scoped={scoped})"
+            );
+            assert!(
+                !Manifest::load(dir.path()).files.contains_key("ignored.md"),
+                "gitignored file must not be recorded in the manifest (scoped={scoped})"
+            );
+            let mut hits: Vec<String> = idx
+                .search("keep other", 50)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            hits.sort();
+            let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+            let mut refs: Vec<(String, String)> = g
+                .all_edges()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.edge_type == "REFERENCES")
+                .map(|e| (e.from.clone(), e.to.clone()))
+                .collect();
+            refs.sort();
+            (hits, g.node_count().unwrap(), refs)
+        };
+        assert_eq!(
+            build(true),
+            build(false),
+            "scoped matches full: gitignored file excluded from both"
+        );
     }
 }
 
