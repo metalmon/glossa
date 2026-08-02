@@ -455,6 +455,20 @@ impl GraphStore {
         Ok(nodes_deleted + edges_deleted)
     }
 
+    /// Remove auto edges pointing AT `target` (incoming). Mirror of `delete_auto_by_source` for the
+    /// `eto` endpoint. Edges only — auto NODES are keyed by `source_path`, not a target, so a doc's
+    /// deletion cleans its own nodes via `delete_auto_by_source`; this cleans inbound REFERENCES that
+    /// other docs authored, so no dangling edge points at a removed node.
+    pub fn delete_auto_by_target(&self, target: &str) -> anyhow::Result<usize> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "DELETE FROM edges WHERE eto = ?1 AND origin LIKE 'auto-%'",
+            rusqlite::params![target],
+        )
+        .context("delete auto edges by target")?;
+        Ok(c.changes() as usize)
+    }
+
     /// Delete every node of `node_type` plus all edges touching those nodes. Returns count removed.
     pub fn delete_by_type(&self, node_type: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
@@ -1413,5 +1427,33 @@ mod tests {
 
         assert_eq!(reader.get_node("vis:test").unwrap(), Some(n));
         assert_eq!(reader.node_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_auto_by_target_removes_incoming_auto_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        // A REFERENCES B (auto), authored by A (source_path = A).
+        crate::graph::build::link_reference(
+            &g,
+            "a.md",
+            "b.md",
+            crate::index::manifest::FileSig {
+                mtime_secs: 1,
+                size: 1,
+            },
+        )
+        .unwrap();
+        assert!(!crate::graph::traverse::neighbors(&g, "a.md", None, 1)
+            .unwrap()
+            .is_empty());
+        let n = g.delete_auto_by_target("b.md").unwrap();
+        assert!(n >= 1, "one incoming auto edge removed");
+        assert!(
+            !crate::graph::traverse::neighbors(&g, "a.md", None, 1)
+                .unwrap()
+                .contains(&"b.md".to_string()),
+            "A->B gone"
+        );
     }
 }
