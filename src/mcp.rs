@@ -54,7 +54,6 @@ const NOTEBOOK_READ_TOOLS: &[&str] = &["ls"];
 const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "del"];
 const EDITOR_TOOLS: &[&str] = &[
     "index",
-    "reindex",
     "graph_build",
     "graph_upsert",
     "graph_delete",
@@ -72,7 +71,6 @@ const GRAPH_TOOLS: &[&str] = &[
     "graph_generalize",
     "resolve",
     "index",
-    "reindex",
     "purge",
 ];
 
@@ -337,6 +335,21 @@ struct GlobArgs {
         description = "ripgrep -g glob over document paths, e.g. * or **/* (all documents), or *<name-fragment>* to find a file by name"
     )]
     pattern: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IndexArgs {
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(description = "rebuild the whole index from scratch (was the `reindex` tool)")]
+    force: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "reindex just this one indexed document path (from grep/read), instead of the whole corpus"
+    )]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -858,26 +871,48 @@ impl GlossaServer {
         )]))
     }
 
-    #[tool(description = "Build/update the index + structural graph for the knowledge base.")]
-    async fn index(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Update the index + structural graph. No args: incremental over the whole knowledge base. force=true: full rebuild from scratch. path=<doc>: reindex just that one document (picks up an in-place edit)."
+    )]
+    async fn index(
+        &self,
+        Parameters(a): Parameters<IndexArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
-        let s = index_dir(&self.root, false).map_err(internal)?;
+        if let Some(p) = a.path.as_deref() {
+            let idx =
+                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let Some(rel) = idx.canonical_document_path(p) else {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "not an indexed document: {p}"
+                ))]));
+            };
+            // Explicit call — bounded wait for the lock (mirror freshen_blocking's loop, ~3s).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
+                    crate::index::store::index_one_file_locked(&self.root, &rel)
+                        .map_err(internal)?;
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            self.mark_dirty();
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "reindexed {rel} in {}",
+                crate::cli_fmt::format_elapsed(started.elapsed())
+            ))]));
+        }
+        let s = index_dir(&self.root, a.force.unwrap_or(false)).map_err(internal)?;
+        self.mark_dirty();
         Ok(CallToolResult::success(vec![Content::text(format!(
             "indexed: {} added, {} removed, {} unchanged in {}",
             s.added,
             s.removed,
             s.unchanged,
-            crate::cli_fmt::format_elapsed(started.elapsed())
-        ))]))
-    }
-
-    #[tool(description = "Rebuild the index + graph from scratch.")]
-    async fn reindex(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
-        let started = std::time::Instant::now();
-        let s = index_dir(&self.root, true).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "reindexed: {} files in {}",
-            s.added,
             crate::cli_fmt::format_elapsed(started.elapsed())
         ))]))
     }
@@ -1286,6 +1321,10 @@ mod tests {
         let se: SearchArgs = serde_json::from_str(r#"{"query":"x","limit":"5"}"#).unwrap();
         assert_eq!(se.limit, Some(5));
 
+        let ix: IndexArgs = serde_json::from_str(r#"{"force":"true","path":"a.md"}"#).unwrap();
+        assert_eq!(ix.force, Some(true));
+        assert_eq!(ix.path, Some("a.md".to_string()));
+
         let g: GrepArgs = serde_json::from_str(
             r#"{"pattern":"x","ignore_case":"true","context":"20","multiline":"1"}"#,
         )
@@ -1301,7 +1340,7 @@ mod tests {
 
     #[test]
     fn empty_param_schema_has_properties() {
-        // no-arg tools (graph_generalize/index/reindex/purge) must expose an explicit
+        // no-arg tools (graph_generalize/purge) must expose an explicit
         // `properties: {}` — LM Studio's tools validator 400s when it is absent.
         let v = serde_json::to_value(schemars::schema_for!(Empty)).unwrap();
         assert!(
@@ -1736,6 +1775,62 @@ mod tests {
         assert!(
             text.contains("b.md"),
             "search must reflect the newly added file: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_tool_reindexes_a_single_edited_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\noriginaltoken\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        std::fs::write(dir.path().join("a.md"), b"# A\nrewritetoken\n").unwrap();
+        srv.index(Parameters(IndexArgs {
+            force: None,
+            path: Some("a.md".into()),
+        }))
+        .await
+        .unwrap();
+        let out = srv
+            .search(Parameters(SearchArgs {
+                query: "rewritetoken".into(),
+                limit: None,
+                glob: None,
+                file_type: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            format!("{out:?}").contains("a.md"),
+            "single-file index made the edit searchable"
+        );
+    }
+
+    #[test]
+    fn reindex_tool_is_gone_index_remains() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        let names: Vec<String> = srv
+            .tool_specs()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(names.contains(&"index".to_string()), "index tool present");
+        assert!(
+            !names.contains(&"reindex".to_string()),
+            "reindex tool removed"
         );
     }
 }
