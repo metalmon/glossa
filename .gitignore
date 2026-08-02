@@ -29,6 +29,12 @@ eval/tensorzero/.env
 eval/sops/*
 !eval/sops/example/
 eval/fixtures/constraint-research-gold.json
+
+# Local-only scanned-PDF test fixtures (large source scans — never commit);
+# read.rs tests skip these when absent
+tests/fixtures/order365.pdf
+tests/fixtures/order455.pdf
+tests/fixtures/pril1.pdf
 new-episode.txt
 *.rtf.orig
 

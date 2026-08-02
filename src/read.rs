@@ -448,6 +448,11 @@ mod image_tests {
     #[test]
     fn full_bleed_scan_passes_original_jpeg_through() {
         let p = fixture("order365.pdf");
+        // Large scanned-PDF fixtures are kept local-only (untracked), so skip
+        // when absent — e.g. a clean checkout or CI without the local fixtures.
+        if !p.exists() {
+            return;
+        }
         let rendered = render_pdf_page(&p, 1)
             .unwrap()
             .expect("scan page 1 should render");
@@ -467,6 +472,10 @@ mod image_tests {
         let cap_bytes = 4 * 1024 * 1024;
         for name in ["order365.pdf", "order455.pdf", "pril1.pdf"] {
             let p = fixture(name);
+            // Local-only (untracked) fixtures; skip any that are absent.
+            if !p.exists() {
+                continue;
+            }
             let rendered = render_pdf_page(&p, 1)
                 .unwrap()
                 .expect("scan page 1 should render");
