@@ -1291,12 +1291,12 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
         let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
         if let Ok(canon) = std::fs::canonicalize(idx.root.join(src_dir).join(target)) {
             if let Some(dst) = by_canon.get(&canon) {
+                // `links` only ever carries entries with src == rel (index_file_into only reindexed
+                // that one file), so the fresh `sig` just returned for it is always the right
+                // provenance stamp — unlike index_dir_locked's `next.files.get(src)`, there's no
+                // stale copy of `rel`'s signature to accidentally read here.
                 if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
-                    let s = manifest.files.get(src).copied().unwrap_or(FileSig {
-                        mtime_secs: 0,
-                        size: 0,
-                    });
-                    let _ = crate::graph::build::link_reference(&graph, src, dst, s);
+                    let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
                 }
             }
         }
@@ -1767,16 +1767,67 @@ mod incremental_tests {
     }
 
     #[test]
+    fn index_one_file_resolves_reference_with_fresh_provenance_sig() {
+        // The by_canon/link_reference block is the risky part of index_one_file_locked: it re-stamps
+        // this file's REFERENCES edge(s) with a FileSig for provenance. That signature must be the
+        // freshly-computed post-edit one (what index_file_into just returned), not a stale copy read
+        // from the manifest loaded before this call updated it — otherwise provenance silently
+        // diverges from what a full reindex would record for the same edit.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nsee [b](b.md)\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        // Edit a.md, keeping the link to b.md, so index_one_file_locked must re-resolve it. The
+        // edited body is a different length than the original, so `size` alone guarantees a
+        // different FileSig regardless of mtime_secs resolution.
+        std::fs::write(
+            dir.path().join("a.md"),
+            b"# A\nsentinel edit\nsee [b](b.md)\n",
+        )
+        .unwrap();
+        let _lock = crate::index::lock::try_index_lock(dir.path()).unwrap();
+        index_one_file_locked(dir.path(), "a.md").unwrap();
+        drop(_lock);
+
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        assert!(
+            crate::graph::traverse::neighbors(&g, "a.md", None, 1)
+                .unwrap()
+                .contains(&"b.md".to_string()),
+            "REFERENCES edge a.md -> b.md re-resolved after single-file reindex"
+        );
+
+        let fresh_sig = file_sig(&dir.path().join("a.md")).unwrap();
+        let edge = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.edge_type == "REFERENCES" && e.from == "a.md" && e.to == "b.md")
+            .expect("REFERENCES edge a.md -> b.md exists");
+        assert_eq!(
+            edge.prov.file_sig,
+            Some(fresh_sig),
+            "REFERENCES edge provenance must carry a.md's post-edit signature, not a stale pre-edit one"
+        );
+    }
+
+    #[test]
     fn index_one_file_matches_full_reindex_for_that_file() {
         // Golden: after the same edit, index_one_file_locked(X) yields the same searchable state for X
-        // as a full index_dir(force). (Chunk-level equivalence via search; graph auto-edges by source.)
-        let build = |single: bool| -> (Vec<String>, u64) {
+        // as a full index_dir(force). (Chunk-level equivalence via search; graph auto-edges by source;
+        // a cross-file link from a.md to b.md exercises the by_canon/link_reference resolution path too.)
+        let build = |single: bool| -> (Vec<String>, u64, Vec<(String, String)>) {
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("a.md"), b"# A\none\n## S2\ntwo\n").unwrap();
+            std::fs::write(
+                dir.path().join("a.md"),
+                b"# A\none\nsee [b](b.md)\n## S2\ntwo\n",
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
             index_dir(dir.path(), true).unwrap();
             std::fs::write(
                 dir.path().join("a.md"),
-                b"# A\none edited\n## S2\ntwo\n### S3\nthree\n",
+                b"# A\none edited\nsee [b](b.md)\n## S2\ntwo\n### S3\nthree\n",
             )
             .unwrap();
             if single {
@@ -1794,12 +1845,20 @@ mod incremental_tests {
                 .collect();
             hits.sort();
             let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-            (hits, g.node_count().unwrap())
+            let mut refs: Vec<(String, String)> = g
+                .all_edges()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.edge_type == "REFERENCES")
+                .map(|e| (e.from, e.to))
+                .collect();
+            refs.sort();
+            (hits, g.node_count().unwrap(), refs)
         };
         assert_eq!(
             build(true),
             build(false),
-            "single-file reindex equals full delta reindex for the edited file"
+            "single-file reindex equals full delta reindex for the edited file, including its REFERENCES edges"
         );
     }
 }
