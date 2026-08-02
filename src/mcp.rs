@@ -160,9 +160,9 @@ impl GlossaServer {
         }
     }
 
-    /// Manifest signature for `rel`, via an in-process cache invalidated by `manifest.json`'s mtime.
-    /// Steady state: one `stat` (O(1)); a full parse only when the mtime advanced (someone reindexed).
-    fn baseline_sig(&self, rel: &str) -> Option<crate::index::manifest::FileSig> {
+    /// Run `f` against the in-process manifest cache, reloading it when `manifest.json`'s mtime advanced
+    /// (one `stat`; a full parse only when something reindexed). Backs both baseline lookups.
+    fn with_manifest<T>(&self, f: impl FnOnce(&crate::index::manifest::Manifest) -> T) -> T {
         let p = self.root.join(".glossa").join("manifest.json");
         let cur = std::fs::metadata(&p)
             .and_then(|m| m.modified())
@@ -177,7 +177,17 @@ impl GlossaServer {
             cache.manifest = crate::index::manifest::Manifest::load(&self.root);
             cache.mtime_nanos = cur;
         }
-        cache.manifest.files.get(rel).copied()
+        f(&cache.manifest)
+    }
+
+    /// Manifest signature for a corpus document `rel`, or `None`.
+    fn baseline_sig(&self, rel: &str) -> Option<crate::index::manifest::FileSig> {
+        self.with_manifest(|m| m.files.get(rel).copied())
+    }
+
+    /// Manifest signature for a notebook note `rel` (key relative to `.glossa/notes`), or `None`.
+    fn baseline_note_sig(&self, rel: &str) -> Option<crate::index::manifest::FileSig> {
+        self.with_manifest(|m| m.notes.get(rel).copied())
     }
 
     /// If `path` is an indexed corpus document whose on-disk signature differs from the manifest
@@ -192,7 +202,20 @@ impl GlossaServer {
             return; // not a corpus doc (note/graph id/garbage)
         };
         if idx.file_type_of(&rel).ok().flatten().as_deref() == Some("note") {
-            return; // notebook note — lives under .glossa/notes/, not a corpus document to reindex
+            // Notebook note: pick up an external in-place content edit (freshen's dir-mtime gate
+            // misses it). Best-effort — skip if another process holds the lock.
+            let abs = self.root.join(".glossa").join("notes").join(&rel);
+            let Ok(cur) = crate::index::store::file_sig(&abs) else {
+                return;
+            };
+            if self.baseline_note_sig(&rel) == Some(cur) {
+                return; // unchanged
+            }
+            if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
+                let _ = crate::index::store::reindex_note_locked(&self.root, &rel);
+                self.mark_dirty();
+            }
+            return;
         }
         let abs = self.root.join(&rel);
         let Ok(cur) = crate::index::store::file_sig(&abs) else {
@@ -1489,6 +1512,63 @@ mod tests {
         assert!(
             format!("{out:?}").contains("a.md"),
             "in-place edit picked up after reading the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_picks_up_an_external_note_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        // Create the note via the tool (write-through indexes it).
+        srv.note(Parameters(NoteArgs {
+            doc: "doc.md".into(),
+            file: "n.csp".into(),
+            content: "oldtoken\n".into(),
+            append: None,
+        }))
+        .await
+        .unwrap();
+        // Edit the note file EXTERNALLY (bypassing the tool) — dir mtime of notes/doc.md changes only on
+        // add/remove, not on a content edit, so freshen alone would miss it.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            dir.path()
+                .join(".glossa")
+                .join("notes")
+                .join("doc.md")
+                .join("n.csp"),
+            b"newtoken freshnote",
+        )
+        .unwrap();
+        // A read of the note triggers the lazy note reindex.
+        let _ = srv
+            .read(Parameters(ReadArgs {
+                path: "doc.md/n.csp".into(),
+                n: 1,
+                page_image: None,
+                include_images: None,
+            }))
+            .await;
+        let out = srv
+            .search(Parameters(SearchArgs {
+                query: "freshnote".into(),
+                limit: None,
+                glob: None,
+                file_type: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            format!("{out:?}").contains("doc.md/n.csp"),
+            "external note edit picked up after reading the note"
         );
     }
 
