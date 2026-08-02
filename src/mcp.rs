@@ -187,6 +187,9 @@ impl GlossaServer {
         let Some(rel) = idx.canonical_document_path(path) else {
             return; // not a corpus doc (note/graph id/garbage)
         };
+        if idx.file_type_of(&rel).ok().flatten().as_deref() == Some("note") {
+            return; // notebook note — lives under .glossa/notes/, not a corpus document to reindex
+        }
         let abs = self.root.join(&rel);
         let Ok(cur) = crate::index::store::file_sig(&abs) else {
             return;
@@ -1989,6 +1992,63 @@ mod tests {
         assert!(
             !text.contains("reindexed"),
             "must not claim success while the lock stayed held: {text}"
+        );
+    }
+
+    // Regression for the note-skip in `lazy_reindex_if_changed`: a notebook-note path handed to
+    // `read` must be served as a note, not swept into a corpus reindex. Before the explicit
+    // `file_type_of(&rel) == Some("note")` check, this only worked by accident (the mis-resolved
+    // `root.join(rel)` for a note doesn't exist, so `file_sig` errored and the handler bailed).
+    #[cfg(feature = "notebook")]
+    #[tokio::test]
+    async fn read_of_notebook_note_does_not_reindex_it_as_a_corpus_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\noriginal\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        srv.note(Parameters(NoteArgs {
+            doc: "a.md".into(),
+            file: "summary.md".into(),
+            content: "note-marker-content".into(),
+            append: None,
+        }))
+        .await
+        .unwrap();
+
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        assert_eq!(
+            idx.file_type_of("a.md/summary.md").unwrap().as_deref(),
+            Some("note"),
+            "note indexed as file_type=note before read"
+        );
+
+        let out = srv
+            .read(Parameters(ReadArgs {
+                path: "a.md/summary.md".into(),
+                n: 1,
+                include_images: None,
+                page_image: None,
+            }))
+            .await
+            .unwrap();
+        let text = format!("{out:?}");
+        assert!(
+            text.contains("note-marker-content"),
+            "read must serve the note content, not a corpus-doc miss: {text}"
+        );
+
+        // The lazy reindex-on-read must leave the note alone — still file_type=note, not
+        // clobbered by a corpus reindex of "a.md/summary.md".
+        assert_eq!(
+            idx.file_type_of("a.md/summary.md").unwrap().as_deref(),
+            Some("note"),
+            "read of a note path must not turn it into a corpus-doc chunk"
         );
     }
 }
