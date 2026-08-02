@@ -1019,22 +1019,26 @@ fn is_transient_fs(e: &TantivyError) -> bool {
     matches!(e, TantivyError::IoError(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
-/// The directory signature the on-disk index was last built from (`.glossa/dirsig`), or `None`.
-pub fn read_dirsig(dir: &Path) -> Option<u64> {
+/// The persisted per-directory map the index was last built from (`.glossa/dirsig`, JSON), or `None`
+/// if absent or unparsable (a legacy u64 file parses as `None` → next pass reindexes and rewrites it).
+pub fn read_dirsig(dir: &Path) -> Option<BTreeMap<String, u128>> {
     std::fs::read_to_string(dir.join(".glossa").join("dirsig"))
         .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-/// Persist the directory signature atomically (temp + rename), so a concurrent reader never sees a
+/// Persist the directory map atomically (temp + rename), so a concurrent reader never sees a
 /// half-written value. Best-effort: failure to record it just means the next read re-scans.
-fn write_dirsig(dir: &Path, sig: u64) {
+fn write_dirsig(dir: &Path, map: &BTreeMap<String, u128>) {
     let glossa = dir.join(".glossa");
     if std::fs::create_dir_all(&glossa).is_err() {
         return;
     }
+    let Ok(s) = serde_json::to_string(map) else {
+        return;
+    };
     let tmp = glossa.join("dirsig.tmp");
-    if std::fs::write(&tmp, sig.to_string()).is_ok() {
+    if std::fs::write(&tmp, s).is_ok() {
         let _ = std::fs::rename(&tmp, glossa.join("dirsig"));
     }
 }
@@ -1169,7 +1173,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         && delta.notes_changed.is_empty()
         && delta.notes_removed.is_empty()
     {
-        write_dirsig(dir, dir_mtime_signature(dir).unwrap_or(0));
+        write_dirsig(dir, &dir_mtime_map(dir).unwrap_or_default());
         return Ok(IndexStats {
             added: 0,
             removed: 0,
@@ -1269,7 +1273,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     writer.commit()?;
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(dir)?;
-    write_dirsig(dir, dir_mtime_signature(dir).unwrap_or(0));
+    write_dirsig(dir, &dir_mtime_map(dir).unwrap_or_default());
     Ok(stats)
 }
 
@@ -1317,12 +1321,12 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
 }
 
 /// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
-/// Fast path: if `.glossa/dirsig` already equals the current signature, return immediately. Else
+/// Fast path: if `.glossa/dirsig` already equals the current map, return immediately. Else
 /// take `index.lock` and index; if another process holds it, poll until either the persisted
-/// signature reaches what we observed (the peer indexed it) or `timeout` elapses (serve current).
+/// map reaches what we observed (the peer indexed it) or `timeout` elapses (serve current).
 pub fn freshen_blocking(dir: &Path, timeout: std::time::Duration) -> anyhow::Result<IndexStats> {
-    let cur = dir_mtime_signature(dir)?;
-    if read_dirsig(dir) == Some(cur) {
+    let cur = dir_mtime_map(dir)?;
+    if read_dirsig(dir).as_ref() == Some(&cur) {
         return Ok(IndexStats::default());
     }
     let deadline = std::time::Instant::now() + timeout;
@@ -1332,7 +1336,7 @@ pub fn freshen_blocking(dir: &Path, timeout: std::time::Duration) -> anyhow::Res
             return index_dir_locked(dir, false);
         }
         // Another process is indexing. If it already reached our observed state, we are fresh.
-        if read_dirsig(dir) == Some(cur) {
+        if read_dirsig(dir).as_ref() == Some(&cur) {
             return Ok(IndexStats::default());
         }
         if std::time::Instant::now() >= deadline {
@@ -1354,9 +1358,24 @@ mod incremental_tests {
         index_dir(dir.path(), false).unwrap();
         assert_eq!(
             read_dirsig(dir.path()),
-            Some(dir_mtime_signature(dir.path()).unwrap()),
-            "after indexing, the persisted signature equals the current directory signature"
+            Some(dir_mtime_map(dir.path()).unwrap()),
+            "after indexing, the persisted map equals the current directory map"
         );
+    }
+
+    #[test]
+    fn dirsig_map_roundtrips_and_migrates_from_u64() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nhello\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        // After indexing, dirsig holds the current map.
+        assert_eq!(
+            read_dirsig(dir.path()),
+            Some(dir_mtime_map(dir.path()).unwrap())
+        );
+        // A legacy u64 dirsig file is treated as "no snapshot" (migration).
+        std::fs::write(dir.path().join(".glossa").join("dirsig"), b"12345").unwrap();
+        assert_eq!(read_dirsig(dir.path()), None, "legacy u64 dirsig -> None");
     }
 
     #[test]
@@ -2559,8 +2578,8 @@ mod tests {
             .iter()
             .any(|h| h.path.ends_with("a.md")));
 
-        // Nothing changed → no work, signature already matches.
-        let cur = dir_mtime_signature(dir.path()).unwrap();
+        // Nothing changed → no work, map already matches.
+        let cur = dir_mtime_map(dir.path()).unwrap();
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         assert_eq!(read_dirsig(dir.path()), Some(cur));
 
