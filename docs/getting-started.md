@@ -40,8 +40,9 @@ After the first `kb index`, you usually **don't need to re-run it**. When you us
 Manual index is still available:
 
 ```bash
-kb index          # incremental
-kb reindex        # full rebuild
+kb index                # incremental
+kb index --force        # full rebuild
+kb index --file <rel>   # reindex one document (picks up an in-place edit)
 ```
 
 The MCP server also reconciles on startup. See [mcp.md § Freshness](mcp.md#freshness-and-maintenance).
@@ -55,7 +56,7 @@ kb index ./my-corpus
 Incremental: changed files are re-extracted; removed files drop from the index and graph. Full rebuild:
 
 ```bash
-kb reindex ./my-corpus
+kb index ./my-corpus --force
 ```
 
 Indexing respects `.gitignore` by default. Use `kb search --no-ignore` when you need to include ignored paths in scans.

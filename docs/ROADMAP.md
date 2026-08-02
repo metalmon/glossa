@@ -17,7 +17,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
-- **CLI:** `kb search|grep|glob|read|index|reindex|graph …|mcp` — scripting-first, not a TUI.
+- **CLI:** `kb search|grep|glob|read|index|graph …|mcp` — scripting-first, not a TUI.
 - **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `neighbors`, formatted `graph_upsert` responses (Written / Merged / REJECTED).
 - **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks).
 - **Dev pipeline:** `justfile` recipes; Windows-friendly eval tooling.
@@ -56,7 +56,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | HTML / CSV / text streaming | **Partial** | Basic `html`, `csv`/`tsv` (100 rows/chunk), encoding sniff + binary skip in `text`; HTML image extraction (`<img>` tags) shipped in v0.2.5 |
 | Image files (png, …) | **Partial** | Filename/folder label chunk; vision at `read` time for embedded office images, not scanned PDF pages |
 | Image-only / scanned PDFs | **Partial** | One `(no-text)` filename chunk when no text layer — not per-page, no OCR |
-| Indexing UX | **Partial** | `+ path` per file on reindex; no bar/counters/ETA |
+| Indexing UX | **Partial** | `+ path` per file on index; no bar/counters/ETA |
 | Format sniffing (content, not extension) | **Open** | Routing by suffix; mislabeled `.doc`/RTF etc. hit wrong parser |
 | Table fidelity (xlsx/docx/pdf) | **Open** | Office → markdown tables break on multi-line cells; PDF is flat layout text |
 | Vision for image-only pages | **Open** | Render/read page images like office embeds in `read` |

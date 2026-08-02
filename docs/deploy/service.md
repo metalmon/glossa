@@ -97,7 +97,7 @@ Remove the install directory and corpus `.glossa/` if you want a clean slate. Co
 When you bump `kb` to a release that changes the index schema (`index_schema_version`):
 
 1. Stop MCP (stdio or HTTP service) and any `kb-train enrich` on the same corpus.
-2. Run `kb reindex <corpus>` once before restarting MCP.
-3. Do not run enrich and an MCP **editor** on the same `<corpus>` while a reindex is in progress — they share `.glossa` and contend on the tantivy writer lock.
+2. Run `kb index <corpus> --force` once before restarting MCP.
+3. Do not run enrich and an MCP **editor** on the same `<corpus>` while a full rebuild is in progress — they share `.glossa` and contend on the tantivy writer lock.
 
 MCP read tools serve the current on-disk index immediately; background `ensure_fresh` never blocks tool handlers. After `sc stop` / `sc start` on Windows HTTP MCP, reload the MCP client in Cursor (SSE sessions do not survive a service restart).

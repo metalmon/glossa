@@ -19,7 +19,7 @@ flowchart TB
   end
 
   subgraph corpus [kb-test corpus]
-    index[kb index / reindex once]
+    index[kb index --force once]
     enrich[just enrich]
   end
 
@@ -113,7 +113,7 @@ Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/deri
 Build or rebuild the search index **before** eval or GEPA (not per question):
 
 ```bash
-./target/release/kb reindex kb-test    # Windows: kb.exe
+./target/release/kb index kb-test --force    # Windows: kb.exe
 ```
 
 TensorZero eval uses a **pre-built index** in `--work`; it does not wipe `.glossa` between questions.
@@ -360,7 +360,7 @@ Full list: `just --list`.
 |---------|-------|
 | `export-tz` search=0 | No episodes or no registry join; run eval on train questions |
 | `joined_by_id=0` | Re-run eval with current `kb-eval` (needs `case_id` tag) |
-| GEPA baseline 0.000 | Empty index → `kb reindex kb-test`; LM Studio up; `just gw-restart` |
+| GEPA baseline 0.000 | Empty index → `kb index kb-test --force`; LM Studio up; `just gw-restart` |
 | `Unknown function: search` | Gateway on old config — `just gw-restart` |
 | `missing field context` | Stale `kb-eval` without `.exe` — `just build-eval force` |
 | `indexed: N added` every question | Stale eval binary or Hotpot dataset with `context` paragraphs |

@@ -14,7 +14,7 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 
 | Profile | Typical use | Disabled tools |
 |---------|-------------|----------------|
-| `reader` | Answer agents | `index`, `reindex`, `graph_*`, `purge`, `note`, `del` |
+| `reader` | Answer agents | `index`, `graph_*`, `purge`, `note`, `del` |
 | `editor` | Index + graph + notebook write | `purge` |
 | `full` | Admin | (none) |
 
@@ -43,8 +43,7 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `ls` | ✓ | ✓ | ✓ | List notebook notes (agent workspace); read note content with `read` |
 | `note` | | ✓ | ✓ | Create/replace — or with `append: true` extend — a notebook note (`doc`, `file`, `content`; `.csp` = validated limit table) |
 | `del` | | ✓ | ✓ | Delete a notebook note |
-| `index` | | ✓ | ✓ | Incremental index |
-| `reindex` | | ✓ | ✓ | Full rebuild |
+| `index` | | ✓ | ✓ | Incremental index; `force: true` for a full rebuild, `path: <doc>` to reindex just one document |
 | `graph_upsert` | | ✓ | ✓ | Create/update reasoning nodes and edges |
 | `graph_build` | | ✓* | ✓* | Compile `.csp` limit tables into constraint graph; only available with `--features constraint` |
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
@@ -147,7 +146,7 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 
 Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `del`) use `.glossa/notebook.lock` the same way.
 
-Index (re)builds are serialized across processes by `.glossa/index.lock`: `index`, `reindex` and the `ensure_fresh` background scan hold it for the whole rebuild. If another process already holds it, the call skips with a no-op stat instead of racing it — clearing and reopening `.glossa/index` concurrently would otherwise fail on Windows ("Access is denied"). The index is cooperative, so whoever wins the lock leaves it correct.
+Index (re)builds are serialized across processes by `.glossa/index.lock`: `index` (incremental, `force`, or single-`path`) and the `ensure_fresh` background scan hold it for the whole rebuild. If another process already holds it, the call skips with a no-op stat instead of racing it — clearing and reopening `.glossa/index` concurrently would otherwise fail on Windows ("Access is denied"). The index is cooperative, so whoever wins the lock leaves it correct.
 
 ## Regenerate external tool schemas
 
