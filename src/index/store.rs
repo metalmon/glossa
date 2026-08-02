@@ -1343,28 +1343,18 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
         Some(s) => s,
         None => return Ok(None),
     };
-    // Resolve this file's outgoing references against the current document set (mirrors index_dir_locked).
-    let manifest = Manifest::load(dir);
-    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-    for p in manifest.files.keys() {
-        if let Ok(c) = std::fs::canonicalize(idx.root.join(p)) {
-            by_canon.insert(c, p.clone());
-        }
-    }
-    for (src, target) in &links {
-        let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
-        if let Ok(canon) = std::fs::canonicalize(idx.root.join(src_dir).join(target)) {
-            if let Some(dst) = by_canon.get(&canon) {
-                // `links` only ever carries entries with src == rel (index_file_into only reindexed
-                // that one file), so the fresh `sig` just returned for it is always the right
-                // provenance stamp — unlike index_dir_locked's `next.files.get(src)`, there's no
-                // stale copy of `rel`'s signature to accidentally read here.
-                if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
-                    let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
-                }
-            }
-        }
-    }
+    // Resolve this file's outgoing references against the current document set, via the shared
+    // O(links) helper (mirrors index_dir_locked / reindex_dirs_locked — this used to be its own
+    // inline by_canon-over-ALL-manifest.files block, the same O(files) shape Finding 1 fixed
+    // elsewhere; a single-file reindex must not pay an all-corpus filesystem stat either).
+    // `links` only ever carries entries with src == rel (index_file_into only reindexed that one
+    // file), so seed the lookup map with THIS file's freshly-computed post-edit `sig` before
+    // resolving — otherwise the helper would read `rel`'s stale pre-edit (or altogether missing)
+    // signature out of the manifest as it stood before this call, and stamp the REFERENCES edge's
+    // provenance with that instead of the edit that just happened.
+    let mut manifest = Manifest::load(dir);
+    manifest.files.insert(rel.to_string(), sig);
+    let _ = resolve_reference_links(&graph, &idx.root, &manifest.files, &links);
     writer.commit()?;
     let mut m = Manifest::load(dir);
     m.files.insert(rel.to_string(), sig);
