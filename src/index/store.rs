@@ -1546,6 +1546,19 @@ fn diff_corpus_dirs(
     (changed, added, removed)
 }
 
+/// True iff the `n:`-prefixed (notebook notes) sub-map differs between two dir-mtime maps —
+/// the production rule for whether `reindex_dirs_locked`'s notes pass needs to run because a note
+/// itself moved (as opposed to Finding 2's owner-removed case, which the caller ORs in separately).
+fn notes_submap_changed(before: &BTreeMap<String, u128>, after: &BTreeMap<String, u128>) -> bool {
+    let notes_of = |m: &BTreeMap<String, u128>| {
+        m.iter()
+            .filter(|(k, _)| k.starts_with("n:"))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<BTreeMap<_, _>>()
+    };
+    notes_of(before) != notes_of(after)
+}
+
 /// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
 /// Fast path: if `.glossa/dirsig` already equals the current map, return immediately. Else
 /// take `index.lock` and index; if another process holds it, poll until either the persisted
@@ -1564,14 +1577,7 @@ pub fn freshen_blocking(dir: &Path, timeout: std::time::Duration) -> anyhow::Res
             // scoped pass reindexes everything -- equivalent to a full pass, self-healing.
             let stored = read_dirsig(dir).unwrap_or_default();
             let (changed, added, removed) = diff_corpus_dirs(&stored, &cur);
-            // Notes touched iff the `n:` sub-map differs between stored and current.
-            let notes_of = |m: &BTreeMap<String, u128>| {
-                m.iter()
-                    .filter(|(k, _)| k.starts_with("n:"))
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect::<BTreeMap<_, _>>()
-            };
-            let notes_touched = notes_of(&stored) != notes_of(&cur);
+            let notes_touched = notes_submap_changed(&stored, &cur);
             return reindex_dirs_locked(dir, &cur, &changed, &added, &removed, notes_touched);
         }
         // Another process is indexing. If it already reached our observed state, we are fresh.
@@ -2184,29 +2190,6 @@ mod incremental_tests {
         );
     }
 
-    /// Classify a `dir_mtime_map` diff into (changed, added, removed) `c:`-prefixed dir keys.
-    /// Test-local mirror of what `freshen` will do in the next task.
-    fn diff_dir_maps(
-        before: &BTreeMap<String, u128>,
-        after: &BTreeMap<String, u128>,
-    ) -> (Vec<String>, Vec<String>, Vec<String>) {
-        let c = |m: &BTreeMap<String, u128>| {
-            m.iter()
-                .filter(|(k, _)| k.starts_with("c:"))
-                .map(|(k, v)| (k.clone(), *v))
-                .collect::<BTreeMap<_, _>>()
-        };
-        let (b, a) = (c(before), c(after));
-        let changed = a
-            .iter()
-            .filter(|(k, v)| b.get(*k).map_or(false, |bv| bv != *v))
-            .map(|(k, _)| k.clone())
-            .collect();
-        let added = a.keys().filter(|k| !b.contains_key(*k)).cloned().collect();
-        let removed = b.keys().filter(|k| !a.contains_key(*k)).cloned().collect();
-        (changed, added, removed)
-    }
-
     #[test]
     fn reindex_dirs_matches_full_across_scenarios() {
         // Golden: for each mutation, a scoped pass over the affected dirs yields the same searchable
@@ -2226,11 +2209,11 @@ mod incremental_tests {
             apply(dir.path());
             let after = dir_mtime_map(dir.path()).unwrap();
             if scoped {
-                let (changed, added, removed) = diff_dir_maps(&before, &after);
-                let notes = after
-                    .keys()
-                    .chain(before.keys())
-                    .any(|k| k.starts_with("n:"));
+                // Production classification: the same `diff_corpus_dirs` + `notes_submap_changed`
+                // calls `freshen_blocking` makes, so this golden test guards the real
+                // scoped-vs-full equivalence, not a local approximation of it.
+                let (changed, added, removed) = diff_corpus_dirs(&before, &after);
+                let notes = notes_submap_changed(&before, &after);
                 let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
                 reindex_dirs_locked(dir.path(), &after, &changed, &added, &removed, notes).unwrap();
             } else {
@@ -2296,9 +2279,10 @@ mod incremental_tests {
             std::fs::write(dir.path().join("b.md"), b"# B\nother\n").unwrap();
             let after = dir_mtime_map(dir.path()).unwrap();
             if scoped {
-                let (changed, added, removed) = diff_dir_maps(&before, &after);
+                let (changed, added, removed) = diff_corpus_dirs(&before, &after);
+                let notes = notes_submap_changed(&before, &after);
                 let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
-                reindex_dirs_locked(dir.path(), &after, &changed, &added, &removed, false).unwrap();
+                reindex_dirs_locked(dir.path(), &after, &changed, &added, &removed, notes).unwrap();
             } else {
                 index_dir(dir.path(), false).unwrap();
             }
