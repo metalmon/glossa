@@ -105,6 +105,19 @@ pub fn abs_root(dir: &Path) -> PathBuf {
     }
 }
 
+/// Like `abs_root`, but for an arbitrary path rather than the corpus root, and `None` (not a
+/// same-path fallback) when canonicalization fails — the caller needs to know the path didn't
+/// resolve, not receive an un-canonicalized stand-in it could accidentally match against.
+fn canonicalize_stripped(path: &Path) -> Option<PathBuf> {
+    let p = std::fs::canonicalize(path).ok()?;
+    let s = p.to_string_lossy();
+    Some(PathBuf::from(
+        s.strip_prefix(r"\\?\")
+            .map(str::to_string)
+            .unwrap_or_else(|| s.into_owned()),
+    ))
+}
+
 /// A document's canonical key: its path RELATIVE to the corpus root. This is the ONE form stored in
 /// the index and the graph; `DocIndex::doc_file` turns it back into a real file path. Built once,
 /// at the walk boundary, so the stored key never depends on how the corpus was addressed.
@@ -1146,19 +1159,26 @@ fn resolve_reference_links(
     files: &std::collections::BTreeMap<String, FileSig>,
     links: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-    for p in files.keys() {
-        if let Ok(c) = std::fs::canonicalize(root.join(p)) {
-            by_canon.insert(c, p.clone());
-        }
+    // Nothing to resolve → skip touching the filesystem at all (the common case on a scoped
+    // pass over a large corpus, where most dirs carry no cross-doc links).
+    if links.is_empty() {
+        return Vec::new();
     }
+    // Canonicalize only the LINK TARGETS (O(links)), not every corpus document (O(files)) — a
+    // scoped reindex pass over a handful of changed dirs must not pay an all-corpus filesystem
+    // stat just because a link happened to be present. `canonicalize_stripped` mirrors `abs_root`'s
+    // `\\?\`-stripping exactly (unlike `abs_root` itself, it returns `None` on failure rather than
+    // falling back to the un-canonicalized path) so the result is in the SAME form as `root_abs`
+    // and `rel_key`'s `strip_prefix` actually matches instead of silently falling through to the
+    // absolute path.
+    let root_abs = abs_root(root);
     let mut unresolved = Vec::new();
-    for (src, target) in links {
+    for (src, raw_target) in links {
         let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
-        let resolved = std::fs::canonicalize(root.join(src_dir).join(target))
-            .ok()
-            .and_then(|canon| by_canon.get(&canon).cloned());
-        match resolved {
+        let dst = canonicalize_stripped(&root.join(src_dir).join(raw_target))
+            .map(|canon| rel_key(&root_abs, &canon))
+            .filter(|rel| files.contains_key(rel));
+        match dst {
             Some(dst) if &dst != src && matches!(graph.get_node(&dst), Ok(Some(_))) => {
                 let sig = files.get(src).copied().unwrap_or(FileSig {
                     mtime_secs: 0,
@@ -1166,7 +1186,7 @@ fn resolve_reference_links(
                 });
                 let _ = crate::graph::build::link_reference(graph, src, &dst, sig);
             }
-            _ => unresolved.push((src.clone(), target.clone())),
+            _ => unresolved.push((src.clone(), raw_target.clone())),
         }
     }
     unresolved
