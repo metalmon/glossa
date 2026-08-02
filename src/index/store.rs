@@ -1050,10 +1050,8 @@ fn write_dirsig(dir: &Path, map: &BTreeMap<String, u128>) {
     let Ok(s) = serde_json::to_string(map) else {
         return;
     };
-    let tmp = glossa.join("dirsig.tmp");
-    if std::fs::write(&tmp, s).is_ok() {
-        let _ = std::fs::rename(&tmp, glossa.join("dirsig"));
-    }
+    // Atomic + retry (temp + rename past transient Windows Access-denied). Best-effort.
+    let _ = crate::index::manifest::atomic_write(&glossa.join("dirsig"), s.as_bytes());
 }
 
 /// Index one file into an already-open writer + graph: drops the file's old chunks and

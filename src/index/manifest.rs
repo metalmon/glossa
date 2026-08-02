@@ -47,6 +47,27 @@ fn manifest_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".glossa").join("manifest.json")
 }
 
+/// Atomically publish `data` to `path`: write a unique sibling temp file, then rename over the
+/// target, so a concurrent reader never sees a half-written file. Retries a few times past a
+/// transient Windows "Access is denied" (`ErrorKind::PermissionDenied`) — a just-created or
+/// Defender-scanned file, or one briefly held open by a concurrent reader, can momentarily block
+/// the rename. Mirrors the tantivy `with_writer_retry` backoff.
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("f");
+    let tmp = path.with_file_name(format!("{name}.tmp.{}", std::process::id()));
+    let mut attempt = 0u32;
+    loop {
+        match std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path)) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 5 && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(20 * attempt)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl Manifest {
     pub fn load(dir: &Path) -> Manifest {
         let p = manifest_path(dir);
@@ -62,11 +83,9 @@ impl Manifest {
             std::fs::create_dir_all(parent)?;
         }
         let s = serde_json::to_string_pretty(self).context("serialize manifest")?;
-        // Atomic publish: write to a sibling temp file, then rename over the target, so a concurrent
-        // `Manifest::load` never reads a half-written file (it would `unwrap_or_default()` to empty).
-        let tmp = p.with_extension(format!("json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, s).with_context(|| format!("write {tmp:?}"))?;
-        std::fs::rename(&tmp, &p).with_context(|| format!("rename {tmp:?} -> {p:?}"))?;
+        // Atomic publish (temp + rename, retrying past transient Windows Access-denied) so a
+        // concurrent `Manifest::load` never reads a half-written file.
+        atomic_write(&p, s.as_bytes()).with_context(|| format!("write manifest {p:?}"))?;
         Ok(())
     }
 
@@ -136,14 +155,14 @@ mod tests {
             },
         );
         m.save(dir.path()).unwrap();
-        // No leftover temp file, and the manifest round-trips.
-        assert!(
-            !dir.path()
-                .join(".glossa")
-                .join("manifest.json.tmp")
-                .exists(),
-            "temp file cleaned up"
-        );
+        // No leftover temp file (pid-suffixed), and the manifest round-trips.
+        let temps: Vec<_> = std::fs::read_dir(dir.path().join(".glossa"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(temps.is_empty(), "temp files cleaned up: {temps:?}");
         let loaded = Manifest::load(dir.path());
         assert_eq!(
             loaded.files.get("a.md"),
@@ -162,6 +181,25 @@ mod tests {
         );
         m.save(dir.path()).unwrap();
         assert_eq!(Manifest::load(dir.path()).files.len(), 2);
+    }
+
+    #[test]
+    fn atomic_write_publishes_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        atomic_write(&p, b"first").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "first");
+        // Rename over an existing target works.
+        atomic_write(&p, b"second").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "second");
+        // No temp siblings left behind.
+        let temps: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(temps.is_empty(), "no temp files left: {temps:?}");
     }
 
     #[test]
