@@ -1340,11 +1340,18 @@ mod incremental_tests {
             g.node_count().unwrap() >= 2,
             "Document + Section nodes built"
         );
-        // cross-doc reference b.md -> a.md resolved (REFERENCES links Document node to
-        // Document node, not section to section — see link_reference).
-        assert!(!crate::graph::traverse::neighbors(&g, "b.md", None, 1)
-            .unwrap()
-            .is_empty());
+        // cross-doc reference b.md -> a.md resolved to a REFERENCES edge (REFERENCES links
+        // Document node to Document node, not section to section — see link_reference).
+        // Asserts the SPECIFIC target, not just non-emptiness: `neighbors` with
+        // `edge_types: None` also picks up the unconditional CONTAINS edge from
+        // Document("b.md") to its own Section("b.md#1"), which would make a bare
+        // `!is_empty()` pass even if reference resolution were broken.
+        assert!(
+            crate::graph::traverse::neighbors(&g, "b.md", None, 1)
+                .unwrap()
+                .contains(&"a.md".to_string()),
+            "cross-doc reference b.md -> a.md resolved to a REFERENCES edge (not just the self CONTAINS edge)"
+        );
     }
 
     #[test]
