@@ -1466,12 +1466,16 @@ pub fn reindex_dirs_locked(
         stats.removed += 1;
     }
 
-    // 3. Notes (only when a `n:` dir key moved): reuse the exact notes-index/drop block
-    // `index_dir_locked` uses, sourced from a fresh `scan_notes_delta` against the manifest as it
-    // stands after steps 1-2. `owner_in` (inside `scan_notes_delta`) checks `d.next.files` for a
-    // note's owning document, so it must be seeded with the current file map, not left empty.
+    // 3. Notes: run when a `n:` dir key moved OR a corpus document was removed this pass. Deleting
+    // an owner document only bumps its `c:` parent dir (the notes tree under `.glossa/notes` is
+    // untouched), so `notes_touched` alone would miss it and leave the orphaned note's chunk
+    // searchable — unlike a full `index_dir`, which always runs the notes pass and lets
+    // `owner_in` purge it. Reuse the exact notes-index/drop block `index_dir_locked` uses,
+    // sourced from a fresh `scan_notes_delta` against the manifest as it stands after steps 1-2.
+    // `owner_in` (inside `scan_notes_delta`) checks `d.next.files` for a note's owning document,
+    // so it must be seeded with the current file map, not left empty.
     #[cfg(feature = "notebook")]
-    if notes_touched {
+    if notes_touched || !gone.is_empty() {
         let mut d = Delta::default();
         d.next.files = manifest.files.clone();
         scan_notes_delta(dir, &manifest, &mut d)?;
@@ -2812,6 +2816,71 @@ mod search_tests {
                 .iter()
                 .any(|h| h.path == "doc.md/limits.csp"),
             "note re-indexed once owner returns"
+        );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn reindex_dirs_locked_purges_orphaned_note_on_owner_removal() {
+        // Regression for Finding 2: deleting an owner document bumps only its `c:` corpus dir —
+        // the `.glossa/notes/<doc>` tree is untouched — so `notes_touched` computed from the
+        // dir-map diff alone stays false. A SCOPED `reindex_dirs_locked` pass must still purge
+        // the now-orphaned note's chunk, matching what a full `index_dir` already does (see
+        // `note_is_dropped_when_owner_removed_and_restored_when_owner_returns` above).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+
+        let notes_dir = dir.path().join(".glossa").join("notes").join("doc.md");
+        fs::create_dir_all(&notes_dir).unwrap();
+        fs::write(notes_dir.join("limits.csp"), b"sentinel note text").unwrap();
+        index_dir(dir.path(), false).unwrap();
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "note is searchable while owner exists"
+        );
+
+        // Remove the owner document, then run the same scoped-reindex path `freshen_blocking`
+        // would run: diff the dir-mtime maps and hand the classification to `reindex_dirs_locked`.
+        let before = dir_mtime_map(dir.path()).unwrap();
+        fs::remove_file(dir.path().join("doc.md")).unwrap();
+        let after = dir_mtime_map(dir.path()).unwrap();
+        let (changed, added, removed) = diff_corpus_dirs(&before, &after);
+        let notes_touched = notes_submap_changed(&before, &after);
+        assert!(
+            !notes_touched,
+            "removing the owner doc must NOT bump the notes dir (that's the bug this test guards against)"
+        );
+        {
+            let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+            reindex_dirs_locked(
+                dir.path(),
+                &after,
+                &changed,
+                &added,
+                &removed,
+                notes_touched,
+            )
+            .unwrap();
+        }
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            !idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/limits.csp"),
+            "orphan chunk removed from the index after a SCOPED reindex, matching a full index_dir"
+        );
+        let m = crate::index::manifest::Manifest::load(dir.path());
+        assert!(
+            !m.notes.contains_key("doc.md/limits.csp"),
+            "orphan not tracked as a live note in the persisted manifest after a scoped reindex"
         );
     }
 
