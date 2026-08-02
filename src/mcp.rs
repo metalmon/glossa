@@ -889,10 +889,12 @@ impl GlossaServer {
             };
             // Explicit call — bounded wait for the lock (mirror freshen_blocking's loop, ~3s).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut done = false;
             loop {
                 if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
                     crate::index::store::index_one_file_locked(&self.root, &rel)
                         .map_err(internal)?;
+                    done = true;
                     break;
                 }
                 if std::time::Instant::now() >= deadline {
@@ -900,10 +902,15 @@ impl GlossaServer {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            self.mark_dirty();
+            if done {
+                self.mark_dirty();
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "reindexed {rel} in {}",
+                    crate::cli_fmt::format_elapsed(started.elapsed())
+                ))]));
+            }
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "reindexed {rel} in {}",
-                crate::cli_fmt::format_elapsed(started.elapsed())
+                "index busy (another process is indexing), try again: {rel}"
             ))]));
         }
         let s = index_dir(&self.root, a.force.unwrap_or(false)).map_err(internal)?;
@@ -1831,6 +1838,38 @@ mod tests {
         assert!(
             !names.contains(&"reindex".to_string()),
             "reindex tool removed"
+        );
+    }
+
+    // Slow (~3s): holds the index lock for the handler's whole bounded-wait deadline to force
+    // the timeout path. Verifies the message is honest — no fabricated "reindexed" success, and
+    // no mark_dirty() side effect — when another process keeps the lock the entire time.
+    #[tokio::test]
+    async fn index_tool_path_reports_busy_when_lock_never_frees() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\noriginaltoken\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        // Another process holds the index lock for the whole handler call.
+        let _holder = crate::index::lock::try_index_lock(dir.path()).unwrap();
+        let out = srv
+            .index(Parameters(IndexArgs {
+                force: None,
+                path: Some("a.md".into()),
+            }))
+            .await
+            .unwrap();
+        let text = format!("{out:?}");
+        assert!(text.contains("busy"), "reports busy: {text}");
+        assert!(
+            !text.contains("reindexed"),
+            "must not claim success while the lock stayed held: {text}"
         );
     }
 }
