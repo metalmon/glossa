@@ -705,6 +705,31 @@ pub fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
     })
 }
 
+/// Reindex ONE notebook note (an external in-place content edit picked up on read), assuming the
+/// caller holds `index.lock`. A note is a single `"note"` chunk with no graph edges, so this is an
+/// idempotent `write_chunks` (delete-by-path → add → commit) plus a `manifest.notes` sig update.
+/// `None` if the note file is gone/unreadable — the manifest is left untouched (deletion changes the
+/// notes dir mtime and is handled by the freshen notes pass, which drops the chunk).
+pub fn reindex_note_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<FileSig>> {
+    let abs = dir.join(".glossa").join("notes").join(rel);
+    let body = match std::fs::read_to_string(&abs) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let idx = DocIndex::open_or_create(dir)?;
+    idx.write_chunks(&[crate::model::Chunk {
+        doc_path: std::path::PathBuf::from(rel),
+        location: "note".into(),
+        file_type: "note".into(),
+        text: body,
+    }])?;
+    let sig = file_sig(&abs)?;
+    let mut m = Manifest::load(dir);
+    m.notes.insert(rel.to_string(), sig);
+    m.save(dir)?;
+    Ok(Some(sig))
+}
+
 impl DocIndex {
     /// Visit every stored chunk: `f(path, ord, file_type, body)`. Used by grep's full scan.
     pub fn iter_chunks(&self, mut f: impl FnMut(&str, u64, &str, &str)) -> anyhow::Result<()> {
@@ -2914,6 +2939,67 @@ mod search_tests {
                 .iter()
                 .any(|h| h.path == "doc.md/limits.csp"),
             "force reindex preserves notes"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "notebook")]
+    fn reindex_note_locked_picks_up_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let notes = dir.path().join(".glossa").join("notes").join("doc.md");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("n.csp"), b"oldtoken").unwrap();
+        // First index of the note.
+        {
+            let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+            reindex_note_locked(dir.path(), "doc.md/n.csp").unwrap();
+        }
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("oldtoken", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path == "doc.md/n.csp"));
+        // Edit the note file on disk, reindex → new content searchable, old gone, manifest updated.
+        std::fs::write(notes.join("n.csp"), b"newtoken sentinel").unwrap();
+        {
+            let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+            reindex_note_locked(dir.path(), "doc.md/n.csp").unwrap();
+        }
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "doc.md/n.csp"),
+            "new content searchable"
+        );
+        assert!(
+            idx.search("oldtoken", 10).unwrap().is_empty(),
+            "old content gone"
+        );
+        assert_eq!(
+            crate::index::manifest::Manifest::load(dir.path())
+                .notes
+                .get("doc.md/n.csp"),
+            Some(&file_sig(&notes.join("n.csp")).unwrap()),
+            "manifest.notes sig updated"
+        );
+        // Gone file → Ok(None), manifest untouched.
+        std::fs::remove_file(notes.join("n.csp")).unwrap();
+        {
+            let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+            assert!(reindex_note_locked(dir.path(), "doc.md/n.csp")
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            crate::index::manifest::Manifest::load(dir.path())
+                .notes
+                .contains_key("doc.md/n.csp"),
+            "manifest.notes untouched on missing file (deletion handled by freshen)"
         );
     }
 }
