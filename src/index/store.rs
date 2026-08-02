@@ -1502,6 +1502,30 @@ pub fn reindex_dirs_locked(
     Ok(stats)
 }
 
+/// Classify a dir-map diff into changed/added/removed CORPUS (`c:`) dir keys.
+fn diff_corpus_dirs(
+    before: &BTreeMap<String, u128>,
+    after: &BTreeMap<String, u128>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let is_c = |k: &String| k.starts_with("c:");
+    let changed = after
+        .iter()
+        .filter(|(k, v)| is_c(k) && before.get(*k).is_some_and(|bv| bv != *v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    let added = after
+        .keys()
+        .filter(|k| is_c(k) && !before.contains_key(*k))
+        .cloned()
+        .collect();
+    let removed = before
+        .keys()
+        .filter(|k| is_c(k) && !after.contains_key(*k))
+        .cloned()
+        .collect();
+    (changed, added, removed)
+}
+
 /// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
 /// Fast path: if `.glossa/dirsig` already equals the current map, return immediately. Else
 /// take `index.lock` and index; if another process holds it, poll until either the persisted
@@ -1514,8 +1538,21 @@ pub fn freshen_blocking(dir: &Path, timeout: std::time::Duration) -> anyhow::Res
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(_guard) = crate::index::lock::try_index_lock(dir) {
-            // We own the lock: index the current tree (index_dir_locked records dirsig). Fresh on return.
-            return index_dir_locked(dir, false);
+            // We own the lock: compute the dir-map diff against the last-indexed state and
+            // reindex only the changed/added/removed corpus dirs (scoped, sublinear pass).
+            // On first run / migration `stored` is empty, so every dir is `added` and the
+            // scoped pass reindexes everything -- equivalent to a full pass, self-healing.
+            let stored = read_dirsig(dir).unwrap_or_default();
+            let (changed, added, removed) = diff_corpus_dirs(&stored, &cur);
+            // Notes touched iff the `n:` sub-map differs between stored and current.
+            let notes_of = |m: &BTreeMap<String, u128>| {
+                m.iter()
+                    .filter(|(k, _)| k.starts_with("n:"))
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect::<BTreeMap<_, _>>()
+            };
+            let notes_touched = notes_of(&stored) != notes_of(&cur);
+            return reindex_dirs_locked(dir, &cur, &changed, &added, &removed, notes_touched);
         }
         // Another process is indexing. If it already reached our observed state, we are fresh.
         if read_dirsig(dir).as_ref() == Some(&cur) {
@@ -2955,6 +2992,28 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.path.ends_with("b.md")));
+    }
+
+    #[test]
+    fn freshen_blocking_scoped_picks_up_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
+        freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
+        // Add a file, then freshen — it must become searchable (via the scoped path).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
+        freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("bravo", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("b.md")));
+        // dirsig now matches the current tree → a second freshen is a no-op.
+        assert_eq!(
+            read_dirsig(dir.path()),
+            Some(dir_mtime_map(dir.path()).unwrap())
+        );
     }
 
     #[test]
