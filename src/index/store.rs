@@ -786,11 +786,10 @@ pub struct Delta {
     pub next: Manifest,
 }
 
-/// Stable hash of every directory's mtime under the corpus (skipping `.glossa`) plus every
-/// directory under `.glossa/notes`. Adding/removing/renaming a file bumps its parent dir's mtime
-/// (and new/removed dirs change the set), so the hash changes; an in-place content edit does not.
-/// Uses nanosecond mtime so a same-second add is still detected. O(dirs), not O(files).
-pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
+/// Per-directory mtime map: `c:{rel}` for corpus dirs (gitignore-aware, skips `.glossa`), `n:{rel}`
+/// for `.glossa/notes` dirs; values are nanosecond mtimes. Add/remove/rename of a file bumps its
+/// parent dir's entry; a new/removed subdir adds/drops an entry. In-place content edits don't change it.
+pub fn dir_mtime_map(dir: &Path) -> anyhow::Result<BTreeMap<String, u128>> {
     let root = abs_root(dir);
     let mut map: BTreeMap<String, u128> = BTreeMap::new();
     collect_dir_mtimes(&root, true, "c", &mut map);
@@ -798,6 +797,15 @@ pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
     if notes_root.is_dir() {
         collect_dir_mtimes(&notes_root, false, "n", &mut map);
     }
+    Ok(map)
+}
+
+/// Stable hash of every directory's mtime under the corpus (skipping `.glossa`) plus every
+/// directory under `.glossa/notes`. Adding/removing/renaming a file bumps its parent dir's mtime
+/// (and new/removed dirs change the set), so the hash changes; an in-place content edit does not.
+/// Uses nanosecond mtime so a same-second add is still detected. O(dirs), not O(files).
+pub fn dir_mtime_signature(dir: &Path) -> anyhow::Result<u64> {
+    let map = dir_mtime_map(dir)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for (k, v) in &map {
         k.hash(&mut h);
@@ -1673,6 +1681,34 @@ mod incremental_tests {
                 .iter()
                 .any(|h| h.path.ends_with("profibus.png")),
             "loose image is searchable by name"
+        );
+    }
+
+    #[test]
+    fn dir_mtime_map_keys_and_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.md"), b"# B\ny\n").unwrap();
+        let m1 = dir_mtime_map(dir.path()).unwrap();
+        assert!(m1.contains_key("c:"), "root dir present as c:");
+        assert!(m1.contains_key("c:sub"), "subdir present as c:sub");
+        // Adding a file bumps its parent dir's mtime entry.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("sub").join("c.md"), b"# C\nz\n").unwrap();
+        let m2 = dir_mtime_map(dir.path()).unwrap();
+        assert_ne!(m1.get("c:sub"), m2.get("c:sub"), "sub mtime changed");
+        assert_eq!(
+            m1.get("c:"),
+            m2.get("c:"),
+            "root unchanged (no direct child added)"
+        );
+        // The aggregate signature wrapper still works and is stable across calls.
+        let s = dir_mtime_signature(dir.path()).unwrap();
+        assert_eq!(
+            s,
+            dir_mtime_signature(dir.path()).unwrap(),
+            "aggregate signature stable"
         );
     }
 
