@@ -54,7 +54,11 @@ impl Manifest {
             std::fs::create_dir_all(parent)?;
         }
         let s = serde_json::to_string_pretty(self).context("serialize manifest")?;
-        std::fs::write(&p, s).with_context(|| format!("write {p:?}"))?;
+        // Atomic publish: write to a sibling temp file, then rename over the target, so a concurrent
+        // `Manifest::load` never reads a half-written file (it would `unwrap_or_default()` to empty).
+        let tmp = p.with_extension("json.tmp");
+        std::fs::write(&tmp, s).with_context(|| format!("write {tmp:?}"))?;
+        std::fs::rename(&tmp, &p).with_context(|| format!("rename {tmp:?} -> {p:?}"))?;
         Ok(())
     }
 
@@ -110,6 +114,46 @@ mod tests {
                 size: 1
             }
         ));
+    }
+
+    #[test]
+    fn save_is_atomic_temp_plus_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::default();
+        m.files.insert(
+            "a.md".into(),
+            FileSig {
+                mtime_secs: 3,
+                size: 4,
+            },
+        );
+        m.save(dir.path()).unwrap();
+        // No leftover temp file, and the manifest round-trips.
+        assert!(
+            !dir.path()
+                .join(".glossa")
+                .join("manifest.json.tmp")
+                .exists(),
+            "temp file cleaned up"
+        );
+        let loaded = Manifest::load(dir.path());
+        assert_eq!(
+            loaded.files.get("a.md"),
+            Some(&FileSig {
+                mtime_secs: 3,
+                size: 4
+            })
+        );
+        // Saving again over an existing file still works (rename overwrites).
+        m.files.insert(
+            "b.md".into(),
+            FileSig {
+                mtime_secs: 5,
+                size: 6,
+            },
+        );
+        m.save(dir.path()).unwrap();
+        assert_eq!(Manifest::load(dir.path()).files.len(), 2);
     }
 
     #[test]
