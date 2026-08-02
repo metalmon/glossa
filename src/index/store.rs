@@ -1247,6 +1247,10 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
                 old_path.as_str(),
             ));
             graph.delete_auto_by_source(old_path)?;
+            // Also drop auto edges OTHER docs authored pointing AT this now-removed doc (e.g. a
+            // REFERENCES edge whose source_path is the referencing doc, not this one), so a
+            // deleted document doesn't leave a dangling edge behind (mirrors reindex_dirs_locked).
+            graph.delete_auto_by_target(old_path)?;
             stats.removed += 1;
         }
     }
@@ -1346,6 +1350,155 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
     m.files.insert(rel.to_string(), sig);
     m.save(dir)?;
     Ok(Some(sig))
+}
+
+/// The `c:`-prefixed corpus dir key (as produced by `dir_mtime_map`) containing manifest file key
+/// `rel_file`: `"c:"` for a root file, else `"c:{parent}"`. Manifest file keys (`rel_key`) use the
+/// OS-native separator (`\` on Windows), but `dir_mtime_map`'s dir keys are always forward-slash
+/// (`collect_dir_mtimes` normalizes them) — normalize here first so the two key spaces compare
+/// equal on every platform.
+fn parent_dir_key(rel_file: &str) -> String {
+    let normalized = rel_file.replace('\\', "/");
+    match normalized.rfind('/') {
+        Some(i) => format!("c:{}", &normalized[..i]),
+        None => "c:".to_string(),
+    }
+}
+
+/// Scoped reindex of only the corpus dirs the caller determined changed/added/removed (typically
+/// from a `dir_mtime_map` diff), assuming `index.lock` is already held. Reindexes just the
+/// affected dirs' files (via `index_file_into`), drops files/dirs that vanished (cleaning graph
+/// edges in BOTH directions), runs the notes pass if `notes_touched`, re-resolves references
+/// (including previously-persisted `unresolved_links`), updates the manifest partially, commits,
+/// and writes `cur_map` to `.glossa/dirsig`. Mirrors `index_dir_locked`'s per-file logic, but the
+/// walk (and thus the extraction cost) is scoped to `changed`/`added`, not the whole corpus.
+pub fn reindex_dirs_locked(
+    dir: &Path,
+    cur_map: &BTreeMap<String, u128>,
+    changed: &[String],
+    added: &[String],
+    removed: &[String],
+    notes_touched: bool,
+) -> anyhow::Result<IndexStats> {
+    let idx = DocIndex::open_or_create(dir)?;
+    let graph = crate::graph::store::GraphStore::open(dir)?;
+    let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
+    let mut manifest = Manifest::load(dir);
+    let mut links: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stats = IndexStats::default();
+
+    // 1. Rescan affected dirs: index new/changed IMMEDIATE files of each changed/added corpus dir
+    // (same ignore semantics as the corpus walk, but depth-1 since only that dir's own files can
+    // have changed — a changed grandchild dir shows up as its own separate key in the map diff).
+    let rescan: Vec<String> = changed.iter().chain(added.iter()).cloned().collect();
+    for key in &rescan {
+        let d = key.strip_prefix("c:").unwrap_or("");
+        let base = if d.is_empty() {
+            idx.root.clone()
+        } else {
+            idx.root.join(d)
+        };
+        let mut wb = WalkBuilder::new(&base);
+        wb.standard_filters(true);
+        wb.max_depth(Some(1));
+        wb.filter_entry(|e| e.file_name() != ".glossa");
+        for entry in wb.build().flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            let rel = rel_key(&idx.root, path);
+            let sig = match file_sig(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            seen.insert(rel.clone());
+            if manifest.files.get(&rel) != Some(&sig)
+                && index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?.is_some()
+            {
+                manifest.files.insert(rel.clone(), sig);
+                stats.added += 1;
+            }
+        }
+    }
+
+    // 2. Drop removed files/dirs (clean edges BOTH directions): a manifest key K is removed iff
+    // its parent dir is wholly gone, or K's parent dir was rescanned above and K didn't turn up.
+    // Collect first, then remove, so we don't mutate `manifest.files` while iterating its keys.
+    let rescan_set: std::collections::HashSet<&str> = rescan.iter().map(String::as_str).collect();
+    let removed_set: std::collections::HashSet<&str> = removed.iter().map(String::as_str).collect();
+    let all_keys: Vec<String> = manifest.files.keys().cloned().collect();
+    let gone: Vec<String> = all_keys
+        .into_iter()
+        .filter(|k| {
+            let pd = parent_dir_key(k);
+            removed_set.contains(pd.as_str())
+                || (rescan_set.contains(pd.as_str()) && !seen.contains(k.as_str()))
+        })
+        .collect();
+    for k in &gone {
+        writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, k.as_str()));
+        graph.delete_auto_by_source(k)?;
+        graph.delete_auto_by_target(k)?;
+        manifest.files.remove(k);
+        stats.removed += 1;
+    }
+
+    // 3. Notes (only when a `n:` dir key moved): reuse the exact notes-index/drop block
+    // `index_dir_locked` uses, sourced from a fresh `scan_notes_delta` against the manifest as it
+    // stands after steps 1-2. `owner_in` (inside `scan_notes_delta`) checks `d.next.files` for a
+    // note's owning document, so it must be seeded with the current file map, not left empty.
+    #[cfg(feature = "notebook")]
+    if notes_touched {
+        let mut d = Delta::default();
+        d.next.files = manifest.files.clone();
+        scan_notes_delta(dir, &manifest, &mut d)?;
+        let notes_root = dir.join(".glossa").join("notes");
+        for rel in &d.notes_changed {
+            let body = match std::fs::read_to_string(notes_root.join(rel)) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("index notes: skip {rel}: {e}");
+                    d.next.notes.remove(rel);
+                    continue;
+                }
+            };
+            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, rel));
+            let _ = writer.add_document(doc!(
+                idx.fields.body => body.clone(),
+                idx.fields.body_trigrams => body.clone(),
+                idx.fields.path => rel.clone(),
+                idx.fields.location => "note",
+                idx.fields.file_type => "note",
+                idx.fields.ord => 1u64,
+            ));
+            stats.added += 1;
+        }
+        for rel in &d.notes_removed {
+            writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, rel));
+            stats.removed += 1;
+        }
+        manifest.notes = d.next.notes;
+    }
+
+    // 4. References: resolve freshly-collected links plus carried-over `unresolved_links` (dropping
+    // any whose source no longer exists — its edges were already dropped in step 2) against the
+    // now-current document set; store what's still unresolved back into the manifest.
+    let fresh_srcs: std::collections::HashSet<String> =
+        links.iter().map(|(src, _)| src.clone()).collect();
+    let mut all = links;
+    for (src, target) in manifest.unresolved_links.drain(..) {
+        if manifest.files.contains_key(&src) && !fresh_srcs.contains(&src) {
+            all.push((src, target));
+        }
+    }
+    manifest.unresolved_links = resolve_reference_links(&graph, &idx.root, &manifest.files, &all);
+
+    writer.commit()?;
+    manifest.save(dir)?;
+    write_dirsig(dir, cur_map);
+    Ok(stats)
 }
 
 /// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
@@ -1971,6 +2124,101 @@ mod incremental_tests {
             build(false),
             "single-file reindex equals full delta reindex for the edited file, including its REFERENCES edges"
         );
+    }
+
+    /// Classify a `dir_mtime_map` diff into (changed, added, removed) `c:`-prefixed dir keys.
+    /// Test-local mirror of what `freshen` will do in the next task.
+    fn diff_dir_maps(
+        before: &BTreeMap<String, u128>,
+        after: &BTreeMap<String, u128>,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let c = |m: &BTreeMap<String, u128>| {
+            m.iter()
+                .filter(|(k, _)| k.starts_with("c:"))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let (b, a) = (c(before), c(after));
+        let changed = a
+            .iter()
+            .filter(|(k, v)| b.get(*k).map_or(false, |bv| bv != *v))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let added = a.keys().filter(|k| !b.contains_key(*k)).cloned().collect();
+        let removed = b.keys().filter(|k| !a.contains_key(*k)).cloned().collect();
+        (changed, added, removed)
+    }
+
+    #[test]
+    fn reindex_dirs_matches_full_across_scenarios() {
+        // Golden: for each mutation, a scoped pass over the affected dirs yields the same searchable
+        // state + graph (nodes + auto edges) as a full index_dir(force) on the same final disk state.
+        let mutate = |p: &std::path::Path| {
+            std::fs::write(p.join("a.md"), b"# A\nalpha [c](sub/c.md)\n").unwrap();
+            std::fs::create_dir_all(p.join("sub")).unwrap();
+            std::fs::write(p.join("sub").join("c.md"), b"# C\ngamma\n").unwrap();
+        };
+        let scenario = |apply: &dyn Fn(&std::path::Path),
+                        scoped: bool|
+         -> (Vec<String>, u64, Vec<(String, String)>) {
+            let dir = tempfile::tempdir().unwrap();
+            mutate(dir.path());
+            index_dir(dir.path(), true).unwrap();
+            let before = dir_mtime_map(dir.path()).unwrap();
+            apply(dir.path());
+            let after = dir_mtime_map(dir.path()).unwrap();
+            if scoped {
+                let (changed, added, removed) = diff_dir_maps(&before, &after);
+                let notes = after
+                    .keys()
+                    .chain(before.keys())
+                    .any(|k| k.starts_with("n:"));
+                let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+                reindex_dirs_locked(dir.path(), &after, &changed, &added, &removed, notes).unwrap();
+            } else {
+                index_dir(dir.path(), false).unwrap();
+            }
+            let idx = DocIndex::open_or_create(dir.path()).unwrap();
+            let mut hits: Vec<String> = idx
+                .search("alpha gamma delta", 50)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            hits.sort();
+            let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+            let mut refs: Vec<(String, String)> = g
+                .all_edges()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.edge_type == "REFERENCES")
+                .map(|e| (e.from.clone(), e.to.clone()))
+                .collect();
+            refs.sort();
+            (hits, g.node_count().unwrap(), refs)
+        };
+        // add a new file in a subdir
+        let add = |p: &std::path::Path| {
+            std::fs::write(p.join("sub").join("d.md"), b"# D\ndelta\n").unwrap()
+        };
+        assert_eq!(scenario(&add, true), scenario(&add, false), "add");
+        // edit a file
+        let edit = |p: &std::path::Path| {
+            std::fs::write(p.join("sub").join("c.md"), b"# C\ngamma edited delta\n").unwrap()
+        };
+        assert_eq!(scenario(&edit, true), scenario(&edit, false), "edit");
+        // remove a file
+        let rm = |p: &std::path::Path| std::fs::remove_file(p.join("sub").join("c.md")).unwrap();
+        assert_eq!(scenario(&rm, true), scenario(&rm, false), "remove-file");
+        // remove a dir
+        let rmdir = |p: &std::path::Path| std::fs::remove_dir_all(p.join("sub")).unwrap();
+        assert_eq!(
+            scenario(&rmdir, true),
+            scenario(&rmdir, false),
+            "remove-dir"
+        );
+        // delete the referenced doc (sub/c.md) — a.md's edge to it must be gone in BOTH
+        // (covered by remove-file above, since a.md -> sub/c.md).
     }
 }
 
