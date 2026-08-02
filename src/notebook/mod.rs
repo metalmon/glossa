@@ -444,6 +444,18 @@ fn write_note(
         file_type: "note".into(),
         text: full.clone(),
     }]);
+    // Keep the delta baseline in sync so a read right after writing a note is a no-op (not a
+    // redundant reindex): `lazy_reindex_if_changed` compares the note's on-disk `file_sig` to
+    // `manifest.notes[rel_path]`, which the write-through above never touched. Best-effort under
+    // the index lock — if `index_dir`/`reindex_note_locked` currently holds it, skip; the
+    // lazy-read path self-heals with its own (idempotent) reindex.
+    if let Some(_g) = crate::index::lock::try_index_lock(root) {
+        if let Ok(sig) = crate::index::store::file_sig(&abs_path) {
+            let mut m = crate::index::manifest::Manifest::load(root);
+            m.notes.insert(rel_path.clone(), sig);
+            let _ = m.save(root);
+        }
+    }
     let lines = full.lines().count();
     // For `schema.toml`, flag any file listed in `[order].files` that is not yet
     // in the document's notebook — so the agent gets actionable feedback.
@@ -574,6 +586,36 @@ mod tests {
             hits.iter().any(|h| h.path == "doc.pdf/n.csp"),
             "note content is indexed at write time: {:?}",
             hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+    }
+
+    // Regression: `write_note`'s write-through indexes the note but must ALSO stamp
+    // `manifest.notes[rel]` with the note's current `file_sig`. Otherwise the baseline stays
+    // stale/absent, and `lazy_reindex_if_changed` (which compares the note's on-disk `file_sig`
+    // to this manifest entry on the very next `read`) sees a mismatch and runs a redundant
+    // `reindex_note_locked` — the no-op the design spec promises for "note through `note`" never
+    // actually holds.
+    #[test]
+    fn write_note_syncs_manifest_baseline_so_a_read_after_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = idx_with_doc(dir.path(), "doc.pdf");
+        let rel_path = "doc.pdf/n.csp";
+        note(dir.path(), &idx, "doc.pdf", "n.csp", "body\n", false);
+
+        let abs_path = dir
+            .path()
+            .join(".glossa")
+            .join("notes")
+            .join("doc.pdf")
+            .join("n.csp");
+        let cur_sig = crate::index::store::file_sig(&abs_path).unwrap();
+
+        let manifest = crate::index::manifest::Manifest::load(dir.path());
+        assert_eq!(
+            manifest.notes.get(rel_path).copied(),
+            Some(cur_sig),
+            "manifest.notes baseline must match the note's on-disk file_sig right after write_note, \
+             so a subsequent lazy_reindex_if_changed comparison sees no change"
         );
     }
 
