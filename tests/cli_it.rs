@@ -87,6 +87,40 @@ fn kb_cat_missing_file_errors() {
 }
 
 #[test]
+fn index_file_flag_reindexes_one_document() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), b"# Title\noldtok\n").unwrap();
+
+    // Build the initial index.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["index"])
+        .assert()
+        .success();
+
+    // Edit the file in place (same length, so size-based change detection alone can't catch it).
+    fs::write(dir.path().join("a.md"), b"# Title\nnewtok\n").unwrap();
+
+    // Reindex just that one file.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["index", "--file", "a.md"])
+        .assert()
+        .success();
+
+    // The updated content is now searchable.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "newtok"])
+        .assert()
+        .success()
+        .stdout(contains("a.md"));
+}
+
+#[test]
 fn zero_hit_search_preserves_last_search() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();

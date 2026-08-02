@@ -77,10 +77,15 @@ enum Cmd {
         /// Path to a document file (.pdf, .docx, .xlsx, .pptx, .md, …).
         target: PathBuf,
     },
-    /// Build or update the on-disk index for ranked search.
-    Index { path: Option<PathBuf> },
-    /// Rebuild the index from scratch.
-    Reindex { path: Option<PathBuf> },
+    /// Update the index. No flags: incremental over the whole corpus. --force: full rebuild.
+    /// --file <rel>: reindex just that one document (picks up an in-place edit).
+    Index {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Delete notebook notes whose owner document no longer exists in the corpus.
     #[cfg(feature = "notebook")]
     Prune {
@@ -647,10 +652,24 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Index { path } => {
-            let path = glossa::root::resolve_root(path);
+        Cmd::Index { path, force, file } => {
+            let root = glossa::root::resolve_root(path);
             let started = std::time::Instant::now();
-            let stats = glossa::index::store::index_dir(&path, false)?;
+            if let Some(rel) = file {
+                let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
+                let Some(rel) = idx.canonical_document_path(&rel) else {
+                    anyhow::bail!("not an indexed document: {rel}");
+                };
+                let _lock = glossa::index::lock::try_index_lock(&root)
+                    .ok_or_else(|| anyhow::anyhow!("another process is indexing; try again"))?;
+                glossa::index::store::index_one_file_locked(&root, &rel)?;
+                println!(
+                    "reindexed {rel} in {}",
+                    glossa::cli_fmt::format_elapsed(started.elapsed())
+                );
+                return Ok(());
+            }
+            let stats = glossa::index::store::index_dir(&root, force)?;
             println!(
                 "indexed: {} added, {} removed, {} unchanged in {}",
                 stats.added,
@@ -658,31 +677,23 @@ fn main() -> anyhow::Result<()> {
                 stats.unchanged,
                 glossa::cli_fmt::format_elapsed(started.elapsed())
             );
-            Ok(())
-        }
-        Cmd::Reindex { path } => {
-            let path = glossa::root::resolve_root(path);
-            let started = std::time::Instant::now();
-            let stats = glossa::index::store::index_dir(&path, true)?;
-            println!(
-                "reindexed: {} files in {}",
-                stats.added,
-                glossa::cli_fmt::format_elapsed(started.elapsed())
-            );
-            // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
-            // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
-            // merges are only reported, never applied here (use `kb graph generalize --merge`).
-            let g = glossa::graph::store::GraphStore::open(&path)?;
-            let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
-            let opts = glossa::graph::generalize::apply::Opts::from_ontology(
-                &ont,
-                glossa::trace::now_ms(),
-            );
-            let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
-            println!(
-                "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
-                r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
-            );
+            if force {
+                // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
+                // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
+                // merges are only reported, never applied here (use `kb graph generalize --merge`).
+                // This mirrors what the old `kb reindex` did — --force is its replacement.
+                let g = glossa::graph::store::GraphStore::open(&root)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&root);
+                let opts = glossa::graph::generalize::apply::Opts::from_ontology(
+                    &ont,
+                    glossa::trace::now_ms(),
+                );
+                let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
+                println!(
+                    "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
+                    r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+                );
+            }
             Ok(())
         }
         #[cfg(feature = "notebook")]
