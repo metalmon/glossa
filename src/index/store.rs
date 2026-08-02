@@ -1031,6 +1031,80 @@ fn write_dirsig(dir: &Path, sig: u64) {
     }
 }
 
+/// Index one file into an already-open writer + graph: drops the file's old chunks and
+/// auto-graph-by-source, extracts chunks, writes each chunk + builds the structural graph
+/// (Document/Section nodes, sequential/hierarchy edges), and appends the file's outgoing links
+/// to `links`. Returns the file's `FileSig`, or `None` if the file is unreadable.
+///
+/// Reference (cross-document) link *resolution* is NOT done here — it stays in the callers,
+/// since it needs the full document set.
+pub fn index_file_into(
+    idx: &DocIndex,
+    graph: &crate::graph::store::GraphStore,
+    writer: &tantivy::IndexWriter,
+    root: &Path,
+    abs_path: &Path,
+    links: &mut Vec<(String, String)>,
+) -> anyhow::Result<Option<FileSig>> {
+    let path_str = rel_key(root, abs_path);
+    let sig = match file_sig(abs_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
+    graph.delete_auto_by_source(&path_str)?;
+    let mut doc_written = false;
+    let mut seq = 0u64;
+    let mut prev_sec: Option<String> = None;
+    let mut file_links: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Index/graph write errors are intentionally not propagated here: one bad chunk must not
+    // abort the whole run (matches the prior per-file behavior). The file is still recorded
+    // in the manifest; a failed write is corrected on the next `reindex`.
+    crate::extract::extract_file(abs_path, &mut |mut c: Chunk| {
+        // Canonicalize the chunk to the corpus-relative key here, at the single indexing
+        // boundary, so the index, the structural graph and section ids all speak ONE form.
+        c.doc_path = PathBuf::from(&path_str);
+        if !doc_written {
+            let _ = crate::graph::build::build_document(graph, &path_str, sig);
+            doc_written = true;
+        }
+        seq += 1;
+        let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
+        // Section ids are always the ordinal now (see build_section), so `path#n`
+        // from resolve_section_ref/neighbors always matches. A heading-less chunk
+        // still has an empty location, which reads back as a blank node label /
+        // index field — fall back to the ordinal so it shows something. This only
+        // affects the label/location field, not the (already ordinal) section id.
+        if c.location.is_empty() {
+            c.location = ord.to_string();
+        }
+        let _ = writer.add_document(doc!(
+            idx.fields.body => c.text.clone(),
+            idx.fields.body_trigrams => c.text.clone(),
+            idx.fields.path => path_str.clone(),
+            idx.fields.location => c.location.clone(),
+            idx.fields.file_type => c.file_type.clone(),
+            idx.fields.ord => ord,
+        ));
+        let _ = crate::graph::build::build_section(graph, &c, ord, sig);
+        let cur_id = crate::graph::build::section_id(&path_str, &ord.to_string());
+        if let Some(prev) = prev_sec.as_deref() {
+            let _ = crate::graph::build::link_sequential(graph, prev, &cur_id, sig, &path_str);
+        }
+        if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &c.location) {
+            let _ = crate::graph::build::link_parent(graph, &cur_id, &parent, sig, &path_str);
+        }
+        file_links.extend(crate::extract::links::extract_links(&c.text));
+        seen.insert(c.location.clone(), cur_id.clone());
+        prev_sec = Some(cur_id);
+    })?;
+    for t in file_links {
+        links.push((path_str.clone(), t));
+    }
+    Ok(Some(sig))
+}
+
 /// Walk `dir`, (re)index changed files, drop removed files, update the manifest.
 /// `force = true` ignores the manifest and rebuilds every file.
 /// Streams each chunk directly into the tantivy writer + graph (constant memory).
@@ -1113,57 +1187,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             return Ok(());
         }
         eprintln!("  + {path_str}");
-        writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, &path_str));
-        graph.delete_auto_by_source(&path_str)?;
-        let mut doc_written = false;
-        let mut seq = 0u64;
-        let mut prev_sec: Option<String> = None;
-        let mut file_links: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        // Index/graph write errors are intentionally not propagated here: one bad chunk must not
-        // abort the whole run (matches the prior per-file behavior). The file is still recorded
-        // in the manifest; a failed write is corrected on the next `reindex`.
-        crate::extract::extract_file(path, &mut |mut c: Chunk| {
-            // Canonicalize the chunk to the corpus-relative key here, at the single indexing
-            // boundary, so the index, the structural graph and section ids all speak ONE form.
-            c.doc_path = PathBuf::from(&path_str);
-            if !doc_written {
-                let _ = crate::graph::build::build_document(&graph, &path_str, sig);
-                doc_written = true;
-            }
-            seq += 1;
-            let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
-            // Section ids are always the ordinal now (see build_section), so `path#n`
-            // from resolve_section_ref/neighbors always matches. A heading-less chunk
-            // still has an empty location, which reads back as a blank node label /
-            // index field — fall back to the ordinal so it shows something. This only
-            // affects the label/location field, not the (already ordinal) section id.
-            if c.location.is_empty() {
-                c.location = ord.to_string();
-            }
-            let _ = writer.add_document(doc!(
-                idx.fields.body => c.text.clone(),
-                idx.fields.body_trigrams => c.text.clone(),
-                idx.fields.path => path_str.clone(),
-                idx.fields.location => c.location.clone(),
-                idx.fields.file_type => c.file_type.clone(),
-                idx.fields.ord => ord,
-            ));
-            let _ = crate::graph::build::build_section(&graph, &c, ord, sig);
-            let cur_id = crate::graph::build::section_id(&path_str, &ord.to_string());
-            if let Some(prev) = prev_sec.as_deref() {
-                let _ = crate::graph::build::link_sequential(&graph, prev, &cur_id, sig, &path_str);
-            }
-            if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &c.location) {
-                let _ = crate::graph::build::link_parent(&graph, &cur_id, &parent, sig, &path_str);
-            }
-            file_links.extend(crate::extract::links::extract_links(&c.text));
-            seen.insert(c.location.clone(), cur_id.clone());
-            prev_sec = Some(cur_id);
-        })?;
-        for t in file_links {
-            links.push((path_str.clone(), t));
-        }
+        index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?;
         stats.added += 1;
         Ok(())
     })?;
@@ -1293,6 +1317,34 @@ mod incremental_tests {
         assert!(g.node_count().unwrap() >= 2); // Document + at least one Section
         let intro = g.resolve("Intro").unwrap();
         assert!(!intro.is_empty());
+    }
+
+    #[test]
+    fn index_dir_still_builds_chunks_and_graph_after_refactor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.md"),
+            b"# Intro\nhello alpha\n## Body\nworld beta\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\nsee [a](a.md)\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("alpha", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("a.md")));
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        assert!(
+            g.node_count().unwrap() >= 2,
+            "Document + Section nodes built"
+        );
+        // cross-doc reference b.md -> a.md resolved (REFERENCES links Document node to
+        // Document node, not section to section — see link_reference).
+        assert!(!crate::graph::traverse::neighbors(&g, "b.md", None, 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
