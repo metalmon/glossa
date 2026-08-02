@@ -679,7 +679,7 @@ pub struct IndexStats {
     pub unchanged: usize,
 }
 
-fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
+pub fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
     let md = std::fs::metadata(path)?;
     let mtime_secs = md
         .modified()?
@@ -1265,6 +1265,49 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     Ok(stats)
 }
 
+/// Reindex ONE corpus document, assuming the caller already holds `index.lock`. Drops the file's old
+/// chunks + auto-graph-by-source and rebuilds them, resolves its outgoing references against the
+/// current document set, commits, and records the new signature in the manifest. `None` if the file
+/// is gone/unreadable (manifest is left unchanged so a later pass can drop it).
+pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<FileSig>> {
+    let idx = DocIndex::open_or_create(dir)?;
+    let graph = crate::graph::store::GraphStore::open(dir)?;
+    let abs = idx.root.join(rel);
+    let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
+    let mut links: Vec<(String, String)> = Vec::new();
+    let sig = match index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links)? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    // Resolve this file's outgoing references against the current document set (mirrors index_dir_locked).
+    let manifest = Manifest::load(dir);
+    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+    for p in manifest.files.keys() {
+        if let Ok(c) = std::fs::canonicalize(idx.root.join(p)) {
+            by_canon.insert(c, p.clone());
+        }
+    }
+    for (src, target) in &links {
+        let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
+        if let Ok(canon) = std::fs::canonicalize(idx.root.join(src_dir).join(target)) {
+            if let Some(dst) = by_canon.get(&canon) {
+                if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
+                    let s = manifest.files.get(src).copied().unwrap_or(FileSig {
+                        mtime_secs: 0,
+                        size: 0,
+                    });
+                    let _ = crate::graph::build::link_reference(&graph, src, dst, s);
+                }
+            }
+        }
+    }
+    writer.commit()?;
+    let mut m = Manifest::load(dir);
+    m.files.insert(rel.to_string(), sig);
+    m.save(dir)?;
+    Ok(Some(sig))
+}
+
 /// Bring the on-disk index up to date with the current tree, synchronously, without ever hanging.
 /// Fast path: if `.glossa/dirsig` already equals the current signature, return immediately. Else
 /// take `index.lock` and index; if another process holds it, poll until either the persisted
@@ -1684,6 +1727,79 @@ mod incremental_tests {
             s1,
             dir_mtime_signature(dir.path()).unwrap(),
             "a real corpus file add still changes the signature"
+        );
+    }
+
+    #[test]
+    fn index_one_file_updates_only_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha original\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), b"# B\nbravo stays\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        // Edit a.md in place.
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha rewritten sentinel\n").unwrap();
+        let _lock = crate::index::lock::try_index_lock(dir.path()).unwrap();
+        index_one_file_locked(dir.path(), "a.md").unwrap();
+        drop(_lock);
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("sentinel", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path.ends_with("a.md")),
+            "new text indexed"
+        );
+        assert!(
+            idx.search("original", 10).unwrap().is_empty(),
+            "old text dropped"
+        );
+        assert!(
+            idx.search("bravo", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path.ends_with("b.md")),
+            "other file untouched"
+        );
+        assert_eq!(
+            Manifest::load(dir.path()).files.get("a.md"),
+            Some(&file_sig(&dir.path().join("a.md")).unwrap())
+        );
+    }
+
+    #[test]
+    fn index_one_file_matches_full_reindex_for_that_file() {
+        // Golden: after the same edit, index_one_file_locked(X) yields the same searchable state for X
+        // as a full index_dir(force). (Chunk-level equivalence via search; graph auto-edges by source.)
+        let build = |single: bool| -> (Vec<String>, u64) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.md"), b"# A\none\n## S2\ntwo\n").unwrap();
+            index_dir(dir.path(), true).unwrap();
+            std::fs::write(
+                dir.path().join("a.md"),
+                b"# A\none edited\n## S2\ntwo\n### S3\nthree\n",
+            )
+            .unwrap();
+            if single {
+                let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+                index_one_file_locked(dir.path(), "a.md").unwrap();
+            } else {
+                index_dir(dir.path(), false).unwrap();
+            }
+            let idx = DocIndex::open_or_create(dir.path()).unwrap();
+            let mut hits: Vec<String> = idx
+                .search("edited three", 20)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            hits.sort();
+            let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+            (hits, g.node_count().unwrap())
+        };
+        assert_eq!(
+            build(true),
+            build(false),
+            "single-file reindex equals full delta reindex for the edited file"
         );
     }
 }
