@@ -11,7 +11,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,9 +42,10 @@ pub struct GlossaServer {
     dirty: Arc<AtomicBool>,
     /// Epoch-ms of the last indexing change — the debounce clock for the maintenance loop.
     last_change: Arc<AtomicU64>,
-    /// True while a synchronous `freshen_now` is running (e.g. mid-await inside a read tool, or
-    /// the fire-and-forget startup warm-up) — surfaced as the `glossa_indexing` metrics gauge.
-    indexing: Arc<AtomicBool>,
+    /// Count of in-flight synchronous `freshen_now` calls (concurrent read tools + the startup
+    /// warm-up). A counter, not a flag, so overlapping freshens don't clear each other early —
+    /// surfaced as the `glossa_indexing` metrics gauge (1 when any freshen is running).
+    indexing: Arc<AtomicUsize>,
     /// When true, `read` tool strips all image content from responses.
     no_image: bool,
     /// In-process cache of `manifest.json`, invalidated by the file's mtime.
@@ -153,7 +154,7 @@ impl GlossaServer {
             trace,
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
-            indexing: Arc::new(AtomicBool::new(false)),
+            indexing: Arc::new(AtomicUsize::new(0)),
             no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         }
@@ -168,7 +169,10 @@ impl GlossaServer {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos());
-        let mut cache = self.manifest_cache.lock().unwrap();
+        let mut cache = self
+            .manifest_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if cur != cache.mtime_nanos {
             cache.manifest = crate::index::manifest::Manifest::load(&self.root);
             cache.mtime_nanos = cur;
@@ -221,13 +225,13 @@ impl GlossaServer {
     /// Best-effort — indexing errors never fail the tool. Runs on the blocking pool so the async
     /// worker is not stalled, but the handler awaits it so the served index reflects the current tree.
     pub async fn freshen_now(&self) {
-        self.indexing.store(true, Ordering::Release);
+        self.indexing.fetch_add(1, Ordering::AcqRel);
         let root = self.root.clone();
         let res = tokio::task::spawn_blocking(move || {
             crate::index::store::freshen_blocking(&root, std::time::Duration::from_secs(3))
         })
         .await;
-        self.indexing.store(false, Ordering::Release);
+        self.indexing.fetch_sub(1, Ordering::AcqRel);
         if let Ok(Ok(stats)) = res {
             if stats.added + stats.removed > 0 {
                 self.mark_dirty();
@@ -303,7 +307,7 @@ impl GlossaServer {
             Err(_) => (0, 0),
         };
         let dirty = self.dirty.load(Ordering::Relaxed) as u8;
-        let indexing = self.indexing.load(Ordering::Relaxed) as u8;
+        let indexing = (self.indexing.load(Ordering::Relaxed) > 0) as u8;
         format!(
             "# HELP glossa_up 1 if the server is running\n\
              # TYPE glossa_up gauge\nglossa_up 1\n\

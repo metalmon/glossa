@@ -56,7 +56,7 @@ impl Manifest {
         let s = serde_json::to_string_pretty(self).context("serialize manifest")?;
         // Atomic publish: write to a sibling temp file, then rename over the target, so a concurrent
         // `Manifest::load` never reads a half-written file (it would `unwrap_or_default()` to empty).
-        let tmp = p.with_extension("json.tmp");
+        let tmp = p.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, s).with_context(|| format!("write {tmp:?}"))?;
         std::fs::rename(&tmp, &p).with_context(|| format!("rename {tmp:?} -> {p:?}"))?;
         Ok(())

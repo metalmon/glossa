@@ -718,6 +718,18 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("prune: failed to remove {o}: {e}"),
                     }
                 }
+                // Best-effort: remove now-empty mirror directories left behind by deleted notes,
+                // walking up to (but not including) the notes root. `remove_dir` only succeeds on an
+                // empty dir, so a still-populated mirror is left intact.
+                for o in &orphans {
+                    let mut dir = notes_root.join(o);
+                    while let Some(parent) = dir.parent() {
+                        if parent == notes_root.as_path() || std::fs::remove_dir(parent).is_err() {
+                            break;
+                        }
+                        dir = parent.to_path_buf();
+                    }
+                }
                 glossa::index::store::ensure_fresh(&root)?;
                 println!("pruned {removed} orphaned note(s)");
             }
