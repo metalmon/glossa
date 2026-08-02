@@ -1136,6 +1136,42 @@ pub fn index_dir(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     index_dir_locked(dir, force)
 }
 
+/// Resolve collected cross-document links against the current document set, creating `REFERENCES`
+/// edges for those that resolve to a real Document node, and returning the `(src, raw_target)` pairs
+/// that still don't resolve (target not an indexed doc). Mirrors the resolution `index_dir_locked`
+/// did inline; shared with the scoped pass.
+fn resolve_reference_links(
+    graph: &crate::graph::store::GraphStore,
+    root: &Path,
+    files: &std::collections::BTreeMap<String, FileSig>,
+    links: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+    for p in files.keys() {
+        if let Ok(c) = std::fs::canonicalize(root.join(p)) {
+            by_canon.insert(c, p.clone());
+        }
+    }
+    let mut unresolved = Vec::new();
+    for (src, target) in links {
+        let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
+        let resolved = std::fs::canonicalize(root.join(src_dir).join(target))
+            .ok()
+            .and_then(|canon| by_canon.get(&canon).cloned());
+        match resolved {
+            Some(dst) if &dst != src && matches!(graph.get_node(&dst), Ok(Some(_))) => {
+                let sig = files.get(src).copied().unwrap_or(FileSig {
+                    mtime_secs: 0,
+                    size: 0,
+                });
+                let _ = crate::graph::build::link_reference(graph, src, &dst, sig);
+            }
+            _ => unresolved.push((src.clone(), target.clone())),
+        }
+    }
+    unresolved
+}
+
 /// Body of `index_dir` assuming `index.lock` is already held by the caller. Records `.glossa/dirsig`
 /// = the current directory signature on every return, so a reader's `freshen_blocking` can tell the
 /// index reflects the current tree even when the delta was empty (e.g. a temp file came and went).
@@ -1216,28 +1252,20 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     }
     // Cross-document REFERENCES: resolve collected link targets against indexed documents.
     // Doc keys are corpus-relative, so resolve each to a real file through the corpus root anchor.
-    let mut by_canon: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-    for p in next.files.keys() {
-        if let Ok(c) = std::fs::canonicalize(idx.root.join(p)) {
-            by_canon.insert(c, p.clone());
+    // Links carried over from the prior manifest (sources this pass left `unchanged`, so they were
+    // never reindexed and never re-collected into `links`) are retried too, so a dangling link gets
+    // picked up the moment its target appears even if the source itself never changes again. Drop
+    // carry-overs whose source no longer exists so a deleted doc can't leave a phantom edge.
+    let fresh_srcs: std::collections::HashSet<String> =
+        links.iter().map(|(src, _)| src.clone()).collect();
+    for (src, target) in &manifest.unresolved_links {
+        if next.files.contains_key(src) && !fresh_srcs.contains(src) {
+            links.push((src.clone(), target.clone()));
         }
     }
-    for (src, target) in &links {
-        let src_dir = Path::new(src).parent().unwrap_or_else(|| Path::new(""));
-        if let Ok(canon) = std::fs::canonicalize(idx.root.join(src_dir).join(target)) {
-            if let Some(dst) = by_canon.get(&canon) {
-                // Only link to a real Document node — a file with no extractable chunks is in
-                // `next.files` but never got a node (build_document fires on the first chunk).
-                if dst != src && matches!(graph.get_node(dst), Ok(Some(_))) {
-                    let sig = next.files.get(src).copied().unwrap_or(FileSig {
-                        mtime_secs: 0,
-                        size: 0,
-                    });
-                    let _ = crate::graph::build::link_reference(&graph, src, dst, sig);
-                }
-            }
-        }
-    }
+    // Links that still don't resolve (target not an indexed doc yet) ride along in the manifest so
+    // a later pass that adds the target can pick the edge back up.
+    next.unresolved_links = resolve_reference_links(&graph, &idx.root, &next.files, &links);
     // Notebook notes: index every changed note as a single `"note"` chunk (delete-by-path is
     // idempotent, so a note that was also written through in-process re-adds cleanly), and drop
     // removed notes. Notes never create graph nodes (§6 of the spec) — only search chunks.
@@ -1487,6 +1515,34 @@ mod incremental_tests {
         assert!(
             !na.iter().any(|n| n.contains("x.com")),
             "external URL is not a REFERENCES edge: {na:?}"
+        );
+    }
+
+    #[test]
+    fn index_dir_persists_and_resolves_unresolved_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nsee [b](b.md)\n").unwrap(); // b.md missing
+        index_dir(dir.path(), true).unwrap();
+        let m = Manifest::load(dir.path());
+        assert!(
+            m.unresolved_links
+                .iter()
+                .any(|(s, t)| s == "a.md" && t == "b.md"),
+            "dangling link recorded"
+        );
+        // Add b.md; a full reindex resolves the edge and clears the unresolved entry.
+        std::fs::write(dir.path().join("b.md"), b"# B\ncontent\n").unwrap();
+        index_dir(dir.path(), false).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        assert!(
+            crate::graph::traverse::neighbors(&g, "a.md", None, 1)
+                .unwrap()
+                .contains(&"b.md".to_string()),
+            "a->b resolved"
+        );
+        assert!(
+            Manifest::load(dir.path()).unresolved_links.is_empty(),
+            "unresolved cleared"
         );
     }
 

@@ -21,6 +21,13 @@ pub struct Manifest {
     /// still load. Lets `scan_delta` notice notes written outside `note()`.
     #[serde(default)]
     pub notes: BTreeMap<String, FileSig>,
+    /// Cross-document `(src, raw_target)` links collected on the last full pass whose target did
+    /// not resolve to an indexed document. `#[serde(default)]` so manifests written before this
+    /// field existed still load (empty = no known dangling links). Re-derived wholesale by every
+    /// full `index_dir` pass (§`resolve_reference_links`), so a later pass that adds the missing
+    /// target clears the entry automatically.
+    #[serde(default)]
+    pub unresolved_links: Vec<(String, String)>,
     #[serde(default = "default_index_schema_version")]
     pub index_schema_version: u32,
 }
@@ -30,6 +37,7 @@ impl Default for Manifest {
         Self {
             files: BTreeMap::new(),
             notes: BTreeMap::new(),
+            unresolved_links: Vec::new(),
             index_schema_version: default_index_schema_version(),
         }
     }
@@ -181,5 +189,23 @@ mod tests {
         let old = r#"{"files":{"a.md":{"mtime_secs":1,"size":2}},"index_schema_version":2}"#;
         let parsed: Manifest = serde_json::from_str(old).unwrap();
         assert!(parsed.notes.is_empty());
+    }
+
+    #[test]
+    fn manifest_roundtrips_unresolved_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::default();
+        m.unresolved_links.push(("a.md".into(), "b.md".into()));
+        m.save(dir.path()).unwrap();
+        assert_eq!(
+            Manifest::load(dir.path()).unresolved_links,
+            vec![("a.md".to_string(), "b.md".to_string())]
+        );
+        // Old manifest without the field still loads.
+        let old = r#"{"files":{},"index_schema_version":2}"#;
+        assert!(serde_json::from_str::<Manifest>(old)
+            .unwrap()
+            .unresolved_links
+            .is_empty());
     }
 }
