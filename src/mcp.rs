@@ -161,7 +161,6 @@ impl GlossaServer {
 
     /// Manifest signature for `rel`, via an in-process cache invalidated by `manifest.json`'s mtime.
     /// Steady state: one `stat` (O(1)); a full parse only when the mtime advanced (someone reindexed).
-    #[allow(dead_code)] // consumed by the in-place-edit check landing in a follow-up task
     fn baseline_sig(&self, rel: &str) -> Option<crate::index::manifest::FileSig> {
         let p = self.root.join(".glossa").join("manifest.json");
         let cur = std::fs::metadata(&p)
@@ -175,6 +174,30 @@ impl GlossaServer {
             cache.mtime_nanos = cur;
         }
         cache.manifest.files.get(rel).copied()
+    }
+
+    /// If `path` is an indexed corpus document whose on-disk signature differs from the manifest
+    /// baseline, reindex just that file (best-effort: skip if another process holds the lock — the
+    /// edit will be caught on a later read/explicit index). Cheap: resolves the path, one `stat`, one
+    /// cache lookup; only touches the index when the file actually changed.
+    fn lazy_reindex_if_changed(&self, path: &str) {
+        let Ok(idx) = crate::index::store::DocIndex::open_or_create(&self.root) else {
+            return;
+        };
+        let Some(rel) = idx.canonical_document_path(path) else {
+            return; // not a corpus doc (note/graph id/garbage)
+        };
+        let abs = self.root.join(&rel);
+        let Ok(cur) = crate::index::store::file_sig(&abs) else {
+            return;
+        };
+        if self.baseline_sig(&rel) == Some(cur) {
+            return; // unchanged
+        }
+        if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
+            let _ = crate::index::store::index_one_file_locked(&self.root, &rel);
+            self.mark_dirty();
+        }
     }
 
     fn open_index_graph(
@@ -814,6 +837,7 @@ impl GlossaServer {
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
+        self.lazy_reindex_if_changed(&a.path);
         let (idx, g) = self.open_index_graph()?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
@@ -837,6 +861,7 @@ impl GlossaServer {
         Parameters(a): Parameters<SourceFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
+        self.lazy_reindex_if_changed(&a.path);
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).ok();
         let max = a
@@ -1417,6 +1442,46 @@ mod tests {
             srv.baseline_sig("a.md"),
             Some(crate::index::store::file_sig(&dir.path().join("a.md")).unwrap()),
             "cache reloaded after mtime bump"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_picks_up_an_in_place_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\noldbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        // In-place edit (no dir-mtime change → B1 freshen alone would miss it).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("a.md"), b"# A\nnewbody freshtoken\n").unwrap();
+        // A read of the edited doc triggers the lazy per-file reindex.
+        let _ = srv
+            .read(Parameters(ReadArgs {
+                path: "a.md".into(),
+                n: 1,
+                page_image: None,
+                include_images: None,
+            }))
+            .await;
+        // Now it is searchable.
+        let out = srv
+            .search(Parameters(SearchArgs {
+                query: "freshtoken".into(),
+                limit: None,
+                glob: None,
+                file_type: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            format!("{out:?}").contains("a.md"),
+            "in-place edit picked up after reading the file"
         );
     }
 
