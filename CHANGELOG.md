@@ -6,6 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`neighbors` MCP tool (structural, typed 1-hop edges)**: lists a node's direct outgoing/incoming edges (`edge_types` filter, `direction: out|in|both`), each rendered with its real direction (`--REL-->` / `<--REL--`) and a `read path #n` anchor. This is the FACTUAL graph-structure tool — for fuzzy "similar cases" use `related`.
+- **`path` MCP tool (shortest connection between two nodes)**: undirected BFS between two node refs (or chunk `path`+`n` pairs), rendered as a chain of hops with each edge's real direction and a `read path #n` anchor per hop. `max_depth` defaults to 6, capped at 12.
+
+### Changed
+
+- **`neighbors` renamed to `related`**: the old fuzzy "similar/community cases after glossary" tool is now called `related` — its behavior is unchanged, only the name. `neighbors` is now the new structural tool described above. Tool descriptions, the eval harness (routing/caching/CLI dispatch), the generated TensorZero tool config, and the `answer_hotpot` prompt were all updated to match.
+
 ## [0.2.6] — 2026-07-26
 
 ### Fixed
