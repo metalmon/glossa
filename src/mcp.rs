@@ -881,11 +881,14 @@ fn read_common(
 ) -> CallToolResult {
     let out = crate::tools::read(root, idx, g, path, n, page_image, trace);
     let mut content = Vec::new();
+    // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
+    // figure-heavy pages, and JPEG is far smaller. `to_jpeg` passes real JPEGs through untouched.
     if page_image {
         if !out.text.is_empty() {
             content.push(Content::text(out.text));
         }
         for img in out.images {
+            let img = crate::read::to_jpeg(img);
             let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
             content.push(Content::image(b64, img.mime));
         }
@@ -893,6 +896,7 @@ fn read_common(
         content.push(Content::text(out.text));
         if include_images {
             for img in out.images {
+                let img = crate::read::to_jpeg(img);
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
                 content.push(Content::image(b64, img.mime));
             }

@@ -175,9 +175,15 @@ enum Cmd {
         /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
         #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
-        /// Disable image output in MCP tools (text-only read tool, no Content::image in responses).
-        #[arg(short = 'N', long = "noimage", env = "GLOSSA_NO_IMAGE")]
+        /// DEPRECATED: images are off by default now — use `--vision` to enable them. Kept as an
+        /// accepted no-op so existing launch commands don't break; it still forces images off.
+        #[arg(short = 'N', long = "noimage", env = "GLOSSA_NO_IMAGE", hide = true)]
         no_image: bool,
+        /// Enable image output in the `read` tool — embedded figures and `page_image`, served as
+        /// JPEG. OFF by default: a figure-heavy page's base64 image payload can overflow the stdio
+        /// JSON-RPC frame and drop the connection. Safe to enable on `--transport streamable-http`.
+        #[arg(long = "vision", env = "GLOSSA_VISION")]
+        vision: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
         #[arg(
             long,
@@ -798,6 +804,7 @@ fn main() -> anyhow::Result<()> {
             trace,
             no_graph,
             no_image,
+            vision,
             transport,
             bind,
             allowed_hosts,
@@ -819,7 +826,8 @@ fn main() -> anyhow::Result<()> {
                     profile: glossa::mcp::Profile::parse(&profile),
                     trace,
                     no_graph,
-                    no_image,
+                    // Images are opt-in via --vision; the legacy --noimage still forces them off.
+                    no_image: no_image || !vision,
                     transport,
                     bind,
                     allowed_hosts,
