@@ -104,7 +104,7 @@ pub fn gold_csp_tsv(param: &str, values: &[String]) -> String {
 
 pub fn oracle_workbook_excerpt(param: &str, values: &[String]) -> String {
     format!(
-        "## Параметры\n| Параметр | independent | данные |\n| {param} | да | {} |\n",
+        "## Parameters\n| Parameter | independent | data |\n| {param} | yes | {} |\n",
         values.join(", ")
     )
 }

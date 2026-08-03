@@ -584,28 +584,28 @@ mod tests {
     fn extracts_constraint_examples_from_transcript() {
         let messages: Vec<Value> = serde_json::from_str(
             r#"[
-              {"role":"assistant","content":[{"type":"tool_call","id":"g1","name":"grep","arguments":{"pattern":"Марка материала","context":20}}]},
-              {"role":"user","content":[{"type":"tool_result","id":"g1","name":"grep","result":"doc.pdf:#7: 14А, 15А"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n1","name":"note","arguments":{"doc":"standard-a.pdf","file":"workbook.md","content":"Марка материала: 14А, 15А"}}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"g1","name":"grep","arguments":{"pattern":"Material grade","context":20}}]},
+              {"role":"user","content":[{"type":"tool_result","id":"g1","name":"grep","result":"doc.pdf:#7: 14A, 15A"}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n1","name":"note","arguments":{"doc":"standard-a.pdf","file":"workbook.md","content":"Material grade: 14A, 15A"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n1","name":"note","result":"wrote workbook.md"}]},
               {"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":"doc.pdf","n":7}}]},
-              {"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"Марка материала"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n2","name":"note","arguments":{"doc":"standard-a.pdf","file":"Марка_материала.csp","content":"Марка материала\n14А\n15А\n"}}]},
+              {"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"Material grade"}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n2","name":"note","arguments":{"doc":"standard-a.pdf","file":"Material_grade.csp","content":"Material grade\n14A\n15A\n"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n2","name":"note","result":"parsed 1 column, 2 rows"}]},
               {"role":"assistant","content":[{"type":"tool_call","id":"b1","name":"graph_build","arguments":{"doc":"standard-a.pdf"}}]},
-              {"role":"user","content":[{"type":"tool_result","id":"b1","name":"graph_build","result":"graph_build FAILED: Марка_материала.csp line 3"}]},
-              {"role":"assistant","content":[{"type":"tool_call","id":"n3","name":"note","arguments":{"doc":"standard-a.pdf","file":"Марка_материала.csp","content":"Марка материала\n14А\n15А\n"}}]},
+              {"role":"user","content":[{"type":"tool_result","id":"b1","name":"graph_build","result":"graph_build FAILED: Material_grade.csp line 3"}]},
+              {"role":"assistant","content":[{"type":"tool_call","id":"n3","name":"note","arguments":{"doc":"standard-a.pdf","file":"Material_grade.csp","content":"Material grade\n14A\n15A\n"}}]},
               {"role":"user","content":[{"type":"tool_result","id":"n3","name":"note","result":"parsed 1 column, 2 rows"}]}
             ]"#,
         )
         .unwrap();
         let mut gold = HashMap::new();
         gold.insert(
-            "Марка материала".to_string(),
+            "Material grade".to_string(),
             GoldParam {
-                parameter: "Марка материала".to_string(),
-                gold_csp: "Марка материала\n14А\n15А\n".to_string(),
-                gold_values: vec!["14А".into(), "15А".into()],
+                parameter: "Material grade".to_string(),
+                gold_csp: "Material grade\n14A\n15A\n".to_string(),
+                gold_values: vec!["14A".into(), "15A".into()],
             },
         );
 
@@ -613,16 +613,16 @@ mod tests {
 
         assert_eq!(rows.materialize.len(), 1);
         assert_eq!(rows.materialize[0].doc, "standard-a.pdf");
-        assert_eq!(rows.materialize[0].parameter, "Марка материала");
+        assert_eq!(rows.materialize[0].parameter, "Material grade");
         assert_eq!(
             rows.materialize[0].workbook_excerpt,
-            "Марка материала: 14А, 15А"
+            "Material grade: 14A, 15A"
         );
-        assert_eq!(rows.materialize[0].gold_values, vec!["14А", "15А"]);
+        assert_eq!(rows.materialize[0].gold_values, vec!["14A", "15A"]);
         assert!(!rows.materialize[0].synthetic);
 
         assert_eq!(rows.research.len(), 1);
-        assert_eq!(rows.research[0].grep_pattern, "Марка материала");
+        assert_eq!(rows.research[0].grep_pattern, "Material grade");
         assert!(rows.research[0].hit);
         assert_eq!(rows.research_reads.len(), 1);
         assert_eq!(rows.research_reads[0].prefill_source, "read");
@@ -631,12 +631,12 @@ mod tests {
         assert_eq!(rows.compile_fix.len(), 1);
         assert_eq!(
             rows.compile_fix[0].broken_csp,
-            "Марка материала\n14А\n15А\n"
+            "Material grade\n14A\n15A\n"
         );
         assert_eq!(
             rows.compile_fix[0].compiler_error,
-            "graph_build FAILED: Марка_материала.csp line 3"
+            "graph_build FAILED: Material_grade.csp line 3"
         );
-        assert_eq!(rows.compile_fix[0].gold_csp, "Марка материала\n14А\n15А\n");
+        assert_eq!(rows.compile_fix[0].gold_csp, "Material grade\n14A\n15A\n");
     }
 }

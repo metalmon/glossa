@@ -1254,7 +1254,7 @@ fn strip_trailing_unit_if_numeric(s: &str) -> String {
         }
     }
     // No space: "63м/с" — peel a trailing unit run off a numeric prefix. A single
-    // trailing letter ("14A", "25А") is a designation-code suffix, not a unit —
+    // trailing letter ("14A", "25A") is a designation-code suffix, not a unit —
     // only multi-char runs (or a bare "°") qualify here; with a space the
     // whitespace branch above still strips single-letter units.
     let unit_start = s
@@ -2931,17 +2931,17 @@ mod tests {
     fn load_validation_reads_canon_order() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("Тип.json"),
+            dir.path().join("Type.json"),
             r#"{"tables":[{"rows":[{"D":"1","h":"2"}]}]}"#,
         )
         .unwrap();
         std::fs::write(
             dir.path().join("schema.toml"),
-            "[order]\nparams = [\"Тип\", \"Высота\"]\n",
+            "[order]\nparams = [\"Type\", \"Height\"]\n",
         )
         .unwrap();
         let (_cols, _rows, _refs, canon) = load_validation_data(dir.path()).unwrap();
-        assert_eq!(canon, vec!["Тип".to_string(), "Высота".into()]);
+        assert_eq!(canon, vec!["Type".to_string(), "Height".into()]);
     }
 
     #[test]
@@ -2959,7 +2959,7 @@ mod tests {
                 },
                 RelationCoverage {
                     ref_name: "SoundIndex".into(),
-                    params: vec!["ЗИ".into(), "Связка".into()],
+                    params: vec!["SI".into(), "Bond".into()],
                     agent_file: None,
                     rows_hit: 0,
                     rows_total: 19,
@@ -2977,10 +2977,10 @@ mod tests {
 
     #[test]
     fn constant_gold_param_is_dropped_from_match() {
-        // Gold table (D, h, тип) where тип is constant → agent (D, h) must still match.
+        // Gold table (D, h, type) where type is constant → agent (D, h) must still match.
         let rt = RefTable {
             name: "Height".into(),
-            params: vec!["D".into(), "h".into(), "тип".into()],
+            params: vec!["D".into(), "h".into(), "type".into()],
             rows: vec![
                 vec!["125".into(), "0,6".into(), "41".into()],
                 vec!["150".into(), "0,6".into(), "41".into()],
@@ -3014,7 +3014,7 @@ mod tests {
         assert_eq!(
             t.agent_file.as_deref(),
             Some("D_h.csp"),
-            "matched despite constant тип"
+            "matched despite constant type"
         );
         assert_eq!(t.rows_hit, 3, "all 3 gold rows covered on (D,h)");
         assert_eq!(t.rows_total, 3);
@@ -3056,8 +3056,8 @@ mod tests {
         // Gold: one wide range per key. Agent: narrow odd bands — equivalent under
         // range cover (odd lattice, matching hull).
         let rt = RefTable {
-            name: "ЗИ".into(),
-            params: vec!["Связка".into(), "ЗИ".into()],
+            name: "SI".into(),
+            params: vec!["Bond".into(), "SI".into()],
             rows: vec![
                 vec!["B".into(), "25-49".into()],
                 vec!["BF".into(), "25-49".into()],
@@ -3088,7 +3088,7 @@ mod tests {
             .collect();
         let agent = vec![AgentTbl {
             file: "zi.csp".into(),
-            headers: vec!["Связка".into(), "ЗИ".into()],
+            headers: vec!["Bond".into(), "SI".into()],
             rows,
             col_vals,
         }];
@@ -3119,13 +3119,13 @@ mod tests {
         assert!(!domain_covers(&gap, &norm_value("25-49")));
     }
 
-    // Height and bore share values (10, 13); binding must send Высота to the D_T
+    // Height and bore share values (10, 13); binding must send Height to the D_T
     // (height) table, not the value-overlapping D_H one. Two positional paths:
     // field name and file name.
     fn hbore_setup() -> (RefTable, Vec<AgentTbl>, Vec<String>) {
         let rt = RefTable {
-            name: "Высота".into(),
-            params: vec!["Наружный диаметр".into(), "Высота".into()],
+            name: "Height".into(),
+            params: vec!["Outer diameter".into(), "Height".into()],
             rows: vec![
                 vec!["125".into(), "10".into()],
                 vec!["150".into(), "13".into()],
@@ -3151,7 +3151,7 @@ mod tests {
                 col_vals,
             }
         };
-        let canon = vec!["Наружный диаметр".to_string(), "Высота".into()];
+        let canon = vec!["Outer diameter".to_string(), "Height".into()];
         (
             rt,
             vec![mk("D_H.csp", ["D", "H"]), mk("D_T.csp", ["D", "T"])],
@@ -3348,16 +3348,16 @@ mod tests {
         // set reproduces the reference domain → covered.
         std::fs::write(
             mirror.join("t.csp"),
-            "Диаметр круга|Марка\n125|14A\n150|25A\n",
+            "Wheel diameter|Grade\n125|14A\n150|25A\n",
         )
         .unwrap();
         let cols = vec![
             ColInfo {
-                name: "Наружный диаметр".into(),
+                name: "Outer diameter".into(),
                 valid: vec!["125".into(), "150".into()],
             },
             ColInfo {
-                name: "Высота".into(),
+                name: "Height".into(),
                 valid: vec!["20".into(), "32".into()],
             },
         ];
@@ -3381,9 +3381,9 @@ mod tests {
         std::fs::create_dir_all(&mirror).unwrap();
         // Agent wrote a regex PATTERN instead of enumerating marks — it must
         // cover concrete reference values like "14A" and "25A".
-        std::fs::write(mirror.join("t.csp"), "Марка\n\\d+A\n").unwrap();
+        std::fs::write(mirror.join("t.csp"), "Grade\n\\d+A\n").unwrap();
         let cols = vec![ColInfo {
-            name: "Марка материала".into(),
+            name: "Material grade".into(),
             valid: vec!["14A".into(), "25A".into()],
         }];
         let report = compare_tables_by_domain(dir.path(), doc, &cols, &[]);
@@ -3424,12 +3424,12 @@ mod tests {
         // steal the diameter file even when domains overlap.
         std::fs::write(
             mirror.join("schema.toml"),
-            "[order]\nparams = [\"Наружный диаметр\", \"Скорость\"]\nfiles = [\"diameter.csp\", \"speed.csp\"]\n",
+            "[order]\nparams = [\"Outer diameter\", \"Speed\"]\nfiles = [\"diameter.csp\", \"speed.csp\"]\n",
         )
         .unwrap();
         let cols = vec![
             ColInfo {
-                name: "Наружный диаметр".into(),
+                name: "Outer diameter".into(),
                 valid: vec![
                     "50".into(),
                     "63".into(),
@@ -3439,7 +3439,7 @@ mod tests {
                 ],
             },
             ColInfo {
-                name: "Скорость".into(),
+                name: "Speed".into(),
                 valid: vec![
                     "32".into(),
                     "50".into(),
@@ -3450,12 +3450,12 @@ mod tests {
                 ],
             },
         ];
-        let canon = vec!["Наружный диаметр".into(), "Скорость".into()];
+        let canon = vec!["Outer diameter".into(), "Speed".into()];
         let report = compare_tables_by_domain(dir.path(), doc, &cols, &canon);
         let speed = report
             .params
             .iter()
-            .find(|p| p.ref_name == "Скорость")
+            .find(|p| p.ref_name == "Speed")
             .unwrap();
         assert_eq!(speed.agent_col.as_deref(), Some("speed.csp"));
         assert_eq!((speed.recall_hit, speed.recall_total), (3, 6));
@@ -3489,21 +3489,21 @@ mod tests {
         let report = TablesReport {
             params: vec![
                 ParamCoverage {
-                    ref_name: "Наружный диаметр".into(),
+                    ref_name: "Outer diameter".into(),
                     agent_col: Some("diameter".into()),
                     recall_hit: 5,
                     recall_total: 5,
                     missing: vec![],
                 },
                 ParamCoverage {
-                    ref_name: "Скорость".into(),
+                    ref_name: "Speed".into(),
                     agent_col: Some("speed".into()),
                     recall_hit: 3,
                     recall_total: 6,
                     missing: vec!["100".into(), "32".into(), "50".into()],
                 },
                 ParamCoverage {
-                    ref_name: "Звуковой индекс".into(),
+                    ref_name: "Sound index".into(),
                     agent_col: None,
                     recall_hit: 0,
                     recall_total: 8,
@@ -3522,7 +3522,7 @@ mod tests {
         assert!(out.contains("3/6"));
         assert!(out.contains("missing: 100,32,50"));
         // Unassigned param shows a dash for the column.
-        assert!(out.contains("Звуковой индекс"));
+        assert!(out.contains("Sound index"));
         assert!(out.contains("—"));
     }
 }

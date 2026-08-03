@@ -288,7 +288,7 @@ mod tests {
             doc_path: PathBuf::from("d.pdf"),
             location: "p.7".into(),
             file_type: "pdf".into(),
-            text: "седьмая страница".into(),
+            text: "seventh page".into(),
         }])
         .unwrap();
         let trace = TraceLog::disabled();
@@ -304,7 +304,7 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(out.contains("седьмая"), "got: {out}");
+        assert!(out.contains("seventh"), "got: {out}");
         // stray string "p.7" -> digit-strip fallback -> 7
         let out2 = exec(
             "read",
@@ -316,7 +316,7 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(out2.contains("седьмая"), "digit-strip fallback: {out2}");
+        assert!(out2.contains("seventh"), "digit-strip fallback: {out2}");
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
             doc_path: PathBuf::from("d.pdf"),
             location: "p.7".into(),
             file_type: "pdf".into(),
-            text: "параметр maxTsdr равен 3000".into(),
+            text: "parameter maxTsdr equals 3000".into(),
         }])
         .unwrap();
         let trace = TraceLog::disabled();
@@ -354,20 +354,20 @@ mod tests {
                 doc_path: PathBuf::from("a.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "Плотность F24".into(),
+                text: "Density F24".into(),
             },
             Chunk {
                 doc_path: PathBuf::from("b.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "Плотность F60".into(),
+                text: "Density F60".into(),
             },
         ])
         .unwrap();
         let trace = TraceLog::disabled();
         let out = exec(
             "grep",
-            &json!({"pattern": "Плотность", "path": "a.pdf#1"}),
+            &json!({"pattern": "Density", "path": "a.pdf#1"}),
             dir.path(),
             &idx,
             None,
@@ -385,23 +385,23 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
             Chunk {
-                doc_path: PathBuf::from("ШАБЛОН.pdf"),
+                doc_path: PathBuf::from("TEMPLATE.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "горячая замена".into(),
+                text: "hot swap".into(),
             },
             Chunk {
                 doc_path: PathBuf::from("Other.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "горячая замена".into(),
+                text: "hot swap".into(),
             },
         ])
         .unwrap();
         let trace = TraceLog::disabled();
         let g = exec(
             "glob",
-            &json!({"pattern": "*ШАБЛОН*"}),
+            &json!({"pattern": "*TEMPLATE*"}),
             dir.path(),
             &idx,
             None,
@@ -409,10 +409,10 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(g.contains("ШАБЛОН") && !g.contains("Other"), "glob: {g}");
+        assert!(g.contains("TEMPLATE") && !g.contains("Other"), "glob: {g}");
         let s = exec(
             "search",
-            &json!({"query": "замена", "glob": "*ШАБЛОН*"}),
+            &json!({"query": "swap", "glob": "*TEMPLATE*"}),
             dir.path(),
             &idx,
             None,
@@ -421,7 +421,7 @@ mod tests {
         )
         .0;
         assert!(
-            s.contains("ШАБЛОН") && !s.contains("Other"),
+            s.contains("TEMPLATE") && !s.contains("Other"),
             "scoped search: {s}"
         );
     }
