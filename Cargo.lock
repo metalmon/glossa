@@ -1340,6 +1340,7 @@ dependencies = [
  "globset",
  "glossa-constraint",
  "ignore",
+ "image",
  "lingua",
  "office_oxide",
  "pdf_oxide",

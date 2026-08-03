@@ -123,6 +123,30 @@ pub struct DocImage {
     pub bytes: Vec<u8>,
 }
 
+/// Normalize an image to JPEG for transport. JPEG passes through untouched; anything else
+/// (typically an embedded PNG figure) is decoded and re-encoded to JPEG. JPEG is dramatically
+/// smaller on the wire than base64-PNG, which is what keeps a many-figure page from overflowing
+/// the stdio JSON-RPC frame. Undecodable or unencodable bytes are returned unchanged (best effort —
+/// never drop the figure). Alpha is flattened by dropping the channel (document figures are opaque).
+pub fn to_jpeg(img: DocImage) -> DocImage {
+    if img.mime == "image/jpeg" {
+        return img;
+    }
+    let Ok(decoded) = image::load_from_memory(&img.bytes) else {
+        return img;
+    };
+    let rgb = decoded.to_rgb8();
+    let mut bytes = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80);
+    match enc.encode_image(&rgb) {
+        Ok(()) => DocImage {
+            mime: "image/jpeg".into(),
+            bytes,
+        },
+        Err(_) => img,
+    }
+}
+
 fn mime_for(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     if lower.ends_with(".png") {
@@ -402,6 +426,39 @@ mod image_tests {
         let p = dir.path().join("plain.md");
         std::fs::write(&p, b"# H\nhi\n").unwrap();
         assert!(extract_images(&p, 1, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn to_jpeg_reencodes_png_and_passes_jpeg_through() {
+        // A real 2x2 PNG, encoded via the image crate so it actually decodes.
+        let mut png = Vec::new();
+        let src = image::RgbImage::from_pixel(2, 2, image::Rgb([10, 120, 240]));
+        image::DynamicImage::ImageRgb8(src)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        // PNG in -> JPEG out, and the output is itself a decodable image.
+        let out = to_jpeg(DocImage {
+            mime: "image/png".into(),
+            bytes: png,
+        });
+        assert_eq!(out.mime, "image/jpeg");
+        assert!(image::load_from_memory(&out.bytes).is_ok());
+
+        // JPEG in -> returned byte-for-byte (no re-encode).
+        let jpg = out.bytes.clone();
+        let passthrough = to_jpeg(DocImage {
+            mime: "image/jpeg".into(),
+            bytes: jpg.clone(),
+        });
+        assert_eq!(passthrough.bytes, jpg);
+
+        // Undecodable bytes -> returned unchanged (best effort, never dropped).
+        let junk = DocImage {
+            mime: "image/png".into(),
+            bytes: b"not really a png".to_vec(),
+        };
+        assert_eq!(to_jpeg(junk.clone()), junk);
     }
 
     #[test]
