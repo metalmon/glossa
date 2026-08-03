@@ -8,6 +8,61 @@ fn type_match(e: &Edge, edge_types: Option<&[String]>) -> bool {
     }
 }
 
+/// One step of a `path_between` result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hop {
+    /// The node reached at this step.
+    pub node: String,
+    /// How we reached it from the previous hop: `(edge_type, forward)`. `forward=true` means the
+    /// edge points prev->node (we followed an outgoing edge); `false` means node->prev (incoming).
+    /// `None` only for the first hop (the `from` node).
+    pub via: Option<(String, bool)>,
+}
+
+/// Undirected shortest path from `from` to `to`: every edge is walked in both directions for
+/// connectivity, but each hop records the edge's real direction. Returns the hop chain (including
+/// `from` with `via=None`), or `None` if `to` is unreachable within `max_depth` edges.
+pub fn path_between(
+    g: &GraphStore,
+    from: &str,
+    to: &str,
+    max_depth: usize,
+) -> anyhow::Result<Option<Vec<Hop>>> {
+    if from == to {
+        return Ok(Some(vec![Hop { node: from.to_string(), via: None }]));
+    }
+    let mut visited: HashSet<String> = HashSet::from([from.to_string()]);
+    let mut q: VecDeque<Vec<Hop>> =
+        VecDeque::from([vec![Hop { node: from.to_string(), via: None }]]);
+    while let Some(p) = q.pop_front() {
+        // p.len()-1 == edges walked so far; stop expanding once we'd exceed max_depth edges.
+        if p.len() > max_depth {
+            continue;
+        }
+        let last = p.last().unwrap().node.clone();
+        let mut steps: Vec<(String, String, bool)> = Vec::new();
+        for e in g.outgoing(&last)? {
+            steps.push((e.to, e.edge_type, true));
+        }
+        for e in g.incoming(&last)? {
+            steps.push((e.from, e.edge_type, false));
+        }
+        for (next, et, fwd) in steps {
+            if next == to {
+                let mut found = p.clone();
+                found.push(Hop { node: next, via: Some((et, fwd)) });
+                return Ok(Some(found));
+            }
+            if visited.insert(next.clone()) {
+                let mut np = p.clone();
+                np.push(Hop { node: next, via: Some((et, fwd)) });
+                q.push_back(np);
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub fn neighbors(
     g: &GraphStore,
     from: &str,
@@ -140,5 +195,39 @@ mod tests {
             Some(vec!["a".into(), "b".into(), "c".into()])
         );
         assert_eq!(path(&g, "a", "z", 5).unwrap(), None);
+    }
+
+    #[test]
+    fn path_between_is_undirected_and_records_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c"] {
+            node(&g, id);
+        }
+        // Only forward edges a->b->c exist.
+        edge(&g, "a", "b", "REL");
+        edge(&g, "b", "c", "REL");
+
+        // Forward reachable, hops carry forward=true.
+        let fwd = path_between(&g, "a", "c", 5).unwrap().unwrap();
+        let nodes: Vec<&str> = fwd.iter().map(|h| h.node.as_str()).collect();
+        assert_eq!(nodes, vec!["a", "b", "c"]);
+        assert_eq!(fwd[0].via, None);
+        assert_eq!(fwd[1].via, Some(("REL".to_string(), true)));
+        assert_eq!(fwd[2].via, Some(("REL".to_string(), true)));
+
+        // Reverse direction is found too (undirected), with forward=false.
+        let rev = path_between(&g, "c", "a", 5).unwrap().unwrap();
+        let rnodes: Vec<&str> = rev.iter().map(|h| h.node.as_str()).collect();
+        assert_eq!(rnodes, vec!["c", "b", "a"]);
+        assert_eq!(rev[1].via, Some(("REL".to_string(), false)));
+
+        // Unreachable within depth.
+        node(&g, "z");
+        assert_eq!(path_between(&g, "a", "z", 5).unwrap(), None);
+        // Same node.
+        let same = path_between(&g, "a", "a", 5).unwrap().unwrap();
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0].node, "a");
     }
 }
