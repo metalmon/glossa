@@ -74,6 +74,7 @@ const FULL_TOOLS: &[&str] = &["purge"];
 const GRAPH_TOOLS: &[&str] = &[
     "glossary",
     "related",
+    "neighbors",
     "graph_upsert",
     "graph_delete",
     "graph_update",
@@ -505,6 +506,31 @@ struct RelatedArgs {
     )]
     #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
     n: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NeighborsArgs {
+    #[serde(default)]
+    #[schemars(description = "graph node id (from a `glossary` line, e.g. `sym:...`)")]
+    node: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "document path from a search result (use with `n` instead of `node`)")]
+    path: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
+    )]
+    #[schemars(description = "chunk number from a search/read (use with `path`)")]
+    n: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
+    )]
+    #[schemars(description = "keep only these edge/relation types (e.g. REFERENCES); omit for all")]
+    edge_types: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(description = "which edges: `out`, `in`, or `both` (default `both`)")]
+    direction: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -948,6 +974,31 @@ impl GlossaServer {
                 a.node.as_deref(),
                 a.path.as_deref(),
                 a.n,
+                &self.trace,
+            ),
+        )]))
+    }
+
+    #[tool(
+        description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect use `path`. Empty => no such edges."
+    )]
+    async fn neighbors(
+        &self,
+        Parameters(a): Parameters<NeighborsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.freshen_now().await;
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let direction = a.direction.as_deref().unwrap_or("both");
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::neighbors(
+                &idx,
+                &g,
+                a.node.as_deref(),
+                a.path.as_deref(),
+                a.n,
+                a.edge_types.as_deref(),
+                direction,
                 &self.trace,
             ),
         )]))

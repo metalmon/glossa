@@ -759,6 +759,71 @@ pub fn related(
     }
 }
 
+/// One structural-neighbor line: `<EDGE_TYPE> <arrow>  <endpoint><meta><read-anchor>`.
+/// `forward=true` prints `->` (an outgoing edge), `false` prints `<-` (incoming).
+fn edge_line(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    edge_type: &str,
+    forward: bool,
+    endpoint_id: &str,
+) -> String {
+    let arrow = if forward { "->" } else { "<-" };
+    format!(
+        "{:<16}{}  {}{}{}",
+        edge_type,
+        arrow,
+        endpoint_ref(idx, g, endpoint_id),
+        meta_suffix(g, endpoint_id),
+        read_anchor(idx, g, endpoint_id),
+    )
+}
+
+/// Structural 1-hop neighbors: the node's actual typed edges (e.g. REFERENCES, CONSTRAINED_BY),
+/// each with its real direction. `direction` filters to outgoing (`"out"`), incoming (`"in"`) or
+/// both; `edge_types` (when set) keeps only those relation names.
+pub fn neighbors(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    node: Option<&str>,
+    path: Option<&str>,
+    n: Option<u64>,
+    edge_types: Option<&[String]>,
+    direction: &str,
+    trace: &TraceLog,
+) -> String {
+    let id = match resolve_node_ref(idx, node, path, n) {
+        Ok(i) => i,
+        Err(m) => return m,
+    };
+    let want = |et: &str| edge_types.map_or(true, |ts| ts.iter().any(|t| t == et));
+    let mut lines = Vec::new();
+    if direction != "in" {
+        for e in g.outgoing(&id).unwrap_or_default() {
+            if want(&e.edge_type) {
+                lines.push(edge_line(idx, g, &e.edge_type, true, &e.to));
+            }
+        }
+    }
+    if direction != "out" {
+        for e in g.incoming(&id).unwrap_or_default() {
+            if want(&e.edge_type) {
+                lines.push(edge_line(idx, g, &e.edge_type, false, &e.from));
+            }
+        }
+    }
+    trace.log(
+        "neighbors",
+        json!({"id": id, "direction": direction}),
+        json!({"edges": lines.len()}),
+    );
+    if lines.is_empty() {
+        "(no structural edges)".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn stats_example_line(
     g: &crate::graph::store::GraphStore,
     id: &str,
@@ -1752,6 +1817,49 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             community_lines[1].contains("cau:tsdr"),
             "second by pr: {out}"
         );
+    }
+
+    #[test]
+    fn neighbors_lists_typed_edges_with_direction_and_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c"] {
+            g.put_node(&node(id, "Entity", id)).unwrap();
+        }
+        g.put_edge(&edge("a", "REFERENCES", "b")).unwrap();
+        g.put_edge(&edge("c", "CONSTRAINED_BY", "a")).unwrap();
+
+        let both = neighbors(&idx, &g, Some("a"), None, None, None, "both", &TraceLog::disabled());
+        assert!(both.contains("REFERENCES") && both.contains("->"));
+        assert!(both.contains("CONSTRAINED_BY") && both.contains("<-"));
+
+        let out = neighbors(&idx, &g, Some("a"), None, None, None, "out", &TraceLog::disabled());
+        assert!(out.contains("REFERENCES") && !out.contains("CONSTRAINED_BY"));
+
+        let filtered = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            Some(&["CONSTRAINED_BY".to_string()]),
+            "both",
+            &TraceLog::disabled(),
+        );
+        assert!(filtered.contains("CONSTRAINED_BY") && !filtered.contains("REFERENCES"));
+
+        let empty = neighbors(
+            &idx,
+            &g,
+            Some("b"),
+            None,
+            None,
+            Some(&["NOPE".to_string()]),
+            "both",
+            &TraceLog::disabled(),
+        );
+        assert_eq!(empty, "(no structural edges)");
     }
 
     #[test]
