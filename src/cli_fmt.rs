@@ -396,20 +396,20 @@ mod tests {
     }
 
     #[test]
-    fn highlight_with_wraps_case_insensitive_cyrillic() {
+    fn highlight_with_wraps_case_insensitive_multibyte() {
         let out = highlight_with(
-            "Проведение Поверки и поверка",
-            &["поверк".to_string()],
+            "Presenting Résumé and résumé",
+            &["résum".to_string()],
             |m| format!("[{m}]"),
         );
-        assert_eq!(out, "Проведение [Поверк]и и [поверк]а");
+        assert_eq!(out, "Presenting [Résum]é and [résum]é");
     }
 
     #[test]
     fn query_terms_keeps_words_of_len_2_plus() {
         assert_eq!(
-            query_terms("МОДУЛЬ ПЛК"),
-            vec!["МОДУЛЬ".to_string(), "ПЛК".to_string()]
+            query_terms("MODULE PLC"),
+            vec!["MODULE".to_string(), "PLC".to_string()]
         );
         assert!(query_terms("a .").is_empty());
     }

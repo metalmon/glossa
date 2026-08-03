@@ -555,7 +555,7 @@ strict = true
             vec![node(
                 "sym:t",
                 "Symptom",
-                "Тестовый симптом насоса",
+                "Test pump symptom",
                 "t.docx",
             )],
             vec![],
@@ -564,7 +564,7 @@ strict = true
         .unwrap();
 
         let (removed, notes) =
-            apply_delete(&g, vec!["Тестовые симптомы насоса".into()], vec![]).unwrap();
+            apply_delete(&g, vec!["Test pump symptoms".into()], vec![]).unwrap();
         assert_eq!(removed, 0, "an inflected variant must not match exactly");
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("matched nothing"), "note: {}", notes[0]);
@@ -574,7 +574,7 @@ strict = true
             notes[0]
         );
         assert!(
-            notes[0].contains("Тестовый симптом насоса"),
+            notes[0].contains("Test pump symptom"),
             "must name the close existing label: {}",
             notes[0]
         );

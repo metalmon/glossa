@@ -68,19 +68,18 @@ mod tests {
 
     #[test]
     fn decodes_non_utf8_markdown() {
-        // "# Привет" header in Windows-1251 (0x23 0x20 then cp1251 bytes).
-        let mut bytes = vec![b'#', b' '];
-        bytes.extend_from_slice(&[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2]); // Привет
+        // "# café" header in Windows-1252 (0x23 0x20 'c' 'a' 'f' then 0xE9 for é).
+        let mut bytes = vec![b'#', b' ', b'c', b'a', b'f', 0xE9];
         bytes.push(b'\n');
         let chunks = MarkdownExtractor
-            .extract(Path::new("ru.md"), &bytes)
+            .extract(Path::new("latin.md"), &bytes)
             .unwrap();
         assert_eq!(chunks.len(), 0); // header-only file: heading recorded, no body chunk
                                      // Now with a body line.
         let mut b2 = bytes.clone();
         b2.extend_from_slice("body\n".as_bytes());
-        let c2 = MarkdownExtractor.extract(Path::new("ru.md"), &b2).unwrap();
+        let c2 = MarkdownExtractor.extract(Path::new("latin.md"), &b2).unwrap();
         assert_eq!(c2.len(), 1);
-        assert_eq!(c2[0].location, "Привет");
+        assert_eq!(c2[0].location, "café");
     }
 }

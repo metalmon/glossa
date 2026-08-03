@@ -82,7 +82,7 @@ pub fn load_problem(
 /// Re-key an assignment onto the graph's actual Field labels using glossa's
 /// morphology-aware resolver (`GraphStore::resolve`, the same one graph_upsert
 /// uses for edge endpoints). A value keyed by a paraphrase of a parameter name
-/// ("d, глубина") still lands on the Field the agent created ("глубина" / "Глубина паза"),
+/// ("d, depth") still lands on the Field the agent created ("depth" / "Slot depth"),
 /// so a faithful domain isn't silently skipped over a wording difference.
 /// Keys that already match a Field, or resolve to no Field, pass through
 /// unchanged (the latter then surface as NOT CHECKED in the feedback).
@@ -737,19 +737,19 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        insert_node(&g, "fld:d", "Field", "Диаметр", "spec.pdf");
+        insert_node(&g, "fld:d", "Field", "Diameter", "spec.pdf");
         insert_node_aliases(
             &g,
             "enum:d",
             "Enum",
-            "Диаметр enum",
+            "Diameter enum",
             &["25", "40", "60"],
             "spec.pdf",
         );
         insert_edge(&g, "fld:d", "CONSTRAINED_BY", "enum:d", "spec.pdf");
 
         let problem = make_adapter_problem(&g, &ont, "spec.pdf");
-        let f = problem.fields.iter().find(|f| f.name == "Диаметр").unwrap();
+        let f = problem.fields.iter().find(|f| f.name == "Diameter").unwrap();
         let values = f
             .constraints
             .iter()
@@ -763,12 +763,12 @@ params = ["condition_field", "condition_value"]
         // The solver honours it: 40 passes, 37 (in-between) is rejected.
         assert!(glossa_constraint::solver::validate(
             &problem,
-            &[("Диаметр".into(), serde_json::json!(40))]
+            &[("Diameter".into(), serde_json::json!(40))]
         )
         .is_empty());
         assert!(!glossa_constraint::solver::validate(
             &problem,
-            &[("Диаметр".into(), serde_json::json!(37))]
+            &[("Diameter".into(), serde_json::json!(37))]
         )
         .is_empty());
     }
@@ -782,27 +782,27 @@ params = ["condition_field", "condition_value"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = make_ont();
 
-        // Agent named the field "Глубина паза"; the assignment keys it "d, глубина".
-        insert_node(&g, "fld:h", "Field", "Глубина паза", "spec.pdf");
+        // Agent named the field "Slot depth"; the assignment keys it "d, depth".
+        insert_node(&g, "fld:h", "Field", "Slot depth", "spec.pdf");
         insert_node_aliases(
             &g,
             "enum:h",
             "Enum",
-            "Глубина паза enum",
+            "Slot depth enum",
             &["0,6", "0,8", "1,2"],
             "spec.pdf",
         );
         insert_edge(&g, "fld:h", "CONSTRAINED_BY", "enum:h", "spec.pdf");
 
         let problem = make_adapter_problem(&g, &ont, "spec.pdf");
-        let raw = vec![("d, глубина".to_string(), serde_json::json!("99"))];
+        let raw = vec![("d, depth".to_string(), serde_json::json!("99"))];
 
         // Without resolution the key misses the field and the bad value passes.
         assert!(glossa_constraint::solver::validate(&problem, &raw).is_empty());
 
-        // With resolution it re-keys onto "Глубина паза" and the enum rejects 99.
+        // With resolution it re-keys onto "Slot depth" and the enum rejects 99.
         let resolved = resolve_assignment_fields(&g, &problem, &raw);
-        assert_eq!(resolved[0].0, "Глубина паза");
+        assert_eq!(resolved[0].0, "Slot depth");
         assert!(
             !glossa_constraint::solver::validate(&problem, &resolved).is_empty(),
             "99 ∉ {{0,6; 0,8; 1,2}} must be caught after resolution"

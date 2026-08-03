@@ -236,10 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn decodes_windows_1251_russian() {
-        // "Привет" in Windows-1251.
-        let cp1251 = [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2];
-        assert_eq!(decode_all(&cp1251).unwrap(), "Привет");
+    fn decodes_windows_1252_latin() {
+        // "café" in Windows-1252 (é = 0xE9).
+        let cp1252 = [b'c', b'a', b'f', 0xE9];
+        assert_eq!(decode_all(&cp1252).unwrap(), "café");
     }
 
     #[test]
@@ -307,14 +307,14 @@ mod stream_tests {
     }
 
     #[test]
-    fn streams_windows_1251_file() {
+    fn streams_windows_1252_file() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("ru.txt");
-        std::fs::write(&p, [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b'\n']).unwrap(); // "Привет\n"
+        let p = dir.path().join("latin.txt");
+        std::fs::write(&p, [b'c', b'a', b'f', 0xE9, b'\n']).unwrap(); // "café\n"
         let mut out = Vec::new();
         stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
         assert_eq!(out.len(), 1);
-        assert!(out[0].text.contains("Привет"));
+        assert!(out[0].text.contains("café"));
     }
 
     #[test]

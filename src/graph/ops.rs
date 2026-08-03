@@ -2041,14 +2041,14 @@ props = []
 strict = true
 "#;
         let ont = Ontology::parse(ONT).unwrap();
-        // prefix "enum:" is 5 bytes; byte 5 falls inside 'п' (bytes 4..6) of "Тип_Enum"
+        // prefix "enum:" is 5 bytes; byte 5 falls inside 'ü' (bytes 4..6) of "TypeüEnum"
         assert_eq!(
-            sanitize_label_for_upsert(&ont, "EnumType", "Тип_Enum"),
-            "Тип_Enum"
+            sanitize_label_for_upsert(&ont, "EnumType", "TypeüEnum"),
+            "TypeüEnum"
         );
         assert_eq!(
-            sanitize_label_for_upsert(&ont, "EnumType", "enum: Тип_Enum"),
-            "Тип_Enum"
+            sanitize_label_for_upsert(&ont, "EnumType", "enum: TypeüEnum"),
+            "TypeüEnum"
         );
     }
 

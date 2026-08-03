@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn heading_markdown_emphasis_is_stripped_from_location() {
-        let chunks = chunk_markdown(Path::new("x.docx"), "# **РАЗДЕЛ** > `code`\nbody\n", "docx");
-        assert_eq!(chunks[0].location, "РАЗДЕЛ > code");
+        let chunks = chunk_markdown(Path::new("x.docx"), "# **SECTION** > `code`\nbody\n", "docx");
+        assert_eq!(chunks[0].location, "SECTION > code");
     }
 }

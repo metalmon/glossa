@@ -88,7 +88,7 @@ mod tests {
         let log = TraceLog::to_dir(dir.path());
         log.log(
             "search",
-            serde_json::json!({"query":"поверка"}),
+            serde_json::json!({"query":"calibration"}),
             serde_json::json!([{"path":"a.md","location":"p.1","score":1.0}]),
         );
         log.log(
@@ -109,6 +109,6 @@ mod tests {
         assert_eq!(lines.len(), 2);
         let e0: TraceEntry = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(e0.tool, "search");
-        assert_eq!(e0.args["query"], "поверка");
+        assert_eq!(e0.args["query"], "calibration");
     }
 }

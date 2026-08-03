@@ -160,8 +160,8 @@ fn line_of_offset(body: &str, off: usize) -> usize {
 }
 
 /// Rewrite runs of literal spaces in the pattern to `\s+` (outside `[...]` classes), so a
-/// single-spaced query matches the irregular whitespace of extracted PDF text ("Пример
-/// условного" finds "Пример  условного"). Returns `None` when the pattern has no space.
+/// single-spaced query matches the irregular whitespace of extracted PDF text ("Sample
+/// device" finds "Sample  device"). Returns `None` when the pattern has no space.
 /// The caller must treat the rewritten pattern as a regex (clear `fixed`); `fixed` input
 /// is escaped first so its other characters stay literal.
 fn normalize_pattern_spaces(pattern: &str, fixed: bool) -> Option<String> {
@@ -523,36 +523,36 @@ mod tests {
     }
 
     #[test]
-    fn grep_finds_exact_cyrillic_code_token() {
+    fn grep_finds_exact_code_token() {
         let (_d, idx) = idx_with(&[
             (
                 "d.pdf",
                 "p.7",
                 "pdf",
-                "Установите параметр maxTsdr равным 3000 tbit.",
+                "Set parameter respTimeout to 3000 tbit.",
             ),
-            ("d.pdf", "p.8", "pdf", "Прочая страница без кода."),
+            ("d.pdf", "p.8", "pdf", "Another page without the code."),
         ]);
-        let hits = grep(&idx, "maxTsdr", &GrepOpts::default()).unwrap();
+        let hits = grep(&idx, "respTimeout", &GrepOpts::default()).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].ord, 7);
-        assert!(hits[0].line.contains("maxTsdr"));
+        assert!(hits[0].line.contains("respTimeout"));
         assert_eq!(
             hits[0].display_line(),
-            "d.pdf:#7: Установите параметр maxTsdr равным 3000 tbit."
+            "d.pdf:#7: Set parameter respTimeout to 3000 tbit."
         );
     }
 
     #[test]
     fn grep_regex_and_flags() {
         let (_d, idx) = idx_with(&[
-            ("a.md", "S1", "md", "Договор №42 подписан"),
-            ("b.md", "S1", "md", "договоры разные"),
-            ("c.pdf", "p.1", "pdf", "ДОГОВОР заглавными"),
+            ("a.md", "S1", "md", "Contract #42 signed"),
+            ("b.md", "S1", "md", "contracts various"),
+            ("c.pdf", "p.1", "pdf", "CONTRACT capitalized"),
         ]);
         let hits = grep(
             &idx,
-            "договор",
+            "contract",
             &GrepOpts {
                 ignore_case: true,
                 ..Default::default()
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(hits.len(), 3);
         let f = grep(
             &idx,
-            "№42",
+            "#42",
             &GrepOpts {
                 fixed: true,
                 ..Default::default()
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(f[0].path, "a.md");
         let t = grep(
             &idx,
-            "договор",
+            "contract",
             &GrepOpts {
                 ignore_case: true,
                 file_type: Some("pdf".into()),
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(t[0].path, "c.pdf");
         let g = grep(
             &idx,
-            "договор",
+            "contract",
             &GrepOpts {
                 ignore_case: true,
                 glob: Some("*.md".into()),
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(g.len(), 2);
         let w = grep(
             &idx,
-            "договор",
+            "contract",
             &GrepOpts {
                 ignore_case: true,
                 word: true,
@@ -610,13 +610,13 @@ mod tests {
     #[test]
     fn grep_glob_recursive_on_windows_paths() {
         let (_d, idx) = idx_with(&[
-            ("dir\\nested.md", "S1", "md", "договор подписан"),
-            ("top.md", "S1", "md", "договор другой"),
-            ("dir\\nested.pdf", "p.1", "pdf", "договор pdf"),
+            ("dir\\nested.md", "S1", "md", "contract signed"),
+            ("top.md", "S1", "md", "contract other"),
+            ("dir\\nested.pdf", "p.1", "pdf", "contract pdf"),
         ]);
         let g = grep(
             &idx,
-            "договор",
+            "contract",
             &GrepOpts {
                 ignore_case: true,
                 glob: Some("**/*.md".into()),
@@ -632,12 +632,12 @@ mod tests {
     #[test]
     fn grep_prefilter_matches_fullscan_results() {
         let (_d, idx) = idx_with(&[
-            ("a.md", "S1", "md", "регистрация устройства завершена"),
-            ("b.md", "S1", "md", "несвязанный текст без слова"),
-            ("c.md", "S2", "md", "повторная регистрация устройства"),
+            ("a.md", "S1", "md", "device registration completed"),
+            ("b.md", "S1", "md", "unrelated text without the word"),
+            ("c.md", "S2", "md", "repeated device registration"),
         ]);
         assert_same_hits(
-            "регистрация",
+            "registration",
             &GrepOpts {
                 ignore_case: true,
                 ..Default::default()
@@ -648,19 +648,19 @@ mod tests {
 
     #[test]
     fn grep_substring_inside_token_is_found() {
-        let (_d, idx) = idx_with(&[("d.pdf", "p.5", "pdf", "Параметр maxTsdr настраивается.")]);
-        assert_same_hits("Tsdr", &GrepOpts::default(), &idx);
+        let (_d, idx) = idx_with(&[("d.pdf", "p.5", "pdf", "Parameter respTimeout is configured.")]);
+        assert_same_hits("Timeout", &GrepOpts::default(), &idx);
     }
 
     #[test]
     fn grep_alternation_prefilter_is_sound() {
         let (_d, idx) = idx_with(&[
-            ("a.md", "S1", "md", "выполнена регистрация устройства"),
-            ("b.md", "S1", "md", "сторонний компонент"),
-            ("c.md", "S1", "md", "обновлённый компонент системы"),
+            ("a.md", "S1", "md", "device registration performed"),
+            ("b.md", "S1", "md", "third-party component"),
+            ("c.md", "S1", "md", "updated system component"),
         ]);
         assert_same_hits(
-            "регистрация|компонент",
+            "registration|component",
             &GrepOpts {
                 ignore_case: true,
                 ..Default::default()
@@ -676,12 +676,12 @@ mod tests {
                 "d.pdf",
                 "p.7",
                 "pdf",
-                "Установите параметр maxTsdr равным 3000 tbit.",
+                "Set parameter respTimeout to 3000 tbit.",
             ),
-            ("d.pdf", "p.8", "pdf", "Прочая страница без кода."),
+            ("d.pdf", "p.8", "pdf", "Another page without the code."),
         ]);
         assert_same_hits(
-            "maxTsdr",
+            "respTimeout",
             &GrepOpts {
                 fixed: true,
                 ..Default::default()
@@ -705,9 +705,9 @@ mod tests {
 
     #[test]
     fn grep_smart_case_default_folds_lowercase_only() {
-        let (_d, idx) = idx_with(&[("d.pdf", "p.1", "pdf", "Контроллер МОДУЛЬ подключён")]);
-        assert_eq!(grep(&idx, "модуль", &GrepOpts::default()).unwrap().len(), 1);
-        assert_eq!(grep(&idx, "Модуль", &GrepOpts::default()).unwrap().len(), 0);
+        let (_d, idx) = idx_with(&[("d.pdf", "p.1", "pdf", "Controller MODULE connected")]);
+        assert_eq!(grep(&idx, "module", &GrepOpts::default()).unwrap().len(), 1);
+        assert_eq!(grep(&idx, "Module", &GrepOpts::default()).unwrap().len(), 0);
     }
 
     #[test]
@@ -816,11 +816,11 @@ mod tests {
             "d.md",
             "S1",
             "md",
-            "row Таблица one\nrow Тип two\njust D three\nsize 3.0 mm\nsize 3X0 mm",
+            "row Table one\nrow Type two\njust D three\nsize 3.0 mm\nsize 3X0 mm",
         )]);
         let alt: Vec<_> = grep(
             &idx,
-            "Таблица|Тип",
+            "Table|Type",
             &GrepOpts {
                 fixed: true,
                 ..Default::default()
@@ -830,7 +830,7 @@ mod tests {
         .iter()
         .map(|h| h.line.clone())
         .collect();
-        assert_eq!(alt, vec!["row Таблица one", "row Тип two"]);
+        assert_eq!(alt, vec!["row Table one", "row Type two"]);
         // No metacharacters → a true literal; a bare `.` stays literal, so "3.0" ≠ "3X0".
         let dec: Vec<_> = grep(
             &idx,
@@ -970,14 +970,14 @@ mod tests {
     #[test]
     fn grep_path_scopes_to_one_document() {
         let (_d, idx) = idx_with(&[
-            ("a.pdf", "p.1", "pdf", "параметр Скорость V10"),
-            ("b.pdf", "p.1", "pdf", "параметр Скорость V20"),
+            ("a.pdf", "p.1", "pdf", "parameter Speed V10"),
+            ("b.pdf", "p.1", "pdf", "parameter Speed V20"),
         ]);
         let opts = GrepOpts {
             glob: Some(path_to_glob("a.pdf#1")),
             ..Default::default()
         };
-        let h = grep(&idx, "Скорость", &opts).unwrap();
+        let h = grep(&idx, "Speed", &opts).unwrap();
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].path, "a.pdf");
     }
@@ -989,15 +989,15 @@ mod tests {
             "d.pdf",
             "p.3",
             "pdf",
-            "Пример  условного   обозначения изделия",
+            "Sample  device   marking label",
         )]);
-        let h = grep(&idx, "Пример условного обозначения", &GrepOpts::default()).unwrap();
+        let h = grep(&idx, "Sample device marking", &GrepOpts::default()).unwrap();
         assert_eq!(h.len(), 1, "single-spaced pattern must match double spaces");
-        assert_same_hits("Пример условного обозначения", &GrepOpts::default(), &idx);
+        assert_same_hits("Sample device marking", &GrepOpts::default(), &idx);
         // `fixed` with a space normalizes too, keeping its other characters literal
         let f = grep(
             &idx,
-            "условного   обозначения",
+            "device   marking",
             &GrepOpts {
                 fixed: true,
                 ..Default::default()

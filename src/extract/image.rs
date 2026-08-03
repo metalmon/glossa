@@ -55,15 +55,15 @@ mod tests {
     #[test]
     fn indexes_image_by_folder_and_stem() {
         let chunks = ImageExtractor
-            .extract(Path::new("kb/Схемы/profibus_сегмент-2.png"), b"\x89PNG")
+            .extract(Path::new("kb/Diagrams/bus_segment-2.png"), b"\x89PNG")
             .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_type, "png");
         assert_eq!(chunks[0].location, "(image)");
         assert!(
-            chunks[0].text.contains("Схемы")
-                && chunks[0].text.contains("profibus")
-                && chunks[0].text.contains("сегмент")
+            chunks[0].text.contains("Diagrams")
+                && chunks[0].text.contains("bus")
+                && chunks[0].text.contains("segment")
         );
     }
 }

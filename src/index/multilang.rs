@@ -183,10 +183,10 @@ mod tests {
     }
 
     #[test]
-    fn russian_inflections_stem_to_same_root() {
+    fn contract_inflections_stem_to_same_root() {
         let mut a = multilang_analyzer(default_detector());
-        let one = tokens(&mut a, "договор");
-        let many = tokens(&mut a, "договоры договоров договорам");
+        let one = tokens(&mut a, "contract");
+        let many = tokens(&mut a, "contracts contracted contracting");
         let root = &one[0];
         assert!(
             many.iter().all(|t| t == root),

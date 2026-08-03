@@ -1812,7 +1812,7 @@ mod incremental_tests {
             g.put_node(&crate::graph::store::Node {
                 id: "sym:test".into(),
                 node_type: "Symptom".into(),
-                label: "тестовый симптом".into(),
+                label: "test symptom".into(),
                 aliases: vec![],
                 prov: crate::graph::store::Provenance {
                     source_path: "a.md".into(),
@@ -1845,7 +1845,7 @@ mod incremental_tests {
     #[test]
     fn reindex_picks_up_changes_and_skips_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.md"), "# T\nдоговоры поставка\n").unwrap();
+        fs::write(dir.path().join("a.md"), "# T\ncontracts delivery\n").unwrap();
 
         let s1 = index_dir(dir.path(), false).unwrap();
         assert_eq!(s1.added, 1);
@@ -1855,7 +1855,7 @@ mod incremental_tests {
         assert_eq!(s2.added, 0);
 
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let hits = idx.search("договор", 10).unwrap();
+        let hits = idx.search("contract", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("a.md")));
     }
 
@@ -1915,7 +1915,7 @@ mod incremental_tests {
     #[test]
     fn ensure_fresh_noop_then_picks_up_change() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.md"), "# T\nдоговоры\n").unwrap();
+        fs::write(dir.path().join("a.md"), "# T\ncontracts\n").unwrap();
         let s1 = ensure_fresh(dir.path()).unwrap();
         assert_eq!(s1.added, 1);
 
@@ -1927,14 +1927,14 @@ mod incremental_tests {
         // change on disk → picked up automatically, searchable
         fs::write(
             dir.path().join("a.md"),
-            "# T\nдоговоры поставка регламент\n",
+            "# T\ncontracts delivery regulation\n",
         )
         .unwrap();
         let s3 = ensure_fresh(dir.path()).unwrap();
         assert_eq!(s3.added, 1);
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx
-            .search("регламент", 10)
+            .search("regulation", 10)
             .unwrap()
             .iter()
             .any(|h| h.path.ends_with("a.md")));
@@ -1976,19 +1976,19 @@ mod incremental_tests {
     #[test]
     fn index_dir_indexes_loose_images() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("Схемы")).unwrap();
+        std::fs::create_dir_all(dir.path().join("Diagrams")).unwrap();
         std::fs::write(
-            dir.path().join("Схемы").join("profibus.png"),
+            dir.path().join("Diagrams").join("bus.png"),
             b"\x89PNG\r\n",
         )
         .unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
-            idx.search("profibus", 10)
+            idx.search("bus", 10)
                 .unwrap()
                 .iter()
-                .any(|h| h.path.ends_with("profibus.png")),
+                .any(|h| h.path.ends_with("bus.png")),
             "loose image is searchable by name"
         );
     }
@@ -2354,17 +2354,17 @@ mod search_tests {
     }
 
     #[test]
-    fn ranked_search_finds_russian_by_inflected_query() {
+    fn ranked_search_finds_by_inflected_query() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            chunk("a.md", "Подписаны договоры на поставку"),
-            chunk("b.md", "unrelated english content"),
+            chunk("a.md", "Delivery contracts have been signed"),
+            chunk("b.md", "unrelated other content"),
         ])
         .unwrap();
 
-        // Query uses a different inflection ("договор") than the doc ("договоры").
-        let hits = idx.search("договор", 10).unwrap();
+        // Query uses a different inflection ("contract") than the doc ("contracts").
+        let hits = idx.search("contract", 10).unwrap();
         assert!(!hits.is_empty(), "stemmed query should match inflected doc");
         assert_eq!(hits[0].path, "a.md");
         assert!(hits[0].score > 0.0);
@@ -2387,10 +2387,10 @@ mod search_tests {
             doc_path: PathBuf::from("d.pdf"),
             location: "p.7".into(),
             file_type: "pdf".into(),
-            text: "горячая замена цпу".into(),
+            text: "hot cpu swap".into(),
         }])
         .unwrap();
-        let hits = idx.search("замена", 10).unwrap();
+        let hits = idx.search("swap", 10).unwrap();
         assert_eq!(hits[0].ord, 7);
     }
 
@@ -2426,7 +2426,7 @@ mod search_tests {
             location: "p.350".into(),
             file_type: "pdf".into(),
             ord: 350,
-            snippet: "горячая замена".into(),
+            snippet: "hot swap".into(),
             score: 17.7,
         };
         let line = pdf.display_line();
@@ -2436,14 +2436,14 @@ mod search_tests {
 
         let md = RankedHit {
             path: "d.md".into(),
-            location: "Введение".into(),
+            location: "Introduction".into(),
             file_type: "md".into(),
             ord: 2,
-            snippet: "текст".into(),
+            snippet: "text".into(),
             score: 3.0,
         };
         assert!(md.display_line().starts_with("[#2] "));
-        assert!(md.display_line().contains("Введение"));
+        assert!(md.display_line().contains("Introduction"));
         assert!(
             !md.display_line().contains("· md ·"),
             "file_type must not leak as label in non-paged line: {}",
@@ -2481,17 +2481,17 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Архив БД\\doc.pdf"),
+            doc_path: PathBuf::from("Archive DB\\doc.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
         }])
         .unwrap();
         assert_eq!(
-            idx.resolve_path("kb-manual\\Архив БД\\doc.pdf")
+            idx.resolve_path("kb-manual\\Archive DB\\doc.pdf")
                 .unwrap()
                 .as_deref(),
-            Some("Архив БД\\doc.pdf")
+            Some("Archive DB\\doc.pdf")
         );
     }
 
@@ -2595,36 +2595,36 @@ mod search_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
             Chunk {
-                doc_path: PathBuf::from("a/МОДУЛЬ.pdf"),
+                doc_path: PathBuf::from("a/MODULE.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "горячая замена цпу".into(),
+                text: "hot cpu swap".into(),
             },
             Chunk {
                 doc_path: PathBuf::from("b/Other.pdf"),
                 location: "p.1".into(),
                 file_type: "pdf".into(),
-                text: "горячая замена цпу".into(),
+                text: "hot cpu swap".into(),
             },
             Chunk {
                 doc_path: PathBuf::from("c/Notes.md"),
                 location: "S1".into(),
                 file_type: "md".into(),
-                text: "горячая замена цпу".into(),
+                text: "hot cpu swap".into(),
             },
         ])
         .unwrap();
 
-        let all = idx.search_filtered("замена", 10, None, None).unwrap();
+        let all = idx.search_filtered("swap", 10, None, None).unwrap();
         assert_eq!(all.len(), 3);
         // glob scopes to the matching path only
         let manual = idx
-            .search_filtered("замена", 10, Some("*МОДУЛЬ*"), None)
+            .search_filtered("swap", 10, Some("*MODULE*"), None)
             .unwrap();
         assert_eq!(manual.len(), 1);
-        assert!(manual[0].path.contains("МОДУЛЬ"));
+        assert!(manual[0].path.contains("MODULE"));
         // file_type scopes to md only
-        let md = idx.search_filtered("замена", 10, None, Some("md")).unwrap();
+        let md = idx.search_filtered("swap", 10, None, Some("md")).unwrap();
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
         // recursive glob on nested paths
@@ -2632,11 +2632,11 @@ mod search_tests {
             doc_path: PathBuf::from("nested\\inner.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
-            text: "горячая замена цпу".into(),
+            text: "hot cpu swap".into(),
         }])
         .unwrap();
         let rec = idx
-            .search_filtered("замена", 10, Some("**/*.pdf"), None)
+            .search_filtered("swap", 10, Some("**/*.pdf"), None)
             .unwrap();
         assert!(rec.len() >= 2);
         assert!(rec.iter().any(|h| h.path.contains("inner.pdf")));
@@ -3076,12 +3076,12 @@ mod tests {
             text: t.into(),
         };
         idx.write_chunks(&[
-            mk("a.md", 1, "регистрация устройства завершена"),
-            mk("b.md", 1, "несвязанный текст"),
+            mk("a.md", 1, "device registration completed"),
+            mk("b.md", 1, "unrelated text"),
         ])
         .unwrap();
         let mut paths = Vec::new();
-        idx.iter_chunks_trigram_candidates(&["рег".to_string()], |path, _ord, _ft, _body| {
+        idx.iter_chunks_trigram_candidates(&["reg".to_string()], |path, _ord, _ft, _body| {
             paths.push(path.to_string());
         })
         .unwrap();

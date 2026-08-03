@@ -118,22 +118,22 @@ mod tests {
     #[test]
     fn glob_docs_lists_distinct_matching_paths_with_counts() {
         let (_d, idx) = idx_with(&[
-            ("kb\\Руководство МОДУЛЬ.pdf", "p.1", "a"),
-            ("kb\\Руководство МОДУЛЬ.pdf", "p.2", "b"),
+            ("kb\\Übersicht MODULE.pdf", "p.1", "a"),
+            ("kb\\Übersicht MODULE.pdf", "p.2", "b"),
             ("kb\\Safety Manual.pdf", "p.1", "c"),
-            ("kb\\Прочее.md", "S1", "d"),
+            ("kb\\Other.md", "S1", "d"),
         ]);
         let pdfs = glob_docs(&idx, "*.pdf").unwrap();
-        // BTreeMap sorts by UTF-8 byte order: 'S' (0x53) < 'Р' (0xD0), so Safety sorts first.
+        // BTreeMap sorts by UTF-8 byte order: 'S' (0x53) < 'Ü' (0xC3), so Safety sorts first.
         assert_eq!(
             pdfs,
             vec![
                 ("kb\\Safety Manual.pdf".to_string(), 1),
-                ("kb\\Руководство МОДУЛЬ.pdf".to_string(), 2),
+                ("kb\\Übersicht MODULE.pdf".to_string(), 2),
             ]
         );
-        let manual = glob_docs(&idx, "*МОДУЛЬ*").unwrap();
-        assert_eq!(manual, vec![("kb\\Руководство МОДУЛЬ.pdf".to_string(), 2)]);
+        let manual = glob_docs(&idx, "*MODULE*").unwrap();
+        assert_eq!(manual, vec![("kb\\Übersicht MODULE.pdf".to_string(), 2)]);
         assert!(glob_docs(&idx, "*nomatch*").unwrap().is_empty());
     }
 

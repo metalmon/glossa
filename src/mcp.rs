@@ -1807,11 +1807,11 @@ mod tests {
     async fn glob_tool_lists_documents() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("МОДУЛЬ.md"),
-            "# A\nраз\n# B\nдва\n".as_bytes(),
+            dir.path().join("MODULE.md"),
+            "# A\none\n# B\ntwo\n".as_bytes(),
         )
         .unwrap();
-        std::fs::write(dir.path().join("Other.md"), "# A\nраз\n".as_bytes()).unwrap();
+        std::fs::write(dir.path().join("Other.md"), "# A\none\n".as_bytes()).unwrap();
         index_dir(dir.path(), true).unwrap();
         let srv = GlossaServer::new(
             dir.path().to_path_buf(),
@@ -1823,12 +1823,12 @@ mod tests {
         let out = format!(
             "{:?}",
             srv.glob(Parameters(GlobArgs {
-                pattern: "*МОДУЛЬ*".into()
+                pattern: "*MODULE*".into()
             }))
             .await
             .unwrap()
         );
-        assert!(out.contains("МОДУЛЬ"), "lists the matching doc: {out}");
+        assert!(out.contains("MODULE"), "lists the matching doc: {out}");
         assert!(!out.contains("Other"), "excludes non-matching: {out}");
     }
 
@@ -1907,7 +1907,7 @@ mod tests {
             g.put_node(&Node {
                 id: "sym:x".into(),
                 node_type: "Symptom".into(),
-                label: "потеря связи".into(),
+                label: "link loss".into(),
                 aliases: vec![],
                 prov: Provenance {
                     source_path: "a.md".into(),
@@ -1967,7 +1967,7 @@ mod tests {
             g.put_node(&Node {
                 id: "sym:x".into(),
                 node_type: "Symptom".into(),
-                label: "потеря связи".into(),
+                label: "link loss".into(),
                 aliases: vec![],
                 prov: Provenance {
                     source_path: "a.md".into(),

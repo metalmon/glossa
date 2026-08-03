@@ -192,15 +192,15 @@ mod tests {
 
     #[test]
     fn label_jaccard_links_paraphrase_not_unrelated() {
-        // Russian labels are intentional: they exercise the Cyrillic stemming path of the
-        // shared morphology pipeline (word-order/inflection-tolerant term sets).
+        // English labels exercise the Latin stemming path of the shared morphology pipeline
+        // (word-order/inflection-tolerant term sets).
         let labels = vec![
-            ("s1".to_string(), "Потеря связи Modbus".to_string()),
+            ("s1".to_string(), "Link loss Modbus".to_string()),
             (
                 "s2".to_string(),
-                "Modbus потеря связи периодическая".to_string(),
+                "Modbus link losses periodic".to_string(),
             ),
-            ("x".to_string(), "Замена предохранителя".to_string()),
+            ("x".to_string(), "Fuse replacement".to_string()),
         ];
         let pairs = label_jaccard(&labels, 0.4);
         assert!(
@@ -225,15 +225,14 @@ mod tests {
 
     #[test]
     fn label_bm25_links_paraphrase_not_unrelated() {
-        // Russian labels are intentional: they exercise the multilang (Cyrillic) analyzer
-        // in the in-RAM BM25 index.
+        // English labels exercise the multilang (Latin) analyzer in the in-RAM BM25 index.
         let labels = vec![
-            ("s1".to_string(), "Потеря связи Modbus".to_string()),
+            ("s1".to_string(), "Link loss Modbus".to_string()),
             (
                 "s2".to_string(),
-                "Modbus периодическая потеря связи".to_string(),
+                "Modbus periodic link losses".to_string(),
             ),
-            ("x".to_string(), "Замена предохранителя питания".to_string()),
+            ("x".to_string(), "Power fuse replacement".to_string()),
         ];
         // relative threshold: paraphrase scores a high fraction of self-score; unrelated never matches
         let pairs = label_bm25(&labels, 0.3, 5).unwrap();

@@ -956,7 +956,8 @@ impl GraphStore {
     /// stemmed terms are all present in its `label` or one of its `aliases` (same morphology
     /// pipeline as search), so word order and inflection don't matter. Exact (case-insensitive)
     /// label/alias equality is always honored too. NOTE: this is morphology- + order-tolerant,
-    /// NOT transliteration-aware — Cyrillic "модбас" still won't match Latin "Modbus".
+    /// NOT transliteration-aware — a phonetic respelling in another script still won't match
+    /// the Latin original.
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
         let c = self.conn.lock().unwrap();
         // Fast path: exact (normalized) label match via the label_norm index — the common case
@@ -1026,8 +1027,8 @@ strict = true
             id: "org:acme".into(),
             node_type: "Organization".into(),
             label: "Acme Corp".into(),
-            // Cyrillic alias is intentional: exercises case-insensitive Cyrillic alias matching.
-            aliases: vec!["ООО Акме".into(), "ACME".into()],
+            // Multi-word alias exercises case-insensitive alias matching.
+            aliases: vec!["Acme Holdings Ltd".into(), "ACME".into()],
             prov: agent_prov(),
         };
         let doc = Node {
@@ -1045,7 +1046,10 @@ strict = true
         };
         g.upsert(&ont, &[org, doc], &[edge]).unwrap();
 
-        assert_eq!(g.resolve("ооо акме").unwrap(), vec!["org:acme".to_string()]);
+        assert_eq!(
+            g.resolve("acme holdings ltd").unwrap(),
+            vec!["org:acme".to_string()]
+        );
         assert_eq!(g.resolve("ACME").unwrap(), vec!["org:acme".to_string()]);
     }
 
@@ -1087,15 +1091,15 @@ strict = true
         let n = Node {
             id: "n:sync".into(),
             node_type: "Organization".into(),
-            label: "Синхронизация пространства параметров".into(),
+            label: "Synchronization parameter spaces".into(),
             aliases: vec![],
             prov: agent_prov(),
         };
         g.upsert(&ont, &[n], &[]).unwrap();
-        // Reordered + different inflection ("пространство" vs "пространства"): exact match
+        // Reordered + different inflection ("space" vs "spaces"): exact match
         // returns nothing, fuzzy (stemmed token subset) must find the node.
         assert_eq!(
-            g.resolve("пространство синхронизация").unwrap(),
+            g.resolve("space synchronization").unwrap(),
             vec!["n:sync".to_string()]
         );
     }
@@ -1108,13 +1112,13 @@ strict = true
         let n = Node {
             id: "n:sync".into(),
             node_type: "Organization".into(),
-            label: "Синхронизация пространства параметров".into(),
+            label: "Synchronization parameter spaces".into(),
             aliases: vec![],
             prov: agent_prov(),
         };
         g.upsert(&ont, &[n], &[]).unwrap();
         // A token NOT present in the label must not match (no shared term → BM25 returns nothing).
-        assert!(g.resolve("температура двигателя").unwrap().is_empty());
+        assert!(g.resolve("motor temperature").unwrap().is_empty());
         // Empty / punctuation-only query must not match everything.
         assert!(g.resolve("   ").unwrap().is_empty());
     }
@@ -1127,15 +1131,15 @@ strict = true
         let n = Node {
             id: "sym:loss".into(),
             node_type: "Organization".into(),
-            label: "Периодическая потеря связи с ПЛК Siemens по Profibus DP".into(),
+            label: "Periodic link loss with Siemens PLC over the bus".into(),
             aliases: vec![],
             prov: agent_prov(),
         };
         g.upsert(&ont, &[n], &[]).unwrap();
-        // A long agent-style query carrying EXTRA words not in the label (проблема, обмен, данными):
+        // A long agent-style query carrying EXTRA words not in the label (problem, exchange, data):
         // the old strict `query ⊆ label` would miss it; BM25 ranks it by the shared terms and finds it.
         let hits = g
-            .resolve("проблема периодической потери связи Profibus обмен данными")
+            .resolve("problem with periodic link loss over the bus data exchange")
             .unwrap();
         assert_eq!(
             hits,

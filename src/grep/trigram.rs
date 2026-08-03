@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn alternation_is_or() {
         match trigram_plan(
-            "регистрация|компонент",
+            "registration|component",
             &GrepOpts {
                 ignore_case: true,
                 ..Default::default()
