@@ -179,10 +179,11 @@ pub fn exec(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
             let n = args.get("n").and_then(parse_n);
-            let edge_types: Option<Vec<String>> = args
-                .get("edge_types")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            // Loose like the MCP surface: a JSON array, a single string, or a comma-separated
+            // string all resolve to the same Vec<String> (some models send `edge_types:"REFERENCES"`).
+            let edge_types: Option<Vec<String>> = args.get("edge_types").and_then(|v| {
+                glossa::json_util::deserialize_opt_vec_string_loose(v).ok().flatten()
+            });
             let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
             let body = match graph {
                 Some(g) => glossa::tools::neighbors(
@@ -218,9 +219,10 @@ pub fn exec(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
             let to_n = args.get("to_n").and_then(parse_n);
+            // Loose like from_n/to_n above: accepts a numeric string ("9") as well as an integer.
             let max_depth = args
                 .get("max_depth")
-                .and_then(|v| v.as_u64())
+                .and_then(parse_n)
                 .map(|n| n as usize)
                 .unwrap_or(6);
             let body = match graph {
@@ -548,4 +550,136 @@ mod tests {
         );
     }
 
+    fn prov() -> glossa::graph::store::Provenance {
+        glossa::graph::store::Provenance {
+            source_path: "p.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.8,
+            created_at: 1,
+        }
+    }
+    fn gnode(id: &str) -> glossa::graph::store::Node {
+        glossa::graph::store::Node {
+            id: id.into(),
+            node_type: "Entity".into(),
+            label: id.into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        }
+    }
+    fn gedge(from: &str, rel: &str, to: &str) -> glossa::graph::store::Edge {
+        glossa::graph::store::Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: rel.into(),
+            prov: prov(),
+        }
+    }
+
+    /// Finding 2: `neighbors`' `edge_types` must accept a single string or a comma-separated
+    /// string, not just a JSON array — some models send `edge_types:"CONSTRAINED_BY"`. Before the
+    /// fix, `.as_array()` silently dropped that filter (both edge types would show up).
+    #[test]
+    fn neighbors_edge_types_accepts_single_string_and_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c"] {
+            g.put_node(&gnode(id)).unwrap();
+        }
+        g.put_edge(&gedge("a", "REFERENCES", "b")).unwrap();
+        g.put_edge(&gedge("c", "CONSTRAINED_BY", "a")).unwrap();
+        let trace = TraceLog::disabled();
+
+        let array_form = exec(
+            "neighbors",
+            &json!({"node": "a", "edge_types": ["CONSTRAINED_BY"]}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            array_form.contains("CONSTRAINED_BY") && !array_form.contains("REFERENCES"),
+            "got: {array_form}"
+        );
+
+        let single_string = exec(
+            "neighbors",
+            &json!({"node": "a", "edge_types": "CONSTRAINED_BY"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert_eq!(single_string, array_form, "single string must filter identically to array");
+
+        let csv_string = exec(
+            "neighbors",
+            &json!({"node": "a", "edge_types": "CONSTRAINED_BY, NOPE"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert_eq!(csv_string, array_form, "comma-separated string must filter identically");
+    }
+
+    /// Finding 2: `path`'s `max_depth` must accept a numeric string ("9"), not just a JSON
+    /// integer. Build a chain longer than the default depth (6) so the test only passes when the
+    /// string is actually parsed rather than silently falling back to the default.
+    #[test]
+    fn path_max_depth_accepts_numeric_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let ids = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"]; // 7 hops, over the default cap of 6
+        for id in ids {
+            g.put_node(&gnode(id)).unwrap();
+        }
+        for w in ids.windows(2) {
+            g.put_edge(&gedge(w[0], "REFERENCES", w[1])).unwrap();
+        }
+        let trace = TraceLog::disabled();
+
+        // Default max_depth (6) is too shallow for a 7-hop chain.
+        let default_depth = exec(
+            "path",
+            &json!({"from": "n0", "to": "n7"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            default_depth.starts_with("no path"),
+            "expected default depth to be too shallow: {default_depth}"
+        );
+
+        // A numeric-string max_depth must be parsed (not dropped to the default 6).
+        let string_depth = exec(
+            "path",
+            &json!({"from": "n0", "to": "n7", "max_depth": "10"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            string_depth.contains("--REFERENCES-->"),
+            "numeric-string max_depth must extend the search: {string_depth}"
+        );
+    }
 }
