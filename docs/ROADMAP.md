@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-07-23**. Version **0.2.5** (tag `v0.2.5`; `master` may be one commit ahead with eval test fixes).
+Status as of **2026-08-04**. Version **0.2.7** (tag `v0.2.7`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -24,7 +24,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick.
 - **export-tz:** four jsonl streams (`search`, `grep`, `glob`, `read`); synthetic grep/glob rows when episodes lack those tool calls; `TrainCase.source` gold join when present.
 - **Constraint graph (CSP):** solver in `constraint/solver.rs` (validate/infer/check, 1223 lines), `constraint_solve` MCP tool — behind `--features constraint`.
-- **`--noimage` / `-N` flag:** disable image output in MCP tools; enforces override in read handler (v0.2.5).
+- **Image output opt-in:** off by default, enabled with `--vision` (`GLOSSA_VISION`); all images served as JPEG (embedded PNGs re-encoded, PDF-embedded/raster JPEGs passed through), so a figure-heavy page no longer overflows the stdio frame. `-N` / `--noimage` kept as a deprecated no-op (v0.2.7; the original `--noimage` toggle shipped in v0.2.5).
 
 See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [benchmarks.md](benchmarks.md) for HotpotQA numbers.
 

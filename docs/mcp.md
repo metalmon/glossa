@@ -22,7 +22,7 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 
 `--no-graph` hides all graph and index tools (search + read only) for eval control arms.
 
-`--noimage` / `-N` (or `GLOSSA_NO_IMAGE=1`) disables all image output: `read` strips `page_image` and `include_images` from its schema and never returns `Content::image`. `get_source_file` is unaffected.
+Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=1`). Without it, `read` strips `page_image` and `include_images` from its schema and never returns `Content::image` (`get_source_file` is unaffected). This is off by default because a figure-heavy page's base64 image payload can overflow the stdio JSON-RPC frame and drop the connection; enabling `--vision` is safe on `--transport streamable-http`. When enabled, all images are served as JPEG (embedded PNGs re-encoded, real JPEGs passed through). `-N` / `--noimage` is a deprecated no-op kept for compatibility (images are already off unless `--vision` is set).
 
 `resolve`, `get_ontology`, and `constraint_solve` are available in every profile. `constraint_solve` and `graph_build` are only registered when the binary is built with `--features constraint` — without it, these tools are absent from the tool list.
 
@@ -33,7 +33,7 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
-| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models. For HTML files, images referenced by `<img>` tags are extracted and returned alongside the text. With `--noimage`, image params are removed from the schema and responses contain text only |
+| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only |
 | `get_source_file` | ✓ | ✓ | ✓ | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
 | `related` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
@@ -61,7 +61,7 @@ Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 ## Typical agent workflow
 
 1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
-2. **`read(path, n)`** — open full chunk text (embedded office images returned as vision content when supported; `page_image: true` renders a PDF page as PNG for hard-to-parse tables/layout).
+2. **`read(path, n)`** — open full chunk text (with `--vision`, embedded office images are returned as JPEG vision content; `page_image: true` renders a PDF page as a JPEG for hard-to-parse tables/layout).
 3. **`glossary("concept")`** — jump to reasoning graph; get cause → resolution chain with `read` anchors.
 4. **`related(node_id)`** — alternate cases (SIMILAR, COMMUNITY) when the first chain is close but wrong.
 5. **`neighbors(node_id)`** / **`path(from, to)`** — inspect a node's direct structural edges, or the shortest chain connecting two nodes.

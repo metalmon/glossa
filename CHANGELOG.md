@@ -6,16 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-03
+## [0.2.7] - 2026-08-04
 
 ### Added
 
 - **`neighbors` MCP tool (structural, typed 1-hop edges)**: lists a node's direct outgoing/incoming edges (`edge_types` filter, `direction: out|in|both`), each rendered with its real direction (`--REL-->` / `<--REL--`) and a `read path #n` anchor. This is the FACTUAL graph-structure tool — for fuzzy "similar cases" use `related`.
 - **`path` MCP tool (shortest connection between two nodes)**: undirected BFS between two node refs (or chunk `path`+`n` pairs), rendered as a chain of hops with each edge's real direction and a `read path #n` anchor per hop. `max_depth` defaults to 6, capped at 12.
+- **`--vision` flag (image output opt-in)**: image output in the `read` tool — embedded figures and `page_image` — is served only when the server is started with `--vision` (env `GLOSSA_VISION`). When enabled, all images go out as **JPEG**: embedded PNGs are decoded and re-encoded, PDF-embedded/rasterized JPEGs pass through unchanged. JPEG is far smaller on the wire than base64-PNG, so no size cap is needed. Safe on `--transport streamable-http`.
 
 ### Changed
 
 - **`neighbors` renamed to `related`**: the old fuzzy "similar/community cases after glossary" tool is now called `related` — its behavior is unchanged, only the name. `neighbors` is now the new structural tool described above. Tool descriptions, the eval harness (routing/caching/CLI dispatch), the generated TensorZero tool config, and the `answer_hotpot` prompt were all updated to match.
+- **Image output is now OFF by default**: previously `read` returned embedded images unless `--noimage` was set. A figure-heavy page (e.g. an HTML manual page with many embedded PNGs) base64-encoded every image into a single stdio JSON-RPC frame, which could exceed the transport frame limit and drop the connection. Images are now opt-in via `--vision` (see above). `-N` / `--noimage` is kept as a hidden, deprecated no-op that still forces images off.
+- **Public examples and fixtures neutralized**: sample data in prompts, test fixtures, the eval/integration fixtures, and the changelog were switched to English and generic fieldbus examples, so the public surface carries no domain-specific sample content. Internal only — no behavior change.
+
+### Fixed
+
+- **Structural `neighbors` no longer emits a self-loop**: a node that carried a structural edge to itself surfaced as its own neighbour in both directions; the self-loop is now de-duplicated out of the `neighbors` result.
 
 ## [0.2.6] — 2026-07-26
 
