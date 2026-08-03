@@ -169,6 +169,36 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "neighbors" => {
+            let node = args
+                .get("node")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let n = args.get("n").and_then(parse_n);
+            let edge_types: Option<Vec<String>> = args
+                .get("edge_types")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+            let body = match graph {
+                Some(g) => glossa::tools::neighbors(
+                    idx,
+                    g,
+                    node,
+                    path,
+                    n,
+                    edge_types.as_deref(),
+                    direction,
+                    trace,
+                ),
+                None => "(graph unavailable)".to_string(),
+            };
+            (body, Vec::new(), Vec::new())
+        }
         "graph_stats" => {
             let body = match graph {
                 Some(g) => glossa::tools::graph_stats(g),
