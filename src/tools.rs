@@ -782,6 +782,7 @@ fn edge_line(
 /// Structural 1-hop neighbors: the node's actual typed edges (e.g. REFERENCES, CONSTRAINED_BY),
 /// each with its real direction. `direction` filters to outgoing (`"out"`), incoming (`"in"`) or
 /// both; `edge_types` (when set) keeps only those relation names.
+#[allow(clippy::too_many_arguments)]
 pub fn neighbors(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -796,7 +797,7 @@ pub fn neighbors(
         Ok(i) => i,
         Err(m) => return m,
     };
-    let want = |et: &str| edge_types.map_or(true, |ts| ts.iter().any(|t| t == et));
+    let want = |et: &str| edge_types.is_none_or(|ts| ts.iter().any(|t| t == et));
     let mut lines = Vec::new();
     if direction != "in" {
         for e in g.outgoing(&id).unwrap_or_default() {
@@ -1926,11 +1927,14 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let dir = tempfile::tempdir().unwrap();
         let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        for id in ["a", "b", "c"] {
+        for id in ["a", "b", "c", "d"] {
             g.put_node(&node(id, "Entity", id)).unwrap();
         }
         g.put_edge(&edge("a", "REFERENCES", "b")).unwrap();
         g.put_edge(&edge("b", "REFERENCES", "c")).unwrap();
+        // Edge points d->c; reaching d from c means traversing it against its stored
+        // direction, so this hop must render as a reverse arrow (`<--...--`).
+        g.put_edge(&edge("d", "CONSTRAINED_BY", "c")).unwrap();
 
         let out = path_between(
             &idx,
@@ -1949,6 +1953,23 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(
             out.lines().next().unwrap().contains("a"),
             "got: {out}"
+        );
+
+        let reverse = path_between(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            Some("d"),
+            None,
+            None,
+            6,
+            &TraceLog::disabled(),
+        );
+        assert!(
+            reverse.contains("<--CONSTRAINED_BY--"),
+            "expected a reverse-direction hop: {reverse}"
         );
 
         let none = path_between(
