@@ -454,7 +454,7 @@ struct ReadArgs {
         deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
     )]
     #[schemars(
-        description = "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text."
+        description = "PDF only: return a raster of page `n` as JPEG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text. Requires the server to be started with --vision."
     )]
     page_image: Option<bool>,
 }
@@ -928,7 +928,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI PNG instead. Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
