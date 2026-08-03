@@ -296,5 +296,9 @@ mod tests {
         assert_eq!(none.v, None);
         let empty: T = serde_json::from_str(r#"{"v":""}"#).unwrap();
         assert_eq!(empty.v, None);
+        let empty_arr: T = serde_json::from_str(r#"{"v":[]}"#).unwrap();
+        assert_eq!(empty_arr.v, None);
+        let blank_arr: T = serde_json::from_str(r#"{"v":[" "]}"#).unwrap();
+        assert_eq!(blank_arr.v, None);
     }
 }

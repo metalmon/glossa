@@ -977,7 +977,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `neighbors(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
+        description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
     )]
     async fn glossary(
         &self,
@@ -993,7 +993,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors."
+        description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
     )]
     async fn related(
         &self,
@@ -1288,7 +1288,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`neighbors`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
+        description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`related`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
     )]
     async fn graph_generalize(
         &self,
@@ -1533,6 +1533,22 @@ mod tests {
         assert_eq!(g.ignore_case, Some(true));
         assert_eq!(g.context, Some(20));
         assert_eq!(g.multiline, Some(true));
+
+        let ne: NeighborsArgs = serde_json::from_str(
+            r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out"}"#,
+        )
+        .unwrap();
+        assert_eq!(ne.n, Some(3));
+        assert_eq!(ne.edge_types, Some(vec!["REFERENCES".to_string()]));
+        assert_eq!(ne.direction, Some("out".to_string()));
+
+        let pa: PathArgs = serde_json::from_str(
+            r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9"}"#,
+        )
+        .unwrap();
+        assert_eq!(pa.from_n, Some(1));
+        assert_eq!(pa.to_n, Some(2));
+        assert_eq!(pa.max_depth, Some(9));
 
         // Native JSON types still deserialize; absent optionals stay None.
         let r2: ReadArgs = serde_json::from_str(r#"{"path":"a.pdf","n":2}"#).unwrap();
