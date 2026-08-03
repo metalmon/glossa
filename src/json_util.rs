@@ -188,6 +188,32 @@ where
     }
 }
 
+/// Accept a string list as a JSON array, a single string, or a comma-separated string — some MCP
+/// clients cannot send arrays. Empty/whitespace entries are dropped; an all-empty result is `None`.
+pub fn deserialize_opt_vec_string_loose<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let raw = Option::<OneOrMany>::deserialize(deserializer)?;
+    let cleaned = raw.map(|x| {
+        let items: Vec<String> = match x {
+            OneOrMany::One(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
+            OneOrMany::Many(m) => m.into_iter().map(|s| s.trim().to_string()).collect(),
+        };
+        items.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()
+    });
+    Ok(cleaned.filter(|v: &Vec<String>| !v.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +277,24 @@ mod tests {
         // Out-of-range u32 and a missing required field are rejected.
         assert!(serde_json::from_str::<T>(r#"{"n":"4294967296"}"#).is_err());
         assert!(serde_json::from_str::<T>(r#"{}"#).is_err());
+    }
+
+    #[test]
+    fn opt_vec_string_loose_accepts_array_single_and_csv() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "deserialize_opt_vec_string_loose")]
+            v: Option<Vec<String>>,
+        }
+        let arr: T = serde_json::from_str(r#"{"v":["A","B"]}"#).unwrap();
+        assert_eq!(arr.v, Some(vec!["A".into(), "B".into()]));
+        let one: T = serde_json::from_str(r#"{"v":"A"}"#).unwrap();
+        assert_eq!(one.v, Some(vec!["A".into()]));
+        let csv: T = serde_json::from_str(r#"{"v":"A, B ,"}"#).unwrap();
+        assert_eq!(csv.v, Some(vec!["A".into(), "B".into()]));
+        let none: T = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(none.v, None);
+        let empty: T = serde_json::from_str(r#"{"v":""}"#).unwrap();
+        assert_eq!(empty.v, None);
     }
 }
