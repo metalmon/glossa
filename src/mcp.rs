@@ -75,6 +75,7 @@ const GRAPH_TOOLS: &[&str] = &[
     "glossary",
     "related",
     "neighbors",
+    "path",
     "graph_upsert",
     "graph_delete",
     "graph_update",
@@ -531,6 +532,40 @@ struct NeighborsArgs {
     #[serde(default)]
     #[schemars(description = "which edges: `out`, `in`, or `both` (default `both`)")]
     direction: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PathArgs {
+    #[serde(default)]
+    #[schemars(description = "start: graph node id (or use from_path+from_n)")]
+    from: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "start: document path (use with from_n instead of from)")]
+    from_path: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
+    )]
+    #[schemars(description = "start: chunk number (use with from_path)")]
+    from_n: Option<u64>,
+    #[serde(default)]
+    #[schemars(description = "end: graph node id (or use to_path+to_n)")]
+    to: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "end: document path (use with to_n instead of to)")]
+    to_path: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
+    )]
+    #[schemars(description = "end: chunk number (use with to_path)")]
+    to_n: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
+    )]
+    #[schemars(description = "max edges to search (default 6, capped at 12)")]
+    max_depth: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -999,6 +1034,32 @@ impl GlossaServer {
                 a.n,
                 a.edge_types.as_deref(),
                 direction,
+                &self.trace,
+            ),
+        )]))
+    }
+
+    #[tool(
+        description = "Show HOW two nodes are connected: the shortest chain of actual edges between them, ignoring edge direction for reachability but printing each edge's real direction (--REL--> / <--REL--) with a `read path #n` anchor per hop, so you can trace and verify the connection (e.g. a reference chain). Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12). Empty => not connected within that depth. For a node's own direct edges use `neighbors`."
+    )]
+    async fn path(
+        &self,
+        Parameters(a): Parameters<PathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.freshen_now().await;
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::path_between(
+                &idx,
+                &g,
+                a.from.as_deref(),
+                a.from_path.as_deref(),
+                a.from_n,
+                a.to.as_deref(),
+                a.to_path.as_deref(),
+                a.to_n,
+                a.max_depth.unwrap_or(6),
                 &self.trace,
             ),
         )]))

@@ -824,6 +824,65 @@ pub fn neighbors(
     }
 }
 
+/// Shortest connection between two nodes (undirected reachability), rendered as a chain: the
+/// `from` node, then one indented line per hop with the edge's real direction
+/// (`--REL-->` / `<--REL--`) and a `read` anchor so the agent can open each hop's evidence.
+/// `max_depth` is clamped to `[1, 12]` so an undirected BFS can't be told to scan the whole graph.
+#[allow(clippy::too_many_arguments)]
+pub fn path_between(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    from_node: Option<&str>,
+    from_path: Option<&str>,
+    from_n: Option<u64>,
+    to_node: Option<&str>,
+    to_path: Option<&str>,
+    to_n: Option<u64>,
+    max_depth: usize,
+    trace: &TraceLog,
+) -> String {
+    let from = match resolve_node_ref(idx, from_node, from_path, from_n) {
+        Ok(i) => i,
+        Err(m) => return format!("from: {m}"),
+    };
+    let to = match resolve_node_ref(idx, to_node, to_path, to_n) {
+        Ok(i) => i,
+        Err(m) => return format!("to: {m}"),
+    };
+    let depth = max_depth.clamp(1, 12);
+    match crate::graph::traverse::path_between(g, &from, &to, depth) {
+        Ok(Some(hops)) => {
+            let mut out = Vec::with_capacity(hops.len());
+            for (i, h) in hops.iter().enumerate() {
+                if i == 0 {
+                    out.push(format!(
+                        "{}{}",
+                        endpoint_ref(idx, g, &h.node),
+                        read_anchor(idx, g, &h.node)
+                    ));
+                } else {
+                    let (et, fwd) = h.via.as_ref().expect("non-first hop has via");
+                    let arrow = if *fwd {
+                        format!("--{et}-->")
+                    } else {
+                        format!("<--{et}--")
+                    };
+                    out.push(format!(
+                        "  {}  {}{}",
+                        arrow,
+                        endpoint_ref(idx, g, &h.node),
+                        read_anchor(idx, g, &h.node)
+                    ));
+                }
+            }
+            trace.log("path", json!({"from": from, "to": to}), json!({"hops": hops.len()}));
+            out.join("\n")
+        }
+        Ok(None) => format!("no path from {from} to {to} within depth {depth}"),
+        Err(e) => format!("path error: {e}"),
+    }
+}
+
 fn stats_example_line(
     g: &crate::graph::store::GraphStore,
     id: &str,
@@ -1860,6 +1919,66 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
         );
         assert_eq!(empty, "(no structural edges)");
+    }
+
+    #[test]
+    fn path_tool_renders_chain_with_arrows_and_no_path_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c"] {
+            g.put_node(&node(id, "Entity", id)).unwrap();
+        }
+        g.put_edge(&edge("a", "REFERENCES", "b")).unwrap();
+        g.put_edge(&edge("b", "REFERENCES", "c")).unwrap();
+
+        let out = path_between(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            Some("c"),
+            None,
+            None,
+            6,
+            &TraceLog::disabled(),
+        );
+        assert!(out.contains("--REFERENCES-->"), "got: {out}");
+        // first line is the `from` node, no arrow prefix
+        assert!(
+            out.lines().next().unwrap().contains("a"),
+            "got: {out}"
+        );
+
+        let none = path_between(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            Some("zzz"),
+            None,
+            None,
+            6,
+            &TraceLog::disabled(),
+        );
+        assert!(none.starts_with("no path"), "got: {none}");
+
+        // max_depth is clamped to [1,12]; 999 must not panic and still finds it.
+        let clamped = path_between(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            Some("c"),
+            None,
+            None,
+            999,
+            &TraceLog::disabled(),
+        );
+        assert!(clamped.contains("--REFERENCES-->"));
     }
 
     #[test]
