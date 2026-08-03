@@ -153,7 +153,7 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
-        "neighbors" => {
+        "related" => {
             let node = args
                 .get("node")
                 .and_then(|v| v.as_str())
@@ -164,7 +164,7 @@ pub fn exec(
                 .filter(|s| !s.is_empty());
             let n = args.get("n").and_then(parse_n);
             let body = match graph {
-                Some(g) => glossa::tools::neighbors(idx, g, node, path, n, trace),
+                Some(g) => glossa::tools::related(idx, g, node, path, n, trace),
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -384,10 +384,10 @@ mod tests {
         assert_eq!(result_no_graph, "(graph unavailable)");
     }
 
-    /// Parity: MCP surface (tools::neighbors directly) and eval surface (exec dispatch) must
+    /// Parity: MCP surface (tools::related directly) and eval surface (exec dispatch) must
     /// produce identical output for the same (idx, graph, path, n). Both call the shared fn.
     #[test]
-    fn neighbors_mcp_and_eval_parity() {
+    fn related_mcp_and_eval_parity() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("p.md"), "# Alpha\nintro\n## Beta\nbody\n").unwrap();
         glossa::index::store::index_dir(dir.path(), true).unwrap();
@@ -397,10 +397,10 @@ mod tests {
         let path = "p.md".to_string(); // canonical key: corpus-root-relative
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out = glossa::tools::neighbors(&idx, &g, None, Some(&path), Some(1), &trace);
+        let mcp_out = glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace);
         // Eval path: dispatch through exec().
         let eval_out = exec(
-            "neighbors",
+            "related",
             &json!({"path": path, "n": 1}),
             dir.path(),
             &idx,

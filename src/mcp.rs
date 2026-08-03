@@ -73,7 +73,7 @@ const EDITOR_TOOLS: &[&str] = &[
 const FULL_TOOLS: &[&str] = &["purge"];
 const GRAPH_TOOLS: &[&str] = &[
     "glossary",
-    "neighbors",
+    "related",
     "graph_upsert",
     "graph_delete",
     "graph_update",
@@ -488,7 +488,7 @@ struct SourceFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct NeighborsArgs {
+struct RelatedArgs {
     #[serde(default)]
     #[schemars(
         description = "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases"
@@ -934,15 +934,15 @@ impl GlossaServer {
     #[tool(
         description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not neighbors."
     )]
-    async fn neighbors(
+    async fn related(
         &self,
-        Parameters(a): Parameters<NeighborsArgs>,
+        Parameters(a): Parameters<RelatedArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::neighbors(
+            crate::tools::related(
                 &idx,
                 &g,
                 a.node.as_deref(),
@@ -1952,7 +1952,7 @@ mod tests {
         let ng = GlossaServer::new(root, Profile::Editor, false, true, false).enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
         assert!(
-            !ng.contains(&"neighbors".to_string())
+            !ng.contains(&"related".to_string())
                 && !ng.contains(&"graph_upsert".to_string())
                 && !ng.contains(&"index".to_string())
         );

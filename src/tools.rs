@@ -529,7 +529,7 @@ impl Default for ChainSpec {
 }
 
 /// Render the far node of an edge: its `(path #ord)` anchor for a section/document, else
-/// `id  [type]  label`. Used by `neighbors` to show related cases.
+/// `id  [type]  label`. Used by `related` to show related cases.
 fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) -> String {
     match g.get_node(nid) {
         Ok(Some(node)) => match node_ref(idx, &node) {
@@ -561,7 +561,7 @@ fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) ->
 /// Resolution) by following outgoing edges whose type is one of `spine_rels`, transitively. Each
 /// hop is one indented line `→ REL  [Type] label  — read <anchor>`; deeper hops indent further.
 /// `seen` breaks cycles. SIMILAR/structural edges are intentionally skipped — they belong to
-/// `neighbors`, not the answer chain.
+/// `related`, not the answer chain.
 fn chain_lines(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -598,7 +598,7 @@ fn chain_lines(
 /// Structural nodes (Section/Document) show their `(path #ord)` anchor. A reasoning node
 /// (Symptom/Cause/Task/…) shows its `id [type] label` then, walked from it along the ontology's
 /// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
-/// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `neighbors`.
+/// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `related`.
 /// Empty → `"(no matches)"`.
 pub fn glossary(
     idx: &DocIndex,
@@ -671,7 +671,32 @@ pub fn glossary(
 /// Top community siblings / stats examples per cluster (PageRank-ranked).
 const COMMUNITY_TOP_LIMIT: usize = 8;
 
-pub fn neighbors(
+/// Resolve a tool's target node from either an explicit `node` id or a `(path, n)` chunk ref —
+/// the shared entry-point for `related` / `neighbors` / `path`. `#0` is tolerated as `#1`
+/// (models write 0 out of habit). Err holds a ready-to-return user message.
+fn resolve_node_ref(
+    idx: &DocIndex,
+    node: Option<&str>,
+    path: Option<&str>,
+    n: Option<u64>,
+) -> Result<String, String> {
+    if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
+        return Ok(nid.to_string());
+    }
+    if let (Some(p), Some(nn)) = (path, n) {
+        let nn = if nn == 0 { 1 } else { nn };
+        return match idx.location_for_ord(p, nn) {
+            Ok(Some(_)) => Ok(crate::graph::build::section_id(p, &nn.to_string())),
+            Ok(None) => Err(format!(
+                "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
+            )),
+            Err(e) => Err(format!("resolve error: {e}")),
+        };
+    }
+    Err("need a node id (from glossary) or a (path, n) chunk".to_string())
+}
+
+pub fn related(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     node: Option<&str>,
@@ -679,25 +704,9 @@ pub fn neighbors(
     n: Option<u64>,
     trace: &TraceLog,
 ) -> String {
-    let id: String = if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
-        nid.to_string()
-    } else if let (Some(p), Some(nn)) = (path, n) {
-        // `#0` → first chunk: numbering is 1-based, but the model often writes 0 out of
-        // programming habit. Tolerate it instead of erroring so it doesn't loop guessing.
-        let nn = if nn == 0 { 1 } else { nn };
-        match idx.location_for_ord(p, nn) {
-            // Section ids are the ordinal (see build_section); location_for_ord only
-            // confirms the chunk exists here — build the id from the ordinal `nn`.
-            Ok(Some(_)) => crate::graph::build::section_id(p, &nn.to_string()),
-            Ok(None) => {
-                return format!(
-                    "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
-                )
-            }
-            Err(e) => return format!("neighbors error: {e}"),
-        }
-    } else {
-        return "neighbors needs a node id (from glossary) or a (path, n) chunk".to_string();
+    let id = match resolve_node_ref(idx, node, path, n) {
+        Ok(i) => i,
+        Err(m) => return m,
     };
     let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
@@ -739,7 +748,7 @@ pub fn neighbors(
         }
     }
     trace.log(
-        "neighbors",
+        "related",
         json!({"id": id}),
         json!({"similar": similar_count, "community": lines.len() - similar_count}),
     );
@@ -1543,7 +1552,7 @@ mod tests {
                 && out.contains("Изменить maxTsdr"),
             "{out}"
         );
-        // SIMILAR is no longer part of glossary — it moved to neighbors
+        // SIMILAR is no longer part of glossary — it moved to related
         assert!(
             !out.contains("SIMILAR"),
             "glossary must not show SIMILAR: {out}"
@@ -1568,11 +1577,11 @@ mod tests {
     }
 
     #[test]
-    fn neighbors_shows_similar_generalization_for_a_node_id() {
+    fn related_shows_similar_generalization_for_a_node_id() {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
         assert!(
             out.contains("SIMILAR")
                 && out.contains("Обновление ПО модулей")
@@ -1582,7 +1591,7 @@ mod tests {
         // it must NOT walk the causal spine — that is glossary's job
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("[Resolution]"),
-            "neighbors is generalization only: {out}"
+            "related is generalization only: {out}"
         );
     }
 
@@ -1636,11 +1645,11 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     }
 
     #[test]
-    fn neighbors_shows_community_siblings_after_generalize() {
+    fn related_shows_community_siblings_after_generalize() {
         let (_d, i) = idx();
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
-        let out = neighbors(&i, &g, Some("sym:a"), None, None, &t);
+        let out = related(&i, &g, Some("sym:a"), None, None, &t);
         assert!(
             out.contains("COMMUNITY"),
             "expected community siblings: {out}"
@@ -1657,14 +1666,14 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     }
 
     #[test]
-    fn neighbors_dedups_similar_from_community_section() {
+    fn related_dedups_similar_from_community_section() {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let ont = Ontology::parse(REASONING_ONT).unwrap();
         let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
-        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
         assert!(
             out.contains("SIMILAR") && out.contains("Обновление ПО модулей"),
             "{out}"
@@ -1680,7 +1689,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     }
 
     #[test]
-    fn neighbors_community_sorted_by_pagerank() {
+    fn related_community_sorted_by_pagerank() {
         use crate::graph::store::NodeMeta;
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
@@ -1728,7 +1737,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = neighbors(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert_eq!(
             community_lines.len(),
@@ -1743,6 +1752,27 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             community_lines[1].contains("cau:tsdr"),
             "second by pr: {out}"
         );
+    }
+
+    #[test]
+    fn resolve_node_ref_prefers_explicit_node_id() {
+        // node id wins over (path,n); missing both is an error.
+        assert_eq!(
+            resolve_node_ref(
+                &crate::index::store::DocIndex::open_or_create(
+                    tempfile::tempdir().unwrap().path()
+                )
+                .unwrap(),
+                Some("sym:x"),
+                None,
+                None
+            ),
+            Ok("sym:x".to_string())
+        );
+        let idx =
+            crate::index::store::DocIndex::open_or_create(tempfile::tempdir().unwrap().path())
+                .unwrap();
+        assert!(resolve_node_ref(&idx, None, None, None).is_err());
     }
 
     #[test]
@@ -2247,9 +2277,9 @@ strict = true
     }
 
     // Structural chunk-navigation tests (NEXT/CHILD/PARENT/PREV/REFERENCES, node_meta on a
-    // section) were removed when `neighbors` became the generalization view (SIMILAR cross-links);
+    // section) were removed when `related` became the generalization view (SIMILAR cross-links);
     // adjacent-chunk navigation now lives in `read`'s prev/next footer. The generalization
-    // behavior is covered by `neighbors_shows_similar_generalization_for_a_node_id` and the
+    // behavior is covered by `related_shows_similar_generalization_for_a_node_id` and the
     // MCP≡eval parity test in eval/src/backend/glossa_tools.rs.
 
     #[test]

@@ -280,7 +280,7 @@ type = \"boolean\"\n";
         std::fs::create_dir_all(config_dir.join("tools")).unwrap();
 
         let n = dump(config_dir).unwrap();
-        // Reader profile has 6 tools: glob, glossary, grep, neighbors, read, search
+        // Reader profile has 6 tools: glob, glossary, grep, related, read, search
         assert!(n >= 1, "expected at least 1 tool, got {}", n);
 
         // (a) tools/search.json exists and parses as JSON with a "properties" key
@@ -328,10 +328,10 @@ type = \"boolean\"\n";
             "surrounding text [metrics.em] missing"
         );
 
-        // (d) tool-list region contains "neighbors"
+        // (d) tool-list region contains "related"
         assert!(
-            toml_out.contains("\"neighbors\""),
-            "tool list missing 'neighbors'"
+            toml_out.contains("\"related\""),
+            "tool list missing 'related'"
         );
 
         // (e) all four markers are preserved
