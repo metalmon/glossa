@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
 ### Added
 
 - **`neighbors` MCP tool (structural, typed 1-hop edges)**: lists a node's direct outgoing/incoming edges (`edge_types` filter, `direction: out|in|both`), each rendered with its real direction (`--REL-->` / `<--REL--`) and a `read path #n` anchor. This is the FACTUAL graph-structure tool — for fuzzy "similar cases" use `related`.
