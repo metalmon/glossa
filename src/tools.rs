@@ -808,6 +808,11 @@ pub fn neighbors(
     }
     if direction != "out" {
         for e in g.incoming(&id).unwrap_or_default() {
+            // A self-loop (from == id) is both outgoing and incoming; when the outgoing pass also
+            // ran (direction "both") it was already printed, so don't emit it a second time.
+            if e.from == id && direction != "in" {
+                continue;
+            }
             if want(&e.edge_type) {
                 lines.push(edge_line(idx, g, &e.edge_type, false, &e.from));
             }
@@ -1920,6 +1925,28 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
         );
         assert_eq!(empty, "(no structural edges)");
+    }
+
+    #[test]
+    fn neighbors_both_dedups_self_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node("a", "Entity", "a")).unwrap();
+        // A self-loop is both an outgoing and an incoming edge of `a`.
+        g.put_edge(&edge("a", "LINKS", "a")).unwrap();
+
+        // `both` must not print the self-loop twice.
+        let both = neighbors(&idx, &g, Some("a"), None, None, None, "both", &TraceLog::disabled());
+        assert_eq!(both.matches("LINKS").count(), 1, "self-loop rendered twice: {both}");
+
+        // Direction-scoped views still show it once, with the matching arrow.
+        let out = neighbors(&idx, &g, Some("a"), None, None, None, "out", &TraceLog::disabled());
+        assert_eq!(out.matches("LINKS").count(), 1);
+        assert!(out.contains("->"));
+        let inc = neighbors(&idx, &g, Some("a"), None, None, None, "in", &TraceLog::disabled());
+        assert_eq!(inc.matches("LINKS").count(), 1);
+        assert!(inc.contains("<-"));
     }
 
     #[test]
