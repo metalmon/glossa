@@ -2056,7 +2056,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
         for n in [
-            node("sym:a", "Symptom", "Profibus loss"),
+            node("sym:a", "Symptom", "Fieldbus loss"),
             node("sym:b", "Symptom", "Modbus timeout"),
         ] {
             g.put_node(&n).unwrap();
@@ -2086,7 +2086,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "{out}"
         );
         assert!(
-            out.contains("comm 0  (1 nodes)") && out.contains("Profibus loss"),
+            out.contains("comm 0  (1 nodes)") && out.contains("Fieldbus loss"),
             "{out}"
         );
         assert!(

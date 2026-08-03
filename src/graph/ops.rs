@@ -1463,7 +1463,7 @@ strict = true
             &g,
             &ont,
             vec![
-                unode("Symptom", "Profibus connection loss", "c.docx"),
+                unode("Symptom", "Fieldbus connection loss", "c.docx"),
                 unode(
                     "Resolution",
                     "Change maxTsdr parameter and restart service",
@@ -1471,7 +1471,7 @@ strict = true
                 ),
             ],
             vec![uedge(
-                "Profibus connection loss",
+                "Fieldbus connection loss",
                 "RESOLVED_BY",
                 "Change maxTsdr parameter and restart service",
                 "c.docx",
@@ -1487,7 +1487,7 @@ strict = true
             &ont,
             vec![],
             vec![uedge(
-                "Profibus connection loss",
+                "Fieldbus connection loss",
                 "RESOLVED_BY",
                 "Change maxTsdr parameter",
                 "c.docx",
