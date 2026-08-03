@@ -231,6 +231,21 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "get_source_file" => {
+            // Mirrors src/mcp.rs's `get_source_file` handler, minus the delivered file bytes:
+            // eval has no ZeroClaw/ACP client downstream to receive `SourceFileOut::file`, so we
+            // return only the model-facing provenance/error text (`SourceFileOut::text`) — that's
+            // the same string the model would read off the real MCP tool result.
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let n = args.get("n").and_then(parse_n);
+            let max_bytes = args
+                .get("max_bytes")
+                .and_then(parse_n)
+                .unwrap_or(glossa::tools::DEFAULT_SOURCE_MAX_BYTES);
+            let raw = args.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
+            let out = glossa::tools::get_source_file(idx, graph, path, n, max_bytes, raw);
+            (out.text, Vec::new(), Vec::new())
+        }
         "graph_stats" => {
             let body = match graph {
                 Some(g) => glossa::tools::graph_stats(g),
@@ -482,4 +497,55 @@ mod tests {
             "generalization neighbors on a graph-less corpus: {mcp_out}"
         );
     }
+
+    /// `get_source_file` was advertised in the generated TZ tool lists but had no `exec` arm
+    /// (fell through to "unknown tool"). Confirm it now resolves a real corpus file and mirrors
+    /// the MCP handler's model-facing provenance text.
+    #[test]
+    fn get_source_file_via_exec_delivers_provenance_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), b"hello source file").unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("note.txt"),
+            location: "1".into(),
+            file_type: "txt".into(),
+            text: "hello source file".into(),
+        }])
+        .unwrap();
+        let trace = TraceLog::disabled();
+
+        let out = exec(
+            "get_source_file",
+            &json!({"path": "note.txt"}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            out.contains("delivered whole file: note.txt"),
+            "got: {out}"
+        );
+
+        // Unknown path -> the same not-found provenance text `get_source_file` returns directly
+        // (not "unknown tool: get_source_file", which is what the missing arm used to produce).
+        let missing = exec(
+            "get_source_file",
+            &json!({"path": "does-not-exist.pdf"}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            !missing.starts_with("unknown tool"),
+            "must dispatch, not fall through: {missing}"
+        );
+    }
+
 }
