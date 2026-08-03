@@ -199,6 +199,38 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "path" => {
+            let from = args
+                .get("from")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let from_path = args
+                .get("from_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let from_n = args.get("from_n").and_then(parse_n);
+            let to = args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let to_path = args
+                .get("to_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let to_n = args.get("to_n").and_then(parse_n);
+            let max_depth = args
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(6);
+            let body = match graph {
+                Some(g) => glossa::tools::path_between(
+                    idx, g, from, from_path, from_n, to, to_path, to_n, max_depth, trace,
+                ),
+                None => "(graph unavailable)".to_string(),
+            };
+            (body, Vec::new(), Vec::new())
+        }
         "graph_stats" => {
             let body = match graph {
                 Some(g) => glossa::tools::graph_stats(g),

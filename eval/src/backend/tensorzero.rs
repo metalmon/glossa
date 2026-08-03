@@ -67,7 +67,7 @@ impl EpisodePolicy {
 enum ToolKind {
     Corpus,         // search/read/grep — static KB index; dedup once, never invalidate
     NotebookRead,   // ls/glob — reflect notebook state; invalidated by any notebook write
-    GraphRead,      // glossary/related/neighbors/resolve/graph_stats — invalidated by any graph mutation
+    GraphRead,      // glossary/related/neighbors/path/resolve/graph_stats — invalidated by any graph mutation
     NotebookMutate, // note/del — invalidates notebook reads
     GraphMutate,    // graph_upsert/delete/update/generalize — invalidates graph reads
     CorpusMutate,   // index/reindex/purge — invalidates everything
@@ -89,9 +89,8 @@ fn tool_kind(name: &str) -> ToolKind {
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
         // constraint_solve reads the graph: an identical call MUST re-run after any
         // graph mutation, else the model sees a stale verdict and fights the "cache".
-        "glossary" | "related" | "neighbors" | "resolve" | "graph_stats" | "constraint_solve" => {
-            ToolKind::GraphRead
-        }
+        "glossary" | "related" | "neighbors" | "path" | "resolve" | "graph_stats"
+        | "constraint_solve" => ToolKind::GraphRead,
         _ => ToolKind::Corpus,
     }
 }

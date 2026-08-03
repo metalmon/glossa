@@ -548,17 +548,16 @@ fn make_exec(
         let ont = Ontology::load_or_default(&agent_g_dir);
         match name {
             "get_task" => (exec_get_task(&src_doc), vec![], vec![]),
-            "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors" | "resolve" => {
-                kb_eval::backend::glossa_tools::exec(
-                    name,
-                    args,
-                    &agent_g_dir,
-                    &idx_kb,
-                    Some(&g),
-                    &spec_kb,
-                    &trace_kb,
-                )
-            }
+            "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors" | "path"
+            | "resolve" => kb_eval::backend::glossa_tools::exec(
+                name,
+                args,
+                &agent_g_dir,
+                &idx_kb,
+                Some(&g),
+                &spec_kb,
+                &trace_kb,
+            ),
             "note" | "ls" | "del" => (
                 exec_notebook(&agent_g_dir, &idx_kb, name, args),
                 vec![],
@@ -2395,17 +2394,16 @@ fn main() -> Result<()> {
 
             match name {
                 "get_task" => (exec_get_task(&src_doc_exec), vec![], vec![]),
-                "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors" | "resolve" => {
-                    kb_eval::backend::glossa_tools::exec(
-                        name,
-                        args,
-                        &agent_g_dir_clone,
-                        &idx_kb,
-                        Some(&g),
-                        &spec_kb,
-                        &trace_kb,
-                    )
-                }
+                "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors"
+                | "path" | "resolve" => kb_eval::backend::glossa_tools::exec(
+                    name,
+                    args,
+                    &agent_g_dir_clone,
+                    &idx_kb,
+                    Some(&g),
+                    &spec_kb,
+                    &trace_kb,
+                ),
                 "note" | "ls" | "del" => {
                     let idx_agent = DocIndex::open_or_create(&agent_g_dir_clone).unwrap();
                     (
