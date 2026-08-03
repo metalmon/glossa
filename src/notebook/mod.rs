@@ -44,15 +44,7 @@ fn csp_dup_removed_suffix(dup_removed: usize) -> String {
 }
 
 fn header_looks_like_commentary(h: &str) -> bool {
-    // The Cyrillic substrings are Russian citation markers commonly pasted into
-    // headers from Russian source tables: "из пун[кта]" = "from clause",
-    // "из табл[ицы]" = "from table".
-    h.chars().count() > 35
-        || h.contains(" - ")
-        || h.contains(" — ")
-        || h.contains("из пун")
-        || h.contains("из табл")
-        || h.contains('(')
+    h.chars().count() > 35 || h.contains(" - ") || h.contains(" — ") || h.contains('(')
 }
 
 fn cell_looks_like_prose(cell: &str) -> bool {
@@ -60,16 +52,9 @@ fn cell_looks_like_prose(cell: &str) -> bool {
     if n > 45 {
         return true;
     }
-    // The Cyrillic substrings are Russian prose connectors that betray a sentence
-    // rather than a bare value: " для " = " for ", " из " = " from ",
-    // " и мельче" = " and finer", " и крупнее" = " and coarser".
     cell.contains('(')
         || cell.contains('—')
         || cell.contains(" - ")
-        || cell.contains(" для ")
-        || cell.contains(" из ")
-        || cell.contains(" и мельче")
-        || cell.contains(" и крупнее")
         || cell.contains('±')
         || cell.contains("±")
 }
@@ -85,7 +70,7 @@ pub fn csp_tutor_hints(table: &CspTable) -> Vec<String> {
     {
         hints.push(
             "column headers look long — source tables usually name the parameter alone \
-             (e.g. «Диаметр», «Материал»)"
+             (e.g. \"Diameter\", \"Material\")"
                 .into(),
         );
     }
@@ -279,17 +264,12 @@ fn reject_placeholder_rows(content: &str) -> anyhow::Result<()> {
         for cell in line.split('\t') {
             let c = cell.trim();
             let lc = c.to_lowercase();
-            let is_placeholder = c.contains("...")
-                || c.contains('…')
-                || lc.contains("и т.д")
-                || lc.contains("и т. д")
-                || lc.contains("так далее")
-                || lc == "etc"
-                || lc == "etc.";
+            let is_placeholder =
+                c.contains("...") || c.contains('…') || lc == "etc" || lc == "etc.";
             if is_placeholder {
                 anyhow::bail!(
                     "placeholder «{c}» on line {} — write out every row explicitly, \
-                     no «...» / «и т.д.» / «etc» (the solver reads the full value set, \
+                     no \"...\" / \"etc\" (the solver reads the full value set, \
                      not a sample)",
                     li + 1
                 );
@@ -700,16 +680,16 @@ mod tests {
             dir.path(),
             &idx,
             "doc.pdf",
-            "Глубина паза",
+            "Slot depth",
             &format!("a{TAB}b\n1{TAB}2\n"),
             false,
         );
         assert!(msg.contains("REJECTED"), "{msg}");
         assert!(msg.contains("no extension"), "{msg}");
-        assert!(msg.contains("Глубина паза.csp"), "{msg}");
+        assert!(msg.contains("Slot depth.csp"), "{msg}");
         assert!(
             !dir.path()
-                .join(".glossa/notes/doc.pdf/Глубина паза")
+                .join(".glossa/notes/doc.pdf/Slot depth")
                 .exists(),
             "must not save the extensionless file"
         );
@@ -718,7 +698,7 @@ mod tests {
             dir.path(),
             &idx,
             "doc.pdf",
-            "Глубина паза.csp",
+            "Slot depth.csp",
             &format!("a{TAB}b\n1{TAB}2\n"),
             false,
         );
@@ -1056,16 +1036,16 @@ mod tests {
 
     #[test]
     fn csp_tutor_hints_clean_grid_is_silent() {
-        let table = parse_csp(&format!("Материал{TAB}Плотность\nM1{TAB}P1\nM2{TAB}P2\n")).unwrap();
+        let table = parse_csp(&format!("Material{TAB}Density\nM1{TAB}P1\nM2{TAB}P2\n")).unwrap();
         assert!(csp_tutor_hints(&table).is_empty());
     }
 
     #[test]
     fn csp_tutor_hints_prose_cells_and_long_header() {
         let table = parse_csp(
-            "Материал (material type) - из пункта 4.4\n\
-             A (первый тип)\n\
-             AB (второй тип)\n",
+            "Material (material type) - from clause 4.4\n\
+             A (type one)\n\
+             AB (type two)\n",
         )
         .unwrap();
         let hints = csp_tutor_hints(&table);
@@ -1085,8 +1065,8 @@ mod tests {
             &idx,
             "doc.pdf",
             "material.csp",
-            "Материал (material type) - из пункта 4.4\n\
-             A (первый тип)\n",
+            "Material (material type) - from clause 4.4\n\
+             A (type one)\n",
             false,
         );
         assert!(msg.contains("  · "), "{msg}");
