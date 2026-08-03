@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "from": {
+      "default": null,
+      "description": "start: graph node id (or use from_path+from_n)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "from_n": {
+      "default": null,
+      "description": "start: chunk number (use with from_path)",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "from_path": {
+      "default": null,
+      "description": "start: document path (use with from_n instead of from)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_depth": {
+      "default": null,
+      "description": "max edges to search (default 6, capped at 12)",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "to": {
+      "default": null,
+      "description": "end: graph node id (or use to_path+to_n)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "to_n": {
+      "default": null,
+      "description": "end: chunk number (use with to_path)",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "to_path": {
+      "default": null,
+      "description": "end: document path (use with to_n instead of to)",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

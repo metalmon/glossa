@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "n": {
+      "default": null,
+      "description": "chunk number, exactly as shown in `[#n]` in a search result",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "node": {
+      "default": null,
+      "description": "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "path": {
+      "default": null,
+      "description": "document path, exactly as shown in a search result (use with `n` instead of `node`)",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

@@ -1,5 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "properties": {},
+  "properties": {
+    "force": {
+      "default": null,
+      "description": "rebuild the whole index from scratch (was the `reindex` tool)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "path": {
+      "default": null,
+      "description": "reindex just this one indexed document path (from grep/read), instead of the whole corpus",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
   "type": "object"
 }

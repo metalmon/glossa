@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "max_bytes": {
+      "default": null,
+      "description": "maximum delivered size in bytes (default 10 MB, matching the ACP client cap)",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "n": {
+      "default": null,
+      "description": "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "path": {
+      "description": "document path, exactly as shown in a search/grep result",
+      "type": "string"
+    },
+    "raw": {
+      "default": null,
+      "description": "return the untouched original file instead of the default PDF conversion (currently only affects DOCX, delivered as PDF by default); default false",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}

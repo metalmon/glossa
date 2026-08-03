@@ -3,7 +3,7 @@
   "properties": {
     "include_images": {
       "default": null,
-      "description": "include embedded images (default true); ignored when page_image is true",
+      "description": "include embedded images (default true)",
       "type": [
         "boolean",
         "null"

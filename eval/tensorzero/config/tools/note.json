@@ -3,14 +3,14 @@
   "properties": {
     "append": {
       "default": null,
-      "description": "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is.",
+      "description": "Add to the existing file instead of replacing it. For a `.csp`, content is data rows placed under the existing header (repeating the header line is fine — it is deduplicated); for other files, content is appended as-is. Pass JSON boolean true (string \"true\" is also accepted).",
       "type": [
         "boolean",
         "null"
       ]
     },
     "content": {
-      "description": "Full file content (replaces the note if it exists, unless append=true). A `.csp` is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing",
+      "description": "Full file content (replaces the note if it exists, unless append=true). Free-form content is stored as-is. Only a `.csp` note is validated on write: the reply echoes the parsed columns and row count, and a malformed table (empty header cell, ragged row) is rejected without writing",
       "type": "string"
     },
     "doc": {
@@ -18,7 +18,7 @@
       "type": "string"
     },
     "file": {
-      "description": "Note filename with extension. `.csp` = a limit table (tab-separated rows, first line is ALWAYS the column headers — exact parameter names); any other extension is a free-form note",
+      "description": "Note filename with extension — free-form; choose any extension that fits the content (e.g. `.md` for a report or table, `.txt` for a jotting). Special case: `.csp` is a validated limit table (tab-separated rows, first line = column headers) used only by the constraint-graph workflow (graph_build) — do not reach for it for ordinary notes",
       "type": "string"
     }
   },
