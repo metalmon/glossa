@@ -60,7 +60,7 @@ pub fn run_enrich(
         let idx = DocIndex::open_or_create(&work_iter)?;
         let graph = GraphStore::open(&work_iter).context("open graph store")?;
         let trace = TraceLog::to_dir(&work_iter);
-        // Ontology-driven chain spec so glossary/neighbors render identically to the MCP surface.
+        // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&work_iter));
 
         // Shared atomic counters so the exec closure (called concurrently for

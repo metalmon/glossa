@@ -18,7 +18,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
 - **MCP:** 15 tools, profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
 - **CLI:** `kb search|grep|glob|read|index|graph …|mcp` — scripting-first, not a TUI.
-- **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `neighbors`, formatted `graph_upsert` responses (Written / Merged / REJECTED).
+- **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `related`, structural `neighbors` (typed 1-hop edges) and `path` (shortest connection between two nodes), formatted `graph_upsert` responses (Written / Merged / REJECTED).
 - **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks).
 - **Dev pipeline:** `justfile` recipes; Windows-friendly eval tooling.
 - **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick.
@@ -116,7 +116,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | `prep-fullwiki` | **Shipped** | CLI + shard builder in `kb-eval prep-fullwiki` |
 | `export-tz` quad jsonl + GEPA | **Shipped** | v1.2.0 — search, grep, glob, read micro-tasks only |
 | Constraint GEPA (5 pools: discover / materialize / compile / coverage / validate) | **Partial** | 5-pool loop, TZ functions, and apply path shipped; graph_build / graph_stats / constraint_solve scorers still use text-recall proxies. See [constraint-gepa.md](constraint-gepa.md). |
-| GEPA graph micro-tasks (`glossary`, `neighbors`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, neighbors → related case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
+| GEPA graph micro-tasks (`glossary`, `related`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, related → alternate case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
 | `--no-graph` control arm | **Shipped** | `kb-eval run --no-graph`, MCP `--no-graph` |
 | Gold join / `case_id` | **Partial** | TZ sets `case_id`; export joins by id or question; OpenAI backend has no tags; enrich sets `case_id` |
 | Whole-run timeout | **Partial** | `kb-eval run --timeout-secs`; not per-round in tool loop |
@@ -152,7 +152,7 @@ Curate domain Q/A with gold source spans; retrieval via span match; LLM judge; g
 |-----------|--------|
 | `kb-train enrich` + support ontology | **Shipped** |
 | glossa-train JSON format + export-tz | **Shipped** |
-| GEPA over `glossary` + `neighbors` | **Open** | Quad GEPA covers flat tools only; add graph micro-tasks so optimized prompt learns when/how to use reasoning chains and COMMUNITY/SIMILAR hops |
+| GEPA over `glossary` + `related` | **Open** | Quad GEPA covers flat tools only; add graph micro-tasks so optimized prompt learns when/how to use reasoning chains and COMMUNITY/SIMILAR hops |
 | Fixed domain mini-corpus + regression CI | **Open** |
 | Domain skills / ontology overlays from patterns | **Open** |
 

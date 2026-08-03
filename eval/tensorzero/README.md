@@ -57,7 +57,7 @@ After `docker compose pull && docker compose up -d`, the agent can query TZ infe
 
 | Function | Role |
 |----------|------|
-| `answer_hotpot` | Full agent: search, grep, glob, read, glossary, neighbors, … |
+| `answer_hotpot` | Full agent: search, grep, glob, read, glossary, related, neighbors, path, … |
 | `search`, `grep`, `glob`, `read` | GEPA micro-tasks (one tool each); prod prompt passed via `input.system` |
 | `gepa_reflect` | Mutator proposes improved system prompt |
 | `enrich` | Graph enrichment from solved cases |

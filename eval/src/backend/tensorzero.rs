@@ -631,7 +631,7 @@ impl AgentBackend for TensorZeroBackend {
         // search/read round instead of reopening per tool call.
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
         let graph = glossa::graph::store::GraphStore::open(work).ok();
-        // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/neighbors render
+        // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/related render
         // the reasoning chain identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),

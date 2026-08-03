@@ -70,6 +70,6 @@ it reaches for `kb` instead of going blind on binary documents:
 Reach for `kb mcp` (see [mcp.md](mcp.md) and
 [connect-to-agents.md](connect-to-agents.md)) when you want a **persistent,
 graph-backed** corpus: ranked retrieval plus a provenance-stamped reasoning
-graph the agent can query (`glossary`, `neighbors`) and extend. The CLI is the
+graph the agent can query (`glossary`, `related`, `neighbors`, `path`) and extend. The CLI is the
 low-friction "read these files now" path; the MCP server is the durable
 "reason over this knowledge base" path. Same binary, same extractors.

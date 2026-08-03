@@ -112,7 +112,7 @@ Once connected, the model can:
 
 1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
 2. **`read(path, n)`** — open full chunk text.
-3. **`glossary` / `neighbors`** — follow reasoning-graph chains (when graph is populated).
+3. **`glossary` / `related`** — follow reasoning-graph chains (when graph is populated).
 
 Tool list: [mcp.md](mcp.md).
 

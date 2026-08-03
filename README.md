@@ -23,7 +23,7 @@ glossa indexes documents on disk, serves ranked search and ripgrep-style tools, 
 - **CLI *or* MCP** — shell out to `kb cat` / `kb grep` / `kb read` as a Unix-composable tool that reads Office & PDF (the `grep`/`cat` your agent is missing), or run it as an MCP server for a persistent, graph-backed corpus. Same binary, same extractors.
 - **Native corpora** — PDF and Office (Word, Excel, PowerPoint) indexed in place; no markdown conversion step.
 - **File-first graph** — files stay authoritative; `.glossa/` is a rebuildable overlay with provenance-stamped reasoning nodes.
-- **Agent retrieval loop** — BM25 `search`, exact `grep`, chunk `read`, then `glossary` → `neighbors` over solved-case chains.
+- **Agent retrieval loop** — BM25 `search`, exact `grep`, chunk `read`, then `glossary` → `related` over solved-case chains.
 - **Production MCP** — one offline binary; stdio for local IDEs, streamable HTTP with health/metrics for deploy.
 
 ## Features

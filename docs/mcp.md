@@ -36,7 +36,9 @@ Reader keeps **notebook read** (`ls` to list notes; note content is read with th
 | `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`); `page_image: true` returns PDF page `n` as a rendered PNG (200 DPI) for vision models. For HTML files, images referenced by `<img>` tags are extracted and returned alongside the text. With `--noimage`, image params are removed from the schema and responses contain text only |
 | `get_source_file` | ✓ | ✓ | ✓ | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
-| `neighbors` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
+| `related` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
+| `neighbors` | ✓ | ✓ | ✓ | A node's direct structural edges (typed, 1-hop, with direction) |
+| `path` | ✓ | ✓ | ✓ | Shortest connection (chain of edges) between two nodes |
 | `resolve` | ✓ | ✓ | ✓ | Entity resolution by name |
 | `get_ontology` | ✓ | ✓ | ✓ | Knowledge-base ontology as JSON: parameters, constraints, relations, graph-building patterns |
 | `constraint_solve` | ✓* | ✓* | ✓* | CSP solver over the constraint graph (`validate` / `infer` / `check`); only available with `--features constraint` |
@@ -61,8 +63,9 @@ Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
 2. **`read(path, n)`** — open full chunk text (embedded office images returned as vision content when supported; `page_image: true` renders a PDF page as PNG for hard-to-parse tables/layout).
 3. **`glossary("concept")`** — jump to reasoning graph; get cause → resolution chain with `read` anchors.
-4. **`neighbors(node_id)`** — alternate cases (SIMILAR, COMMUNITY) when the first chain is close but wrong.
-5. **`graph_upsert`** (editor) — add validated reasoning nodes; response shows what was written.
+4. **`related(node_id)`** — alternate cases (SIMILAR, COMMUNITY) when the first chain is close but wrong.
+5. **`neighbors(node_id)`** / **`path(from, to)`** — inspect a node's direct structural edges, or the shortest chain connecting two nodes.
+6. **`graph_upsert`** (editor) — add validated reasoning nodes; response shows what was written.
 
 ### `graph_upsert` response
 

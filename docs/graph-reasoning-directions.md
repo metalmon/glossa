@@ -34,7 +34,7 @@ Naming this explicitly is itself useful: every proposed direction below is "make
 
 ## What is under-used today
 
-- **Abduction is a side effect of `enrich`, not an inference mode at query time.** At inference the agent just walks `neighbors`; there is no explicit "best explanation" ranking.
+- **Abduction is a side effect of `enrich`, not an inference mode at query time.** At inference the agent just walks `related`; there is no explicit "best explanation" ranking.
 - **`confidence` is stored on every node/edge but not used as a probability.** Provenance carries a confidence field; nothing updates it (Bayesian updating) or reasons over it (posterior ranking).
 - **SIMILAR is surface-level.** Label Jaccard + shared evidence — lexical overlap, not relational structure.
 - **The ontology is monotonic and strict.** No notion of defaults, exceptions, or retraction.
@@ -69,7 +69,7 @@ For retrieval, note that BM25 already has a probabilistic-relevance heritage (Bi
 
 **Hook.** `confidence` is already on every node/edge; case frequencies from the graph supply priors; the eval harness already scores candidates GEPA could allocate by uncertainty.
 
-**Why effective.** Cheapest use of data already present, and it unifies the abduction ranking (direction 1) with the induction priors — one posterior instead of ad-hoc heuristics. Gives a principled ranking signal for `glossary`/`neighbors`, a tie-breaker when multiple chains apply, and a more sample-efficient optimizer.
+**Why effective.** Cheapest use of data already present, and it unifies the abduction ranking (direction 1) with the induction priors — one posterior instead of ad-hoc heuristics. Gives a principled ranking signal for `glossary`/`related`, a tie-breaker when multiple chains apply, and a more sample-efficient optimizer.
 
 **Caveats.** Naive Bayes assumes symptoms are conditionally independent given the cause — often false; move to noisy-OR / Bayesian networks when it bites. Thresholds only mean something if the probabilities are **calibrated** (Platt / Beta calibration for judge and `confidence`). Markov Logic Networks remain the heavy, fully general option (logic + probability), but the Bayesian steps above are the lighter, higher-leverage first move.
 

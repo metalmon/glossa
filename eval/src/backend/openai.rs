@@ -67,7 +67,7 @@ impl AgentBackend for OpenAiBackend {
         // search/read in the agent loop instead of reopening per tool call.
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
         let graph = glossa::graph::store::GraphStore::open(work).ok();
-        // Ontology-driven chain spec so glossary/neighbors render identically to the MCP surface.
+        // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );

@@ -55,7 +55,9 @@ ZeroClaw prefixes tools with the server name. glossa tools appear as:
 | `grep` | `glossa__grep` |
 | `glob` | `glossa__glob` |
 | `glossary` | `glossa__glossary` |
+| `related` | `glossa__related` |
 | `neighbors` | `glossa__neighbors` |
+| `path` | `glossa__path` |
 | `resolve` | `glossa__resolve` |
 
 With **`reader`** profile, write tools (`graph_upsert`, `index`, …) are hidden from the tool list.
@@ -72,7 +74,9 @@ auto_approve = [
   "glossa__grep",
   "glossa__glob",
   "glossa__glossary",
+  "glossa__related",
   "glossa__neighbors",
+  "glossa__path",
   "glossa__resolve",
 ]
 ```
@@ -118,7 +122,7 @@ Install the service:
 
 - Offline search over PDF, Office, Markdown, and text in a folder
 - Exact `grep` for codes and version strings
-- Optional reasoning graph (`glossary`, `neighbors`) without embeddings or cloud vector DB
+- Optional reasoning graph (`glossary`, `related`, `neighbors`, `path`) without embeddings or cloud vector DB
 - Auto-indexing when files on disk change
 
 ZeroClaw keeps handling channels (Telegram, Discord, …), model routing, and non-KB tools.
