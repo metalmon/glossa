@@ -1255,10 +1255,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("МОДУЛЬ.pdf"),
+            doc_path: PathBuf::from("MODULE.pdf"),
             location: "p.7".into(),
             file_type: "pdf".into(),
-            text: "параметр maxTsdr равен 3000".into(),
+            text: "response timeout param equals 3000".into(),
         }])
         .unwrap();
         (d, i)
@@ -1637,11 +1637,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         for n in [
-            node("sym:loss", "Symptom", "Профибус потеря связи"),
-            node("cau:tsdr", "Cause", "Малый maxTsdr"),
-            node("res:set", "Resolution", "Изменить maxTsdr в 3000"),
-            node("tsk:upd", "Task", "Обновление ПО модулей"),
-            node("tsk:prog", "Task", "Программирование контроллера"),
+            node("sym:loss", "Symptom", "Bus link dropout"),
+            node("cau:tsdr", "Cause", "Low respTimeout"),
+            node("res:set", "Resolution", "Change respTimeout to 3000"),
+            node("tsk:upd", "Task", "Update module firmware"),
+            node("tsk:prog", "Task", "Program the controller"),
         ] {
             g.put_node(&n).unwrap();
         }
@@ -1666,20 +1666,20 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = glossary(&i, &g, "Профибус потеря связи", &spine_spec(), &t);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
-            out.contains("[Symptom]") && out.contains("Профибус потеря связи"),
+            out.contains("[Symptom]") && out.contains("Bus link dropout"),
             "{out}"
         );
         assert!(
-            out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Малый maxTsdr"),
+            out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Low respTimeout"),
             "{out}"
         );
         assert!(
             out.contains("→ RESOLVED_BY")
                 && out.contains("[Resolution]")
-                && out.contains("Изменить maxTsdr"),
+                && out.contains("Change respTimeout"),
             "{out}"
         );
         // SIMILAR is no longer part of glossary — it moved to related
@@ -1698,7 +1698,7 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(&i, &g, "Профибус потеря связи", &empty, &t);
+        let out = glossary(&i, &g, "Bus link dropout", &empty, &t);
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -1714,8 +1714,8 @@ mod tests {
         let out = related(&i, &g, Some("sym:loss"), None, None, &t);
         assert!(
             out.contains("SIMILAR")
-                && out.contains("Обновление ПО модулей")
-                && out.contains("Программирование контроллера"),
+                && out.contains("Update module firmware")
+                && out.contains("Program the controller"),
             "{out}"
         );
         // it must NOT walk the causal spine — that is glossary's job
@@ -1755,12 +1755,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let g = GraphStore::open(d.path()).unwrap();
         let ont = Ontology::parse(REASONING_ONT).unwrap();
         let nodes = [
-            node("sym:a", "Symptom", "Профибус потеря связи"),
-            node("cau:a", "Cause", "Малый maxTsdr"),
-            node("res:a", "Resolution", "Поднять maxTsdr"),
-            node("sym:b", "Symptom", "Modbus таймаут опроса"),
-            node("cau:b", "Cause", "Неверный baud"),
-            node("res:b", "Resolution", "Изменить скорость порта"),
+            node("sym:a", "Symptom", "Bus link dropout"),
+            node("cau:a", "Cause", "Low respTimeout"),
+            node("res:a", "Resolution", "Raise respTimeout"),
+            node("sym:b", "Symptom", "Modbus poll timeout"),
+            node("cau:b", "Cause", "Wrong baud"),
+            node("res:b", "Resolution", "Change port speed"),
         ];
         let edges = [
             edge("sym:a", "CAUSED_BY", "cau:a"),
@@ -1805,15 +1805,15 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let out = related(&i, &g, Some("sym:loss"), None, None, &t);
         assert!(
-            out.contains("SIMILAR") && out.contains("Обновление ПО модулей"),
+            out.contains("SIMILAR") && out.contains("Update module firmware"),
             "{out}"
         );
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert!(
             !community_lines
                 .iter()
-                .any(|l| l.contains("Обновление ПО модулей")
-                    || l.contains("Программирование контроллера")),
+                .any(|l| l.contains("Update module firmware")
+                    || l.contains("Program the controller")),
             "SIMILAR nodes must not repeat in COMMUNITY: {out}",
         );
     }
@@ -2109,32 +2109,32 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 
     #[test]
     fn read_is_omnivorous_over_reasoning_node_ids() {
-        let (_d, i) = idx(); // МОДУЛЬ.pdf #p.7 = "параметр maxTsdr равен 3000"
+        let (_d, i) = idx(); // MODULE.pdf #p.7 = "response timeout param equals 3000"
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
-        g.put_node(&node("res:fix", "Resolution", "Изменить maxTsdr в 3000"))
+        g.put_node(&node("res:fix", "Resolution", "Change respTimeout to 3000"))
             .unwrap();
-        g.put_edge(&edge("res:fix", "MENTIONS", "МОДУЛЬ.pdf#p.7"))
+        g.put_edge(&edge("res:fix", "MENTIONS", "MODULE.pdf#p.7"))
             .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
         let out = read(_d.path(), &i, Some(&g), "res:fix", 1, false, &t).text;
         assert!(
-            out.contains("[Resolution]") && out.contains("Изменить maxTsdr"),
+            out.contains("[Resolution]") && out.contains("Change respTimeout"),
             "node header: {out}"
         );
         assert!(
-            out.contains("── MENTIONS · МОДУЛЬ.pdf #7 ──"),
+            out.contains("── MENTIONS · MODULE.pdf #7 ──"),
             "attributed evidence header: {out}"
         );
         assert!(
-            out.contains("параметр maxTsdr равен 3000"),
+            out.contains("response timeout param equals 3000"),
             "evidence body: {out}"
         );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(_d.path(), &i, Some(&g), "МОДУЛЬ.pdf", 7, false, &t).text;
+        let doc = read(_d.path(), &i, Some(&g), "MODULE.pdf", 7, false, &t).text;
         assert!(
-            doc.contains("параметр maxTsdr равен 3000") && !doc.contains("── MENTIONS"),
+            doc.contains("response timeout param equals 3000") && !doc.contains("── MENTIONS"),
             "doc read unchanged: {doc}"
         );
     }
@@ -2143,9 +2143,9 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn search_renders_numbered_or_empty() {
         let (_d, i) = idx();
         let t = TraceLog::disabled();
-        let (body, hits) = search(&i, "maxTsdr", 10, None, None, &t);
+        let (body, hits) = search(&i, "timeout", 10, None, None, &t);
         assert_eq!(hits.len(), 1);
-        assert!(body.starts_with("[#7] ") && body.contains("maxTsdr"));
+        assert!(body.starts_with("[#7] ") && body.contains("timeout"));
         let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t);
         assert_eq!(empty, "(no results)");
     }
@@ -2154,7 +2154,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn read_returns_full_body_and_unified_footer() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        let big = "Я".repeat(5000); // > old 4000-char cap
+        let big = "X".repeat(5000); // > old 4000-char cap
         i.write_chunks(&[
             Chunk {
                 doc_path: PathBuf::from("d.md"),
@@ -2235,7 +2235,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Архив БД\\doc.pdf"),
+            doc_path: PathBuf::from("Archive DB\\doc.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "body text".into(),
@@ -2246,7 +2246,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             d.path(),
             &i,
             None,
-            "kb-manual\\Архив БД\\doc.pdf",
+            "kb-manual\\Archive DB\\doc.pdf",
             1,
             false,
             &t,
@@ -2263,7 +2263,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Архив БД\\Методика поверки МодульПЛК 2025.pdf"),
+            doc_path: PathBuf::from("Archive DB\\Calibration Guide PLCModule 2025.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
@@ -2274,14 +2274,14 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             d.path(),
             &i,
             None,
-            "kb-manual\\МодульПЛК 2025.pdf",
+            "kb-manual\\PLCModule 2025.pdf",
             1,
             false,
             &t,
         )
         .text;
         assert!(out.contains("did you mean"), "hint on miss: {out}");
-        assert!(out.contains("Методика"), "suggest real path: {out}");
+        assert!(out.contains("Calibration"), "suggest real path: {out}");
     }
 
     #[test]
@@ -2347,7 +2347,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(grep(
             d.path(),
             &i,
-            "maxTsdr",
+            "timeout",
             &crate::grep::GrepOpts::default(),
             &t
         )
@@ -2362,7 +2362,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             ),
             "(no matches)"
         );
-        assert!(glob(&i, "*МОДУЛЬ*", &t).contains("МОДУЛЬ.pdf  (7 chunks)"));
+        assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 
@@ -2525,9 +2525,9 @@ strict = true
             aliases: vec![],
             prov: prov(),
         };
-        g.put_node(&node("sym:loss", "Symptom", "Потеря связи"))
+        g.put_node(&node("sym:loss", "Symptom", "Link dropout"))
             .unwrap();
-        g.put_node(&node("cau:maxtsdr", "Cause", "Малый maxTsdr"))
+        g.put_node(&node("cau:maxtsdr", "Cause", "Low respTimeout"))
             .unwrap();
         g.put_edge(&Edge {
             from: "sym:loss".into(),
@@ -2539,14 +2539,14 @@ strict = true
 
         // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
         // so the agent sees the causal chain without a separate call.
-        let out = glossary(&idx, &g, "Потеря связи", &spine_spec(), &t);
+        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
             out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
             "walks the CAUSED_BY hop: {out}"
         );
         assert!(
-            out.contains("Малый maxTsdr"),
+            out.contains("Low respTimeout"),
             "shows the connected Cause label: {out}"
         );
     }
