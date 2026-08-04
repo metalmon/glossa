@@ -295,7 +295,8 @@ enum GraphAction {
         /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
         #[arg(short = 't', long = "type")]
         node_type: Option<String>,
-        /// output format: text (default), json, dot, graphml
+        /// output format: text (default), json, dot, graphml, html
+        /// (html = self-contained offline interactive viewer)
         #[arg(short = 'f', long, default_value = "text")]
         format: String,
     },
@@ -1026,8 +1027,12 @@ fn main() -> anyhow::Result<()> {
                         use glossa::graph::io::{collect, to_graphml};
                         print!("{}", to_graphml(&collect(&g, node_type.as_deref())?));
                     }
+                    "html" => {
+                        use glossa::graph::io::{collect, to_html};
+                        print!("{}", to_html(&g, &collect(&g, node_type.as_deref())?));
+                    }
                     other => anyhow::bail!(
-                        "unknown format {:?} — valid formats: text, json, dot, graphml",
+                        "unknown format {:?} — valid formats: text, json, dot, graphml, html",
                         other
                     ),
                 }

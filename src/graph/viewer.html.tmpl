@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge graph</title>
+<style>
+  :root{
+    --bg:#f6f8fa; --surface:#ffffff; --line:#e2e6ea; --tx:#1a2028; --mut:#67707c;
+    --acc:#2f6df6; --shadow:0 10px 34px rgba(20,30,50,.14); --scroll:#c4ccd6; --scrollbg:transparent;
+    --cybg:#f6f8fa; --edge:#9aa6b4; --edgetx:#67707c; --nodetx:#1a2028;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0d1017; --surface:#161b24; --line:#242c38; --tx:#e6edf3; --mut:#8b98a9;
+      --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#39424f; --scrollbg:transparent;
+      --cybg:#0d1017; --edge:#3d4757; --edgetx:#8b98a9; --nodetx:#e6edf3; }
+  }
+  :root[data-theme="light"]{ --bg:#f6f8fa; --surface:#ffffff; --line:#e2e6ea; --tx:#1a2028;
+    --mut:#67707c; --acc:#2f6df6; --shadow:0 10px 34px rgba(20,30,50,.14); --scroll:#c4ccd6;
+    --cybg:#f6f8fa; --edge:#9aa6b4; --edgetx:#67707c; --nodetx:#1a2028; }
+  :root[data-theme="dark"]{ --bg:#0d1017; --surface:#161b24; --line:#242c38; --tx:#e6edf3;
+    --mut:#8b98a9; --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#39424f;
+    --cybg:#0d1017; --edge:#3d4757; --edgetx:#8b98a9; --nodetx:#e6edf3; }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:var(--scrollbg)}
+  ::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:6px;border:2px solid var(--surface)}
+  ::-webkit-scrollbar-thumb:hover{background:var(--mut)}
+  *{scrollbar-color:var(--scroll) transparent;scrollbar-width:thin}
+
+  header{position:absolute;top:0;left:0;right:0;height:56px;display:flex;align-items:center;
+    justify-content:center;padding:0 18px;z-index:20;background:var(--bg)}
+  .searchwrap{position:relative;width:min(720px,calc(100vw - 40px))}
+  #q{width:100%;height:44px;background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    color:var(--tx);padding:0 16px 0 46px;font-size:14.5px;outline:none}
+  #q:focus{border-color:var(--acc)}
+  .searchwrap .ic{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--mut);
+    pointer-events:none;display:block}
+  .results{position:absolute;top:52px;left:0;right:0;max-height:min(62vh,520px);overflow:auto;
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+    padding:6px;display:none;z-index:25}
+  .results.open{display:block}
+  .res{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;cursor:pointer}
+  .res:hover,.res.active{background:color-mix(in srgb,var(--acc) 12%,transparent)}
+  .res .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+  .res .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+  .res .ty{font-size:11px;color:var(--mut)}
+  .res .dg{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums;min-width:20px;text-align:right}
+  .grp{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);padding:8px 11px 4px}
+  .none{padding:14px 11px;color:var(--mut);font-size:13px}
+
+  .iconbtn{width:34px;height:34px;display:flex;align-items:center;justify-content:center;
+    background:transparent;border:none;color:var(--mut);cursor:pointer;font-size:18px;line-height:1;padding:0}
+  .iconbtn:hover{color:var(--tx)}
+  #theme{position:absolute;bottom:10px;right:12px;z-index:11}
+
+  #graph{position:absolute;top:56px;left:0;right:0;bottom:0;background:var(--cybg);touch-action:none}
+  #crumbs{position:absolute;top:60px;left:0;right:0;z-index:10;display:flex;justify-content:center;
+    flex-wrap:wrap;gap:3px 7px;align-items:center;padding:0 24px;font-size:12.5px;pointer-events:none}
+  #crumbs .c{color:var(--mut);cursor:pointer;pointer-events:auto}
+  #crumbs .c:hover{color:var(--tx)}
+  #crumbs .c.here{color:var(--tx);font-weight:600}
+  #crumbs .sep{color:var(--mut);opacity:.55}
+  .placeholder{position:absolute;inset:56px 0 0 0;display:flex;flex-direction:column;gap:8px;
+    align-items:center;justify-content:center;color:var(--mut);pointer-events:none;z-index:5}
+  .placeholder svg{opacity:.5}
+  .placeholder .big{font-size:16px;color:var(--tx)}
+  .logo{position:absolute;bottom:15px;left:16px;z-index:10;color:var(--tx);opacity:.92;height:23px;
+    text-decoration:none}
+  .logo svg{height:23px;width:auto;display:block}
+  .logo .mark{fill:var(--acc)}
+  .logo .word{fill:currentColor}
+  .legend{position:absolute;bottom:19px;right:54px;z-index:10;display:none;gap:14px;flex-wrap:wrap;
+    justify-content:flex-end;max-width:58vw;font-size:12px}
+  .legend.show{display:flex}
+  .legend .it{display:flex;align-items:center;gap:6px;color:var(--mut)}
+  .legend .dot{width:10px;height:10px;border-radius:50%}
+
+  @media (max-width:640px){
+    header{height:52px;padding:0 10px}
+    .searchwrap{width:calc(100vw - 20px)}
+    #q{height:42px;font-size:16px;padding:0 14px 0 42px}   /* 16px avoids iOS focus-zoom */
+    .searchwrap .ic{left:13px}
+    .results{top:50px;max-height:64vh}
+    #graph{top:52px}
+    #crumbs{top:54px;justify-content:center;flex-wrap:wrap;padding:6px 10px 0}
+    #crumbs .c{max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .placeholder{inset:52px 0 0 0;padding:0 24px;text-align:center}
+    .legend.show{display:none}   /* hide legend on mobile — nodes are colour-coded; keeps the bottom clean */
+    .logo{bottom:11px;left:11px;height:19px}
+    .logo svg{height:19px}
+    #theme{bottom:4px;right:6px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="searchwrap">
+    <svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7.5"/><path d="M20 20l-4-4"/></svg>
+    <input id="q" autocomplete="off" spellcheck="false">
+    <div class="results" id="results"></div>
+  </div>
+</header>
+<div id="graph"></div>
+<div id="crumbs"></div>
+<div class="placeholder" id="placeholder">
+  <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="6" r="2.5"/><circle cx="16" cy="17" r="2.5"/><path d="M9 8l6 8M9 7h5"/></svg>
+  <div class="big" id="phtext"></div>
+</div>
+<div class="logo" id="logo" title="glossa"><svg viewBox="0 0 168 52" role="img" aria-label="glossa"><rect class="mark" x="0" y="6" width="34" height="7" rx="2" opacity="0.4"/><rect class="mark" x="4" y="18" width="34" height="7" rx="2" opacity="0.65"/><rect class="mark" x="8" y="30" width="34" height="7" rx="2"/><rect class="mark" x="22" y="6" width="3" height="31" rx="1" opacity="0.3"/><circle class="mark" cx="23.5" cy="44" r="3"/><text class="word" x="50" y="40" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="40" font-weight="650" letter-spacing="-1.2">glossa</text></svg></div>
+<div class="legend" id="legend"></div>
+<button class="iconbtn" id="theme"></button>
+<script>/*__CYTOSCAPE_LIB__*/</script>
+<script>
+const DATA = __GRAPH_DATA__;
+const N = DATA.nodes, E = DATA.edges;
+const PALETTE = ['#e5484d','#30a46c','#3b82f6','#f5a524','#8b5cf6','#ec4899',
+  '#0ea5e9','#eab308','#22c55e','#6366f1','#f97316','#a855f7','#14b8a6','#f43f5e'];
+const SOFT = new Set(DATA.softEdges||[]);
+const COL={}; (DATA.types||[]).forEach((t,i)=>COL[t]=PALETTE[i%PALETTE.length]);
+
+// Hard-coded UI strings, chosen by browser locale (English default, Russian for ru-*).
+const LANG=(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
+const T=({
+  en:{search:'Search the knowledge base…',pick:'Search and pick a node to explore its connections',
+      top:'Most connected',matches:n=>n+' matches',none:'No matches',theme:'Toggle theme'},
+  ru:{search:'Поиск по базе знаний…',pick:'Найдите узел, чтобы раскрыть его связи',
+      top:'Наиболее связанные',matches:n=>n+' совпадений',none:'Ничего не найдено',theme:'Сменить тему'}
+})[LANG];
+
+// adjacency incl. soft (SIMILAR) links, flagged; used to build the local subgraph
+const adj = N.map(()=>[]);
+for(let e=0;e<E.length;e++){ const [s,t,k]=E[e]; const soft=SOFT.has(k);
+  adj[s].push({i:t,k,dir:1,soft}); adj[t].push({i:s,k,dir:-1,soft}); }
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let cy=null;
+
+// ── theme ──
+function cssv(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function currentTheme(){ const s=localStorage.getItem('kg-theme');
+  if(s) return s;
+  return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'; }
+function applyTheme(t){ document.documentElement.setAttribute('data-theme',t);
+  localStorage.setItem('kg-theme',t); $('theme').textContent = t==='dark'?'☾':'☀';
+  if(cy) cy.style(cyStyle()); }
+$('theme').addEventListener('click',()=>{
+  const cur=document.documentElement.getAttribute('data-theme')||currentTheme();
+  applyTheme(cur==='dark'?'light':'dark');
+});
+
+// ── glossary search ──
+let focus=-1, hist=[], activeRes=-1, resList=[];
+function rank(qs){
+  const out=[];
+  for(let i=0;i<N.length;i++){
+    const lo=N[i].l.toLowerCase(); let sc=-1;
+    if(!qs){ if(N[i].s) continue; sc=N[i].d; }   // sources are findable by search, not in the default list
+    else if(lo.startsWith(qs)) sc=2e6-lo.length;
+    else if(lo.includes(qs)) sc=1e6-lo.indexOf(qs);
+    if(sc>=0) out.push([sc,i]);
+  }
+  out.sort((a,b)=>b[0]-a[0]);
+  return out.slice(0,80).map(r=>r[1]);
+}
+function renderResults(){
+  const q=$('q').value.trim().toLowerCase();
+  resList=rank(q); activeRes=resList.length?0:-1;
+  const box=$('results'); box.innerHTML='';
+  const g=document.createElement('div'); g.className='grp';
+  g.textContent=q?T.matches(resList.length):T.top;
+  box.appendChild(g);
+  resList.forEach((i,k)=>{
+    const d=document.createElement('div'); d.className='res'+(k===activeRes?' active':'');
+    d.innerHTML='<span class="dot" style="background:'+(COL[N[i].t]||'#888')+'"></span>'
+      +'<span class="nm">'+esc(N[i].l)+'</span><span class="ty">'+esc(N[i].t)+'</span>'
+      +'<span class="dg">'+N[i].d+'</span>';
+    d.addEventListener('mousedown',ev=>{ev.preventDefault();select(i);});
+    d.addEventListener('mouseenter',()=>{activeRes=k;highlightRes();});
+    box.appendChild(d);
+  });
+  if(!resList.length){ const n=document.createElement('div'); n.className='none'; n.textContent=T.none; box.appendChild(n); }
+  box.classList.add('open');
+}
+function highlightRes(){ [...$('results').querySelectorAll('.res')].forEach((el,k)=>el.classList.toggle('active',k===activeRes)); }
+function closeResults(){ $('results').classList.remove('open'); }
+$('q').addEventListener('input',renderResults);
+$('q').addEventListener('focus',renderResults);
+$('q').addEventListener('blur',()=>setTimeout(closeResults,120));
+$('q').addEventListener('keydown',e=>{
+  if(e.key==='ArrowDown'){e.preventDefault();activeRes=Math.min(resList.length-1,activeRes+1);highlightRes();scrollActive();}
+  else if(e.key==='ArrowUp'){e.preventDefault();activeRes=Math.max(0,activeRes-1);highlightRes();scrollActive();}
+  else if(e.key==='Enter'){ if(activeRes>=0){select(resList[activeRes]);} }
+  else if(e.key==='Escape'){ $('q').blur(); closeResults(); }
+});
+function scrollActive(){ const el=$('results').querySelectorAll('.res')[activeRes]; if(el) el.scrollIntoView({block:'nearest'}); }
+
+// ── cytoscape ego graph ──
+function cyStyle(){
+  const edge=cssv('--edge'), edgetx=cssv('--edgetx'), nodetx=cssv('--nodetx'), acc=cssv('--acc'), surf=cssv('--surface');
+  return [
+    {selector:'node',style:{
+      'background-color':e=>COL[e.data('type')]||'#888',
+      'label':'data(label)','color':nodetx,'font-family':'-apple-system,Segoe UI,Roboto,sans-serif',
+      'text-wrap':'wrap','text-max-width':'210px','text-valign':'bottom','text-margin-y':7,
+      'line-height':1.25,'border-width':2,'border-color':surf,'overlay-opacity':0,
+      'transition-property':'opacity','transition-duration':'120ms'}},
+    {selector:'node[d=0]',style:{'width':52,'height':52,'border-width':3,'border-color':acc,
+      'font-size':'16px','font-weight':'bold','z-index':30,'text-max-width':'320px'}},
+    {selector:'node[d=1]',style:{'width':34,'height':34,'font-size':'13.5px','z-index':20}},
+    {selector:'node[src=1]',style:{'shape':'round-rectangle','width':28,'height':19,
+      'background-opacity':0.55,'border-style':'dashed','font-size':'12px','color':edgetx}},
+    {selector:'.dim',style:{'opacity':0.14}},
+    {selector:'edge',style:{'curve-style':'bezier','line-color':edge,'target-arrow-color':edge,
+      'transition-property':'opacity','transition-duration':'120ms'}},
+    {selector:'edge[soft=0]',style:{'width':1.9,'target-arrow-shape':'triangle','arrow-scale':1,
+      'label':'data(rel)','font-size':'11px','color':edgetx,'text-rotation':'autorotate',
+      'text-background-color':surf,'text-background-opacity':0.9,'text-background-padding':2}},
+    {selector:'edge[soft=1]',style:{'width':1,'line-style':'dashed','opacity':0.4,'target-arrow-shape':'none'}}
+  ];
+}
+// Local subgraph = focus + its direct neighbours (typed relations, SIMILAR, and
+// MENTIONS sources) + the edges among them. Laid out organically with the
+// built-in cose force layout so it reads as a dense local map, not a rigid star.
+function showEgo(fi){
+  const seen=new Set([fi]), keep=[];
+  const cand=adj[fi].slice().sort((a,b)=>(a.soft-b.soft)||(N[b.i].d-N[a.i].d));
+  for(const e of cand){ if(seen.has(e.i))continue; seen.add(e.i); keep.push(e); if(keep.length>=30)break; }
+  const set=new Set([fi,...keep.map(e=>e.i)]);
+  const mk=i=>({id:'n'+i,label:N[i].l,type:N[i].t,d:i===fi?0:1,src:N[i].s?1:0});
+  const els=[{group:'nodes',data:mk(fi)}];
+  for(const e of keep) els.push({group:'nodes',data:mk(e.i)});
+  const eseen=new Set();
+  for(const [s,t,k] of E){ if(!set.has(s)||!set.has(t))continue;
+    const a=Math.min(s,t),b=Math.max(s,t),id='e'+a+'_'+b+'_'+k; if(eseen.has(id))continue; eseen.add(id);
+    els.push({group:'edges',data:{id,source:'n'+s,target:'n'+t,rel:k,soft:SOFT.has(k)?1:0}}); }
+  cy.elements().remove(); cy.add(els);
+  // Dynamic, label-aware density. `nodeDimensionsIncludeLabels` sizes each node
+  // by its wrapped label, so cose spaces nodes only as much as their texts
+  // need — packed where labels are short, roomier ONLY where they'd otherwise
+  // collide. A small idealEdgeLength + gravity keep it as compact as possible
+  // (maximum nodes in view) and a high nodeOverlap eliminates residual label
+  // collisions; no fixed boundingBox (it would squeeze this apart). Seeded
+  // concentrically with randomize:false so the same ego lays out the same way.
+  const mob=window.innerWidth<640;
+  const foc=cy.getElementById('n'+fi);
+  // Compact base layout in a fixed box → short edges, dense packing. Then expand
+  // ONLY where label boxes collide (relaxLabels) — spacing appears solely where
+  // texts would otherwise overlap. Text never shrinks (MINZ); if the ego is
+  // bigger than the screen, centre on the focus and pan for the rest.
+  // Box scales with node count — few nodes get a tight box (short edges), many
+  // get a larger one — so density stays high regardless of ego size.
+  const cnt=cy.nodes().length;
+  const bw=mob?Math.min(window.innerWidth-24,170+cnt*16):Math.min(560,210+cnt*22),
+        bh=Math.round(bw/(mob?1.2:1.4));
+  cy.layout({name:'cose',animate:false,randomize:true,fit:false,padding:mob?20:34,
+    boundingBox:{x1:0,y1:0,w:bw,h:bh},
+    idealEdgeLength:mob?58:70,nodeRepulsion:3500,gravity:0.5,numIter:1400,
+    nodeDimensionsIncludeLabels:true,edgeElasticity:120,coolingFactor:0.95}).run();
+  relaxLabels(mob?85:60);
+  cy.fit(cy.elements(), mob?20:70);
+  const z=cy.zoom(), MINZ=mob?0.95:1.0, MAXZ=mob?1.6:1.25;
+  if(z<MINZ){ cy.zoom(MINZ); cy.center(foc); }
+  else if(z>MAXZ){ cy.zoom(MAXZ); cy.center(cy.elements()); }
+}
+// Push apart nodes whose label boxes overlap (along the smaller-overlap axis),
+// a few sweeps — resolves residual collisions cose leaves from offset labels.
+function relaxLabels(iters){
+  const ns=cy.nodes(), n=ns.length;
+  for(let it=0;it<iters;it++){
+    const bb=ns.map(x=>x.boundingBox({includeLabels:true}));
+    const mv=Array.from({length:n},()=>({x:0,y:0}));
+    let any=false;
+    for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){
+      const A=bb[a],B=bb[b];
+      const ox=Math.min(A.x2,B.x2)-Math.max(A.x1,B.x1), oy=Math.min(A.y2,B.y2)-Math.max(A.y1,B.y1);
+      if(ox>0&&oy>0){ any=true;
+        const acx=(A.x1+A.x2)/2,acy=(A.y1+A.y2)/2,bcx=(B.x1+B.x2)/2,bcy=(B.y1+B.y2)/2;
+        if(ox<oy){ const d=(ox/2+1)*(acx<=bcx?-1:1); mv[a].x+=d; mv[b].x-=d; }
+        else { const d=(oy/2+1)*(acy<=bcy?-1:1); mv[a].y+=d; mv[b].y-=d; }
+      }
+    }
+    if(!any)break;
+    for(let i=0;i<n;i++) if(mv[i].x||mv[i].y){ const p=ns[i].position(); ns[i].position({x:p.x+mv[i].x,y:p.y+mv[i].y}); }
+  }
+}
+function select(i, keepQuery){
+  if(focus>=0 && focus!==i) hist.push(focus);
+  focus=i;
+  $('placeholder').style.display='none'; $('legend').classList.add('show');
+  showEgo(i); renderCrumbs(); closeResults();
+  if(!keepQuery){ $('q').value=''; $('q').blur(); }
+}
+function renderCrumbs(){
+  const c=$('crumbs'); c.innerHTML='';
+  const trail=hist.concat([focus]);
+  trail.forEach((idx,k)=>{
+    if(k>0){const s=document.createElement('span');s.className='sep';s.textContent='›';c.appendChild(s);}
+    const a=document.createElement('span'); a.className='c'+(k===trail.length-1?' here':'');
+    a.textContent=idx>=0?N[idx].l:''; a.title=idx>=0?N[idx].l:'';
+    a.addEventListener('click',()=>{ hist=trail.slice(0,k); focus=idx; showEgo(idx); renderCrumbs(); });
+    c.appendChild(a);
+  });
+}
+
+// legend from types actually present
+function buildLegend(){
+  const seen=new Set(N.map(n=>n.t));
+  const box=$('legend'); box.innerHTML='';
+  for(const t of (DATA.types||[])){ if(!seen.has(t))continue;
+    const it=document.createElement('span'); it.className='it';
+    it.innerHTML='<span class="dot" style="background:'+(COL[t]||'#888')+'"></span>'+esc(t);
+    box.appendChild(it);
+  }
+}
+
+// ── boot ──
+$('q').placeholder=T.search; $('phtext').textContent=T.pick; $('theme').title=T.theme;
+applyTheme(currentTheme());
+buildLegend();
+cy = cytoscape({
+  container:$('graph'), style:cyStyle(), minZoom:0.2, maxZoom:2.5, wheelSensitivity:0.25,
+  boxSelectionEnabled:false, autoungrabify:false
+});
+cy.on('tap','node',evt=>{ const idx=+evt.target.id().slice(1); if(idx!==focus) select(idx,false); });
+cy.on('mouseover','node',evt=>{ const keep=evt.target.closedNeighborhood();
+  cy.elements().addClass('dim'); keep.removeClass('dim'); $('graph').style.cursor='pointer'; });
+cy.on('mouseout','node',()=>{ cy.elements().removeClass('dim'); $('graph').style.cursor='default'; });
+renderResults(); closeResults();
+</script>
+</body>
+</html>

@@ -102,10 +102,21 @@ MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
 ### 5. Export, import, prune
 
 ```bash
-kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml)
+kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml/html)
+kb graph dump ./my-corpus -f html > kb.html # self-contained offline graph explorer (see below)
 kb graph import graph.json ./my-corpus     # replace the semantic layer from a graph file (file = source of truth)
 kb graph prune ./my-corpus -t Symptom      # delete all nodes of a type (and edges touching them)
 ```
+
+**`-f html` — offline interactive explorer.** Emits one self-contained HTML file
+(the graph library and data are embedded; nothing is fetched at runtime, so it
+works offline and can be handed to anyone). Open it in a browser: a glossary
+search returns matching nodes, and selecting one shows a focused local view —
+that node in the centre with its typed relations, similar nodes, and `MENTIONS`
+sources — which you traverse by clicking. Node colours and the legend are
+derived from the data, so it renders any graph. Light/dark theme follows the
+system with a manual toggle; the UI is English, switching to Russian on a `ru`
+locale. Mobile-friendly (touch pan/zoom, responsive layout).
 
 ## Constraint workflow (feature-gated)
 

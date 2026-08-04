@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`kb graph dump -f html` — self-contained offline graph explorer**: emits a single HTML file with the graph library (Cytoscape.js) and data embedded, so it pulls nothing at runtime and works fully offline. Search-first UX: a glossary search returns matching nodes; selecting one opens a focused local view (the node centred with its typed relations, similar nodes, and `MENTIONS` sources) that you traverse by clicking. Density is label-aware — nodes pack tightly and spread only where their texts would overlap — and text stays at a readable size (the view never shrinks it). Colours/legend are derived from the data; light/dark theme follows the system with a manual toggle; UI is English, switching to Russian on a `ru` locale; responsive for mobile.
+
 ## [0.2.7] - 2026-08-04
 
 ### Added

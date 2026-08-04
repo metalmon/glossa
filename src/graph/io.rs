@@ -194,6 +194,128 @@ pub fn to_graphml(e: &GraphExport) -> String {
     out
 }
 
+/// Derived similarity links the generalize pass writes. Excluded from graph
+/// traversal in the viewer (they are dense and noisy); the viewer navigates the
+/// real typed relations. Kept in the payload so a future mode could use them.
+const SOFT_EDGE_TYPES: &[&str] = &["SIMILAR"];
+
+/// Render the export as a single self-contained, offline interactive HTML page.
+///
+/// The page is a search-first, node-by-node graph explorer: a glossary search
+/// returns matching nodes, and selecting one shows a concentric ego view (the
+/// node in the center with its typed connections), which you traverse by
+/// clicking. The graph is drawn with Cytoscape.js, whose minified source is
+/// embedded in the binary via `include_str!` alongside the template — nothing
+/// is read from disk or the network at runtime, so it works fully offline. Node
+/// positions are computed in the browser (small ego networks), so no layout is
+/// baked here. Type colors and the legend are derived from the data.
+pub fn to_html(g: &GraphStore, e: &GraphExport) -> String {
+    use std::collections::{BTreeSet, HashMap};
+
+    let idx: HashMap<&str, usize> = e
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    let base = e.nodes.len();
+
+    // Non-exported edge endpoints are sources (the structural Section/Document
+    // nodes referenced via MENTIONS etc.). Give them indices after the exported
+    // nodes so the viewer can show them as `source` nodes you can open. collect()
+    // only returns edges touching an exported node, so at most one end is a stub.
+    let mut stub_pos: HashMap<&str, usize> = HashMap::new();
+    let mut stub_order: Vec<&str> = Vec::new();
+    for ed in &e.edges {
+        for endp in [ed.from.as_str(), ed.to.as_str()] {
+            if !idx.contains_key(endp) && !stub_pos.contains_key(endp) {
+                stub_pos.insert(endp, base + stub_order.len());
+                stub_order.push(endp);
+            }
+        }
+    }
+
+    // Resolve edges to combined indices; degree (for glossary ranking) counts
+    // hard relations between two exported nodes; stubs get a reference count.
+    let resolve = |id: &str| -> usize { idx.get(id).copied().unwrap_or_else(|| stub_pos[id]) };
+    let mut render_edges: Vec<(usize, usize, &str)> = Vec::with_capacity(e.edges.len());
+    let mut deg = vec![0u32; base];
+    let mut stub_deg = vec![0u32; stub_order.len()];
+    for ed in &e.edges {
+        let (s, t) = (resolve(&ed.from), resolve(&ed.to));
+        render_edges.push((s, t, ed.edge_type.as_str()));
+        if !SOFT_EDGE_TYPES.contains(&ed.edge_type.as_str()) && s < base && t < base && s != t {
+            deg[s] += 1;
+            deg[t] += 1;
+        }
+        if s >= base {
+            stub_deg[s - base] += 1;
+        }
+        if t >= base {
+            stub_deg[t - base] += 1;
+        }
+    }
+
+    // Look up real labels for the source stubs, prefixing each with its document
+    // so it reads "file.pdf · p.734", not a bare "p.734". All of these
+    // (Document, Section, …) are provenance, so they collapse to one `Source`
+    // type — a single legend entry instead of three near-synonyms.
+    const SOURCE_TYPE: &str = "Source";
+    let stub_labels: Vec<String> = stub_order
+        .iter()
+        .map(|id| match g.get_node(id) {
+            Ok(Some(n)) => {
+                let doc = n.prov.source_path;
+                if doc.is_empty() || n.label.contains(doc.as_str()) {
+                    n.label
+                } else {
+                    let base = doc.rsplit(['/', '\\']).next().unwrap_or(doc.as_str());
+                    format!("{base} · {}", n.label)
+                }
+            }
+            _ => id.to_string(),
+        })
+        .collect();
+
+    let mut node_types: BTreeSet<&str> = e.nodes.iter().map(|n| n.node_type.as_str()).collect();
+    if !stub_labels.is_empty() {
+        node_types.insert(SOURCE_TYPE);
+    }
+    let edge_types: BTreeSet<&str> = render_edges.iter().map(|(_, _, k)| *k).collect();
+
+    let mut nodes_json: Vec<serde_json::Value> = e
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, nd)| serde_json::json!({"l": nd.label, "t": nd.node_type, "d": deg[i]}))
+        .collect();
+    for (i, label) in stub_labels.iter().enumerate() {
+        nodes_json.push(serde_json::json!({"l": label, "t": SOURCE_TYPE, "d": stub_deg[i], "s": 1}));
+    }
+    let edges_json: Vec<serde_json::Value> = render_edges
+        .iter()
+        .map(|&(s, t, k)| serde_json::json!([s, t, k]))
+        .collect();
+
+    let payload = serde_json::json!({
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "types": node_types.iter().copied().collect::<Vec<_>>(),
+        "edgeTypes": edge_types.iter().copied().collect::<Vec<_>>(),
+        "softEdges": SOFT_EDGE_TYPES,
+    });
+    // `</` inside a <script> would close the tag early; neutralize it.
+    let data = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{}".into())
+        .replace("</", "<\\/");
+    // Guard against a stray `</script` sequence inside the vendored library.
+    let lib = include_str!("vendor/cytoscape.min.js").replace("</script", "<\\/script");
+
+    include_str!("viewer.html.tmpl")
+        .replace("__GRAPH_DATA__", &data)
+        .replace("/*__CYTOSCAPE_LIB__*/", &lib)
+}
+
 pub fn import_replace_layer(
     g: &GraphStore,
     ont: &Ontology,
@@ -258,6 +380,43 @@ mod tests {
         assert_eq!(back.nodes.len(), 2);
         assert_eq!(back.edges.len(), 1);
         assert_eq!(back.nodes[0].label, "Label A");
+    }
+
+    fn empty_store() -> GraphStore {
+        GraphStore::open(tempfile::tempdir().unwrap().path()).unwrap()
+    }
+
+    #[test]
+    fn html_is_self_contained_and_embeds_data() {
+        let html = to_html(&empty_store(), &make_export());
+        // Both template placeholders must be filled in.
+        assert!(!html.contains("__GRAPH_DATA__"), "data placeholder not substituted");
+        assert!(
+            !html.contains("/*__CYTOSCAPE_LIB__*/"),
+            "library placeholder not substituted"
+        );
+        // The graph library is embedded (offline), not loaded from a CDN.
+        assert!(html.contains("Cytoscape"), "vendored library not embedded");
+        assert!(
+            !html.contains("<script src=") && !html.contains("<link "),
+            "viewer must not load any external resource"
+        );
+        // Graph data (labels + types) is baked in.
+        assert!(html.contains("Label A"), "node label missing from payload");
+        assert!(html.contains("RESOLVED_BY"), "edge type missing from payload");
+        assert!(html.contains("Symptom"), "node type missing from payload");
+    }
+
+    #[test]
+    fn html_handles_empty_graph() {
+        let empty = GraphExport {
+            exported_types: vec![],
+            nodes: vec![],
+            edges: vec![],
+        };
+        let html = to_html(&empty_store(), &empty);
+        assert!(!html.contains("__GRAPH_DATA__"));
+        assert!(html.contains("Cytoscape"));
     }
 
     const ONT: &str = r#"
