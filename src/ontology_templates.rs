@@ -124,6 +124,38 @@ pub fn suggest(query: &str, k: usize) -> Vec<(String, usize)> {
     scored.into_iter().take(k).collect()
 }
 
+/// Outcome of a materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    Created,
+    Kept,
+    Overwritten,
+}
+
+/// Write a preset to `<root>/.glossa/ontology.toml`. On an existing file: `Kept`
+/// unless `force`. Unknown name → error listing the closest presets.
+pub fn write_template(
+    root: &std::path::Path,
+    name_or_alias: &str,
+    force: bool,
+) -> anyhow::Result<Written> {
+    let name = resolve(name_or_alias).ok_or_else(|| {
+        let near = nearest(name_or_alias, 3).join(", ");
+        anyhow::anyhow!("unknown ontology preset '{name_or_alias}' — did you mean: {near}? (kb ontology list)")
+    })?;
+    let toml = raw(&name).expect("resolved name is embedded");
+
+    let glossa_dir = root.join(".glossa");
+    let target = glossa_dir.join("ontology.toml");
+    let existed = target.exists();
+    if existed && !force {
+        return Ok(Written::Kept);
+    }
+    std::fs::create_dir_all(&glossa_dir)?;
+    std::fs::write(&target, toml)?;
+    Ok(if existed { Written::Overwritten } else { Written::Created })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +194,29 @@ mod tests {
         let s = suggest("we keep a register of personal data and its retention period", 3);
         assert_eq!(s.first().map(|(n, _)| n.as_str()), Some("data-privacy"));
         assert!(s.iter().all(|(_, score)| *score > 0));
+    }
+
+    #[test]
+    fn write_template_create_keep_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let target = root.join(".glossa").join("ontology.toml");
+
+        // create
+        assert!(matches!(write_template(root, "support", false).unwrap(), Written::Created));
+        assert!(target.exists());
+        let written = std::fs::read_to_string(&target).unwrap();
+        Ontology::parse(&written).unwrap(); // valid ontology on disk
+
+        // keep (no force)
+        assert!(matches!(write_template(root, "compliance", false).unwrap(), Written::Kept));
+        assert!(std::fs::read_to_string(&target).unwrap().contains("Symptom")); // still support
+
+        // force overwrite (via alias)
+        assert!(matches!(write_template(root, "normocontrol", true).unwrap(), Written::Overwritten));
+        assert!(std::fs::read_to_string(&target).unwrap().contains("NormativeRequirement"));
+
+        // unknown → error
+        assert!(write_template(root, "does-not-exist", false).is_err());
     }
 }
