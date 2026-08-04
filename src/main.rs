@@ -85,6 +85,9 @@ enum Cmd {
         force: bool,
         #[arg(long)]
         file: Option<String>,
+        /// Materialize a baked ontology preset before indexing (see `kb ontology list`).
+        #[arg(long)]
+        ontology: Option<String>,
     },
     /// Delete notebook notes whose owner document no longer exists in the corpus.
     #[cfg(feature = "notebook")]
@@ -662,7 +665,12 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Index { path, force, file } => {
+        Cmd::Index {
+            path,
+            force,
+            file,
+            ontology,
+        } => {
             let root = glossa::root::resolve_root(path);
             let started = std::time::Instant::now();
             if let Some(rel) = file {
@@ -678,6 +686,20 @@ fn main() -> anyhow::Result<()> {
                     glossa::cli_fmt::format_elapsed(started.elapsed())
                 );
                 return Ok(());
+            }
+            if let Some(name) = ontology {
+                match glossa::ontology_templates::write_template(&root, &name, false)? {
+                    glossa::ontology_templates::Written::Created => {
+                        println!("ontology: wrote '{name}' preset to .glossa/ontology.toml");
+                    }
+                    glossa::ontology_templates::Written::Kept => {
+                        eprintln!(
+                            "ontology.toml already exists; keeping it, ignoring --ontology {name} \
+                             (use `kb ontology init --force` to replace)"
+                        );
+                    }
+                    glossa::ontology_templates::Written::Overwritten => unreachable!("force=false"),
+                }
             }
             let stats = glossa::index::store::index_dir(&root, force)?;
             println!(
