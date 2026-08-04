@@ -19,6 +19,7 @@ props = []
 [entities.Resolution] # an action / fix / answer-pattern
 id_prefix = "res"
 props = []
+requires_grounding = true
 [entities.Task]       # a how-to intent (a procedure the user wants to perform)
 id_prefix = "tsk"
 props = []
