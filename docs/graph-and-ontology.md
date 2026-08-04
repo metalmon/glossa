@@ -57,6 +57,20 @@ Unknown node or edge types are rejected — the enricher cannot invent types.
 
 The same file declares **spines** (valid chain shapes for hygiene) and **closure** rules (transitive edge composition). Consumed by `graph generalize` and prune logic — domain rules stay in TOML, not Rust.
 
+### Grounding
+
+Reasoning nodes should trace to a source document; the built-in `MENTIONS` edge grounds a node to a `Section`. Mark a node type as requiring grounding:
+
+```toml
+[entities.Resolution]
+requires_grounding = true
+```
+
+Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolution`) needs a direct `MENTIONS`; the others ground through it — so the flag goes on that one type. It is enforced two ways:
+
+- **Write time** — `graph_upsert` rejects the whole call if a `requires_grounding` node has no `MENTIONS` (in the batch or already in the graph), naming the node and the edge to add. Document-agnostic: the `MENTIONS` may cite any indexed document, not only the node's `source_path`.
+- **Standing** — `graph generalize` reports required nodes that lost a *live* `MENTIONS` (none, or one whose target section was removed) as `ungrounded=<n>` plus a re-ground list. This is a **separate bucket** from off-spine `prune_candidates`: re-ground them, or delete with `--prune-ungrounded` (destructive, CLI only).
+
 ## Operator workflow
 
 ### 1. Deploy ontology
@@ -84,7 +98,10 @@ Or via MCP: `graph_generalize`. Non-destructive by default. Destructive options 
 ```bash
 kb graph generalize ./my-corpus --merge              # collapse near-duplicates
 kb graph generalize ./my-corpus --prune-incomplete   # remove off-spine nodes
+kb graph generalize ./my-corpus --prune-ungrounded   # remove required nodes that lost MENTIONS grounding
 ```
+
+The non-destructive run still **reports** `ungrounded=<n>` and lists those nodes (see [Grounding](#grounding)) so an agent can re-ground them.
 
 ### 4. Inspect
 
