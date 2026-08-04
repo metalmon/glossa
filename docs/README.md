@@ -14,6 +14,7 @@ User-facing documentation for the glossa knowledge-base engine.
 | [architecture.md](architecture.md) | Developers | File-first design, index, graph, derived layer |
 | [mcp.md](mcp.md) | Agent integrators | MCP tools, profiles, local IDE config |
 | [graph-and-ontology.md](graph-and-ontology.md) | Domain operators | Ontology overlay, enrich workflow, CLI mirror |
+| [ontology-presets.md](ontology-presets.md) | Domain operators | Baked task ontologies, `--ontology` flag, `kb ontology` commands, catalog |
 | [eval-and-training.md](eval-and-training.md) | Benchmark developers | kb-eval, kb-train, dataset format, just recipes |
 | [deploy/service.md](deploy/service.md) | Ops | Service install (Linux / Windows / macOS) |
 | [deploy/mcp-server.md](deploy/mcp-server.md) | DevOps | Advanced HTTP deployment, multi-instance |

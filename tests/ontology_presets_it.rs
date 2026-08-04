@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use std::fs;
 
@@ -34,4 +35,36 @@ fn index_ontology_keeps_existing_file() {
 
     let onto = fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap();
     assert!(onto.contains("# mine")); // untouched
+}
+
+#[test]
+fn ontology_list_show_init_suggest() {
+    // list
+    Command::cargo_bin("kb").unwrap().args(["ontology", "list"])
+        .assert().success()
+        .stdout(contains("compliance").and(contains("support")));
+
+    // show prints the TOML
+    Command::cargo_bin("kb").unwrap().args(["ontology", "show", "support"])
+        .assert().success()
+        .stdout(contains("Symptom").and(contains("RESOLVED_BY")));
+
+    // show resolves an alias
+    Command::cargo_bin("kb").unwrap().args(["ontology", "show", "normocontrol"])
+        .assert().success()
+        .stdout(contains("NormativeRequirement"));
+
+    // suggest ranks by free text
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "suggest", "register of personal data and retention"])
+        .assert().success()
+        .stdout(contains("data-privacy"));
+
+    // init into a temp dir
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "init", "--template", "compliance", dir.path().to_str().unwrap()])
+        .assert().success();
+    assert!(std::fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap()
+        .contains("NormativeRequirement"));
 }
