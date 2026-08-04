@@ -1,0 +1,66 @@
+[meta]
+domain = "compliance"
+description = "Check a document against normative requirements: requirement -> field/value -> evidence in the text."
+family = "compliance"
+tier = 1
+aliases = ["normocontrol", "conformance", "normative"]
+
+[entities.NormativeRequirement]  # one checkable requirement pulled from a standard/spec
+id_prefix = "req"
+props = []
+[entities.Field]                 # a constrained parameter of the checked document
+id_prefix = "fld"
+props = []
+[entities.Evidence]              # the place in the document that satisfies a requirement
+id_prefix = "evd"
+props = []
+requires_grounding = true
+[entities.Standard]              # a cited standard / regulation
+id_prefix = "std"
+props = []
+
+[relations.CONSTRAINS]
+from = ["NormativeRequirement"]
+to = ["Field"]
+[relations.CONSTRAINED_BY]
+from = ["Field"]
+to = ["Range", "Regex", "Enum", "Required", "Forbidden"]
+[relations.VERIFIED_BY]
+from = ["NormativeRequirement"]
+to = ["Evidence"]
+[relations.REFERENCES]
+from = ["NormativeRequirement"]
+to = ["Standard"]
+[relations.HAS_MIN]
+from = ["Range"]
+to = ["Literal"]
+[relations.HAS_MAX]
+from = ["Range"]
+to = ["Literal"]
+[relations.HAS_PATTERN]
+from = ["Regex"]
+to = ["Literal"]
+
+[validation]
+strict = true
+
+[constraint_types.Range]
+params = ["min", "max"]
+[constraint_types.Regex]
+params = ["pattern"]
+[constraint_types.Enum]
+params = ["values"]
+[constraint_types.Required]
+params = []
+[constraint_types.Forbidden]
+params = []
+
+[entities.Literal]
+id_prefix = "lit"
+props = []
+
+[reasoning]
+spines = [
+  { anchor = "NormativeRequirement", relations = ["VERIFIED_BY"] },
+]
+mentions = "MENTIONS"
