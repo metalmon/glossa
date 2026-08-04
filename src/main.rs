@@ -291,7 +291,8 @@ enum GraphAction {
     },
     /// Dump all nodes (optionally filtered by type) with their outgoing edges.
     Dump {
-        path: PathBuf,
+        /// corpus directory (default: current directory)
+        path: Option<PathBuf>,
         /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
         #[arg(short = 't', long = "type")]
         node_type: Option<String>,
@@ -995,6 +996,7 @@ fn main() -> anyhow::Result<()> {
                 node_type,
                 format,
             } => {
+                let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 match format.as_str() {
                     "text" => {
