@@ -210,6 +210,8 @@ pub struct Ontology {
     /// How-to notes keyed by entity / relation / constraint-type name, surfaced by
     /// `get_ontology`. Optional per type; empty when the ontology declares none.
     descriptions: BTreeMap<String, String>,
+    /// Entity types whose nodes must carry a `MENTIONS` grounding edge.
+    grounding_types: std::collections::BTreeSet<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -225,6 +227,16 @@ impl Ontology {
             .entities
             .iter()
             .filter_map(|(name, v)| entity_id_prefix(v).map(|p| (name.clone(), p)))
+            .collect();
+        let grounding_types = raw
+            .entities
+            .iter()
+            .filter_map(|(name, v)| {
+                v.get("requires_grounding")
+                    .and_then(|b| b.as_bool())
+                    .filter(|&b| b)
+                    .map(|_| name.clone())
+            })
             .collect();
         // Collect how-to notes from entities, relations, and constraint types into
         // one map keyed by name (they share a type namespace in the graph).
@@ -308,6 +320,7 @@ impl Ontology {
             patterns,
             tables,
             descriptions,
+            grounding_types,
         })
     }
 
@@ -335,6 +348,11 @@ impl Ontology {
             .get(node_type)
             .cloned()
             .unwrap_or_else(|| node_type.to_lowercase())
+    }
+
+    /// Whether nodes of `node_type` must carry a `MENTIONS` grounding edge.
+    pub fn requires_grounding(&self, node_type: &str) -> bool {
+        self.grounding_types.contains(node_type)
     }
 
     /// The reasoning spines — the valid shapes a node must lie on a complete instance of to
@@ -723,5 +741,20 @@ props = []
         let o2 = Ontology::load_or_default(dir.path());
         assert!(o2.validate_node("Person").is_ok());
         assert!(o2.validate_node("Alien").is_err());
+    }
+
+    #[test]
+    fn requires_grounding_flag_parses() {
+        let ont = Ontology::parse(
+            r#"
+[entities.Resolution]
+requires_grounding = true
+[entities.Symptom]
+"#,
+        )
+        .unwrap();
+        assert!(ont.requires_grounding("Resolution"));
+        assert!(!ont.requires_grounding("Symptom"));
+        assert!(!ont.requires_grounding("Cause")); // undeclared → false, no panic
     }
 }
