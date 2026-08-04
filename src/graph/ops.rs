@@ -610,6 +610,48 @@ pub fn graph_upsert(
         }
     }
 
+    // (4b) Grounding guarantee. Node types the ontology marks `requires_grounding`
+    // MUST have a MENTIONS edge to a source, in THIS batch or already in the graph.
+    // A batch that would leave one ungrounded is rejected whole (nothing written).
+    // Document-agnostic: the MENTIONS may cite any document.
+    let grounding_errs: Vec<String> = nodespecs
+        .iter()
+        .filter(|n| ont.requires_grounding(&n.node_type))
+        .filter(|n| {
+            let in_batch = edgespecs
+                .iter()
+                .any(|e| e.edge_type == crate::graph::MENTIONS && e.from == n.id);
+            let in_graph = g
+                .outgoing(&n.id)
+                .map(|es| es.iter().any(|e| e.edge_type == crate::graph::MENTIONS))
+                .unwrap_or(false);
+            !in_batch && !in_graph
+        })
+        .map(|n| {
+            format!(
+                "\"{}: {}\" requires grounding: add a MENTIONS edge from it to the document section it is grounded in — {{\"from\":\"{}\",\"edge_type\":\"MENTIONS\",\"to\":\"<doc>#<n>\",\"source_path\":\"<doc>\"}}",
+                n.node_type, n.label, n.label
+            )
+        })
+        .collect();
+    if !grounding_errs.is_empty() {
+        let mut dropped = grounding_errs;
+        dropped.extend(errs);
+        let out = UpsertOutcome {
+            message: String::new(),
+            nodes: 0,
+            edges: 0,
+            rejected: true,
+            dump: vec![],
+            merged: vec![],
+            dropped,
+        };
+        return UpsertOutcome {
+            message: format_upsert_response(&out),
+            ..out
+        };
+    }
+
     // (5) build dump lines (resolved state, for the caller to log). Echo a node's
     // `aliases` when it has any — for an Enum these ARE the allowed values, so the
     // model sees exactly how many landed and catches a value it dropped while
@@ -1021,6 +1063,21 @@ props = []
 [entities.Resolution]
 id_prefix = "res"
 props = []
+[relations.RESOLVED_BY]
+from = ["Symptom"]
+to = ["Resolution"]
+[validation]
+strict = true
+"#;
+
+    const GROUNDING_ONT: &str = r#"
+[entities.Symptom]
+id_prefix = "sym"
+props = []
+[entities.Resolution]
+id_prefix = "res"
+props = []
+requires_grounding = true
 [relations.RESOLVED_BY]
 from = ["Symptom"]
 to = ["Resolution"]
@@ -2184,5 +2241,79 @@ strict = true
             "hint should list existing node: {}",
             out.message
         );
+    }
+
+    #[test]
+    fn grounding_required_node_without_mentions_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(&idx, &g, &ont, vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 1_000_000);
+        assert!(out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0);
+        assert_eq!(out.edges, 0);
+        assert!(out.message.contains("requires grounding"), "{}", out.message);
+        assert!(out.message.contains("Module restart"), "{}", out.message);
+        assert!(g.all_nodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grounding_satisfied_by_mentions_in_same_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(&idx, &g, &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx")],
+            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1_000_000);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1);
+        assert_eq!(out.edges, 1);
+    }
+
+    #[test]
+    fn grounding_mentions_to_other_document_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        write_doc(&idx, "other.docx");
+        let out = graph_upsert(&idx, &g, &ont,
+            vec![unode("Resolution", "Cross ref fix", "case1.docx")],
+            vec![uedge("Cross ref fix", "MENTIONS", "other.docx#1", "other.docx")], 1_000_000);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.edges, 1);
+    }
+
+    #[test]
+    fn grounding_satisfied_by_existing_edge_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out1 = graph_upsert(&idx, &g, &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx")],
+            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1);
+        assert!(!out1.rejected, "{}", out1.message);
+        let out2 = graph_upsert(&idx, &g, &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 2);
+        assert!(!out2.rejected, "existing grounding must satisfy: {}", out2.message);
+    }
+
+    #[test]
+    fn non_required_type_without_grounding_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Connection loss", "case1.docx")], vec![], 1_000_000);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1);
     }
 }
