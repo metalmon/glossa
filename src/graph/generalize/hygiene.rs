@@ -73,6 +73,35 @@ pub fn incomplete_nodes(
     del
 }
 
+/// Ids of grounding-required nodes lacking a LIVE `MENTIONS` — either none at all,
+/// or one whose target is absent from `nodes` (dangling after its source was
+/// removed). `nodes` = `(id, node_type)`; `edges` = `(from, edge_type, to)`.
+/// Sorted, deterministic. Empty `grounding_types` → empty.
+pub fn ungrounded_nodes(
+    nodes: &[(String, String)],
+    edges: &[Triple],
+    grounding_types: &HashSet<String>,
+) -> Vec<String> {
+    if grounding_types.is_empty() {
+        return Vec::new();
+    }
+    let existing: HashSet<&str> = nodes.iter().map(|(id, _)| id.as_str()).collect();
+    let grounded: HashSet<&str> = edges
+        .iter()
+        .filter(|(_, et, to)| et == crate::graph::MENTIONS && existing.contains(to.as_str()))
+        .map(|(from, _, _)| from.as_str())
+        .collect();
+    let mut out: Vec<String> = nodes
+        .iter()
+        .filter(|(_, ty)| grounding_types.contains(ty))
+        .filter(|(id, _)| !grounded.contains(id.as_str()))
+        .map(|(id, _)| id.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Nodes on a complete instance of ONE typed spine: the start must have the spine's `anchor` type
 /// AND reach the end through the relation sequence. Returned ids borrow `edges`.
 fn survivors_for_spine<'e>(
@@ -283,5 +312,26 @@ mod tests {
         let nodes = n(&[("S", "Symptom")]);
         let edges = e(&[]);
         assert!(incomplete_nodes(&nodes, &edges, &[], &spine_types(), &structural()).is_empty());
+    }
+
+    #[test]
+    fn ungrounded_nodes_flags_missing_and_dangling() {
+        let nodes = vec![
+            ("res:a".to_string(), "Resolution".to_string()), // grounded (live)
+            ("res:b".to_string(), "Resolution".to_string()), // dangling MENTIONS
+            ("res:c".to_string(), "Resolution".to_string()), // no MENTIONS
+            ("sym:x".to_string(), "Symptom".to_string()),    // not required
+            ("sec:1".to_string(), "Section".to_string()),    // a live section
+        ];
+        let edges = vec![
+            ("res:a".to_string(), "MENTIONS".to_string(), "sec:1".to_string()),   // live
+            ("res:b".to_string(), "MENTIONS".to_string(), "sec:gone".to_string()),// dangling
+        ];
+        let mut gt = std::collections::HashSet::new();
+        gt.insert("Resolution".to_string());
+        let out = ungrounded_nodes(&nodes, &edges, &gt);
+        assert_eq!(out, vec!["res:b".to_string(), "res:c".to_string()]);
+        // Empty grounding_types → no-op.
+        assert!(ungrounded_nodes(&nodes, &edges, &std::collections::HashSet::new()).is_empty());
     }
 }
