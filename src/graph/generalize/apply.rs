@@ -46,6 +46,10 @@ pub struct Opts {
     pub spines: Vec<Spine>,
     /// Hygiene: entity types that are endpoints of spine relations (to tell doomed from auxiliary).
     pub spine_types: HashSet<String>,
+    /// Hygiene: entity types that must be grounded (from ontology `requires_grounding`).
+    pub grounding_types: HashSet<String>,
+    /// Hygiene: delete ungrounded required nodes (report-only when false). CLI `--prune-ungrounded`.
+    pub prune_ungrounded: bool,
     pub now: u64,
 }
 
@@ -67,6 +71,8 @@ impl Opts {
             prune_incomplete: false,
             spines: vec![],
             spine_types: HashSet::new(),
+            grounding_types: HashSet::new(),
+            prune_ungrounded: false,
             now,
         }
     }
@@ -80,6 +86,12 @@ impl Opts {
             structural: ont.structural(),
             spines: ont.spines(),
             spine_types: ont.spine_types(),
+            grounding_types: ont
+                .entity_types()
+                .iter()
+                .filter(|t| ont.requires_grounding(t))
+                .cloned()
+                .collect(),
             ..Opts::defaults(now)
         }
     }
@@ -94,6 +106,9 @@ pub struct Report {
     pub communities: usize,
     pub merge_candidates: usize,
     pub merged_nodes: usize,
+    pub ungrounded_candidates: usize,
+    pub ungrounded_pruned: usize,
+    pub ungrounded: Vec<String>,
 }
 
 fn derived_prov(now: u64, confidence: f32) -> Provenance {
@@ -138,6 +153,16 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         if opts.prune_incomplete && !doomed.is_empty() {
             report.pruned_nodes = g.delete_nodes(&doomed)?;
         }
+
+        // (Hygiene) grounding-required nodes lacking a live MENTIONS — a SEPARATE bucket from the
+        // structural prune above (never merged: a node can be complete-but-ungrounded or
+        // doomed-but-grounded). Report-only unless opts.prune_ungrounded.
+        let ungrounded = hygiene::ungrounded_nodes(&id_types, &edges, &opts.grounding_types);
+        report.ungrounded_candidates = ungrounded.len();
+        if opts.prune_ungrounded && !ungrounded.is_empty() {
+            report.ungrounded_pruned = g.delete_nodes(&ungrounded)?;
+        }
+        report.ungrounded = ungrounded;
     }
 
     // (Tier 1) near-dup MERGE from shared evidence: reasoning nodes that MENTION the same chunk.
@@ -570,5 +595,71 @@ strict = false
             .unwrap()
             .iter()
             .any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"));
+    }
+
+    #[test]
+    fn generalize_reports_and_prunes_ungrounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        // A live Section, a grounded Resolution, and an ungrounded one (dangling MENTIONS).
+        let prov = |src: &str| Provenance {
+            source_path: src.into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 1.0,
+            created_at: 1,
+        };
+        for (id, ty, label) in [
+            ("sec:1", "Section", "S1"),
+            ("res:a", "Resolution", "Grounded"),
+            ("res:b", "Resolution", "Ungrounded"),
+        ] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: ty.into(),
+                label: label.into(),
+                aliases: vec![],
+                prov: prov("doc.md"),
+            })
+            .unwrap();
+        }
+        g.put_edge(&Edge {
+            from: "res:a".into(),
+            to: "sec:1".into(),
+            edge_type: "MENTIONS".into(),
+            prov: prov("doc.md"),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "res:b".into(),
+            to: "sec:gone".into(),
+            edge_type: "MENTIONS".into(),
+            prov: prov("doc.md"),
+        })
+        .unwrap();
+
+        let mut gt = std::collections::HashSet::new();
+        gt.insert("Resolution".to_string());
+
+        // report-only
+        let mut opts = Opts::defaults(1);
+        opts.grounding_types = gt.clone();
+        let r = generalize(&g, &opts).unwrap();
+        assert_eq!(r.ungrounded_candidates, 1);
+        assert_eq!(r.ungrounded, vec!["res:b".to_string()]);
+        assert_eq!(r.ungrounded_pruned, 0);
+        assert!(
+            g.get_node("res:b").unwrap().is_some(),
+            "report-only must not delete"
+        );
+
+        // prune
+        let mut opts2 = Opts::defaults(2);
+        opts2.grounding_types = gt;
+        opts2.prune_ungrounded = true;
+        let r2 = generalize(&g, &opts2).unwrap();
+        assert_eq!(r2.ungrounded_pruned, 1);
+        assert!(g.get_node("res:b").unwrap().is_none(), "pruned");
     }
 }
