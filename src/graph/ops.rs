@@ -829,15 +829,27 @@ pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
 pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     let opts = crate::graph::generalize::apply::Opts::from_ontology(ont, now);
     match crate::graph::generalize::apply::generalize(g, &opts) {
-        Ok(r) => format!(
-            "generalized: prune_candidates={} inferred_edges={} similar_edges={} \
-             communities={} merge_candidates={}",
-            r.prune_candidates,
-            r.inferred_edges,
-            r.similar_edges,
-            r.communities,
-            r.merge_candidates
-        ),
+        Ok(r) => {
+            let mut s = format!(
+                "generalized: prune_candidates={} ungrounded={} inferred_edges={} \
+                 similar_edges={} communities={} merge_candidates={}",
+                r.prune_candidates,
+                r.ungrounded_candidates,
+                r.inferred_edges,
+                r.similar_edges,
+                r.communities,
+                r.merge_candidates
+            );
+            if !r.ungrounded.is_empty() {
+                s.push_str("\nungrounded (re-ground these — add a MENTIONS to their source section):");
+                for id in r.ungrounded.iter().take(25) {
+                    if let Ok(Some(n)) = g.get_node(id) {
+                        s.push_str(&format!("\n- {} [{}] {}  (source: {})", n.id, n.node_type, n.label, n.prov.source_path));
+                    }
+                }
+            }
+            s
+        }
         Err(e) => format!("graph_generalize error: {e}"),
     }
 }
@@ -2315,5 +2327,23 @@ strict = true
         let out = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Connection loss", "case1.docx")], vec![], 1_000_000);
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
+    }
+
+    #[test]
+    fn graph_generalize_text_reports_ungrounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let prov = crate::graph::store::Provenance {
+            source_path: "doc.md".into(), range: None, file_sig: None,
+            origin: "agent".into(), confidence: 1.0, created_at: 1,
+        };
+        g.put_node(&crate::graph::store::Node {
+            id: "res:b".into(), node_type: "Resolution".into(), label: "Ungrounded".into(),
+            aliases: vec![], prov,
+        }).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let text = graph_generalize(&g, &ont, 1);
+        assert!(text.contains("ungrounded=1"), "{text}");
+        assert!(text.contains("Ungrounded"), "{text}");
     }
 }

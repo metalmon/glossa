@@ -265,6 +265,8 @@ enum GraphAction {
             help = "delete degenerate reasoning chains off the ontology spine (destructive)"
         )]
         prune_incomplete: bool,
+        #[arg(long, help = "delete required nodes that lost their MENTIONS grounding (destructive)")]
+        prune_ungrounded: bool,
     },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
@@ -915,6 +917,7 @@ fn main() -> anyhow::Result<()> {
                 path,
                 merge,
                 prune_incomplete,
+                prune_ungrounded,
             } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
@@ -925,17 +928,21 @@ fn main() -> anyhow::Result<()> {
                 );
                 opts.apply_merges = merge;
                 opts.prune_incomplete = prune_incomplete;
+                opts.prune_ungrounded = prune_ungrounded;
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
                 println!(
                     "generalize: prune_candidates={} pruned_nodes={} inferred_edges={} \
-                     similar_edges={} communities={} merge_candidates={} merged_nodes={}",
+                     similar_edges={} communities={} merge_candidates={} merged_nodes={} \
+                     ungrounded_candidates={} ungrounded_pruned={}",
                     r.prune_candidates,
                     r.pruned_nodes,
                     r.inferred_edges,
                     r.similar_edges,
                     r.communities,
                     r.merge_candidates,
-                    r.merged_nodes
+                    r.merged_nodes,
+                    r.ungrounded_candidates,
+                    r.ungrounded_pruned,
                 );
                 Ok(())
             }
