@@ -90,6 +90,12 @@ struct RawMeta {
     description: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    tier: Option<u8>,
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -173,6 +179,9 @@ pub struct Meta {
     pub domain: Option<String>,
     pub description: Option<String>,
     pub note: Option<String>,
+    pub family: Option<String>,
+    pub tier: u8,
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -306,6 +315,9 @@ impl Ontology {
                 domain: raw.meta.domain.filter(|d| !d.is_empty()),
                 description: raw.meta.description.filter(|d| !d.is_empty()),
                 note: raw.meta.note.filter(|d| !d.is_empty()),
+                family: raw.meta.family.filter(|d| !d.is_empty()),
+                tier: raw.meta.tier.unwrap_or(2),
+                aliases: raw.meta.aliases,
             },
             entity_types: raw.entities.keys().cloned().collect(),
             id_prefixes,
@@ -566,6 +578,30 @@ description = "entity"
         let p = o.patterns().get("foo").unwrap();
         assert_eq!(p.description, "A pattern.");
         assert_eq!(p.example.as_deref(), Some("human only"));
+    }
+
+    #[test]
+    fn meta_catalog_fields_parse_and_default() {
+        let toml = r#"
+[meta]
+description = "X"
+family = "compliance"
+tier = 1
+aliases = ["normocontrol", "conformance"]
+[entities.Field]
+props = []
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        let m = o.meta();
+        assert_eq!(m.family.as_deref(), Some("compliance"));
+        assert_eq!(m.tier, 1);
+        assert_eq!(m.aliases, vec!["normocontrol".to_string(), "conformance".to_string()]);
+
+        // absent → tier defaults to 2, family None, aliases empty
+        let o2 = Ontology::parse("[entities.X]\nprops=[]\n").unwrap();
+        assert_eq!(o2.meta().tier, 2);
+        assert!(o2.meta().family.is_none());
+        assert!(o2.meta().aliases.is_empty());
     }
 
     #[test]
