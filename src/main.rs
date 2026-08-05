@@ -1258,7 +1258,7 @@ fn main() -> anyhow::Result<()> {
                             "json" => print!("{}", to_json(&export)?),
                             "dot" => print!("{}", to_dot(&export)),
                             "graphml" => print!("{}", to_graphml(&export)),
-                            "html" => print!("{}", to_html(&g, &export)),
+                            "html" => print!("{}", to_html(&g, &export, &path)),
                             _ => unreachable!(),
                         }
                     }

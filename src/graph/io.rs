@@ -209,7 +209,7 @@ const SOFT_EDGE_TYPES: &[&str] = &["SIMILAR"];
 /// is read from disk or the network at runtime, so it works fully offline. Node
 /// positions are computed in the browser (small ego networks), so no layout is
 /// baked here. Type colors and the legend are derived from the data.
-pub fn to_html(g: &GraphStore, e: &GraphExport) -> String {
+pub fn to_html(g: &GraphStore, e: &GraphExport, root: &std::path::Path) -> String {
     use std::collections::{BTreeSet, HashMap};
 
     let idx: HashMap<&str, usize> = e
@@ -283,11 +283,62 @@ pub fn to_html(g: &GraphStore, e: &GraphExport) -> String {
     }
     let edge_types: BTreeSet<&str> = render_edges.iter().map(|(_, _, k)| *k).collect();
 
+    // When the dump was taken — shown in the mini-stat and used as the reference
+    // instant for valid-time status. `stamp_full` is the comparable RFC3339 form;
+    // `stamp` is the human-readable form injected as DATA.stamp.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let stamp_full = crate::graph::temporal::epoch_to_rfc3339(now_secs);
+    let stamp = format!(
+        "{} UTC",
+        stamp_full.get(..16).unwrap_or(&stamp_full).replace('T', " ")
+    );
+
+    // Temporality: staleness (source file drifted since grounding), computed once
+    // from the full node set; valid-time window + status pulled per exported node.
+    let all = g.all_nodes().unwrap_or_default();
+    let stale_input: Vec<(String, String, Option<crate::index::manifest::FileSig>)> = all
+        .iter()
+        .map(|n| (n.id.clone(), n.prov.source_path.clone(), n.prov.file_sig))
+        .collect();
+    let stale: std::collections::HashSet<String> =
+        crate::graph::generalize::hygiene::stale_nodes(root, &stale_input)
+            .into_iter()
+            .collect();
+
     let mut nodes_json: Vec<serde_json::Value> = e
         .nodes
         .iter()
         .enumerate()
-        .map(|(i, nd)| serde_json::json!({"l": nd.label, "t": nd.node_type, "d": deg[i]}))
+        .map(|(i, nd)| {
+            let mut o = serde_json::json!({"l": nd.label, "t": nd.node_type, "d": deg[i]});
+            if let Ok(Some(v)) = g.validity_for(&nd.id) {
+                if let Some(f) = v.valid_from_raw.as_ref().or(v.valid_from.as_ref()) {
+                    o["vf"] = serde_json::json!(f);
+                }
+                if let Some(t) = v.valid_to_raw.as_ref().or(v.valid_to.as_ref()) {
+                    o["vt"] = serde_json::json!(t);
+                }
+                let st = crate::graph::temporal::status(
+                    v.valid_from.as_deref(),
+                    v.valid_to.as_deref(),
+                    false,
+                    &stamp_full,
+                );
+                o["vs"] = serde_json::json!(match st {
+                    crate::graph::temporal::Status::Future => "future",
+                    crate::graph::temporal::Status::Expired => "expired",
+                    crate::graph::temporal::Status::Superseded => "superseded",
+                    crate::graph::temporal::Status::Current => "current",
+                });
+            }
+            if stale.contains(&nd.id) {
+                o["sl"] = serde_json::json!(1);
+            }
+            o
+        })
         .collect();
     for (i, label) in stub_labels.iter().enumerate() {
         nodes_json.push(serde_json::json!({"l": label, "t": SOURCE_TYPE, "d": stub_deg[i], "s": 1}));
@@ -303,6 +354,7 @@ pub fn to_html(g: &GraphStore, e: &GraphExport) -> String {
         "types": node_types.iter().copied().collect::<Vec<_>>(),
         "edgeTypes": edge_types.iter().copied().collect::<Vec<_>>(),
         "softEdges": SOFT_EDGE_TYPES,
+        "stamp": stamp,
     });
     // `</` inside a <script> would close the tag early; neutralize it.
     let data = serde_json::to_string(&payload)
@@ -389,7 +441,7 @@ mod tests {
 
     #[test]
     fn html_is_self_contained_and_embeds_data() {
-        let html = to_html(&empty_store(), &make_export());
+        let html = to_html(&empty_store(), &make_export(), std::path::Path::new("."));
         // Both template placeholders must be filled in.
         assert!(!html.contains("__GRAPH_DATA__"), "data placeholder not substituted");
         assert!(
@@ -415,7 +467,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
         };
-        let html = to_html(&empty_store(), &empty);
+        let html = to_html(&empty_store(), &empty, std::path::Path::new("."));
         assert!(!html.contains("__GRAPH_DATA__"));
         assert!(html.contains("Cytoscape"));
     }

@@ -11,16 +11,16 @@
     --cybg:#f6f8fa; --edge:#9aa6b4; --edgetx:#67707c; --nodetx:#1a2028;
   }
   @media (prefers-color-scheme: dark){
-    :root{ --bg:#0d1017; --surface:#161b24; --line:#242c38; --tx:#e6edf3; --mut:#8b98a9;
-      --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#39424f; --scrollbg:transparent;
-      --cybg:#0d1017; --edge:#3d4757; --edgetx:#8b98a9; --nodetx:#e6edf3; }
+    :root{ --bg:#131313; --surface:#1d1d1d; --line:#2b2b2b; --tx:#e8e8e8; --mut:#9a9a9a;
+      --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#3a3a3a; --scrollbg:transparent;
+      --cybg:#131313; --edge:#454545; --edgetx:#9a9a9a; --nodetx:#e8e8e8; }
   }
   :root[data-theme="light"]{ --bg:#f6f8fa; --surface:#ffffff; --line:#e2e6ea; --tx:#1a2028;
     --mut:#67707c; --acc:#2f6df6; --shadow:0 10px 34px rgba(20,30,50,.14); --scroll:#c4ccd6;
     --cybg:#f6f8fa; --edge:#9aa6b4; --edgetx:#67707c; --nodetx:#1a2028; }
-  :root[data-theme="dark"]{ --bg:#0d1017; --surface:#161b24; --line:#242c38; --tx:#e6edf3;
-    --mut:#8b98a9; --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#39424f;
-    --cybg:#0d1017; --edge:#3d4757; --edgetx:#8b98a9; --nodetx:#e6edf3; }
+  :root[data-theme="dark"]{ --bg:#131313; --surface:#1d1d1d; --line:#2b2b2b; --tx:#e8e8e8;
+    --mut:#9a9a9a; --acc:#5b8cff; --shadow:0 12px 38px rgba(0,0,0,.5); --scroll:#3a3a3a;
+    --cybg:#131313; --edge:#454545; --edgetx:#9a9a9a; --nodetx:#e8e8e8; }
 
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--tx);
@@ -31,7 +31,7 @@
   ::-webkit-scrollbar-thumb:hover{background:var(--mut)}
   *{scrollbar-color:var(--scroll) transparent;scrollbar-width:thin}
 
-  header{position:absolute;top:0;left:0;right:0;height:56px;display:flex;align-items:center;
+  header{position:absolute;top:0;left:0;right:0;height:66px;display:flex;align-items:center;
     justify-content:center;padding:0 18px;z-index:20;background:var(--bg)}
   .searchwrap{position:relative;width:min(720px,calc(100vw - 40px))}
   #q{width:100%;height:44px;background:var(--surface);border:1px solid var(--line);border-radius:12px;
@@ -39,7 +39,8 @@
   #q:focus{border-color:var(--acc)}
   .searchwrap .ic{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--mut);
     pointer-events:none;display:block}
-  .results{position:absolute;top:52px;left:0;right:0;max-height:min(62vh,520px);overflow:auto;
+  .results{position:absolute;top:62px;left:0;right:0;max-height:min(62vh,520px);overflow:auto;
+    -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
     background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
     padding:6px;display:none;z-index:25}
   .results.open{display:block}
@@ -49,6 +50,11 @@
   .res .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
   .res .ty{font-size:11px;color:var(--mut)}
   .res .dg{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums;min-width:20px;text-align:right}
+  .res .st{font-size:10px;padding:1px 6px;border-radius:6px;white-space:nowrap;line-height:1.6;flex:0 0 auto}
+  .st-current{background:color-mix(in srgb,#30a46c 20%,transparent);color:#30a46c}
+  .st-future,.st-superseded{background:color-mix(in srgb,var(--mut) 20%,transparent);color:var(--mut)}
+  .st-expired{background:color-mix(in srgb,#e0a020 22%,transparent);color:#e0a020}
+  .st-stale{background:color-mix(in srgb,#e5484d 20%,transparent);color:#e5484d;font-weight:600}
   .grp{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);padding:8px 11px 4px}
   .none{padding:14px 11px;color:var(--mut);font-size:13px}
 
@@ -57,14 +63,14 @@
   .iconbtn:hover{color:var(--tx)}
   #theme{position:absolute;bottom:10px;right:12px;z-index:11}
 
-  #graph{position:absolute;top:56px;left:0;right:0;bottom:0;background:var(--cybg);touch-action:none}
-  #crumbs{position:absolute;top:60px;left:0;right:0;z-index:10;display:flex;justify-content:center;
+  #graph{position:absolute;top:66px;left:0;right:0;bottom:0;background:var(--cybg);touch-action:none}
+  #crumbs{position:absolute;top:70px;left:0;right:0;z-index:10;display:flex;justify-content:center;
     flex-wrap:wrap;gap:3px 7px;align-items:center;padding:0 24px;font-size:12.5px;pointer-events:none}
   #crumbs .c{color:var(--mut);cursor:pointer;pointer-events:auto}
   #crumbs .c:hover{color:var(--tx)}
   #crumbs .c.here{color:var(--tx);font-weight:600}
   #crumbs .sep{color:var(--mut);opacity:.55}
-  .placeholder{position:absolute;inset:56px 0 0 0;display:flex;flex-direction:column;gap:8px;
+  .placeholder{position:absolute;inset:66px 0 0 0;display:flex;flex-direction:column;gap:8px;
     align-items:center;justify-content:center;color:var(--mut);pointer-events:none;z-index:5}
   .placeholder svg{opacity:.5}
   .placeholder .big{font-size:16px;color:var(--tx)}
@@ -73,6 +79,8 @@
   .logo svg{height:23px;width:auto;display:block}
   .logo .mark{fill:var(--acc)}
   .logo .word{fill:currentColor}
+  .dumpmeta{position:absolute;bottom:18px;left:104px;z-index:10;color:var(--mut);
+    font-size:11.5px;letter-spacing:.2px;white-space:nowrap;pointer-events:none;opacity:.8}
   .legend{position:absolute;bottom:19px;right:54px;z-index:10;display:none;gap:14px;flex-wrap:wrap;
     justify-content:flex-end;max-width:58vw;font-size:12px}
   .legend.show{display:flex}
@@ -92,6 +100,7 @@
     .legend.show{display:none}   /* hide legend on mobile — nodes are colour-coded; keeps the bottom clean */
     .logo{bottom:11px;left:11px;height:19px}
     .logo svg{height:19px}
+    .dumpmeta{left:84px;bottom:12px;font-size:10.5px;max-width:52vw;overflow:hidden;text-overflow:ellipsis}
     #theme{bottom:4px;right:6px}
   }
 </style>
@@ -111,6 +120,7 @@
   <div class="big" id="phtext"></div>
 </div>
 <div class="logo" id="logo" title="glossa"><svg viewBox="0 0 168 52" role="img" aria-label="glossa"><rect class="mark" x="0" y="6" width="34" height="7" rx="2" opacity="0.4"/><rect class="mark" x="4" y="18" width="34" height="7" rx="2" opacity="0.65"/><rect class="mark" x="8" y="30" width="34" height="7" rx="2"/><rect class="mark" x="22" y="6" width="3" height="31" rx="1" opacity="0.3"/><circle class="mark" cx="23.5" cy="44" r="3"/><text class="word" x="50" y="40" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="40" font-weight="650" letter-spacing="-1.2">glossa</text></svg></div>
+<div class="dumpmeta" id="dumpmeta"></div>
 <div class="legend" id="legend"></div>
 <button class="iconbtn" id="theme"></button>
 <script>/*__CYTOSCAPE_LIB__*/</script>
@@ -126,9 +136,13 @@ const COL={}; (DATA.types||[]).forEach((t,i)=>COL[t]=PALETTE[i%PALETTE.length]);
 const LANG=(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
 const T=({
   en:{search:'Search the knowledge base…',pick:'Search and pick a node to explore its connections',
-      top:'Most connected',matches:n=>n+' matches',none:'No matches',theme:'Toggle theme'},
+      top:'Most connected',matches:n=>n+' matches',none:'No matches',theme:'Toggle theme',
+      nodes:n=>n+' nodes',edges:n=>n+' edges',stale:n=>n+' stale',valid:'valid',
+      current:'current',future:'future',expired:'expired',superseded:'superseded'},
   ru:{search:'Поиск по базе знаний…',pick:'Найдите узел, чтобы раскрыть его связи',
-      top:'Наиболее связанные',matches:n=>n+' совпадений',none:'Ничего не найдено',theme:'Сменить тему'}
+      top:'Наиболее связанные',matches:n=>n+' совпадений',none:'Ничего не найдено',theme:'Сменить тему',
+      nodes:n=>n+' узлов',edges:n=>n+' рёбер',stale:n=>n+' устаревших',valid:'действ.',
+      current:'актуально',future:'будущее',expired:'истекло',superseded:'заменено'}
 })[LANG];
 
 // adjacency incl. soft (SIMILAR) links, flagged; used to build the local subgraph
@@ -137,6 +151,13 @@ for(let e=0;e<E.length;e++){ const [s,t,k]=E[e]; const soft=SOFT.has(k);
   adj[s].push({i:t,k,dir:1,soft}); adj[t].push({i:s,k,dir:-1,soft}); }
 
 const $=id=>document.getElementById(id);
+// mini-stat beside the logo: dump time + graph size + stale count (localised)
+(function(){
+  const nn=N.filter(n=>!n.s).length, ee=E.length, ss=N.filter(n=>n.sl).length;
+  let s=(DATA.stamp?DATA.stamp+' · ':'')+T.nodes(nn)+' · '+T.edges(ee);
+  if(ss) s+=' · ⚠ '+T.stale(ss);
+  const el=$('dumpmeta'); if(el) el.textContent=s;
+})();
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let cy=null;
 
@@ -153,8 +174,9 @@ $('theme').addEventListener('click',()=>{
   applyTheme(cur==='dark'?'light':'dark');
 });
 
-// ── glossary search ──
-let focus=-1, hist=[], activeRes=-1, resList=[];
+// ── glossary search (results paged in on scroll — no fixed cap) ──
+const BATCH=60;
+let focus=-1, hist=[], activeRes=-1, resList=[], rendered=0;
 function rank(qs){
   const out=[];
   for(let i=0;i<N.length;i++){
@@ -165,25 +187,40 @@ function rank(qs){
     if(sc>=0) out.push([sc,i]);
   }
   out.sort((a,b)=>b[0]-a[0]);
-  return out.slice(0,80).map(r=>r[1]);
+  return out.map(r=>r[1]);   // full ranked list; the dropdown pages it in as you scroll
 }
+function tempTags(nd){
+  let s='';
+  if(nd.vs){ const win=(nd.vf||'…')+' – '+(nd.vt||'∞');
+    s+='<span class="st st-'+nd.vs+'" title="'+esc(T.valid+': '+win)+'">'+T[nd.vs]+'</span>'; }
+  if(nd.sl){ s+='<span class="st st-stale" title="'+esc(T.stale(1))+'">⚠</span>'; }
+  return s;
+}
+function resRow(i,k){
+  const nd=N[i];
+  const d=document.createElement('div'); d.className='res'+(k===activeRes?' active':'');
+  d.innerHTML='<span class="dot" style="background:'+(COL[nd.t]||'#888')+'"></span>'
+    +'<span class="nm">'+esc(nd.l)+'</span><span class="ty">'+esc(nd.t)+'</span>'
+    +tempTags(nd)+'<span class="dg">'+nd.d+'</span>';
+  d.addEventListener('mousedown',ev=>{ev.preventDefault();select(i);});
+  d.addEventListener('mouseenter',()=>{activeRes=k;highlightRes();});
+  return d;
+}
+function renderMore(){
+  const box=$('results'), end=Math.min(rendered+BATCH,resList.length);
+  for(let k=rendered;k<end;k++) box.appendChild(resRow(resList[k],k));
+  rendered=end;
+}
+function ensureRendered(k){ while(rendered<=k && rendered<resList.length) renderMore(); }
 function renderResults(){
   const q=$('q').value.trim().toLowerCase();
-  resList=rank(q); activeRes=resList.length?0:-1;
-  const box=$('results'); box.innerHTML='';
+  resList=rank(q); activeRes=resList.length?0:-1; rendered=0;
+  const box=$('results'); box.innerHTML=''; box.scrollTop=0;
   const g=document.createElement('div'); g.className='grp';
-  g.textContent=q?T.matches(resList.length):T.top;
+  g.textContent=q?T.matches(resList.length):T.top;   // true total — no silent truncation
   box.appendChild(g);
-  resList.forEach((i,k)=>{
-    const d=document.createElement('div'); d.className='res'+(k===activeRes?' active':'');
-    d.innerHTML='<span class="dot" style="background:'+(COL[N[i].t]||'#888')+'"></span>'
-      +'<span class="nm">'+esc(N[i].l)+'</span><span class="ty">'+esc(N[i].t)+'</span>'
-      +'<span class="dg">'+N[i].d+'</span>';
-    d.addEventListener('mousedown',ev=>{ev.preventDefault();select(i);});
-    d.addEventListener('mouseenter',()=>{activeRes=k;highlightRes();});
-    box.appendChild(d);
-  });
   if(!resList.length){ const n=document.createElement('div'); n.className='none'; n.textContent=T.none; box.appendChild(n); }
+  else renderMore();
   box.classList.add('open');
 }
 function highlightRes(){ [...$('results').querySelectorAll('.res')].forEach((el,k)=>el.classList.toggle('active',k===activeRes)); }
@@ -191,8 +228,10 @@ function closeResults(){ $('results').classList.remove('open'); }
 $('q').addEventListener('input',renderResults);
 $('q').addEventListener('focus',renderResults);
 $('q').addEventListener('blur',()=>setTimeout(closeResults,120));
+// page in the next batch when the list is scrolled near the bottom (wheel or touch)
+$('results').addEventListener('scroll',()=>{ const b=$('results'); if(b.scrollTop+b.clientHeight>=b.scrollHeight-40) renderMore(); });
 $('q').addEventListener('keydown',e=>{
-  if(e.key==='ArrowDown'){e.preventDefault();activeRes=Math.min(resList.length-1,activeRes+1);highlightRes();scrollActive();}
+  if(e.key==='ArrowDown'){e.preventDefault();activeRes=Math.min(resList.length-1,activeRes+1);ensureRendered(activeRes);highlightRes();scrollActive();}
   else if(e.key==='ArrowUp'){e.preventDefault();activeRes=Math.max(0,activeRes-1);highlightRes();scrollActive();}
   else if(e.key==='Enter'){ if(activeRes>=0){select(resList[activeRes]);} }
   else if(e.key==='Escape'){ $('q').blur(); closeResults(); }
