@@ -78,6 +78,31 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents; see [graph-reasoning-directions.md](graph-reasoning-directions.md) |
 | Tailored ontology error messages | **Partial** | `edge_validation_hint()` in `ontology.rs` covers constraint fields; domain-specific messages (e.g. Task → CAUSED_BY → Cause) not yet added |
 
+### Temporality (valid-time → bitemporal)
+
+Give reasoning facts a time dimension so the conformance engine can answer
+*"was this valid / known on date X"* and trace every verdict to the interval it
+held in. Built phase by phase to a professional (bitemporal, SQL:2011-informed)
+level. Design lives in `docs/superpowers/specs/` (per-phase spec → plan).
+
+**Grounding parallel:** temporality is grounded in the ontology the same way
+`MENTIONS` grounding is — a per-entity `requires_validity` flag (mirror of
+`requires_grounding`) makes `graph_upsert` reject a node of that type that
+carries no valid-time. Presets mark the types that must be timed
+(`hr-compliance` Record, `data-privacy` DataAsset, `contract` Obligation,
+`reg-change` Requirement, `certification` Evidence).
+
+Core rule throughout: **world time ≠ document time** — `valid_*` is when a fact
+holds in the world; `provenance` (source doc / section, `created_at`) is when it
+was recorded.
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **1 — Valid-time core (as-of)** | authored `node_validity` side table (1:1, survives `generalize`), `valid_from`/`valid_to` on `graph_upsert`, `requires_validity` enforcement, `--as-of <date>` filter on `glossary`/`neighbors`/`ls`/`dump`/`read`, per-node status (current/future/expired), `SUPERSEDES` relation, ISO-8601 storage keeping the raw expression | **Shipped** (Phase 1) |
+| **2 — Transaction-time / bitemporal (as-at)** | `known_from` (seeded from `created_at`) / `known_to`, logical retraction for agent temporal nodes, `--as-at <T>`, combined bitemporal query | **Open** |
+| **3 — Temporal reasoning & hygiene** | Allen interval relations; `generalize` surfacing (expired-but-referenced, coverage gaps/overlaps, supersession-chain consistency); temporal conditions in `constraint_solve` (valid-as-of, one-valid-at-a-time, no-gap coverage) | **Open** |
+| **4 — Uncertainty & edges** | EDTF (`~`/`?`/unspecified) parsed to bounds (raw stored since Phase 1), strict/lenient query modes, edge-level validity | **Open** |
+
 ### Constraint graph (CSP)
 
 | Item | Status | Notes |

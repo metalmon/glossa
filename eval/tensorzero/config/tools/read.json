@@ -17,7 +17,7 @@
     },
     "page_image": {
       "default": null,
-      "description": "PDF only: return a raster of page `n` as PNG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text.",
+      "description": "PDF only: return a raster of page `n` as JPEG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text. Requires the server to be started with --vision.",
       "type": [
         "boolean",
         "null"

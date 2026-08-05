@@ -42,6 +42,22 @@
         },
         "source_path": {
           "type": "string"
+        },
+        "valid_from": {
+          "default": null,
+          "description": "Start of this node's authored validity interval, any ISO-8601 granularity\n(`\"2020\"`, `\"2020-06\"`, `\"2020-06-15\"`, or a full RFC3339 UTC instant).\n`None` when the caller doesn't touch validity (leaves any existing interval alone).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_to": {
+          "default": null,
+          "description": "End of the authored validity interval, same granularity rules as `valid_from`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

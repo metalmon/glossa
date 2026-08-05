@@ -80,6 +80,56 @@ Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolu
 - **Write time** — `graph_upsert` rejects the whole call if a `requires_grounding` node has no `MENTIONS` (in the batch or already in the graph), naming the node and the edge to add. Document-agnostic: the `MENTIONS` may cite any indexed document, not only the node's `source_path`.
 - **Standing** — `graph generalize` reports required nodes that lost a *live* `MENTIONS` (none, or one whose target section was removed) as `ungrounded=<n>` plus a re-ground list. This is a **separate bucket** from off-spine `prune_candidates`: re-ground them, or delete with `--prune-ungrounded` (destructive, CLI only).
 
+### Valid-time
+
+A reasoning node can carry a **validity interval** — the span of time the fact
+it represents actually holds in the world. `graph_upsert` accepts two optional
+fields per node:
+
+```json
+{"node_type": "Requirement", "label": "…", "source_path": "…",
+ "valid_from": "2024-01-01", "valid_to": "2024-12-31"}
+```
+
+`valid_from`/`valid_to` accept any ISO-8601 granularity (a bare year, `YYYY-MM`,
+`YYYY-MM-DD`, or a full RFC3339 instant); the raw string is kept alongside the
+normalized bound so the original expression is never lost. `valid_to` is
+optional — omitting it leaves the interval open-ended (still in effect).
+Leaving both out on an update doesn't touch an existing interval; a node with
+no validity at all is **timeless** and always considered current.
+
+**`requires_validity`** is the exact analog of [`requires_grounding`](#grounding),
+declared the same way in the ontology:
+
+```toml
+[entities.Requirement]
+requires_validity = true
+```
+
+`graph_upsert` rejects a node of that type with no `valid_from` — supplied in
+the same batch or already on record — naming the node and the fields to add.
+Presets that model time-bound facts (`hr-compliance`, `data-privacy`,
+`contract`, `reg-change`, `certification`) mark their timed type this way; see
+[Ontology presets](ontology-presets.md).
+
+**Reading as of a date.** `kb graph glossary/ls/near/node/dump` take `--as-of
+<date>` on the CLI, and `glossary`/`neighbors`/`related` take an `as_of` arg
+over MCP. A node outside its validity interval on that date is hidden from the
+result; a timeless node is always shown. `neighbors`/`related` apply the filter
+to the *surrounding* graph (edge endpoints, SIMILAR links, community
+siblings) — the explicitly named anchor node is returned regardless of its own
+window, so an expired node is still reachable by id, just with a filtered
+neighbourhood. `kb graph node` / MCP `read` additionally report the node's own
+**status** — current, future, expired, or superseded (via an incoming
+`SUPERSEDES` edge) — so a caller can tell *why* it's outside the window.
+
+**World time ≠ document time.** `valid_from`/`valid_to` describe when the fact
+held *in the world*; provenance (`source_path`, the `MENTIONS` grounding,
+`created_at`) describes when it was *recorded*. A requirement can be entered
+into the graph today with a `valid_from` years in the past, or scheduled with a
+`valid_from` in the future — the two clocks are independent, and only the
+former is queried by `--as-of`.
+
 ## Operator workflow
 
 ### 1. Deploy ontology

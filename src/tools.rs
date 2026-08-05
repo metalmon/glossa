@@ -752,7 +752,9 @@ fn resolve_node_ref(
 
 /// `as_of` (when `Some`), normalized via `temporal::normalize_point`, drops any SIMILAR/COMMUNITY
 /// endpoint outside its authored validity interval (`GraphStore::visible_at`); a timeless node
-/// (no validity row) is always shown.
+/// (no validity row) is always shown. This filters the *surrounding* graph only — the anchor node
+/// itself (resolved from `node`/`path`+`n`) is always looked up and its related nodes computed
+/// regardless of the anchor's own validity window.
 #[allow(clippy::too_many_arguments)]
 pub fn related(
     idx: &DocIndex,
@@ -849,6 +851,9 @@ fn edge_line(
 /// both; `edge_types` (when set) keeps only those relation names. `as_of` (when `Some`),
 /// normalized via `temporal::normalize_point`, drops any endpoint outside its authored validity
 /// interval (`GraphStore::visible_at`); a timeless endpoint (no validity row) is always shown.
+/// This filters the *surrounding* graph only — the anchor node itself (resolved from
+/// `node`/`path`+`n`) is always looked up and its edges enumerated regardless of the anchor's own
+/// validity window.
 #[allow(clippy::too_many_arguments)]
 pub fn neighbors(
     idx: &DocIndex,

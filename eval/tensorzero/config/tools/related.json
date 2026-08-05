@@ -1,6 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "as_of": {
+      "default": null,
+      "description": "show the graph as it was valid on this date (ISO-8601); a related node outside its validity interval is hidden. Timeless nodes are always shown. Filters the surrounding related nodes only, not the anchor `node` itself.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "n": {
       "default": null,
       "description": "chunk number, exactly as shown in `[#n]` in a search result",

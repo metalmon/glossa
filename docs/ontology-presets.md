@@ -135,6 +135,15 @@ unless it has a `MENTIONS` edge to a source section, and `kb graph generalize`
 surfaces any that later lose their grounding. See
 [Grounding](graph-and-ontology.md#grounding) for the mechanics.
 
+## Valid-time
+
+The same way, presets that model a time-bound fact mark that type
+`requires_validity = true` — `hr-compliance` (`Record`), `data-privacy`
+(`DataAsset`), `contract` (`Obligation`), `reg-change` (`Requirement`) and
+`certification` (`Evidence`). `graph_upsert` then rejects such a node unless it
+carries a `valid_from`. See [Valid-time](graph-and-ontology.md#valid-time) for
+the mechanics and `--as-of` / `as_of` reads.
+
 ## See also
 
 - [Graph and ontology](graph-and-ontology.md) — how the overlay is used by the

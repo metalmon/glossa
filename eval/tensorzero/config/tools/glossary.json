@@ -1,7 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "as_of": {
+      "default": null,
+      "description": "show the graph as it was valid on this date (ISO-8601); a matched node outside its validity interval is hidden. Timeless nodes are always shown.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "name": {
+      "description": "concept in your own words, e.g. \"connection loss\"",
       "type": "string"
     }
   },

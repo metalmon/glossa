@@ -512,7 +512,7 @@ struct RelatedArgs {
         deserialize_with = "crate::json_util::deserialize_opt_string_loose"
     )]
     #[schemars(
-        description = "show the graph as it was valid on this date (ISO-8601); a related node outside its validity interval is hidden. Timeless nodes are always shown."
+        description = "show the graph as it was valid on this date (ISO-8601); a related node outside its validity interval is hidden. Timeless nodes are always shown. Filters the surrounding related nodes only, not the anchor `node` itself."
     )]
     as_of: Option<String>,
 }
@@ -545,7 +545,7 @@ struct NeighborsArgs {
         deserialize_with = "crate::json_util::deserialize_opt_string_loose"
     )]
     #[schemars(
-        description = "show the graph as it was valid on this date (ISO-8601); a neighbor outside its validity interval is hidden. Timeless nodes are always shown."
+        description = "show the graph as it was valid on this date (ISO-8601); a neighbor outside its validity interval is hidden. Timeless nodes are always shown. Filters the surrounding neighbors only, not the anchor `node` itself."
     )]
     as_of: Option<String>,
 }
