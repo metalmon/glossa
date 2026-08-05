@@ -246,6 +246,13 @@ enum GraphAction {
         /// concept in your own words, e.g. "connection loss"
         query: String,
         path: Option<PathBuf>,
+        /// Show the graph as it was valid on this date (ISO-8601); nodes outside their
+        /// validity interval are hidden. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        /// Reference instant for validity status (defaults to now). Deterministic in tests.
+        #[arg(long)]
+        now: Option<String>,
     },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
@@ -255,6 +262,13 @@ enum GraphAction {
         node_type: Option<String>,
         #[arg(short = 'l', long, default_value_t = 50)]
         limit: usize,
+        /// Show the graph as it was valid on this date (ISO-8601); nodes outside their
+        /// validity interval are hidden. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        /// Reference instant for validity status (defaults to now). Deterministic in tests.
+        #[arg(long)]
+        now: Option<String>,
     },
     /// Run the deterministic generalization pass: transitive closure, SIMILAR links, communities
     /// and centrality (written as derived `auto-generalized` edges + `node_meta`). With `--merge`,
@@ -285,11 +299,25 @@ enum GraphAction {
         depth: usize,
         #[arg(short = 't', long = "type")]
         types: Vec<String>,
+        /// Show the graph as it was valid on this date (ISO-8601); nodes outside their
+        /// validity interval are hidden. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        /// Reference instant for validity status (defaults to now). Deterministic in tests.
+        #[arg(long)]
+        now: Option<String>,
     },
     /// Show a node: type, label, provenance, and its outgoing edges.
     Node {
         node_id: String,
         path: Option<PathBuf>,
+        /// Show the graph as it was valid on this date (ISO-8601); the node is treated as not
+        /// found when outside its validity interval. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        /// Reference instant for validity status (defaults to now). Deterministic in tests.
+        #[arg(long)]
+        now: Option<String>,
     },
     /// Show a path between two node ids (bounded).
     Path {
@@ -310,6 +338,13 @@ enum GraphAction {
         /// (html = self-contained offline interactive viewer)
         #[arg(short = 'f', long, default_value = "text")]
         format: String,
+        /// Show the graph as it was valid on this date (ISO-8601); nodes outside their
+        /// validity interval are hidden. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        /// Reference instant for validity status (defaults to now). Deterministic in tests.
+        #[arg(long)]
+        now: Option<String>,
     },
     /// Import a graph file (JSON), replacing the semantic layer (file = source of truth).
     Import {
@@ -362,6 +397,74 @@ enum OntologyAction {
         #[arg(trailing_var_arg = true, required = true)]
         text: Vec<String>,
     },
+}
+
+/// Post-filter `glossary()`'s already-rendered text down to the id-blocks visible at `at`. Each
+/// top-level id's block is its head line (no leading whitespace, starting with the node id) plus
+/// any indented spine-chain lines that follow — dropped as one unit when the head id itself is
+/// outside its validity interval. IDs the store has no validity row for are always visible, so
+/// `(no matches)`/error lines pass through unchanged (their leading "word" resolves to "visible"
+/// since it has no validity row either).
+fn filter_glossary_at(text: &str, g: &glossa::graph::store::GraphStore, at: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut block: Vec<&str> = Vec::new();
+    let mut block_visible = true;
+    for line in text.lines() {
+        let is_head = !line.starts_with(' ') && !line.starts_with('\t');
+        if is_head {
+            if block_visible {
+                out.append(&mut block);
+            } else {
+                block.clear();
+            }
+            let id = line.split_whitespace().next().unwrap_or("");
+            block_visible = g.visible_at(id, at).unwrap_or(true);
+        }
+        block.push(line);
+    }
+    if block_visible {
+        out.append(&mut block);
+    }
+    if out.is_empty() {
+        "(no matches)".to_string()
+    } else {
+        out.join("\n")
+    }
+}
+
+/// Unix seconds (UTC) -> the strict `YYYY-MM-DDThh:mm:ssZ` form `temporal::normalize_point`
+/// accepts unchanged. Used as the `graph node` status reference when neither `--as-of` nor
+/// `--now` is given (system time). Hand-rolled — no date crate, consistent with `graph::temporal`
+/// (Howard Hinnant's `civil_from_days`: http://howardhinnant.github.io/date_algorithms.html).
+fn epoch_to_rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, mi, se) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
+}
+
+#[cfg(test)]
+mod temporal_cli_tests {
+    use super::epoch_to_rfc3339;
+
+    #[test]
+    fn epoch_to_rfc3339_known_instants() {
+        assert_eq!(epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(epoch_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+        assert_eq!(epoch_to_rfc3339(1_719_788_645), "2024-06-30T23:04:05Z");
+        // leap day
+        assert_eq!(epoch_to_rfc3339(1_709_222_400), "2024-02-29T16:00:00Z");
+    }
 }
 
 fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
@@ -918,7 +1021,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
-            GraphAction::Glossary { query, path } => {
+            GraphAction::Glossary { query, path, as_of, now: _now } => {
                 let path = glossa::root::resolve_root(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
@@ -927,19 +1030,30 @@ fn main() -> anyhow::Result<()> {
                 let spec = glossa::tools::ChainSpec::from_ontology(
                     &glossa::graph::ontology::Ontology::load_or_default(&path),
                 );
-                println!(
-                    "{}",
-                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace)
-                );
+                let rendered = glossa::tools::glossary(&idx, &g, &query, &spec, &trace);
+                let rendered = match &as_of {
+                    Some(a) => {
+                        let at = glossa::graph::temporal::normalize_point(a)?;
+                        filter_glossary_at(&rendered, &g, &at)
+                    }
+                    None => rendered,
+                };
+                println!("{rendered}");
                 Ok(())
             }
             GraphAction::Ls {
                 path,
                 node_type,
                 limit,
+                as_of,
+                now: _now,
             } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
+                let at = as_of
+                    .as_deref()
+                    .map(glossa::graph::temporal::normalize_point)
+                    .transpose()?;
                 let nodes = g.all_nodes()?;
                 match node_type {
                     None => {
@@ -947,6 +1061,11 @@ fn main() -> anyhow::Result<()> {
                         let mut counts: std::collections::BTreeMap<String, usize> =
                             std::collections::BTreeMap::new();
                         for n in &nodes {
+                            if let Some(a) = &at {
+                                if !g.visible_at(&n.id, a)? {
+                                    continue;
+                                }
+                            }
                             *counts.entry(n.node_type.clone()).or_default() += 1;
                         }
                         for (t, c) in &counts {
@@ -955,7 +1074,15 @@ fn main() -> anyhow::Result<()> {
                         println!("\n(use --type <T> to list nodes, or `kb graph search <query>`)");
                     }
                     Some(t) => {
-                        let matched: Vec<_> = nodes.iter().filter(|n| n.node_type == t).collect();
+                        let mut matched = Vec::new();
+                        for n in nodes.iter().filter(|n| n.node_type == t) {
+                            if let Some(a) = &at {
+                                if !g.visible_at(&n.id, a)? {
+                                    continue;
+                                }
+                            }
+                            matched.push(n);
+                        }
                         for n in matched.iter().take(limit) {
                             println!("{}  [{}]  {}", n.id, n.node_type, n.label);
                         }
@@ -1004,6 +1131,8 @@ fn main() -> anyhow::Result<()> {
                 path,
                 depth,
                 types,
+                as_of,
+                now: _now,
             } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
@@ -1012,7 +1141,16 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     Some(types.as_slice())
                 };
+                let at = as_of
+                    .as_deref()
+                    .map(glossa::graph::temporal::normalize_point)
+                    .transpose()?;
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
+                    if let Some(a) = &at {
+                        if !g.visible_at(&id, a)? {
+                            continue;
+                        }
+                    }
                     // Section ids are opaque ordinals (`<path>#<n>`); print the node label
                     // (heading) alongside so the output stays human-readable.
                     match g.get_node(&id)? {
@@ -1024,13 +1162,60 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Node { node_id, path } => {
+            GraphAction::Node { node_id, path, as_of, now } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
+                let at = as_of
+                    .as_deref()
+                    .map(glossa::graph::temporal::normalize_point)
+                    .transpose()?;
+                if let Some(a) = &at {
+                    if !g.visible_at(&node_id, a)? {
+                        println!("node not found: {node_id}");
+                        return Ok(());
+                    }
+                }
                 match g.get_node(&node_id)? {
                     Some(n) => {
-                        let edges = g.outgoing(&node_id)?;
+                        let mut edges = g.outgoing(&node_id)?;
+                        if let Some(a) = &at {
+                            let mut kept = Vec::with_capacity(edges.len());
+                            for e in edges {
+                                if g.visible_at(&e.to, a)? {
+                                    kept.push(e);
+                                }
+                            }
+                            edges = kept;
+                        }
                         print!("{}", glossa::cli_fmt::render_node(&n, &edges));
+                        if let Some(v) = g.validity_for(&node_id)? {
+                            let from_disp = v.valid_from_raw.as_deref().unwrap_or("(open)");
+                            let to_disp = v.valid_to_raw.as_deref().unwrap_or("(open)");
+                            println!("  valid:  {from_disp} .. {to_disp}");
+                            // Reference instant: --as-of if given, else --now, else system time.
+                            let reference = match (&at, &now) {
+                                (Some(a), _) => a.clone(),
+                                (None, Some(nw)) => glossa::graph::temporal::normalize_point(nw)?,
+                                (None, None) => epoch_to_rfc3339((glossa::trace::now_ms() / 1000) as i64),
+                            };
+                            let superseded = g
+                                .incoming(&node_id)?
+                                .iter()
+                                .any(|e| e.edge_type == "SUPERSEDES");
+                            let status = glossa::graph::temporal::status(
+                                v.valid_from.as_deref(),
+                                v.valid_to.as_deref(),
+                                superseded,
+                                &reference,
+                            );
+                            let status_str = match status {
+                                glossa::graph::temporal::Status::Future => "future",
+                                glossa::graph::temporal::Status::Current => "current",
+                                glossa::graph::temporal::Status::Expired => "expired",
+                                glossa::graph::temporal::Status::Superseded => "superseded",
+                            };
+                            println!("  status: {status_str}");
+                        }
                     }
                     None => println!("node not found: {node_id}"),
                 }
@@ -1055,9 +1240,15 @@ fn main() -> anyhow::Result<()> {
                 path,
                 node_type,
                 format,
+                as_of,
+                now: _now,
             } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
+                let at = as_of
+                    .as_deref()
+                    .map(glossa::graph::temporal::normalize_point)
+                    .transpose()?;
                 match format.as_str() {
                     "text" => {
                         let mut nodes = g.all_nodes()?;
@@ -1066,6 +1257,11 @@ fn main() -> anyhow::Result<()> {
                             if node_type.as_deref().is_some_and(|t| t != n.node_type) {
                                 continue;
                             }
+                            if let Some(a) = &at {
+                                if !g.visible_at(&n.id, a)? {
+                                    continue;
+                                }
+                            }
                             let al = if n.aliases.is_empty() {
                                 String::new()
                             } else {
@@ -1073,25 +1269,48 @@ fn main() -> anyhow::Result<()> {
                             };
                             println!("[{}] {}  {}{}", n.node_type, n.id, n.label, al);
                             for e in g.outgoing(&n.id)? {
+                                if let Some(a) = &at {
+                                    if !g.visible_at(&e.to, a)? {
+                                        continue;
+                                    }
+                                }
                                 println!("    -{}-> {}", e.edge_type, e.to);
                             }
                         }
                     }
-                    "json" => {
-                        use glossa::graph::io::{collect, to_json};
-                        print!("{}", to_json(&collect(&g, node_type.as_deref())?)?);
-                    }
-                    "dot" => {
-                        use glossa::graph::io::{collect, to_dot};
-                        print!("{}", to_dot(&collect(&g, node_type.as_deref())?));
-                    }
-                    "graphml" => {
-                        use glossa::graph::io::{collect, to_graphml};
-                        print!("{}", to_graphml(&collect(&g, node_type.as_deref())?));
-                    }
-                    "html" => {
-                        use glossa::graph::io::{collect, to_html};
-                        print!("{}", to_html(&g, &collect(&g, node_type.as_deref())?));
+                    "json" | "dot" | "graphml" | "html" => {
+                        use glossa::graph::io::{collect, to_dot, to_graphml, to_html, to_json};
+                        let mut export = collect(&g, node_type.as_deref())?;
+                        if let Some(a) = &at {
+                            let mut visible_ids = std::collections::HashSet::new();
+                            for n in &export.nodes {
+                                if g.visible_at(&n.id, a)? {
+                                    visible_ids.insert(n.id.clone());
+                                }
+                            }
+                            export.nodes.retain(|n| visible_ids.contains(&n.id));
+                            let mut kept_edges = Vec::with_capacity(export.edges.len());
+                            for e in export.edges {
+                                // An endpoint outside the exported node set (e.g. a structural
+                                // node) is checked directly — absent-from-export doesn't mean
+                                // hidden-by-as-of.
+                                let from_ok = visible_ids.contains(&e.from)
+                                    || g.visible_at(&e.from, a)?;
+                                let to_ok =
+                                    visible_ids.contains(&e.to) || g.visible_at(&e.to, a)?;
+                                if from_ok && to_ok {
+                                    kept_edges.push(e);
+                                }
+                            }
+                            export.edges = kept_edges;
+                        }
+                        match format.as_str() {
+                            "json" => print!("{}", to_json(&export)?),
+                            "dot" => print!("{}", to_dot(&export)),
+                            "graphml" => print!("{}", to_graphml(&export)),
+                            "html" => print!("{}", to_html(&g, &export)),
+                            _ => unreachable!(),
+                        }
                     }
                     other => anyhow::bail!(
                         "unknown format {:?} — valid formats: text, json, dot, graphml, html",
