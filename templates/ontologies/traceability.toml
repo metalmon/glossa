@@ -31,3 +31,4 @@ spines = [
   { anchor = "Requirement", relations = ["SATISFIED_BY", "VERIFIED_BY"] },
 ]
 mentions = "MENTIONS"
+closure = [["SATISFIED_BY", "VERIFIED_BY", "VERIFIED_BY"]]

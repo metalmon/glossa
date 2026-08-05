@@ -76,7 +76,7 @@ relations.
 | `compliance` | Check a document against a body of normative requirements (the normative-control shape): requirement → constrained field, grounded in the text. |
 | `tender` | Bid / RFP / tender-response conformance: every requirement answered, every mandatory document attached, specs meet the stated minimums. |
 | `contract` | Extract obligations, deadlines and penalties from a contract and check it against a playbook of acceptable positions. |
-| `certification` | Declaration / certification of conformity: which technical regulations apply → which tests → which supporting documents. |
+| `certification` | Declaration / certification of conformity: which technical regulations apply → which tests, grounded in the source text. |
 | `qa-inspection` | Incoming/outgoing goods inspection: a lot or item against a spec or datasheet, certificate of conformance. |
 | `audit` | Controls audit: control → mitigated risk, grounded in the text. |
 | `reg-change` | Impact of a changed standard or law: which internal documents, products and processes are affected. |
