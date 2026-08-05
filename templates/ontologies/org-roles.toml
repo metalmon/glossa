@@ -12,11 +12,9 @@ requires_grounding = true
 [entities.Team]
 id_prefix = "tea"
 props = []
-requires_grounding = true
 [entities.Process]
 id_prefix = "pro"
 props = []
-requires_grounding = true
 
 [relations.REPORTS_TO]
 from = ["Role"]

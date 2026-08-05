@@ -14,12 +14,9 @@ requires_validity = true
 [entities.Standard]
 id_prefix = "std"
 props = []
-requires_grounding = true
-requires_validity = true
 [entities.Impacted]
 id_prefix = "imp"
 props = []
-requires_grounding = true
 
 [relations.SUPERSEDES]
 from = ["Standard", "Requirement"]

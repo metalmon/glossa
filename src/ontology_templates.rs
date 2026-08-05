@@ -325,16 +325,20 @@ mod tests {
         // concrete extracted nouns are grounded
         assert!(g("qa-inspection", "Parameter"));
         assert!(g("compliance", "Field"));
-        assert!(g("vendor", "Service"));
-        assert!(g("data-privacy", "Processor"));
+        assert!(g("vendor", "Contract"));
+        assert!(g("data-privacy", "DataAsset"));
         assert!(g("support", "Resolution"));
         // synthesized anchors + abstract carriers are NOT
         assert!(!g("support", "Symptom"));
         assert!(!g("support", "Task"));
         assert!(!g("compliance", "Literal"));
         assert!(!g("customer-journey", "PainPoint"));
-        // reg-change Standard gains validity
-        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Standard"));
+        // grounding consolidated to one node per preset: siblings are ungrounded
+        assert!(!g("vendor", "Service"));
+        assert!(!g("data-privacy", "Processor"));
+        // reg-change: the validity window lives on Requirement, not Standard
+        assert!(!Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Standard"));
+        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Requirement"));
     }
 
     #[test]
@@ -365,5 +369,20 @@ mod tests {
         // the grounded node is the right one
         assert!(Ontology::parse(raw("support").unwrap()).unwrap().requires_grounding("Resolution"));
         assert!(Ontology::parse(raw("audit").unwrap()).unwrap().requires_grounding("Control"));
+
+        // constraint/flat presets: grounding consolidated to exactly one node each
+        for p in ["qa-inspection","data-privacy","hr-compliance","access-governance",
+                  "vendor","product-catalog","competency","org-roles","okr",
+                  "project-schedule","timeline","reg-change"] {
+            assert_eq!(ground_count(p), 1, "{p}: exactly one requires_grounding");
+        }
+        // the grounded node is the right one (spot check)
+        assert!(Ontology::parse(raw("qa-inspection").unwrap()).unwrap().requires_grounding("Parameter"));
+        assert!(Ontology::parse(raw("data-privacy").unwrap()).unwrap().requires_grounding("DataAsset"));
+        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_grounding("Requirement"));
+        // data-privacy is not over-cut: ROPA reasoning nodes remain (ungrounded)
+        assert!(has_entity("data-privacy", "Purpose"));
+        assert!(has_entity("data-privacy", "LegalBasis"));
+        assert!(has_entity("data-privacy", "Processor"));
     }
 }

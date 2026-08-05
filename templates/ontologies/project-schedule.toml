@@ -8,7 +8,6 @@ aliases = ["plan", "gantt"]
 [entities.Milestone]
 id_prefix = "mst"
 props = []
-requires_grounding = true
 [entities.Task]
 id_prefix = "tsk"
 props = []

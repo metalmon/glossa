@@ -8,11 +8,9 @@ aliases = ["sod", "iam-gov"]
 [entities.Role]
 id_prefix = "rol"
 props = []
-requires_grounding = true
 [entities.Permission]
 id_prefix = "prm"
 props = []
-requires_grounding = true
 [entities.Grant]
 id_prefix = "grn"
 props = []

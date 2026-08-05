@@ -8,11 +8,9 @@ aliases = ["tprm", "supply-chain", "procurement"]
 [entities.Vendor]
 id_prefix = "ven"
 props = []
-requires_grounding = true
 [entities.Service]
 id_prefix = "svc"
 props = []
-requires_grounding = true
 [entities.Contract]
 id_prefix = "ctr"
 props = []
@@ -20,7 +18,6 @@ requires_grounding = true
 [entities.Sla]
 id_prefix = "sla"
 props = []
-requires_grounding = true
 
 [relations.PROVIDES]
 from = ["Vendor"]

@@ -12,11 +12,9 @@ requires_grounding = true
 [entities.Feature]
 id_prefix = "ftr"
 props = []
-requires_grounding = true
 [entities.Plan]
 id_prefix = "pln"
 props = []
-requires_grounding = true
 
 [relations.HAS_FEATURE]
 from = ["Product"]

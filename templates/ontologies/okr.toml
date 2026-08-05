@@ -12,11 +12,9 @@ requires_grounding = true
 [entities.KeyResult]
 id_prefix = "kr"
 props = []
-requires_grounding = true
 [entities.Initiative]
 id_prefix = "ini"
 props = []
-requires_grounding = true
 
 [relations.MEASURED_BY]
 from = ["Objective"]

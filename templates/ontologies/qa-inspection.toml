@@ -8,7 +8,6 @@ aliases = ["incoming", "iqc"]
 [entities.Lot]
 id_prefix = "lot"
 props = []
-requires_grounding = true
 [entities.Parameter]
 id_prefix = "prm"
 props = []
