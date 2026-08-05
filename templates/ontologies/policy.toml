@@ -1,0 +1,39 @@
+[meta]
+domain = "policy"
+description = "Policy / handbook management: policy -> rule -> exception, and rule applicability scope."
+family = "governance"
+tier = 1
+aliases = ["handbook", "regulation"]
+
+[entities.Policy]
+id_prefix = "pol"
+props = []
+[entities.Rule]
+id_prefix = "rul"
+props = []
+requires_grounding = true
+[entities.Exception]
+id_prefix = "exc"
+props = []
+[entities.Scope]
+id_prefix = "scp"
+props = []
+
+[relations.DEFINES]
+from = ["Policy"]
+to = ["Rule"]
+[relations.HAS_EXCEPTION]
+from = ["Rule"]
+to = ["Exception"]
+[relations.APPLIES_TO]
+from = ["Rule"]
+to = ["Scope"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Policy", relations = ["DEFINES"] },
+]
+mentions = "MENTIONS"

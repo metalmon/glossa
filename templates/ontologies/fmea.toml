@@ -1,0 +1,39 @@
+[meta]
+domain = "fmea"
+description = "Failure mode and effects analysis: failure mode -> effect / cause -> control."
+family = "risk"
+tier = 1
+aliases = ["reliability", "safety"]
+
+[entities.FailureMode]
+id_prefix = "fm"
+props = []
+[entities.Effect]
+id_prefix = "eff"
+props = []
+[entities.Cause]
+id_prefix = "cau"
+props = []
+[entities.Control]
+id_prefix = "ctl"
+props = []
+requires_grounding = true
+
+[relations.HAS_EFFECT]
+from = ["FailureMode"]
+to = ["Effect"]
+[relations.CAUSED_BY]
+from = ["FailureMode"]
+to = ["Cause"]
+[relations.CONTROLLED_BY]
+from = ["FailureMode", "Cause"]
+to = ["Control"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "FailureMode", relations = ["CAUSED_BY", "CONTROLLED_BY"] },
+]
+mentions = "MENTIONS"

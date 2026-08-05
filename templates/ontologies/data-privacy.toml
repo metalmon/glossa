@@ -1,0 +1,50 @@
+[meta]
+domain = "data-privacy"
+description = "Records of processing (ROPA): data -> legal basis -> retention -> processor."
+family = "compliance"
+tier = 1
+aliases = ["ropa", "gdpr", "pii"]
+
+[entities.DataAsset]   # a category of personal data being processed
+id_prefix = "dat"
+props = []
+requires_grounding = true
+[entities.Purpose]     # why the data is processed
+id_prefix = "pur"
+props = []
+[entities.LegalBasis]  # the lawful basis for processing
+id_prefix = "lgb"
+props = []
+[entities.Processor]   # who processes the data
+id_prefix = "prc"
+props = []
+[entities.Literal]
+id_prefix = "lit"
+props = []
+
+[relations.PROCESSED_FOR]
+from = ["DataAsset"]
+to = ["Purpose"]
+[relations.HAS_LEGAL_BASIS]
+from = ["DataAsset"]
+to = ["LegalBasis"]
+[relations.PROCESSED_BY]
+from = ["DataAsset"]
+to = ["Processor"]
+[relations.CONSTRAINED_BY]
+from = ["DataAsset"]
+to = ["Range", "Required"]
+[relations.HAS_MAX]
+from = ["Range"]
+to = ["Literal"]
+
+[validation]
+strict = true
+
+[constraint_types.Range]
+params = ["min", "max"]
+[constraint_types.Required]
+params = []
+
+[reasoning]
+mentions = "MENTIONS"

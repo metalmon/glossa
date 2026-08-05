@@ -1,0 +1,48 @@
+[meta]
+domain = "support"
+description = "Troubleshooting plus documentation search: symptom -> cause -> resolution."
+family = "causal"
+tier = 2
+aliases = ["troubleshooting", "helpdesk"]
+
+[entities.Symptom]    # an observed problem / question class (keep BROAD)
+id_prefix = "sym"
+props = []
+[entities.Cause]      # a root cause
+id_prefix = "cau"
+props = []
+[entities.Resolution] # an action / fix / answer-pattern
+id_prefix = "res"
+props = []
+requires_grounding = true
+[entities.Task]       # a how-to intent
+id_prefix = "tsk"
+props = []
+[entities.Component]  # a generic subject the symptom occurs in
+props = []
+[entities.Parameter]  # a configurable setting a resolution sets
+props = []
+
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[relations.RESOLVED_BY]
+from = ["Symptom", "Cause", "Task"]
+to = ["Resolution"]
+[relations.SETS]
+from = ["Resolution"]
+to = ["Parameter"]
+[relations.OCCURS_IN]
+from = ["Symptom"]
+to = ["Component"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] },
+  { anchor = "Task",    relations = ["RESOLVED_BY"] },
+]
+closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
+mentions = "MENTIONS"

@@ -1,0 +1,34 @@
+[meta]
+domain = "project-schedule"
+description = "Project schedule: milestone -> task, with task dependencies and blockers."
+family = "project"
+tier = 2
+aliases = ["plan", "gantt"]
+
+[entities.Milestone]
+id_prefix = "mst"
+props = []
+[entities.Task]
+id_prefix = "tsk"
+props = []
+requires_grounding = true
+
+[relations.HAS_TASK]
+from = ["Milestone"]
+to = ["Task"]
+[relations.DEPENDS_ON]
+from = ["Task"]
+to = ["Task"]
+[relations.BLOCKS]
+from = ["Task"]
+to = ["Task"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Milestone", relations = ["HAS_TASK"] },
+]
+closure = [["DEPENDS_ON", "DEPENDS_ON", "DEPENDS_ON"]]
+mentions = "MENTIONS"

@@ -1,0 +1,34 @@
+[meta]
+domain = "reg-change"
+description = "Regulatory change watch: standard supersession chains and their downstream impact."
+family = "compliance"
+tier = 1
+aliases = ["regwatch"]
+
+[entities.Requirement]
+id_prefix = "req"
+props = []
+requires_grounding = true
+[entities.Standard]
+id_prefix = "std"
+props = []
+[entities.Impacted]
+id_prefix = "imp"
+props = []
+
+[relations.SUPERSEDES]
+from = ["Standard"]
+to = ["Standard"]
+[relations.DEFINED_IN]
+from = ["Requirement"]
+to = ["Standard"]
+[relations.AFFECTS]
+from = ["Requirement"]
+to = ["Impacted"]
+
+[validation]
+strict = true
+
+[reasoning]
+closure = [["SUPERSEDES", "SUPERSEDES", "SUPERSEDES"]]
+mentions = "MENTIONS"

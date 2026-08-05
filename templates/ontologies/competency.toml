@@ -1,0 +1,34 @@
+[meta]
+domain = "competency"
+description = "Competency / skills management: role -> required skill, person -> held skill, skill prerequisites."
+family = "hr"
+tier = 2
+aliases = ["skills", "l&d"]
+
+[entities.Role]
+id_prefix = "rol"
+props = []
+[entities.Skill]
+id_prefix = "skl"
+props = []
+requires_grounding = true
+[entities.Person]
+id_prefix = "per"
+props = []
+
+[relations.REQUIRES_SKILL]
+from = ["Role"]
+to = ["Skill"]
+[relations.HAS_SKILL]
+from = ["Person"]
+to = ["Skill"]
+[relations.PREREQUISITE_OF]
+from = ["Skill"]
+to = ["Skill"]
+
+[validation]
+strict = true
+
+[reasoning]
+closure = [["PREREQUISITE_OF", "PREREQUISITE_OF", "PREREQUISITE_OF"]]
+mentions = "MENTIONS"

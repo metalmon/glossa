@@ -1,0 +1,40 @@
+[meta]
+domain = "access-governance"
+description = "Access governance / segregation of duties: role grants, assignments, and conflicting permission combos."
+family = "compliance"
+tier = 1
+aliases = ["sod", "iam-gov"]
+
+[entities.Role]
+id_prefix = "rol"
+props = []
+requires_grounding = true
+[entities.Permission]
+id_prefix = "prm"
+props = []
+[entities.Grant]
+id_prefix = "grn"
+props = []
+requires_grounding = true
+
+[relations.GRANTS]
+from = ["Role"]
+to = ["Permission"]
+[relations.ASSIGNED]
+from = ["Grant"]
+to = ["Role"]
+[relations.CONFLICTS_WITH]
+from = ["Permission"]
+to = ["Permission"]
+[relations.CONSTRAINED_BY]
+from = ["Permission"]
+to = ["Forbidden"]
+
+[validation]
+strict = true
+
+[constraint_types.Forbidden]
+params = []
+
+[reasoning]
+mentions = "MENTIONS"

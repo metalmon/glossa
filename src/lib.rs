@@ -8,6 +8,7 @@ pub mod index;
 pub mod json_util;
 pub mod mcp;
 pub mod model;
+pub mod ontology_templates;
 pub mod query;
 pub mod read;
 pub mod root;

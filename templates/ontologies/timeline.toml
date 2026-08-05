@@ -1,0 +1,28 @@
+[meta]
+domain = "timeline"
+description = "Event timeline / chronology: temporal ordering and causal links between events."
+family = "temporal"
+tier = 2
+aliases = ["chronology", "history"]
+
+[entities.Event]
+id_prefix = "evt"
+props = []
+requires_grounding = true
+
+[relations.BEFORE]
+from = ["Event"]
+to = ["Event"]
+[relations.AFTER]
+from = ["Event"]
+to = ["Event"]
+[relations.CAUSED]
+from = ["Event"]
+to = ["Event"]
+
+[validation]
+strict = true
+
+[reasoning]
+closure = [["BEFORE", "BEFORE", "BEFORE"]]
+mentions = "MENTIONS"

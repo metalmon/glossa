@@ -1,0 +1,39 @@
+[meta]
+domain = "certification"
+description = "Product conformity assessment: product -> technical regulation -> test -> evidence."
+family = "compliance"
+tier = 1
+aliases = ["conformity"]
+
+[entities.Product]
+id_prefix = "prd"
+props = []
+[entities.TechReg]
+id_prefix = "trg"
+props = []
+[entities.Test]
+id_prefix = "tst"
+props = []
+[entities.Evidence]
+id_prefix = "evd"
+props = []
+requires_grounding = true
+
+[relations.SUBJECT_TO]
+from = ["Product"]
+to = ["TechReg"]
+[relations.REQUIRES_TEST]
+from = ["TechReg"]
+to = ["Test"]
+[relations.EVIDENCED_BY]
+from = ["Test"]
+to = ["Evidence"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "TechReg", relations = ["REQUIRES_TEST", "EVIDENCED_BY"] },
+]
+mentions = "MENTIONS"

@@ -14,13 +14,22 @@ Structural nodes bypass ontology validation. Reasoning nodes and edges are valid
 
 ## Ontology file
 
-Deploy a domain overlay at:
+The overlay lives at:
 
 ```
 <corpus-root>/.glossa/ontology.toml
 ```
 
-Reference implementations:
+The quickest way to get one is a **preset** baked into the binary — pick it at
+first index and glossa writes the file for you:
+
+```bash
+kb index ./my-corpus --ontology compliance   # see: kb ontology list
+```
+
+See [Ontology presets](ontology-presets.md) for the catalog and the
+`kb ontology list/show/init/suggest` commands. To hand-write one instead, start
+from a reference implementation:
 - Technical-support knowledge base: [`eval/ontology-support.toml`](../eval/ontology-support.toml).
 - Constraint/CSP validation (regulatory and standards documents): [`eval/ontology-constraint.toml`](../eval/ontology-constraint.toml).
 
@@ -74,6 +83,14 @@ Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolu
 ## Operator workflow
 
 ### 1. Deploy ontology
+
+Pick a [preset](ontology-presets.md) — it writes the overlay and indexes:
+
+```bash
+kb index ./my-corpus --ontology support   # kb ontology list for the catalog
+```
+
+Or hand-deploy a reference overlay:
 
 ```bash
 mkdir -p ./my-corpus/.glossa

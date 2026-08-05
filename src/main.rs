@@ -85,6 +85,9 @@ enum Cmd {
         force: bool,
         #[arg(long)]
         file: Option<String>,
+        /// Materialize a baked ontology preset before indexing (see `kb ontology list`).
+        #[arg(long)]
+        ontology: Option<String>,
     },
     /// Delete notebook notes whose owner document no longer exists in the corpus.
     #[cfg(feature = "notebook")]
@@ -98,6 +101,11 @@ enum Cmd {
     Graph {
         #[command(subcommand)]
         action: GraphAction,
+    },
+    /// Browse and apply baked ontology presets.
+    Ontology {
+        #[command(subcommand)]
+        action: OntologyAction,
     },
     /// Exact/regex (ripgrep-style) search over the extracted text.
     Grep {
@@ -327,6 +335,32 @@ enum GraphAction {
         /// Directory with `*.csp` (default: the document's notes mirror under `.glossa/notes/`).
         #[arg(long)]
         tables_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OntologyAction {
+    /// List the preset catalog (grouped by tier, then family).
+    List {
+        #[arg(long)]
+        family: Option<String>,
+        #[arg(long)]
+        tier: Option<u8>,
+    },
+    /// Print a preset's TOML (accepts a name or alias).
+    Show { name: String },
+    /// Materialize a preset to <path>/.glossa/ontology.toml (no indexing).
+    Init {
+        path: Option<PathBuf>,
+        #[arg(short = 't', long = "template")]
+        template: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Rank presets against a free-text description of your documents.
+    Suggest {
+        #[arg(trailing_var_arg = true, required = true)]
+        text: Vec<String>,
     },
 }
 
@@ -662,7 +696,12 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Index { path, force, file } => {
+        Cmd::Index {
+            path,
+            force,
+            file,
+            ontology,
+        } => {
             let root = glossa::root::resolve_root(path);
             let started = std::time::Instant::now();
             if let Some(rel) = file {
@@ -678,6 +717,20 @@ fn main() -> anyhow::Result<()> {
                     glossa::cli_fmt::format_elapsed(started.elapsed())
                 );
                 return Ok(());
+            }
+            if let Some(name) = ontology {
+                match glossa::ontology_templates::write_template(&root, &name, false)? {
+                    glossa::ontology_templates::Written::Created => {
+                        println!("ontology: wrote '{name}' preset to .glossa/ontology.toml");
+                    }
+                    glossa::ontology_templates::Written::Kept => {
+                        eprintln!(
+                            "ontology.toml already exists; keeping it, ignoring --ontology {name} \
+                             (use `kb ontology init --force` to replace)"
+                        );
+                    }
+                    glossa::ontology_templates::Written::Overwritten => unreachable!("force=false"),
+                }
             }
             let stats = glossa::index::store::index_dir(&root, force)?;
             println!(
@@ -1100,5 +1153,57 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Cmd::Ontology { action } => {
+            use glossa::ontology_templates as ot;
+            match action {
+                OntologyAction::List { family, tier } => {
+                    let mut cat = ot::catalog();
+                    cat.sort_by(|a, b| a.tier.cmp(&b.tier)
+                        .then(a.family.cmp(&b.family))
+                        .then(a.name.cmp(&b.name)));
+                    for t in cat {
+                        if let Some(f) = &family {
+                            if t.family.as_deref() != Some(f.as_str()) { continue; }
+                        }
+                        if let Some(n) = tier {
+                            if t.tier != n { continue; }
+                        }
+                        let desc = t.description.as_deref().unwrap_or("");
+                        let fam = t.family.as_deref().unwrap_or("-");
+                        println!("[tier {}] {:<18} {:<12} {}", t.tier, t.name, fam, desc);
+                    }
+                    Ok(())
+                }
+                OntologyAction::Show { name } => {
+                    let canon = ot::resolve(&name).ok_or_else(|| {
+                        anyhow::anyhow!("unknown preset '{name}' — did you mean: {}? (kb ontology list)",
+                            ot::nearest(&name, 3).join(", "))
+                    })?;
+                    print!("{}", ot::raw(&canon).unwrap());
+                    Ok(())
+                }
+                OntologyAction::Init { path, template, force } => {
+                    let root = glossa::root::resolve_root(path);
+                    match ot::write_template(&root, &template, force)? {
+                        ot::Written::Created => println!("wrote '{template}' to .glossa/ontology.toml"),
+                        ot::Written::Overwritten => println!("overwrote .glossa/ontology.toml with '{template}'"),
+                        ot::Written::Kept => anyhow::bail!(
+                            ".glossa/ontology.toml already exists — pass --force to replace it"),
+                    }
+                    Ok(())
+                }
+                OntologyAction::Suggest { text } => {
+                    let q = text.join(" ");
+                    let hits = ot::suggest(&q, 5);
+                    if hits.is_empty() {
+                        println!("no preset matched — try `kb ontology list`");
+                    }
+                    for (name, score) in hits {
+                        println!("{name}\t(score {score})");
+                    }
+                    Ok(())
+                }
+            }
+        }
     }
 }

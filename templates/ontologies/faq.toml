@@ -1,0 +1,30 @@
+[meta]
+domain = "faq"
+description = "Frequently asked questions: question -> answer, related questions, superseded answers."
+family = "knowledge"
+tier = 2
+aliases = ["knowledge-base"]
+
+[entities.Question]
+id_prefix = "qst"
+props = []
+[entities.Answer]
+id_prefix = "ans"
+props = []
+requires_grounding = true
+
+[relations.ANSWERED_BY]
+from = ["Question"]
+to = ["Answer"]
+[relations.RELATED_TO]
+from = ["Question"]
+to = ["Question"]
+[relations.SUPERSEDES]
+from = ["Answer"]
+to = ["Answer"]
+
+[validation]
+strict = true
+
+[reasoning]
+mentions = "MENTIONS"

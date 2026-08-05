@@ -1,0 +1,41 @@
+[meta]
+domain = "qa-inspection"
+description = "Incoming quality control: lot -> measured parameter -> constraint (range/enum)."
+family = "compliance"
+tier = 1
+aliases = ["incoming", "iqc"]
+
+[entities.Lot]
+id_prefix = "lot"
+props = []
+[entities.Parameter]
+id_prefix = "prm"
+props = []
+requires_grounding = true
+[entities.Literal]
+id_prefix = "lit"
+props = []
+
+[relations.MEASURES]
+from = ["Lot"]
+to = ["Parameter"]
+[relations.CONSTRAINED_BY]
+from = ["Parameter"]
+to = ["Range", "Enum"]
+[relations.HAS_MIN]
+from = ["Range"]
+to = ["Literal"]
+[relations.HAS_MAX]
+from = ["Range"]
+to = ["Literal"]
+
+[validation]
+strict = true
+
+[constraint_types.Range]
+params = ["min", "max"]
+[constraint_types.Enum]
+params = ["values"]
+
+[reasoning]
+mentions = "MENTIONS"

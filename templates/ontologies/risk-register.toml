@@ -1,0 +1,41 @@
+[meta]
+domain = "risk-register"
+description = "Enterprise risk register: risk -> root cause -> mitigating control, with an accountable owner."
+family = "risk"
+tier = 1
+aliases = ["erm"]
+
+[entities.Risk]
+id_prefix = "rsk"
+props = []
+requires_grounding = true
+[entities.Cause]
+id_prefix = "cau"
+props = []
+[entities.Control]
+id_prefix = "ctl"
+props = []
+requires_grounding = true
+[entities.Owner]
+id_prefix = "own"
+props = []
+
+[relations.CAUSED_BY]
+from = ["Risk"]
+to = ["Cause"]
+[relations.MITIGATED_BY]
+from = ["Risk", "Cause"]
+to = ["Control"]
+[relations.OWNED_BY]
+from = ["Risk"]
+to = ["Owner"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Risk", relations = ["CAUSED_BY", "MITIGATED_BY"] },
+]
+closure = [["CAUSED_BY", "MITIGATED_BY", "MITIGATED_BY"]]
+mentions = "MENTIONS"
