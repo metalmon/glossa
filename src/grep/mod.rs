@@ -983,6 +983,26 @@ mod tests {
     }
 
     #[test]
+    fn grep_path_scope_idempotent_to_slash() {
+        // Reproduces the real bug: a `path=` copied from a tool's DISPLAYED (backslash)
+        // path silently matched nothing because the glob compiler ate `\` as an escape.
+        // Both slash directions must now scope to the same single document.
+        let (_d, idx) = idx_with(&[
+            ("dir\\a.pdf", "p.1", "pdf", "parameter Speed V10"),
+            ("dir\\b.pdf", "p.1", "pdf", "parameter Speed V20"),
+        ]);
+        for p in ["dir\\a.pdf", "dir/a.pdf"] {
+            let opts = GrepOpts {
+                glob: Some(path_to_glob(p)),
+                ..Default::default()
+            };
+            let h = grep(&idx, "Speed", &opts).unwrap();
+            assert_eq!(h.len(), 1, "path={p:?} must scope to exactly one document");
+            assert_eq!(h[0].path, "dir\\a.pdf", "path={p:?} scoped to the wrong doc");
+        }
+    }
+
+    #[test]
     fn grep_single_spaces_match_irregular_whitespace() {
         // Extracted PDF text often carries double spaces; a single-spaced query must match.
         let (_d, idx) = idx_with(&[(

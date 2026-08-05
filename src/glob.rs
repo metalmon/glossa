@@ -17,10 +17,19 @@ pub fn normalize_pattern(pattern: &str) -> &str {
 }
 
 /// Compile a ripgrep `-g` glob (not `--iglob`: case-sensitive).
+///
+/// The pattern's path separators are normalized to `/` — symmetric with
+/// [`normalize_path_for_glob`] on the haystack — so a Windows-style `\` path
+/// (the exact form the `read`/`glob`/`search` tools DISPLAY) scopes correctly
+/// regardless of slash direction. Consequence: `\` is always a path separator
+/// here, never a metacharacter-escape; this corpus's paths never need escaping,
+/// and slash-direction idempotence matters more. `backslash_escape` is therefore
+/// off (no `\` survives normalization anyway).
 pub fn compile_glob(pattern: &str) -> anyhow::Result<GlobMatcher> {
-    GlobBuilder::new(normalize_pattern(pattern))
+    let pattern = normalize_pattern(pattern).replace('\\', "/");
+    GlobBuilder::new(&pattern)
         .literal_separator(false)
-        .backslash_escape(true)
+        .backslash_escape(false)
         .build()
         .map(|g| g.compile_matcher())
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -176,5 +185,24 @@ mod tests {
     fn normalize_pattern_aliases() {
         assert_eq!(normalize_pattern(""), "**");
         assert_eq!(normalize_pattern("  **/*  "), "**");
+    }
+
+    #[test]
+    fn glob_is_idempotent_to_slash_direction() {
+        // Stored paths carry Windows `\`; the tools DISPLAY them that way, so a model copies
+        // a `\`-path straight into a glob/scope. Both slash directions must scope identically.
+        // (`\R` in the subdir separator is exactly what the old backslash-escape ate.)
+        let (_d, idx) = idx_with(&[
+            ("Ref Data\\Report Generator.pdf", "p.1", "a"),
+            ("Ref Data\\Other.pdf", "p.1", "b"),
+        ]);
+        let backslash = glob_docs(&idx, "**/Ref Data\\Report Generator.pdf").unwrap();
+        let forward = glob_docs(&idx, "**/Ref Data/Report Generator.pdf").unwrap();
+        assert_eq!(backslash.len(), 1, "backslash glob must match one doc");
+        assert_eq!(
+            backslash, forward,
+            "both slash directions must yield identical results"
+        );
+        assert_eq!(backslash[0].0, "Ref Data\\Report Generator.pdf");
     }
 }
