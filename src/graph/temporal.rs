@@ -30,7 +30,15 @@ fn days_in_month(y: i64, m: u32) -> u32 {
 /// for a full datetime (handled separately).
 fn parse_date(s: &str) -> Option<(i64, u32, Option<u32>)> {
     let parts: Vec<&str> = s.split('-').collect();
+    // Reject any input that doesn't have exactly 1, 2, or 3 dash-separated segments
+    if !(1..=3).contains(&parts.len()) {
+        return None;
+    }
     let y: i64 = parts.first()?.parse().ok()?;
+    // Clamp year to 4 digits (0..=9999) for fixed-width lexicographic ordering
+    if !(0..=9999).contains(&y) {
+        return None;
+    }
     if parts.len() == 1 {
         return Some((y, 0, None));
     }
@@ -54,6 +62,10 @@ fn edtf_marker(s: &str) -> bool {
 
 /// A strict `YYYY-MM-DDThh:mm:ssZ` datetime passes through unchanged if valid.
 fn passthrough_datetime(s: &str) -> Option<String> {
+    // Valid RFC3339 is ASCII-only; reject multi-byte chars to avoid split_at panic
+    if !s.is_ascii() {
+        return None;
+    }
     // exactly 20 chars: 2024-03-01T09:30:00Z
     if s.len() != 20 || !s.ends_with('Z') || s.as_bytes().get(10) != Some(&b'T') {
         return None;
@@ -138,11 +150,48 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_month_boundaries() {
+        // 30-day months
+        assert_eq!(normalize_to("2024-04").unwrap(), "2024-04-30T23:59:59Z");
+        assert_eq!(normalize_to("2024-06").unwrap(), "2024-06-30T23:59:59Z");
+        assert_eq!(normalize_to("2024-09").unwrap(), "2024-09-30T23:59:59Z");
+        assert_eq!(normalize_to("2024-11").unwrap(), "2024-11-30T23:59:59Z");
+        // 31-day months
+        assert_eq!(normalize_to("2024-01").unwrap(), "2024-01-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-03").unwrap(), "2024-03-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-05").unwrap(), "2024-05-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-07").unwrap(), "2024-07-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-08").unwrap(), "2024-08-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-10").unwrap(), "2024-10-31T23:59:59Z");
+        assert_eq!(normalize_to("2024-12").unwrap(), "2024-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn normalizes_leap_years_century_rule() {
+        // Century divisible by 400 = leap
+        assert_eq!(normalize_to("2000-02").unwrap(), "2000-02-29T23:59:59Z");
+        // Century not divisible by 400 = not leap
+        assert_eq!(normalize_to("1900-02").unwrap(), "1900-02-28T23:59:59Z");
+        assert_eq!(normalize_to("1800-02").unwrap(), "1800-02-28T23:59:59Z");
+    }
+
+    #[test]
     fn rejects_edtf_and_garbage() {
+        // EDTF uncertainty markers
         assert!(normalize_from("~2019").is_err());
         assert!(normalize_from("2019?").is_err());
+        assert!(normalize_from("2024-01-01?").is_err());
+        assert!(normalize_from("202X-01-01").is_err());
+        assert!(normalize_from("202x-01-01").is_err());
+        assert!(normalize_from("2024-01-01..2024-01-02").is_err());
+        // Malformed dates
         assert!(normalize_from("not-a-date").is_err());
         assert!(normalize_from("2024-13").is_err()); // bad month
+        // Trailing garbage (more than 3 dash-separated segments)
+        assert!(normalize_from("2024-01-01-99").is_err());
+        // 5-digit year (breaks fixed-width lexicographic ordering)
+        assert!(normalize_from("12024").is_err());
+        assert!(normalize_from("12024-01-01").is_err());
     }
 
     #[test]
