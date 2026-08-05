@@ -1,6 +1,7 @@
 [meta]
 domain = "reg-change"
 description = "Regulatory change watch: standard supersession chains and their downstream impact."
+note = "Requirement.valid_from/valid_to state when the requirement actually applies in the world (e.g. the effective period of a given revision); this is distinct from provenance (when the standard text was published or the requirement was recorded). Never conflate the two."
 family = "compliance"
 tier = 1
 aliases = ["regwatch"]
@@ -9,6 +10,7 @@ aliases = ["regwatch"]
 id_prefix = "req"
 props = []
 requires_grounding = true
+requires_validity = true
 [entities.Standard]
 id_prefix = "std"
 props = []
@@ -17,8 +19,8 @@ id_prefix = "imp"
 props = []
 
 [relations.SUPERSEDES]
-from = ["Standard"]
-to = ["Standard"]
+from = ["Standard", "Requirement"]
+to = ["Standard", "Requirement"]
 [relations.DEFINED_IN]
 from = ["Requirement"]
 to = ["Standard"]

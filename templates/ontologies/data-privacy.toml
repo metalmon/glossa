@@ -1,6 +1,7 @@
 [meta]
 domain = "data-privacy"
 description = "Records of processing (ROPA): data -> legal basis -> retention -> processor."
+note = "DataAsset.valid_from/valid_to state when the processing activity actually holds in the world (e.g. the period a data category is collected under a given basis); this is distinct from provenance (when the ROPA entry was recorded or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
 aliases = ["ropa", "gdpr", "pii"]
@@ -9,6 +10,7 @@ aliases = ["ropa", "gdpr", "pii"]
 id_prefix = "dat"
 props = []
 requires_grounding = true
+requires_validity = true
 [entities.Purpose]     # why the data is processed
 id_prefix = "pur"
 props = []

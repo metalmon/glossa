@@ -1,6 +1,7 @@
 [meta]
 domain = "certification"
 description = "Product conformity assessment: product -> technical regulation -> test -> evidence."
+note = "Evidence.valid_from/valid_to state when the evidence (e.g. a test result or certificate) actually holds in the world, i.e. its validity/expiry period; this is distinct from provenance (when the evidence was recorded or filed). Never conflate the two."
 family = "compliance"
 tier = 1
 aliases = ["conformity"]
@@ -18,6 +19,7 @@ props = []
 id_prefix = "evd"
 props = []
 requires_grounding = true
+requires_validity = true
 
 [relations.SUBJECT_TO]
 from = ["Product"]

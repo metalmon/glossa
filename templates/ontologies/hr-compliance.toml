@@ -1,6 +1,7 @@
 [meta]
 domain = "hr-compliance"
 description = "HR / EHS / labor compliance: role -> required record -> value constraints."
+note = "Record.valid_from/valid_to state when the record holds true in the world (e.g. a certification's effective period); this is distinct from provenance (when the record was filed or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
 aliases = ["ehs", "labor"]
@@ -12,6 +13,7 @@ props = []
 id_prefix = "rec"
 props = []
 requires_grounding = true
+requires_validity = true
 [entities.Literal]
 id_prefix = "lit"
 props = []
@@ -25,6 +27,9 @@ to = ["Required", "Range"]
 [relations.HAS_MAX]
 from = ["Range"]
 to = ["Literal"]
+[relations.SUPERSEDES]
+from = ["Record"]
+to = ["Record"]
 
 [validation]
 strict = true
