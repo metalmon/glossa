@@ -80,6 +80,8 @@ Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolu
 - **Write time** — `graph_upsert` rejects the whole call if a `requires_grounding` node has no `MENTIONS` (in the batch or already in the graph), naming the node and the edge to add. Document-agnostic: the `MENTIONS` may cite any indexed document, not only the node's `source_path`.
 - **Standing** — `graph generalize` reports required nodes that lost a *live* `MENTIONS` (none, or one whose target section was removed) as `ungrounded=<n>` plus a re-ground list. This is a **separate bucket** from off-spine `prune_candidates`: re-ground them, or delete with `--prune-ungrounded` (destructive, CLI only).
 
+**Grounding convention.** Document-extracted concrete nouns — a `Product` or `Parameter` named in source text — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`. The `get_ontology` MCP tool advertises these requirements per entity so an enricher can prepare `MENTIONS` edges upfront, rather than waiting for a `graph_upsert` rejection.
+
 ### Valid-time
 
 A reasoning node can carry a **validity interval** — the span of time the fact
@@ -169,12 +171,6 @@ kb graph generalize ./my-corpus --prune-ungrounded   # remove required nodes tha
 ```
 
 The non-destructive run still **reports** `ungrounded=<n>` and lists those nodes (see [Grounding](#grounding)) so an agent can re-ground them.
-
-### Discovering grounding and validity requirements upfront
-
-The `get_ontology` MCP tool returns per-entity `requires_grounding` and `requires_validity` boolean flags. This lets an enricher agent know the constraints before calling `graph_upsert` — it can prepare `MENTIONS` edges or `valid_from` fields rather than waiting for a rejection.
-
-**Grounding convention.** Document-extracted concrete nouns — a `Product` or `Parameter` named in source text — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`.
 
 ### 4. Inspect
 
