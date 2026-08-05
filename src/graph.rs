@@ -18,4 +18,5 @@ pub mod build;
 pub mod generalize;
 pub mod io;
 pub mod ops;
+pub mod temporal;
 pub mod traverse;
