@@ -1023,8 +1023,17 @@ impl GlossaServer {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
+        let stale = crate::tools::StaleChecker::new(self.root.clone());
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace, a.as_of.as_deref()),
+            crate::tools::glossary(
+                &idx,
+                &g,
+                &a.name,
+                &spec,
+                &self.trace,
+                a.as_of.as_deref(),
+                Some(&stale),
+            ),
         )]))
     }
 
@@ -1038,6 +1047,7 @@ impl GlossaServer {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
+        let stale = crate::tools::StaleChecker::new(self.root.clone());
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::related(
                 &idx,
@@ -1047,6 +1057,7 @@ impl GlossaServer {
                 a.n,
                 &self.trace,
                 a.as_of.as_deref(),
+                Some(&stale),
             ),
         )]))
     }
@@ -1062,6 +1073,7 @@ impl GlossaServer {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let direction = a.direction.as_deref().unwrap_or("both");
+        let stale = crate::tools::StaleChecker::new(self.root.clone());
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::neighbors(
                 &idx,
@@ -1073,6 +1085,7 @@ impl GlossaServer {
                 direction,
                 &self.trace,
                 a.as_of.as_deref(),
+                Some(&stale),
             ),
         )]))
     }

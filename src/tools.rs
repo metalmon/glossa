@@ -500,23 +500,69 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
     }
 }
 
-/// Compact community/centrality annotation drawn from `node_meta` (populated by
-/// `kb graph generalize` / auto-run at the end of `reindex`). Returns "" when no meta exists yet,
-/// so output is byte-identical on graphs that haven't been generalized. Format:
-/// `"  · comm 3 · pr 0.142 · deg 5"` — only the parts that are present.
-fn meta_suffix(g: &crate::graph::store::GraphStore, id: &str) -> String {
-    let Ok(Some(m)) = g.node_meta(id) else {
-        return String::new();
-    };
+/// Advisory check for a grounded node's source having drifted since grounding: compares the
+/// stored `Provenance.file_sig` against a fresh `crate::index::store::file_sig` re-stat of the
+/// source file under `root`, re-stat results cached per `source_path` for the life of the
+/// checker (one per tool call — many nodes typically share a doc). Same comparison as
+/// `graph::generalize::hygiene::stale_nodes`, single-node form: a `None` stored sig, or a
+/// missing/unreadable source, is never stale.
+pub struct StaleChecker {
+    root: std::path::PathBuf,
+    cache: std::cell::RefCell<std::collections::HashMap<String, Option<crate::index::manifest::FileSig>>>,
+}
+
+impl StaleChecker {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            cache: Default::default(),
+        }
+    }
+
+    pub fn is_stale(&self, node: &crate::graph::store::Node) -> bool {
+        let Some(stored) = node.prov.file_sig else {
+            return false;
+        };
+        let cur = *self
+            .cache
+            .borrow_mut()
+            .entry(node.prov.source_path.clone())
+            .or_insert_with(|| {
+                crate::index::store::file_sig(&self.root.join(&node.prov.source_path)).ok()
+            });
+        matches!(cur, Some(cur) if cur != stored)
+    }
+}
+
+/// Compact community/centrality/staleness annotation. The community/centrality part is drawn
+/// from `node_meta` (populated by `kb graph generalize` / auto-run at the end of `reindex`) and
+/// is "" when no meta exists yet, so output is byte-identical on graphs that haven't been
+/// generalized. When `stale` is `Some` and the node's source has drifted (`StaleChecker::is_stale`),
+/// `⚠ stale` is appended regardless of `node_meta` state. Format:
+/// `"  · comm 3 · pr 0.142 · deg 5 · ⚠ stale"` — only the parts that are present.
+fn meta_suffix(
+    g: &crate::graph::store::GraphStore,
+    id: &str,
+    stale: Option<&StaleChecker>,
+) -> String {
     let mut parts = Vec::new();
-    if let Some(c) = m.community {
-        parts.push(format!("comm {c}"));
+    if let Ok(Some(m)) = g.node_meta(id) {
+        if let Some(c) = m.community {
+            parts.push(format!("comm {c}"));
+        }
+        if let Some(pr) = m.pagerank {
+            parts.push(format!("pr {pr:.3}"));
+        }
+        if let Some(d) = m.degree {
+            parts.push(format!("deg {d}"));
+        }
     }
-    if let Some(pr) = m.pagerank {
-        parts.push(format!("pr {pr:.3}"));
-    }
-    if let Some(d) = m.degree {
-        parts.push(format!("deg {d}"));
+    if let Some(sc) = stale {
+        if let Ok(Some(node)) = g.get_node(id) {
+            if sc.is_stale(&node) {
+                parts.push("⚠ stale".to_string());
+            }
+        }
     }
     if parts.is_empty() {
         String::new()
@@ -595,6 +641,7 @@ fn chain_lines(
     seen: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,
     at: Option<&str>,
+    stale: Option<&StaleChecker>,
 ) {
     for e in g.outgoing(id).unwrap_or_default() {
         if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
@@ -617,10 +664,10 @@ fn chain_lines(
             e.edge_type,
             node.node_type,
             node.label,
-            meta_suffix(g, &node.id),
+            meta_suffix(g, &node.id, stale),
             read_anchor(idx, g, &node.id),
         ));
-        chain_lines(idx, g, &node.id, spec, depth + 1, seen, out, at);
+        chain_lines(idx, g, &node.id, spec, depth + 1, seen, out, at, stale);
     }
 }
 
@@ -631,7 +678,10 @@ fn chain_lines(
 /// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `related`.
 /// Empty → `"(no matches)"`. `as_of` (when `Some`), normalized via `temporal::normalize_point`,
 /// hides any resolved node (and any chain hop) outside its authored validity interval
-/// (`GraphStore::visible_at`); a timeless node (no validity row) is always shown.
+/// (`GraphStore::visible_at`); a timeless node (no validity row) is always shown. `stale` (when
+/// `Some`), flags any resolved node (or chain hop) whose source has drifted since grounding with
+/// an inline `⚠ stale` marker — advisory only, never hides the node.
+#[allow(clippy::too_many_arguments)]
 pub fn glossary(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -639,6 +689,7 @@ pub fn glossary(
     spec: &ChainSpec,
     trace: &TraceLog,
     as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
 ) -> String {
     let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
         Ok(a) => a,
@@ -665,7 +716,7 @@ pub fn glossary(
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
                         match node_ref(idx, &node) {
                             // structural node (Section/Document): show its anchor, no chain
-                            Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id)),
+                            Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id, stale)),
                             // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
                                 // Node ids are label-only, so the owner document is not in the id.
@@ -679,7 +730,7 @@ pub fn glossary(
                                 };
                                 let head = format!(
                                     "{base}{owner}{}{}",
-                                    meta_suffix(g, &node.id),
+                                    meta_suffix(g, &node.id, stale),
                                     read_anchor(idx, g, &node.id),
                                 );
                                 let mut seen = std::collections::HashSet::new();
@@ -694,6 +745,7 @@ pub fn glossary(
                                     &mut seen,
                                     &mut chain,
                                     at.as_deref(),
+                                    stale,
                                 );
                                 if chain.is_empty() {
                                     head
@@ -754,7 +806,8 @@ fn resolve_node_ref(
 /// endpoint outside its authored validity interval (`GraphStore::visible_at`); a timeless node
 /// (no validity row) is always shown. This filters the *surrounding* graph only — the anchor node
 /// itself (resolved from `node`/`path`+`n`) is always looked up and its related nodes computed
-/// regardless of the anchor's own validity window.
+/// regardless of the anchor's own validity window. `stale` (when `Some`) flags any drifted-source
+/// endpoint with an inline `⚠ stale` marker.
 #[allow(clippy::too_many_arguments)]
 pub fn related(
     idx: &DocIndex,
@@ -764,6 +817,7 @@ pub fn related(
     n: Option<u64>,
     trace: &TraceLog,
     as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
 ) -> String {
     let id = match resolve_node_ref(idx, node, path, n) {
         Ok(i) => i,
@@ -782,7 +836,7 @@ pub fn related(
             lines.push(format!(
                 "SIMILAR  {}{}{}",
                 endpoint_ref(idx, g, &e.to),
-                meta_suffix(g, &e.to),
+                meta_suffix(g, &e.to, stale),
                 read_anchor(idx, g, &e.to)
             ));
         }
@@ -792,7 +846,7 @@ pub fn related(
             lines.push(format!(
                 "SIMILAR  {}{}{}",
                 endpoint_ref(idx, g, &e.from),
-                meta_suffix(g, &e.from),
+                meta_suffix(g, &e.from, stale),
                 read_anchor(idx, g, &e.from)
             ));
         }
@@ -806,7 +860,7 @@ pub fn related(
                         lines.push(format!(
                             "COMMUNITY  {}{}{}",
                             endpoint_ref(idx, g, &sib_id),
-                            meta_suffix(g, &sib_id),
+                            meta_suffix(g, &sib_id, stale),
                             read_anchor(idx, g, &sib_id),
                         ));
                     }
@@ -828,12 +882,14 @@ pub fn related(
 
 /// One structural-neighbor line: `<EDGE_TYPE> <arrow>  <endpoint><meta><read-anchor>`.
 /// `forward=true` prints `->` (an outgoing edge), `false` prints `<-` (incoming).
+#[allow(clippy::too_many_arguments)]
 fn edge_line(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     edge_type: &str,
     forward: bool,
     endpoint_id: &str,
+    stale: Option<&StaleChecker>,
 ) -> String {
     let arrow = if forward { "->" } else { "<-" };
     format!(
@@ -841,7 +897,7 @@ fn edge_line(
         edge_type,
         arrow,
         endpoint_ref(idx, g, endpoint_id),
-        meta_suffix(g, endpoint_id),
+        meta_suffix(g, endpoint_id, stale),
         read_anchor(idx, g, endpoint_id),
     )
 }
@@ -853,7 +909,8 @@ fn edge_line(
 /// interval (`GraphStore::visible_at`); a timeless endpoint (no validity row) is always shown.
 /// This filters the *surrounding* graph only — the anchor node itself (resolved from
 /// `node`/`path`+`n`) is always looked up and its edges enumerated regardless of the anchor's own
-/// validity window.
+/// validity window. `stale` (when `Some`) flags any drifted-source endpoint with an inline
+/// `⚠ stale` marker.
 #[allow(clippy::too_many_arguments)]
 pub fn neighbors(
     idx: &DocIndex,
@@ -865,6 +922,7 @@ pub fn neighbors(
     direction: &str,
     trace: &TraceLog,
     as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
 ) -> String {
     let id = match resolve_node_ref(idx, node, path, n) {
         Ok(i) => i,
@@ -881,7 +939,7 @@ pub fn neighbors(
     if direction != "in" {
         for e in g.outgoing(&id).unwrap_or_default() {
             if want(&e.edge_type) && visible(&e.to) {
-                lines.push(edge_line(idx, g, &e.edge_type, true, &e.to));
+                lines.push(edge_line(idx, g, &e.edge_type, true, &e.to, stale));
             }
         }
     }
@@ -893,7 +951,7 @@ pub fn neighbors(
                 continue;
             }
             if want(&e.edge_type) && visible(&e.from) {
-                lines.push(edge_line(idx, g, &e.edge_type, false, &e.from));
+                lines.push(edge_line(idx, g, &e.edge_type, false, &e.from, stale));
             }
         }
     }
@@ -1757,13 +1815,13 @@ mod tests {
         .unwrap();
         let t = TraceLog::disabled();
         // No as_of: node is visible as usual.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None);
         assert!(out.contains("[Symptom]"), "{out}");
         // as_of after the validity window: the node is filtered out entirely.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"));
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"), None);
         assert_eq!(out, "(no matches)", "{out}");
         // as_of inside the window: still visible.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"));
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"), None);
         assert!(out.contains("[Symptom]"), "{out}");
     }
 
@@ -1807,7 +1865,7 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
             out.contains("[Symptom]") && out.contains("Bus link dropout"),
@@ -1839,7 +1897,7 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None);
+        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None, None);
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -1848,11 +1906,68 @@ mod tests {
     }
 
     #[test]
+    fn glossary_marks_stale_source() {
+        // A grounded node whose stored file_sig no longer matches its source file (drifted
+        // AFTER grounding) → glossary flags it inline with "⚠ stale". A node grounded against a
+        // source that hasn't changed → no marker, even when the same StaleChecker is used.
+        let (_d, i) = idx();
+        let root = tempfile::tempdir().unwrap();
+        let drifted_path = root.path().join("drifted.md");
+        let fresh_path = root.path().join("fresh.md");
+        std::fs::write(&drifted_path, b"v1").unwrap();
+        std::fs::write(&fresh_path, b"unchanged").unwrap();
+        let drifted_sig = crate::index::store::file_sig(&drifted_path).unwrap();
+        let fresh_sig = crate::index::store::file_sig(&fresh_path).unwrap();
+
+        let g = GraphStore::open(root.path()).unwrap();
+        let mk_prov = |source_path: &str, sig| Provenance {
+            source_path: source_path.into(),
+            range: None,
+            file_sig: Some(sig),
+            origin: "agent".into(),
+            confidence: 0.8,
+            created_at: 1,
+        };
+        g.put_node(&Node {
+            id: "sym:drift".into(),
+            node_type: "Symptom".into(),
+            label: "Drifted symptom".into(),
+            aliases: Vec::new(),
+            prov: mk_prov("drifted.md", drifted_sig),
+        })
+        .unwrap();
+        g.put_node(&Node {
+            id: "sym:fresh".into(),
+            node_type: "Symptom".into(),
+            label: "Fresh symptom".into(),
+            aliases: Vec::new(),
+            prov: mk_prov("fresh.md", fresh_sig),
+        })
+        .unwrap();
+
+        // Drift drifted.md AFTER grounding; fresh.md is left untouched.
+        std::fs::write(&drifted_path, b"v2-longer-content").unwrap();
+
+        let t = TraceLog::disabled();
+        let stale = StaleChecker::new(root.path());
+
+        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, Some(&stale));
+        assert!(out.contains("⚠ stale"), "expected stale marker: {out}");
+
+        let out = glossary(&i, &g, "Fresh symptom", &ChainSpec::default(), &t, None, Some(&stale));
+        assert!(!out.contains("⚠ stale"), "unexpected stale marker: {out}");
+
+        // No checker at all (as production callers that lack a root may pass) → no marker either.
+        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, None);
+        assert!(!out.contains("⚠ stale"), "stale check must be opt-in: {out}");
+    }
+
+    #[test]
     fn related_shows_similar_generalization_for_a_node_id() {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
         assert!(
             out.contains("SIMILAR")
                 && out.contains("Update module firmware")
@@ -1920,7 +2035,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:a"), None, None, &t, None);
+        let out = related(&i, &g, Some("sym:a"), None, None, &t, None, None);
         assert!(
             out.contains("COMMUNITY"),
             "expected community siblings: {out}"
@@ -1944,7 +2059,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
         assert!(
             out.contains("SIMILAR") && out.contains("Update module firmware"),
             "{out}"
@@ -2008,7 +2123,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert_eq!(
             community_lines.len(),
@@ -2046,6 +2161,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "both",
             &TraceLog::disabled(),
             None,
+            None,
         );
         assert!(both.contains("REFERENCES") && both.contains("->"));
         assert!(both.contains("CONSTRAINED_BY") && both.contains("<-"));
@@ -2060,6 +2176,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "out",
             &TraceLog::disabled(),
             None,
+            None,
         );
         assert!(out.contains("REFERENCES") && !out.contains("CONSTRAINED_BY"));
 
@@ -2073,6 +2190,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "both",
             &TraceLog::disabled(),
             None,
+            None,
         );
         assert!(filtered.contains("CONSTRAINED_BY") && !filtered.contains("REFERENCES"));
 
@@ -2085,6 +2203,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             Some(&["NOPE".to_string()]),
             "both",
             &TraceLog::disabled(),
+            None,
             None,
         );
         assert_eq!(empty, "(no structural edges)");
@@ -2110,6 +2229,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "both",
             &TraceLog::disabled(),
             None,
+            None,
         );
         assert_eq!(both.matches("LINKS").count(), 1, "self-loop rendered twice: {both}");
 
@@ -2124,6 +2244,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "out",
             &TraceLog::disabled(),
             None,
+            None,
         );
         assert_eq!(out.matches("LINKS").count(), 1);
         assert!(out.contains("->"));
@@ -2136,6 +2257,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             None,
             "in",
             &TraceLog::disabled(),
+            None,
             None,
         );
         assert_eq!(inc.matches("LINKS").count(), 1);
@@ -2655,13 +2777,13 @@ strict = true
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
-        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
+        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
         assert!(
             result.contains("org:acme"),
             "expected node id in result, got: {result}"
         );
         assert_eq!(
-            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None),
+            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None, None),
             "(no matches)"
         );
     }
@@ -2674,7 +2796,7 @@ strict = true
         let t = TraceLog::disabled();
 
         // Before the pass there is no node_meta → output is unannotated (back-compat).
-        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
+        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
         assert!(
             !before.contains("comm "),
             "no meta annotation before generalize: {before}"
@@ -2684,7 +2806,7 @@ strict = true
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
-        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
+        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
         assert!(
             after.contains("org:acme"),
             "still shows the node id: {after}"
@@ -2732,7 +2854,7 @@ strict = true
 
         // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
         // so the agent sees the causal chain without a separate call.
-        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None);
+        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None, None);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
             out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
@@ -2766,12 +2888,12 @@ strict = true
         let t = TraceLog::disabled();
 
         // "Intro" is a Section node; glossary should render it as "path  #1 · Intro".
-        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None);
+        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None, None);
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
         assert_eq!(
-            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None),
+            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None, None),
             "(no matches)"
         );
     }

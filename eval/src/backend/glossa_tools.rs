@@ -152,7 +152,9 @@ pub fn exec(
                 glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
             });
             let body = match graph {
-                Some(g) => glossa::tools::glossary(idx, g, name, spec, trace, as_of.as_deref()),
+                Some(g) => {
+                    glossa::tools::glossary(idx, g, name, spec, trace, as_of.as_deref(), None)
+                }
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -171,7 +173,9 @@ pub fn exec(
                 glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
             });
             let body = match graph {
-                Some(g) => glossa::tools::related(idx, g, node, path, n, trace, as_of.as_deref()),
+                Some(g) => {
+                    glossa::tools::related(idx, g, node, path, n, trace, as_of.as_deref(), None)
+                }
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -206,6 +210,7 @@ pub fn exec(
                     direction,
                     trace,
                     as_of.as_deref(),
+                    None,
                 ),
                 None => "(graph unavailable)".to_string(),
             };
@@ -487,7 +492,8 @@ mod tests {
         let path = "p.md".to_string(); // canonical key: corpus-root-relative
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out = glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None);
+        let mcp_out =
+            glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None, None);
         // Eval path: dispatch through exec().
         let eval_out = exec(
             "related",

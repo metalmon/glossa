@@ -969,9 +969,18 @@ fn main() -> anyhow::Result<()> {
                 let spec = glossa::tools::ChainSpec::from_ontology(
                     &glossa::graph::ontology::Ontology::load_or_default(&path),
                 );
+                let stale = glossa::tools::StaleChecker::new(path.clone());
                 println!(
                     "{}",
-                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace, as_of.as_deref())
+                    glossa::tools::glossary(
+                        &idx,
+                        &g,
+                        &query,
+                        &spec,
+                        &trace,
+                        as_of.as_deref(),
+                        Some(&stale),
+                    )
                 );
                 Ok(())
             }
