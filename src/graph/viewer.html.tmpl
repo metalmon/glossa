@@ -134,14 +134,16 @@ const COL={}; (DATA.types||[]).forEach((t,i)=>COL[t]=PALETTE[i%PALETTE.length]);
 
 // Hard-coded UI strings, chosen by browser locale (English default, Russian for ru-*).
 const LANG=(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
+// Russian plural picker: a=one (1,21…), b=few (2–4,22–24…), c=many (0,5–20,11–14…).
+const plu=(n,a,b,c)=>{const t=n%10,h=n%100;return h>=11&&h<=14?c:t===1?a:t>=2&&t<=4?b:c;};
 const T=({
   en:{search:'Search the knowledge base…',pick:'Search and pick a node to explore its connections',
-      top:'Most connected',matches:n=>n+' matches',none:'No matches',theme:'Toggle theme',
-      nodes:n=>n+' nodes',edges:n=>n+' edges',stale:n=>n+' stale',valid:'valid',
+      top:'Most connected',matches:n=>n+(n===1?' match':' matches'),none:'No matches',theme:'Toggle theme',
+      nodes:n=>n+(n===1?' node':' nodes'),edges:n=>n+(n===1?' edge':' edges'),stale:n=>n+' stale',valid:'valid',
       current:'current',future:'future',expired:'expired',superseded:'superseded'},
   ru:{search:'Поиск по базе знаний…',pick:'Найдите узел, чтобы раскрыть его связи',
-      top:'Наиболее связанные',matches:n=>n+' совпадений',none:'Ничего не найдено',theme:'Сменить тему',
-      nodes:n=>n+' узлов',edges:n=>n+' рёбер',stale:n=>n+' устаревших',valid:'действ.',
+      top:'Наиболее связанные',matches:n=>n+' '+plu(n,'совпадение','совпадения','совпадений'),none:'Ничего не найдено',theme:'Сменить тему',
+      nodes:n=>n+' '+plu(n,'узел','узла','узлов'),edges:n=>n+' '+plu(n,'ребро','ребра','рёбер'),stale:n=>n+' '+plu(n,'устаревший','устаревших','устаревших'),valid:'действ.',
       current:'актуально',future:'будущее',expired:'истекло',superseded:'заменено'}
 })[LANG];
 
