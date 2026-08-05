@@ -1,0 +1,38 @@
+[meta]
+domain = "hr-compliance"
+description = "HR / EHS / labor compliance: role -> required record -> value constraints."
+family = "compliance"
+tier = 1
+aliases = ["ehs", "labor"]
+
+[entities.Role]
+id_prefix = "rol"
+props = []
+[entities.Record]
+id_prefix = "rec"
+props = []
+requires_grounding = true
+[entities.Literal]
+id_prefix = "lit"
+props = []
+
+[relations.REQUIRES_RECORD]
+from = ["Role"]
+to = ["Record"]
+[relations.CONSTRAINED_BY]
+from = ["Record"]
+to = ["Required", "Range"]
+[relations.HAS_MAX]
+from = ["Range"]
+to = ["Literal"]
+
+[validation]
+strict = true
+
+[constraint_types.Required]
+params = []
+[constraint_types.Range]
+params = ["min", "max"]
+
+[reasoning]
+mentions = "MENTIONS"

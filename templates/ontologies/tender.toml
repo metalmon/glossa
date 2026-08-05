@@ -1,0 +1,33 @@
+[meta]
+domain = "tender"
+description = "RFP/bid response tracking: requirement -> response -> evidence in the text."
+family = "compliance"
+tier = 1
+aliases = ["rfp", "bid"]
+
+[entities.TenderRequirement]
+id_prefix = "req"
+props = []
+[entities.Response]
+id_prefix = "rsp"
+props = []
+[entities.Evidence]
+id_prefix = "evd"
+props = []
+requires_grounding = true
+
+[relations.ANSWERED_BY]
+from = ["TenderRequirement"]
+to = ["Response"]
+[relations.EVIDENCED_BY]
+from = ["Response"]
+to = ["Evidence"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "TenderRequirement", relations = ["ANSWERED_BY", "EVIDENCED_BY"] },
+]
+mentions = "MENTIONS"

@@ -219,4 +219,27 @@ mod tests {
         // unknown → error
         assert!(write_template(root, "does-not-exist", false).is_err());
     }
+
+    #[test]
+    fn all_presets_well_formed() {
+        let mut seen_names = std::collections::HashSet::new();
+        let mut seen_aliases = std::collections::HashSet::new();
+        for (name, toml) in TEMPLATES {
+            let o = Ontology::parse(toml)
+                .unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+            let m = o.meta();
+            assert!(m.description.is_some(), "{name}: [meta].description required");
+            assert!(m.family.is_some(), "{name}: [meta].family required");
+            assert!(m.tier == 1 || m.tier == 2, "{name}: tier must be 1 or 2");
+            assert!(seen_names.insert(name.to_string()), "duplicate preset name {name}");
+            for a in &m.aliases {
+                assert!(seen_aliases.insert(a.clone()), "{name}: duplicate alias {a}");
+                assert!(raw(a).is_none(), "{name}: alias {a} collides with a preset name");
+            }
+            // every requires_grounding type is a declared entity
+            // (validated indirectly: parse succeeds and strict validation is on)
+            assert!(o.strict(), "{name}: presets must set strict = true");
+        }
+        assert_eq!(TEMPLATES.len(), 26, "expected 26 presets");
+    }
 }

@@ -1,0 +1,36 @@
+[meta]
+domain = "decision-log"
+description = "Architecture/decision records: decision -> chosen and considered options -> driving criteria."
+family = "decision"
+tier = 2
+aliases = ["adr"]
+
+[entities.Decision]
+id_prefix = "dec"
+props = []
+requires_grounding = true
+[entities.Option]
+id_prefix = "opt"
+props = []
+[entities.Criterion]
+id_prefix = "crt"
+props = []
+
+[relations.CHOOSES]
+from = ["Decision"]
+to = ["Option"]
+[relations.CONSIDERED]
+from = ["Decision"]
+to = ["Option"]
+[relations.DRIVEN_BY]
+from = ["Decision"]
+to = ["Criterion"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Decision", relations = ["CHOOSES"] },
+]
+mentions = "MENTIONS"

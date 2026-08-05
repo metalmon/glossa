@@ -1,0 +1,38 @@
+[meta]
+domain = "product-catalog"
+description = "Product catalog: product -> feature -> plan, feature dependencies, product replacement."
+family = "product"
+tier = 2
+aliases = ["offering", "pricing"]
+
+[entities.Product]
+id_prefix = "prd"
+props = []
+requires_grounding = true
+[entities.Feature]
+id_prefix = "ftr"
+props = []
+requires_grounding = true
+[entities.Plan]
+id_prefix = "pln"
+props = []
+
+[relations.HAS_FEATURE]
+from = ["Product"]
+to = ["Feature"]
+[relations.IN_PLAN]
+from = ["Feature"]
+to = ["Plan"]
+[relations.REQUIRES]
+from = ["Feature"]
+to = ["Feature"]
+[relations.REPLACES]
+from = ["Product"]
+to = ["Product"]
+
+[validation]
+strict = true
+
+[reasoning]
+closure = [["REQUIRES", "REQUIRES", "REQUIRES"]]
+mentions = "MENTIONS"

@@ -1,0 +1,40 @@
+[meta]
+domain = "vendor"
+description = "Vendor management: contracts, SLAs, third-party risk, and supply chains."
+family = "procurement"
+tier = 2
+aliases = ["tprm", "supply-chain", "procurement"]
+
+[entities.Vendor]
+id_prefix = "ven"
+props = []
+requires_grounding = true
+[entities.Service]
+id_prefix = "svc"
+props = []
+[entities.Contract]
+id_prefix = "ctr"
+props = []
+requires_grounding = true
+[entities.Sla]
+props = []
+
+[relations.PROVIDES]
+from = ["Vendor"]
+to = ["Service"]
+[relations.GOVERNS]
+from = ["Contract"]
+to = ["Service"]
+[relations.HAS_SLA]
+from = ["Contract"]
+to = ["Sla"]
+[relations.SUBCONTRACTS]
+from = ["Vendor"]
+to = ["Vendor"]
+
+[validation]
+strict = true
+
+[reasoning]
+closure = [["SUBCONTRACTS", "SUBCONTRACTS", "SUBCONTRACTS"]]
+mentions = "MENTIONS"

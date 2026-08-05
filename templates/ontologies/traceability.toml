@@ -1,0 +1,34 @@
+[meta]
+domain = "traceability"
+description = "Requirements traceability matrix (QMS/ISO 9001): requirement -> design -> verifying test."
+family = "traceability"
+tier = 2
+aliases = ["qms", "iso9001", "rtm"]
+
+[entities.Requirement]
+id_prefix = "req"
+props = []
+requires_grounding = true
+[entities.Design]
+id_prefix = "dsg"
+props = []
+[entities.Test]
+id_prefix = "tst"
+props = []
+requires_grounding = true
+
+[relations.SATISFIED_BY]
+from = ["Requirement"]
+to = ["Design"]
+[relations.VERIFIED_BY]
+from = ["Requirement", "Design"]
+to = ["Test"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Requirement", relations = ["SATISFIED_BY", "VERIFIED_BY"] },
+]
+mentions = "MENTIONS"

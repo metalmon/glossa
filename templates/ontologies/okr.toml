@@ -1,0 +1,33 @@
+[meta]
+domain = "okr"
+description = "Objectives and key results: objective -> key result -> advancing initiative."
+family = "strategy"
+tier = 2
+aliases = ["goals"]
+
+[entities.Objective]
+id_prefix = "obj"
+props = []
+requires_grounding = true
+[entities.KeyResult]
+id_prefix = "kr"
+props = []
+[entities.Initiative]
+id_prefix = "ini"
+props = []
+
+[relations.MEASURED_BY]
+from = ["Objective"]
+to = ["KeyResult"]
+[relations.ADVANCED_BY]
+from = ["KeyResult"]
+to = ["Initiative"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Objective", relations = ["MEASURED_BY"] },
+]
+mentions = "MENTIONS"

@@ -1,0 +1,39 @@
+[meta]
+domain = "sop"
+description = "Standard operating procedures: procedure -> ordered steps -> required tools / preconditions."
+family = "procedural"
+tier = 2
+aliases = ["howto", "runbook", "onboarding"]
+
+[entities.Procedure]
+id_prefix = "prc"
+props = []
+[entities.Step]
+id_prefix = "stp"
+props = []
+requires_grounding = true
+[entities.Tool]
+id_prefix = "tol"
+props = []
+[entities.Precondition]
+id_prefix = "pre"
+props = []
+
+[relations.HAS_STEP]
+from = ["Procedure"]
+to = ["Step"]
+[relations.NEXT]
+from = ["Step"]
+to = ["Step"]
+[relations.REQUIRES]
+from = ["Step"]
+to = ["Tool", "Precondition"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Procedure", relations = ["HAS_STEP"] },
+]
+mentions = "MENTIONS"

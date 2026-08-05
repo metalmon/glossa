@@ -1,0 +1,39 @@
+[meta]
+domain = "contract"
+description = "Contract lifecycle management: clause -> obligation -> party, deviations from playbook."
+family = "compliance"
+tier = 1
+aliases = ["legal", "clm"]
+
+[entities.Clause]
+id_prefix = "cls"
+props = []
+requires_grounding = true
+[entities.Obligation]
+id_prefix = "obl"
+props = []
+[entities.Party]
+id_prefix = "pty"
+props = []
+[entities.PlaybookPosition]
+id_prefix = "pbp"
+props = []
+
+[relations.IMPOSES]
+from = ["Clause"]
+to = ["Obligation"]
+[relations.ON_PARTY]
+from = ["Obligation"]
+to = ["Party"]
+[relations.DEVIATES_FROM]
+from = ["Clause"]
+to = ["PlaybookPosition"]
+
+[validation]
+strict = true
+
+[reasoning]
+spines = [
+  { anchor = "Clause", relations = ["IMPOSES"] },
+]
+mentions = "MENTIONS"
