@@ -246,13 +246,6 @@ enum GraphAction {
         /// concept in your own words, e.g. "connection loss"
         query: String,
         path: Option<PathBuf>,
-        /// Show the graph as it was valid on this date (ISO-8601); nodes outside their
-        /// validity interval are hidden. Timeless nodes are always shown.
-        #[arg(long = "as-of")]
-        as_of: Option<String>,
-        /// Reference instant for validity status (defaults to now). Deterministic in tests.
-        #[arg(long)]
-        now: Option<String>,
     },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
@@ -397,39 +390,6 @@ enum OntologyAction {
         #[arg(trailing_var_arg = true, required = true)]
         text: Vec<String>,
     },
-}
-
-/// Post-filter `glossary()`'s already-rendered text down to the id-blocks visible at `at`. Each
-/// top-level id's block is its head line (no leading whitespace, starting with the node id) plus
-/// any indented spine-chain lines that follow — dropped as one unit when the head id itself is
-/// outside its validity interval. IDs the store has no validity row for are always visible, so
-/// `(no matches)`/error lines pass through unchanged (their leading "word" resolves to "visible"
-/// since it has no validity row either).
-fn filter_glossary_at(text: &str, g: &glossa::graph::store::GraphStore, at: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    let mut block: Vec<&str> = Vec::new();
-    let mut block_visible = true;
-    for line in text.lines() {
-        let is_head = !line.starts_with(' ') && !line.starts_with('\t');
-        if is_head {
-            if block_visible {
-                out.append(&mut block);
-            } else {
-                block.clear();
-            }
-            let id = line.split_whitespace().next().unwrap_or("");
-            block_visible = g.visible_at(id, at).unwrap_or(true);
-        }
-        block.push(line);
-    }
-    if block_visible {
-        out.append(&mut block);
-    }
-    if out.is_empty() {
-        "(no matches)".to_string()
-    } else {
-        out.join("\n")
-    }
 }
 
 /// Unix seconds (UTC) -> the strict `YYYY-MM-DDThh:mm:ssZ` form `temporal::normalize_point`
@@ -1021,7 +981,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
-            GraphAction::Glossary { query, path, as_of, now: _now } => {
+            GraphAction::Glossary { query, path } => {
                 let path = glossa::root::resolve_root(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
@@ -1030,15 +990,10 @@ fn main() -> anyhow::Result<()> {
                 let spec = glossa::tools::ChainSpec::from_ontology(
                     &glossa::graph::ontology::Ontology::load_or_default(&path),
                 );
-                let rendered = glossa::tools::glossary(&idx, &g, &query, &spec, &trace);
-                let rendered = match &as_of {
-                    Some(a) => {
-                        let at = glossa::graph::temporal::normalize_point(a)?;
-                        filter_glossary_at(&rendered, &g, &at)
-                    }
-                    None => rendered,
-                };
-                println!("{rendered}");
+                println!(
+                    "{}",
+                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace)
+                );
                 Ok(())
             }
             GraphAction::Ls {

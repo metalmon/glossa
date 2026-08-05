@@ -221,3 +221,44 @@ fn graph_dump_and_near_drop_edges_to_filtered_endpoints() {
         .success()
         .stdout(contains("res:the-id"));
 }
+
+/// `graph dump -f json` (and by extension dot/graphml/html) shares the SAME node-set filter as
+/// the text format — this covers the non-text path specifically, since `Dump`'s `--as-of` filters
+/// `graph::io::collect()`'s `GraphExport` before formatting, not the rendered text.
+#[test]
+fn graph_dump_json_omits_out_of_window_node() {
+    let dir = tempfile::tempdir().unwrap();
+    build_fixture(dir.path());
+
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args([
+            "graph",
+            "dump",
+            "-f",
+            "json",
+            "--as-of",
+            "2024-01-01",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("res:the-id").not())
+        .stdout(contains("res:timeless"));
+
+    // ...and present as-of a date inside its validity window.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args([
+            "graph",
+            "dump",
+            "-f",
+            "json",
+            "--as-of",
+            "2022-01-01",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("res:the-id"));
+}
