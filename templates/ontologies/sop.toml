@@ -1,6 +1,6 @@
 [meta]
 domain = "sop"
-description = "Standard operating procedures: procedure -> ordered steps -> required tools / preconditions."
+description = "Standard operating procedures: procedure -> ordered steps."
 family = "procedural"
 tier = 2
 aliases = ["howto", "runbook", "onboarding"]
@@ -8,17 +8,8 @@ aliases = ["howto", "runbook", "onboarding"]
 [entities.Procedure]
 id_prefix = "prc"
 props = []
-requires_grounding = true
 [entities.Step]
 id_prefix = "stp"
-props = []
-requires_grounding = true
-[entities.Tool]
-id_prefix = "tol"
-props = []
-requires_grounding = true
-[entities.Precondition]
-id_prefix = "pre"
 props = []
 requires_grounding = true
 
@@ -28,9 +19,6 @@ to = ["Step"]
 [relations.NEXT]
 from = ["Step"]
 to = ["Step"]
-[relations.REQUIRES]
-from = ["Step"]
-to = ["Tool", "Precondition"]
 
 [validation]
 strict = true

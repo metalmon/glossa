@@ -1,7 +1,7 @@
 [meta]
 domain = "certification"
-description = "Product conformity assessment: product -> technical regulation -> test -> evidence."
-note = "Evidence.valid_from/valid_to state when the evidence (e.g. a test result or certificate) actually holds in the world, i.e. its validity/expiry period; this is distinct from provenance (when the evidence was recorded or filed). Never conflate the two."
+description = "Product conformity assessment: product -> technical regulation -> test, grounded and time-bound in the text."
+note = "Test.valid_from/valid_to state when the test (e.g. a test result or certificate) actually holds in the world, i.e. its validity/expiry period; this is distinct from provenance (when the test was recorded or filed). Never conflate the two."
 family = "compliance"
 tier = 1
 aliases = ["conformity"]
@@ -9,17 +9,11 @@ aliases = ["conformity"]
 [entities.Product]
 id_prefix = "prd"
 props = []
-requires_grounding = true
 [entities.TechReg]
 id_prefix = "trg"
 props = []
-requires_grounding = true
 [entities.Test]
 id_prefix = "tst"
-props = []
-requires_grounding = true
-[entities.Evidence]
-id_prefix = "evd"
 props = []
 requires_grounding = true
 requires_validity = true
@@ -30,15 +24,12 @@ to = ["TechReg"]
 [relations.REQUIRES_TEST]
 from = ["TechReg"]
 to = ["Test"]
-[relations.EVIDENCED_BY]
-from = ["Test"]
-to = ["Evidence"]
 
 [validation]
 strict = true
 
 [reasoning]
 spines = [
-  { anchor = "TechReg", relations = ["REQUIRES_TEST", "EVIDENCED_BY"] },
+  { anchor = "TechReg", relations = ["REQUIRES_TEST"] },
 ]
 mentions = "MENTIONS"

@@ -1,6 +1,6 @@
 [meta]
 domain = "contract"
-description = "Contract lifecycle management: clause -> obligation -> party, deviations from playbook."
+description = "Contract lifecycle management: clause -> obligation, deviations from playbook."
 note = "Obligation.valid_from/valid_to state when the obligation actually binds in the world (e.g. an amended term's effective period); this is distinct from provenance (when the clause was drafted, signed, or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
@@ -9,16 +9,11 @@ aliases = ["legal", "clm"]
 [entities.Clause]
 id_prefix = "cls"
 props = []
-requires_grounding = true
 [entities.Obligation]
 id_prefix = "obl"
 props = []
 requires_grounding = true
 requires_validity = true
-[entities.Party]
-id_prefix = "pty"
-props = []
-requires_grounding = true
 [entities.PlaybookPosition]
 id_prefix = "pbp"
 props = []
@@ -26,9 +21,6 @@ props = []
 [relations.IMPOSES]
 from = ["Clause"]
 to = ["Obligation"]
-[relations.ON_PARTY]
-from = ["Obligation"]
-to = ["Party"]
 [relations.DEVIATES_FROM]
 from = ["Clause"]
 to = ["PlaybookPosition"]

@@ -1,6 +1,6 @@
 [meta]
 domain = "audit"
-description = "Controls audit / GRC: control -> mitigated risk -> verifying evidence."
+description = "Controls audit / GRC: control -> mitigated risk, grounded in the text."
 family = "compliance"
 tier = 1
 aliases = ["controls", "grc"]
@@ -12,24 +12,16 @@ requires_grounding = true
 [entities.Risk]
 id_prefix = "rsk"
 props = []
-requires_grounding = true
-[entities.Evidence]
-id_prefix = "evd"
-props = []
-requires_grounding = true
 
 [relations.MITIGATES]
 from = ["Control"]
 to = ["Risk"]
-[relations.VERIFIED_BY]
-from = ["Control", "Risk"]
-to = ["Evidence"]
 
 [validation]
 strict = true
 
 [reasoning]
 spines = [
-  { anchor = "Control", relations = ["MITIGATES", "VERIFIED_BY"] },
+  { anchor = "Control", relations = ["MITIGATES"] },
 ]
 mentions = "MENTIONS"

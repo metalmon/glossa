@@ -327,7 +327,7 @@ mod tests {
         assert!(g("compliance", "Field"));
         assert!(g("vendor", "Service"));
         assert!(g("data-privacy", "Processor"));
-        assert!(g("support", "Component"));
+        assert!(g("support", "Resolution"));
         // synthesized anchors + abstract carriers are NOT
         assert!(!g("support", "Symptom"));
         assert!(!g("support", "Task"));
@@ -335,5 +335,35 @@ mod tests {
         assert!(!g("customer-journey", "PainPoint"));
         // reg-change Standard gains validity
         assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Standard"));
+    }
+
+    #[test]
+    fn presets_are_thin_reasoning_skeletons() {
+        use crate::graph::ontology::Ontology;
+        let ground_count = |p: &str| {
+            let o = Ontology::parse(raw(p).unwrap()).unwrap();
+            o.entity_types().iter().filter(|t| o.requires_grounding(t)).count()
+        };
+        let has_entity = |p: &str, t: &str| {
+            Ontology::parse(raw(p).unwrap()).unwrap().entity_types().contains(t)
+        };
+        // exactly one grounded node per preset (spot a representative set)
+        for p in ["support","compliance","tender","certification","audit","fmea",
+                  "risk-register","traceability","sop","policy","customer-journey",
+                  "decision-log","faq","contract"] {
+            assert_eq!(ground_count(p), 1, "{p}: exactly one requires_grounding");
+        }
+        // Evidence node is gone everywhere
+        for p in ["compliance","tender","certification","audit"] {
+            assert!(!has_entity(p, "Evidence"), "{p}: Evidence must be cut");
+        }
+        // context nouns cut
+        assert!(!has_entity("support", "Component"));
+        assert!(!has_entity("support", "Parameter"));
+        assert!(!has_entity("sop", "Tool"));
+        assert!(!has_entity("risk-register", "Owner"));
+        // the grounded node is the right one
+        assert!(Ontology::parse(raw("support").unwrap()).unwrap().requires_grounding("Resolution"));
+        assert!(Ontology::parse(raw("audit").unwrap()).unwrap().requires_grounding("Control"));
     }
 }

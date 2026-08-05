@@ -1,6 +1,6 @@
 [meta]
 domain = "risk-register"
-description = "Enterprise risk register: risk -> root cause -> mitigating control, with an accountable owner."
+description = "Enterprise risk register: risk -> root cause -> mitigating control."
 family = "risk"
 tier = 1
 aliases = ["erm"]
@@ -8,17 +8,11 @@ aliases = ["erm"]
 [entities.Risk]
 id_prefix = "rsk"
 props = []
-requires_grounding = true
 [entities.Cause]
 id_prefix = "cau"
 props = []
-requires_grounding = true
 [entities.Control]
 id_prefix = "ctl"
-props = []
-requires_grounding = true
-[entities.Owner]
-id_prefix = "own"
 props = []
 requires_grounding = true
 
@@ -26,11 +20,8 @@ requires_grounding = true
 from = ["Risk"]
 to = ["Cause"]
 [relations.MITIGATED_BY]
-from = ["Risk", "Cause"]
+from = ["Cause"]
 to = ["Control"]
-[relations.OWNED_BY]
-from = ["Risk"]
-to = ["Owner"]
 
 [validation]
 strict = true

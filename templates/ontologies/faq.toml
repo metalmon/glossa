@@ -8,7 +8,6 @@ aliases = ["knowledge-base"]
 [entities.Question]
 id_prefix = "qst"
 props = []
-requires_grounding = true
 [entities.Answer]
 id_prefix = "ans"
 props = []

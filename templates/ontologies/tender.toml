@@ -1,6 +1,6 @@
 [meta]
 domain = "tender"
-description = "RFP/bid response tracking: requirement -> response -> evidence in the text."
+description = "RFP/bid response tracking: requirement -> response, grounded in the text."
 family = "compliance"
 tier = 1
 aliases = ["rfp", "bid"]
@@ -8,28 +8,20 @@ aliases = ["rfp", "bid"]
 [entities.TenderRequirement]
 id_prefix = "req"
 props = []
-requires_grounding = true
 [entities.Response]
 id_prefix = "rsp"
-props = []
-requires_grounding = true
-[entities.Evidence]
-id_prefix = "evd"
 props = []
 requires_grounding = true
 
 [relations.ANSWERED_BY]
 from = ["TenderRequirement"]
 to = ["Response"]
-[relations.EVIDENCED_BY]
-from = ["Response"]
-to = ["Evidence"]
 
 [validation]
 strict = true
 
 [reasoning]
 spines = [
-  { anchor = "TenderRequirement", relations = ["ANSWERED_BY", "EVIDENCED_BY"] },
+  { anchor = "TenderRequirement", relations = ["ANSWERED_BY"] },
 ]
 mentions = "MENTIONS"

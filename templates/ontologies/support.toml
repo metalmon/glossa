@@ -11,7 +11,6 @@ props = []
 [entities.Cause]      # a root cause
 id_prefix = "cau"
 props = []
-requires_grounding = true
 [entities.Resolution] # an action / fix / answer-pattern
 id_prefix = "res"
 props = []
@@ -19,27 +18,13 @@ requires_grounding = true
 [entities.Task]       # a how-to intent
 id_prefix = "tsk"
 props = []
-[entities.Component]  # a generic subject the symptom occurs in
-id_prefix = "cmp"
-props = []
-requires_grounding = true
-[entities.Parameter]  # a configurable setting a resolution sets
-id_prefix = "prm"
-props = []
-requires_grounding = true
 
 [relations.CAUSED_BY]
 from = ["Symptom"]
 to = ["Cause"]
 [relations.RESOLVED_BY]
-from = ["Symptom", "Cause", "Task"]
+from = ["Cause", "Task"]
 to = ["Resolution"]
-[relations.SETS]
-from = ["Resolution"]
-to = ["Parameter"]
-[relations.OCCURS_IN]
-from = ["Symptom"]
-to = ["Component"]
 
 [validation]
 strict = true

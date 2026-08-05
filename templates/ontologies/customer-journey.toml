@@ -1,6 +1,6 @@
 [meta]
 domain = "customer-journey"
-description = "Customer journey mapping: stage -> touchpoint -> channel, and pain points along the way."
+description = "Customer journey mapping: stage -> touchpoint, and pain points along the way."
 family = "cx"
 tier = 2
 aliases = ["journey-map", "cx"]
@@ -12,10 +12,6 @@ props = []
 id_prefix = "tp"
 props = []
 requires_grounding = true
-[entities.Channel]
-id_prefix = "chn"
-props = []
-requires_grounding = true
 [entities.PainPoint]
 id_prefix = "pnp"
 props = []
@@ -23,9 +19,6 @@ props = []
 [relations.HAS_TOUCHPOINT]
 from = ["Stage"]
 to = ["Touchpoint"]
-[relations.ON_CHANNEL]
-from = ["Touchpoint"]
-to = ["Channel"]
 [relations.NEXT]
 from = ["Stage"]
 to = ["Stage"]

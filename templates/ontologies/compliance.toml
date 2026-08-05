@@ -1,6 +1,6 @@
 [meta]
 domain = "compliance"
-description = "Check a document against normative requirements: requirement -> field/value -> evidence in the text."
+description = "Check a document against normative requirements: requirement -> constrained field, grounded in the text."
 family = "compliance"
 tier = 1
 aliases = ["normocontrol", "conformance", "normative"]
@@ -8,17 +8,8 @@ aliases = ["normocontrol", "conformance", "normative"]
 [entities.NormativeRequirement]  # one checkable requirement pulled from a standard/spec
 id_prefix = "req"
 props = []
-requires_grounding = true
 [entities.Field]                 # a constrained parameter of the checked document
 id_prefix = "fld"
-props = []
-requires_grounding = true
-[entities.Evidence]              # the place in the document that satisfies a requirement
-id_prefix = "evd"
-props = []
-requires_grounding = true
-[entities.Standard]              # a cited standard / regulation
-id_prefix = "std"
 props = []
 requires_grounding = true
 
@@ -28,12 +19,6 @@ to = ["Field"]
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to = ["Range", "Regex", "Enum", "Required", "Forbidden"]
-[relations.VERIFIED_BY]
-from = ["NormativeRequirement"]
-to = ["Evidence"]
-[relations.REFERENCES]
-from = ["NormativeRequirement"]
-to = ["Standard"]
 [relations.HAS_MIN]
 from = ["Range"]
 to = ["Literal"]
@@ -64,6 +49,6 @@ props = []
 
 [reasoning]
 spines = [
-  { anchor = "NormativeRequirement", relations = ["VERIFIED_BY"] },
+  { anchor = "NormativeRequirement", relations = ["CONSTRAINS"] },
 ]
 mentions = "MENTIONS"
