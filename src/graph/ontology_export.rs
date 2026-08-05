@@ -26,6 +26,10 @@ struct ParameterExport {
     id_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    requires_grounding: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    requires_validity: bool,
 }
 
 #[derive(Serialize)]
@@ -67,6 +71,8 @@ pub fn export_json(ont: &Ontology) -> Value {
             json!(ParameterExport {
                 id_prefix: Some(ont.id_abbrev(name)),
                 description: ont.description(name).map(str::to_string),
+                requires_grounding: ont.requires_grounding(name),
+                requires_validity: ont.requires_validity(name),
             }),
         );
     }
@@ -113,14 +119,27 @@ pub fn export_json(ont: &Ontology) -> Value {
         })
         .collect();
 
-    json!({
+    let any_validity = ont
+        .entity_types()
+        .iter()
+        .any(|n| ont.requires_validity(n));
+
+    let mut out = json!({
         "meta": meta_export,
         "parameters": parameters,
         "constraints": constraints,
         "relations": relations,
         "patterns": patterns,
         "strict": ont.strict(),
-    })
+    });
+    if any_validity {
+        out["validity_note"] = json!(
+            "A type marked requires_validity needs a valid_from (optionally valid_to) \
+             on graph_upsert — the ISO-8601 window during which the fact holds in the \
+             world (distinct from provenance, which records when it was read)."
+        );
+    }
+    out
 }
 
 /// Pretty-printed JSON string for tool responses.
@@ -229,5 +248,35 @@ description = "Never wire IF_FIELD/IF_VALUE to a Field node."
         let params = c["params"].as_array().unwrap();
         assert!(params[0].as_str().unwrap().contains("Literal"));
         assert!(c["description"].as_str().unwrap().contains("Never wire"));
+    }
+
+    #[test]
+    fn export_surfaces_grounding_and_validity_flags() {
+        let toml = r#"
+[entities.Record]
+requires_grounding = true
+requires_validity = true
+[entities.Note]
+props = []
+[validation]
+strict = true
+"#;
+        let ont = Ontology::parse(toml).unwrap();
+        let j = export_json(&ont);
+        assert_eq!(j["parameters"]["Record"]["requires_grounding"], true);
+        assert_eq!(j["parameters"]["Record"]["requires_validity"], true);
+        // an unflagged entity omits both (skip_serializing_if)
+        assert!(j["parameters"]["Note"].get("requires_grounding").is_none());
+        assert!(j["parameters"]["Note"].get("requires_validity").is_none());
+        // a validity note is present because some type requires validity
+        assert!(j["validity_note"].as_str().unwrap().contains("valid_from"));
+    }
+
+    #[test]
+    fn export_omits_validity_note_when_no_type_requires_it() {
+        let ont = Ontology::parse("[entities.X]\nprops=[]\n").unwrap();
+        let j = export_json(&ont);
+        assert!(j.get("validity_note").is_none());
+        assert!(j["parameters"]["X"].get("requires_grounding").is_none());
     }
 }
