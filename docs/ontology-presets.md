@@ -73,19 +73,19 @@ relations.
 
 | Preset | What it models |
 |--------|----------------|
-| `compliance` | Check a document against a body of normative requirements (the normative-control shape): requirement → field/value → evidence in the text. |
+| `compliance` | Check a document against a body of normative requirements (the normative-control shape): requirement → constrained field, grounded in the text. |
 | `tender` | Bid / RFP / tender-response conformance: every requirement answered, every mandatory document attached, specs meet the stated minimums. |
 | `contract` | Extract obligations, deadlines and penalties from a contract and check it against a playbook of acceptable positions. |
 | `certification` | Declaration / certification of conformity: which technical regulations apply → which tests → which supporting documents. |
 | `qa-inspection` | Incoming/outgoing goods inspection: a lot or item against a spec or datasheet, certificate of conformance. |
-| `audit` | Controls audit: control → risk → evidence → gap. |
+| `audit` | Controls audit: control → mitigated risk, grounded in the text. |
 | `reg-change` | Impact of a changed standard or law: which internal documents, products and processes are affected. |
 | `data-privacy` | Records of processing (ROPA): data → legal basis → retention period → processor. |
 | `access-governance` | Access and segregation of duties: who may do what, forbidden role combinations, least privilege. |
 | `hr-compliance` | Mandatory personnel records per role (training, medicals, clearances) and their expiry. |
-| `risk-register` | Enterprise risk register: risk → cause → control → owner. |
+| `risk-register` | Enterprise risk register: risk → root cause → mitigating control. |
 | `fmea` | Failure modes of a product or process and their controls (quality, reliability, safety). |
-| `policy` | Internal rulebook: policy → rule → exception, with a scope of application. |
+| `policy` | Internal rulebook: policy → rule → exception, grounded in the text. |
 
 ### Tier 2 — operational knowledge
 
@@ -97,7 +97,7 @@ relations.
 | `traceability` | Requirement ↔ implementation ↔ verification traceability (QMS / ISO 9001). |
 | `vendor` | Vendor management: contracts, SLAs, third-party risk (incl. supply chains). |
 | `product-catalog` | Catalogue of products / plans / features: composition, dependencies, replacements. |
-| `customer-journey` | Customer-journey map: stages, touchpoints, channels, pain points. |
+| `customer-journey` | Customer-journey map: stages, touchpoints, pain points. |
 | `okr` | Goal decomposition: objective → key result → initiative. |
 | `project-schedule` | Project plan: milestones, tasks, dependencies, blockers. |
 | `decision-log` | Decision log with rationale (ADR). |
@@ -128,11 +128,14 @@ data, `kb graph generalize` to recompute derived links.
 
 ## Grounding
 
-Presets that carry reasoning data mark one node type per shape with
-`requires_grounding = true` — the concrete, document-quoting node (a
-`Resolution`, a `Step`, an `Evidence`). `graph_upsert` then rejects such a node
-unless it has a `MENTIONS` edge to a source section, and `kb graph generalize`
-surfaces any that later lose their grounding. See
+A preset's reasoning graph holds the reasoning path, not the source material
+itself — context and entities stay in the documents, reached by search/read.
+Each shape marks exactly one node type with `requires_grounding = true`: the
+concrete, document-quoting terminal (a `Resolution`, a `Step`, a `Field`).
+There is no separate citation-proxy node — the cited section, via `MENTIONS`,
+*is* the evidence. `graph_upsert` then rejects a grounded node unless it has a
+`MENTIONS` edge to a source section, and `kb graph generalize` surfaces any
+that later lose their grounding. See
 [Grounding](graph-and-ontology.md#grounding) for the mechanics.
 
 ## Valid-time
@@ -140,7 +143,7 @@ surfaces any that later lose their grounding. See
 The same way, presets that model a time-bound fact mark that type
 `requires_validity = true` — `hr-compliance` (`Record`), `data-privacy`
 (`DataAsset`), `contract` (`Obligation`), `reg-change` (`Requirement`) and
-`certification` (`Evidence`). `graph_upsert` then rejects such a node unless it
+`certification` (`Test`). `graph_upsert` then rejects such a node unless it
 carries a `valid_from`. See [Valid-time](graph-and-ontology.md#valid-time) for
 the mechanics and `--as-of` / `as_of` reads.
 
