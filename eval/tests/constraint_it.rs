@@ -514,6 +514,8 @@ fn agent_style_upsert_builds_enum_constraint() {
         label: l.into(),
         source_path: "spec.docx".into(),
         aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        valid_from: None,
+        valid_to: None,
     };
     let uedge = |f: &str, et: &str, to: &str| glossa::graph::ops::UpsertEdge {
         from: f.into(),

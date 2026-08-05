@@ -93,6 +93,8 @@ pub fn tables_to_graph(
             label: field_label.clone(),
             source_path: doc.into(),
             aliases: vec![],
+            valid_from: None,
+            valid_to: None,
         });
 
         let shape = compile_field(
@@ -214,24 +216,32 @@ fn compile_field(
                     label: cond_label.clone(),
                     source_path: doc.into(),
                     aliases: vec![],
+                    valid_from: None,
+                    valid_to: None,
                 });
                 nodes.push(UpsertNode {
                     node_type: wiring.literal_entity.clone(),
                     label: trigger.clone(),
                     source_path: doc.into(),
                     aliases: vec![],
+                    valid_from: None,
+                    valid_to: None,
                 });
                 nodes.push(UpsertNode {
                     node_type: wiring.literal_entity.clone(),
                     label: t_val.clone(),
                     source_path: doc.into(),
                     aliases: vec![],
+                    valid_from: None,
+                    valid_to: None,
                 });
                 nodes.push(UpsertNode {
                     node_type: wiring.enum_constraint.clone(),
                     label: enum_label.clone(),
                     source_path: doc.into(),
                     aliases,
+                    valid_from: None,
+                    valid_to: None,
                 });
                 edges.push(UpsertEdge {
                     from: field_label.into(),
@@ -275,6 +285,8 @@ fn compile_field(
         label: enum_label.clone(),
         source_path: doc.into(),
         aliases,
+        valid_from: None,
+        valid_to: None,
     });
     edges.push(UpsertEdge {
         from: field_label.into(),

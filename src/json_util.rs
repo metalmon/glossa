@@ -188,6 +188,59 @@ where
     }
 }
 
+/// Serde helper for `Option<String>` that also accepts a JSON number or bool, stringified —
+/// a small model writing a bare year for a date field (`"valid_from": 2020`) should not lose
+/// the whole node to a type-mismatch error.
+/// Use with `#[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]`.
+pub fn deserialize_opt_string_loose<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OptStringVisitor;
+
+    impl<'de> Visitor<'de> for OptStringVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string, or a number/bool stringified")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+    }
+
+    deserializer.deserialize_any(OptStringVisitor)
+}
+
 /// Accept a string list as a JSON array, a single string, or a comma-separated string — some MCP
 /// clients cannot send arrays. Empty/whitespace entries are dropped; an all-empty result is `None`.
 pub fn deserialize_opt_vec_string_loose<'de, D>(
@@ -300,5 +353,24 @@ mod tests {
         assert_eq!(empty_arr.v, None);
         let blank_arr: T = serde_json::from_str(r#"{"v":[" "]}"#).unwrap();
         assert_eq!(blank_arr.v, None);
+    }
+
+    #[test]
+    fn opt_string_loose_accepts_string_number_bool_and_absent() {
+        #[derive(Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "deserialize_opt_string_loose")]
+            valid_from: Option<String>,
+        }
+        let s: T = serde_json::from_str(r#"{"valid_from":"2020-01-01"}"#).unwrap();
+        assert_eq!(s.valid_from.as_deref(), Some("2020-01-01"));
+        let n: T = serde_json::from_str(r#"{"valid_from":2020}"#).unwrap();
+        assert_eq!(n.valid_from.as_deref(), Some("2020"));
+        let b: T = serde_json::from_str(r#"{"valid_from":true}"#).unwrap();
+        assert_eq!(b.valid_from.as_deref(), Some("true"));
+        let absent: T = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(absent.valid_from, None);
+        let null: T = serde_json::from_str(r#"{"valid_from":null}"#).unwrap();
+        assert_eq!(null.valid_from, None);
     }
 }

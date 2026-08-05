@@ -7,7 +7,8 @@ use crate::graph::agent::{
     apply_delete, apply_update, apply_upsert, EdgeRef, EdgeSpec, NodeSpec, NodeUpdate,
 };
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{normalize_label, GraphStore, Node};
+use crate::graph::store::{normalize_label, GraphStore, Node, NodeValidity};
+use crate::graph::temporal;
 use crate::index::store::DocIndex;
 use serde_json::Value;
 
@@ -22,6 +23,14 @@ pub struct UpsertNode {
     pub source_path: String,
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Start of this node's authored validity interval, any ISO-8601 granularity
+    /// (`"2020"`, `"2020-06"`, `"2020-06-15"`, or a full RFC3339 UTC instant).
+    /// `None` when the caller doesn't touch validity (leaves any existing interval alone).
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    pub valid_from: Option<String>,
+    /// End of the authored validity interval, same granularity rules as `valid_from`.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    pub valid_to: Option<String>,
 }
 
 /// A directed edge identified by node labels (or section refs) at both endpoints.
@@ -376,21 +385,54 @@ pub fn graph_upsert(
     let mut errs: Vec<String> = Vec::new();
 
     // (1) Nodes: keep those whose source_path is a real indexed document; drop the rest.
+    // A node also carrying valid_from/valid_to is normalized here — an unparseable date is a
+    // client error, so (mirroring the hallucinated-source_path case) that ONE node is dropped
+    // with an actionable message rather than failing the whole batch.
     struct SanitizedNode {
         node_type: String,
         label: String,
         aliases: Vec<String>,
+        valid_from_raw: Option<String>,
+        valid_from_norm: Option<String>,
+        valid_to_raw: Option<String>,
+        valid_to_norm: Option<String>,
     }
     let mut valid_nodes: Vec<(SanitizedNode, String)> = Vec::new();
     for nd in &nodes {
         match idx.canonical_document_path(&nd.source_path) {
             Some(canonical) => {
                 let label = sanitize_label_for_upsert(ont, &nd.node_type, &nd.label);
+                let valid_from_norm = match nd.valid_from.as_deref().map(temporal::normalize_from).transpose() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errs.push(format!(
+                            "node \"{}\" dropped: invalid valid_from \"{}\": {e}",
+                            nd.label,
+                            nd.valid_from.as_deref().unwrap_or_default()
+                        ));
+                        continue;
+                    }
+                };
+                let valid_to_norm = match nd.valid_to.as_deref().map(temporal::normalize_to).transpose() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errs.push(format!(
+                            "node \"{}\" dropped: invalid valid_to \"{}\": {e}",
+                            nd.label,
+                            nd.valid_to.as_deref().unwrap_or_default()
+                        ));
+                        continue;
+                    }
+                };
                 valid_nodes.push((
                     SanitizedNode {
                         node_type: nd.node_type.clone(),
                         label,
                         aliases: nd.aliases.clone(),
+                        valid_from_raw: nd.valid_from.clone(),
+                        valid_from_norm,
+                        valid_to_raw: nd.valid_to.clone(),
+                        valid_to_norm,
                     },
                     canonical,
                 ));
@@ -441,6 +483,29 @@ pub fn graph_upsert(
                 range: None,
                 confidence: None,
             }
+        })
+        .collect();
+
+    // Validity supplied per node, keyed by the same id() nodespecs use — looked up both by
+    // the (4c) requires_validity guarantee below and by the post-write authoring step (7).
+    struct ValidityInput {
+        valid_from_norm: Option<String>,
+        valid_from_raw: Option<String>,
+        valid_to_norm: Option<String>,
+        valid_to_raw: Option<String>,
+    }
+    let mut validity_by_id: std::collections::HashMap<String, ValidityInput> = valid_nodes
+        .iter()
+        .map(|(nd, _)| {
+            (
+                id_for(ont, &nd.node_type, &nd.label),
+                ValidityInput {
+                    valid_from_norm: nd.valid_from_norm.clone(),
+                    valid_from_raw: nd.valid_from_raw.clone(),
+                    valid_to_norm: nd.valid_to_norm.clone(),
+                    valid_to_raw: nd.valid_to_raw.clone(),
+                },
+            )
         })
         .collect();
 
@@ -652,6 +717,50 @@ pub fn graph_upsert(
         };
     }
 
+    // (4c) Validity guarantee. Node types the ontology marks `requires_validity` MUST carry a
+    // valid_from, supplied in THIS batch or already recorded in the graph. Mirrors the grounding
+    // guarantee above: a batch that would leave one untimed is rejected whole (nothing written).
+    let validity_errs: Vec<String> = nodespecs
+        .iter()
+        .filter(|n| ont.requires_validity(&n.node_type))
+        .filter(|n| {
+            let supplied = validity_by_id
+                .get(&n.id)
+                .map(|v| v.valid_from_norm.is_some())
+                .unwrap_or(false);
+            let in_graph = g
+                .validity_for(&n.id)
+                .ok()
+                .flatten()
+                .map(|v| v.valid_from.is_some())
+                .unwrap_or(false);
+            !supplied && !in_graph
+        })
+        .map(|n| {
+            format!(
+                "\"{}: {}\" requires a validity interval — add valid_from (and optionally valid_to): {{\"type\":\"{}\",\"label\":\"{}\",\"valid_from\":\"<YYYY-MM-DD>\",\"valid_to\":\"<YYYY-MM-DD>\"}}",
+                n.node_type, n.label, n.node_type, n.label
+            )
+        })
+        .collect();
+    if !validity_errs.is_empty() {
+        let mut dropped = validity_errs;
+        dropped.extend(errs);
+        let out = UpsertOutcome {
+            message: String::new(),
+            nodes: 0,
+            edges: 0,
+            rejected: true,
+            dump: vec![],
+            merged: vec![],
+            dropped,
+        };
+        return UpsertOutcome {
+            message: format_upsert_response(&out),
+            ..out
+        };
+    }
+
     // (5) build dump lines (resolved state, for the caller to log). Echo a node's
     // `aliases` when it has any — for an Enum these ARE the allowed values, so the
     // model sees exactly how many landed and catches a value it dropped while
@@ -714,9 +823,36 @@ pub fn graph_upsert(
         };
     }
 
+    // Validity to author once the write below succeeds — captured now (by id) since nodespecs
+    // is moved into apply_upsert next. Only nodes that actually supplied a bound get a row;
+    // a node that merely satisfied (4c) via an existing node_validity row is left untouched.
+    let validity_writes: Vec<(String, ValidityInput)> = nodespecs
+        .iter()
+        .filter_map(|n| {
+            let v = validity_by_id.remove(&n.id)?;
+            (v.valid_from_norm.is_some() || v.valid_to_norm.is_some()).then_some((n.id.clone(), v))
+        })
+        .collect();
+
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
     match apply_upsert(g, ont, nodespecs, edgespecs, now) {
         Ok(result) => {
+            // Author node_validity for each node that supplied a bound. A write failure here
+            // (store error) surfaces as a dropped-item note — the node itself is already
+            // committed, so this does not roll the batch back.
+            for (id, v) in &validity_writes {
+                if let Err(e) = g.upsert_validity(
+                    id,
+                    &NodeValidity {
+                        valid_from: v.valid_from_norm.clone(),
+                        valid_to: v.valid_to_norm.clone(),
+                        valid_from_raw: v.valid_from_raw.clone(),
+                        valid_to_raw: v.valid_to_raw.clone(),
+                    },
+                ) {
+                    errs.push(format!("node \"{id}\" validity not recorded: {e}"));
+                }
+            }
             let out = UpsertOutcome {
                 message: String::new(),
                 nodes: result.nodes_written,
@@ -1103,6 +1239,8 @@ strict = true
             label: label.into(),
             source_path: src.into(),
             aliases: vec![],
+            valid_from: None,
+            valid_to: None,
         }
     }
 
@@ -2345,5 +2483,70 @@ strict = true
         let text = graph_generalize(&g, &ont, 1);
         assert!(text.contains("ungrounded=1"), "{text}");
         assert!(text.contains("Ungrounded"), "{text}");
+    }
+
+    const VALIDITY_ONT: &str = r#"
+[entities.Record]
+id_prefix = "rec"
+props = []
+requires_validity = true
+[validation]
+strict = true
+"#;
+
+    /// `graph_upsert` authors a `node_validity` row (normalized period edges) for a node
+    /// that supplied `valid_from`/`valid_to`, keeping the raw string alongside.
+    #[test]
+    fn upsert_writes_validity_and_normalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+        write_doc(&idx, "a.md");
+
+        let node = UpsertNode {
+            valid_from: Some("2020".into()),
+            valid_to: Some("2023-06".into()),
+            ..unode("Record", "clearance", "a.md")
+        };
+        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 0);
+        assert!(!out.rejected, "{}", out.message);
+
+        let id = id_for(&ont, "Record", "clearance");
+        let v = g.validity_for(&id).unwrap().unwrap();
+        assert_eq!(v.valid_from.as_deref(), Some("2020-01-01T00:00:00Z"));
+        assert_eq!(v.valid_to.as_deref(), Some("2023-06-30T23:59:59Z"));
+        assert_eq!(v.valid_from_raw.as_deref(), Some("2020"));
+    }
+
+    /// A `requires_validity` node with no `valid_from` (neither in this batch nor already in
+    /// the graph) is rejected whole — mirrors the grounding-guarantee reject semantics.
+    #[test]
+    fn requires_validity_rejects_untimed_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+        write_doc(&idx, "a.md");
+
+        // no valid_from → rejected, nothing written
+        let untimed = unode("Record", "x", "a.md");
+        let out = graph_upsert(&idx, &g, &ont, vec![untimed], vec![], 0);
+        assert!(out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0);
+        assert!(
+            out.message.contains("requires a validity interval"),
+            "{}",
+            out.message
+        );
+        assert!(g.all_nodes().unwrap().is_empty());
+
+        // with valid_from → accepted
+        let timed = UpsertNode {
+            valid_from: Some("2024-01-01".into()),
+            ..unode("Record", "y", "a.md")
+        };
+        let out2 = graph_upsert(&idx, &g, &ont, vec![timed], vec![], 0);
+        assert!(!out2.rejected, "{}", out2.message);
     }
 }
