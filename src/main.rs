@@ -279,6 +279,16 @@ enum GraphAction {
         )]
         merge: bool,
     },
+    /// Diagnose graph health: ungrounded / stale / incomplete nodes.
+    Doctor {
+        path: Option<PathBuf>,
+        /// Delete off-spine (incomplete/degenerate) nodes.
+        #[arg(long = "prune-incomplete")]
+        prune_incomplete: bool,
+        /// Delete ungrounded nodes (last resort; prefer re-grounding).
+        #[arg(long = "prune-ungrounded")]
+        prune_ungrounded: bool,
+    },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
     Near {
@@ -1032,6 +1042,29 @@ fn main() -> anyhow::Result<()> {
                      merge_candidates={} merged_nodes={}",
                     r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates, r.merged_nodes,
                 );
+                Ok(())
+            }
+            GraphAction::Doctor {
+                path,
+                prune_incomplete,
+                prune_ungrounded,
+            } => {
+                let path = glossa::root::resolve_root(path);
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+                let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
+                print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
+                if prune_incomplete || prune_ungrounded {
+                    let (inc, ung) = glossa::graph::doctor::prune(
+                        &g,
+                        &report,
+                        &glossa::graph::doctor::PruneOpts {
+                            incomplete: prune_incomplete,
+                            ungrounded: prune_ungrounded,
+                        },
+                    )?;
+                    println!("pruned: incomplete={inc} ungrounded={ung}");
+                }
                 Ok(())
             }
             GraphAction::Near {

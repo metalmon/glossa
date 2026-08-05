@@ -985,6 +985,68 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     }
 }
 
+fn fmt_sig(sig: Option<crate::index::manifest::FileSig>) -> String {
+    match sig {
+        Some(s) => format!("{}:{}", s.mtime_secs, s.size),
+        None => "none".to_string(),
+    }
+}
+
+fn fmt_doubtful_line(d: &crate::graph::doctor::DoubtfulNode) -> String {
+    use crate::graph::doctor::Reason;
+    let base = format!(
+        "  {}  [{}]  {}  {}",
+        d.id, d.node_type, d.label, d.source_path
+    );
+    match &d.reason {
+        Reason::Ungrounded => format!("{base}  ungrounded"),
+        Reason::Incomplete => format!("{base}  incomplete"),
+        Reason::Stale { stored, current } => format!(
+            "{base}  stale ({}→{})",
+            fmt_sig(*stored),
+            fmt_sig(*current)
+        ),
+    }
+}
+
+/// Bounded listing of a doctor bucket: at most `limit` lines, then a `… N more` summary.
+fn fmt_bucket(name: &str, nodes: &[crate::graph::doctor::DoubtfulNode], limit: usize) -> String {
+    let mut out = format!("{name}: {}\n", nodes.len());
+    for d in nodes.iter().take(limit) {
+        out.push_str(&fmt_doubtful_line(d));
+        out.push('\n');
+    }
+    if nodes.len() > limit {
+        out.push_str(&format!("  … {} more\n", nodes.len() - limit));
+    }
+    out
+}
+
+/// Render a `DoctorReport` as text — id/type/label/source_path/reason per doubtful node (stale
+/// includes `stored→current` file signatures), bounded per bucket. Shared by the CLI
+/// `graph doctor` command (which also needs the raw `DoctorReport` to drive `--prune-*`) and
+/// `graph_doctor` below (report-only, for MCP).
+pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
+    const LIMIT: usize = 50;
+    let mut out = String::new();
+    out.push_str(&fmt_bucket("ungrounded", &rep.ungrounded, LIMIT));
+    out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
+    out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT));
+    out.push_str(&format!("unverifiable: {}\n", rep.unverifiable));
+    out
+}
+
+/// Diagnose graph health (the three doubts: ungrounded / stale / incomplete) and render the
+/// structured report as text so a healing agent (or a human running `kb graph doctor`) can act
+/// on it. Report-only: never mutates the store. Shared by the CLI `graph doctor` command and
+/// the MCP `graph_doctor` tool so both see identical output.
+pub fn graph_doctor(g: &GraphStore, ont: &Ontology, root: &std::path::Path) -> String {
+    match crate::graph::doctor::doctor(g, ont, root) {
+        Ok(rep) => fmt_doctor_report(&rep),
+        Err(e) => format!("graph_doctor error: {e}"),
+    }
+}
+
 /// Doc-scoped inventory for `graph_stats(doc=…)`: every non-structural node owned by
 /// `source_path == doc`, plus **all** outgoing edges. Ontology-independent — `doc` is only
 /// a scope filter. Shared by MCP and constraint-eval so both see the same listing.
