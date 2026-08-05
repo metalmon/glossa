@@ -358,6 +358,13 @@ impl GraphStore {
         )
         .context("delete edges referencing source nodes")?;
         let ref_edges = c.changes() as usize;
+        // node_validity is authored, source-of-truth data with no FK cascade — clean it up
+        // while the node ids from this source are still resolvable, before the nodes go away.
+        c.execute(
+            "DELETE FROM node_validity WHERE node_id IN (SELECT id FROM nodes WHERE source_path = ?1)",
+            rusqlite::params![source_path],
+        )
+        .context("delete node_validity by source")?;
         c.execute(
             "DELETE FROM nodes WHERE source_path = ?1",
             rusqlite::params![source_path],
@@ -462,6 +469,15 @@ impl GraphStore {
     /// changed/removed file.
     pub fn delete_auto_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
+        // auto-* nodes never carry authored validity today, but clean up defensively so every
+        // node-delete path is covered — no FK cascade in this store, and this stays correct if
+        // that assumption ever changes.
+        c.execute(
+            "DELETE FROM node_validity WHERE node_id IN \
+             (SELECT id FROM nodes WHERE source_path = ?1 AND origin LIKE 'auto-%')",
+            rusqlite::params![source_path],
+        )
+        .context("delete node_validity for auto nodes by source")?;
         c.execute(
             "DELETE FROM nodes WHERE source_path = ?1 AND origin LIKE 'auto-%'",
             rusqlite::params![source_path],
@@ -501,6 +517,13 @@ impl GraphStore {
         )
         .context("delete edges by type")?;
         let edges_deleted = c.changes() as usize;
+        // node_validity is authored, source-of-truth data with no FK cascade — clean it up
+        // while the node ids of this type are still resolvable, before the nodes go away.
+        c.execute(
+            "DELETE FROM node_validity WHERE node_id IN (SELECT id FROM nodes WHERE node_type = ?1)",
+            rusqlite::params![node_type],
+        )
+        .context("delete node_validity by type")?;
         c.execute(
             "DELETE FROM nodes WHERE node_type = ?1",
             rusqlite::params![node_type],
@@ -1438,6 +1461,41 @@ mod tests {
         // deleting the node removes its validity row
         g.delete_nodes(&["res:x".into()]).unwrap();
         assert!(g.validity_for("res:x").unwrap().is_none());
+    }
+
+    /// `delete_by_type`/`delete_by_source` delete agent nodes too (which can carry authored
+    /// validity), so they must clean up `node_validity` just like the per-id delete paths do —
+    /// unlike `node_meta`, an orphaned `node_validity` row is never regenerated/self-healed.
+    #[test]
+    fn delete_by_type_removes_node_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&Node {
+            id: "agent:timed".into(),
+            node_type: "Regulation".into(),
+            label: "agent:timed".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+        g.upsert_validity(
+            "agent:timed",
+            &NodeValidity {
+                valid_from: Some("2020-01-01T00:00:00Z".into()),
+                valid_to: None,
+                valid_from_raw: None,
+                valid_to_raw: None,
+            },
+        )
+        .unwrap();
+        assert!(g.validity_for("agent:timed").unwrap().is_some());
+
+        g.delete_by_type("Regulation").unwrap();
+        assert!(g.get_node("agent:timed").unwrap().is_none());
+        assert!(
+            g.validity_for("agent:timed").unwrap().is_none(),
+            "node_validity must not be orphaned by delete_by_type"
+        );
     }
 
     #[test]
