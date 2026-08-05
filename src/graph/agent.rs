@@ -30,18 +30,13 @@ pub struct EdgeSpec {
     pub confidence: Option<f32>,
 }
 
-fn stat_sig(path: &str) -> Option<FileSig> {
-    let md = std::fs::metadata(path).ok()?;
-    let mtime_secs = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    Some(FileSig {
-        mtime_secs,
-        size: md.len(),
-    })
+/// Resolve `source_path` against the corpus `root` — matching every staleness CONSUMER
+/// (`hygiene::stale_nodes`, `doctor::doctor`, `tools::StaleChecker`), which all re-stat
+/// `root.join(source_path)`. Stamping against the bare (CWD-relative) path here used to
+/// silently defeat staleness whenever the process CWD differed from the corpus root (the
+/// normal MCP-server deployment).
+fn stat_sig(root: &std::path::Path, source_path: &str) -> Option<FileSig> {
+    crate::index::store::file_sig(&root.join(source_path)).ok()
 }
 
 /// Result of applying an agent upsert batch (after dedup by label+type).
@@ -62,13 +57,14 @@ pub fn apply_upsert(
     nodes: Vec<NodeSpec>,
     edges: Vec<EdgeSpec>,
     now: u64,
+    root: &std::path::Path,
 ) -> anyhow::Result<ApplyUpsertResult> {
     use std::collections::HashMap;
 
     let prov = |source_path: &str, range: Option<String>, confidence: Option<f32>| Provenance {
         source_path: source_path.to_string(),
         range,
-        file_sig: stat_sig(source_path),
+        file_sig: stat_sig(root, source_path),
         origin: "agent".into(),
         confidence: confidence.unwrap_or(0.8),
         created_at: now,
@@ -379,7 +375,7 @@ strict = true
             range: None,
             confidence: Some(0.9),
         }];
-        let r = apply_upsert(&g, &ont, nodes, edges, 123).unwrap();
+        let r = apply_upsert(&g, &ont, nodes, edges, 123, dir.path()).unwrap();
         assert_eq!((r.nodes_written, r.edges_written), (2, 1));
         assert_eq!(g.node_count().unwrap(), 2);
         let org = g.get_node("org:acme").unwrap().unwrap();
@@ -393,7 +389,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![node("x", "Alien", "x", "d.docx")];
-        assert!(apply_upsert(&g, &ont, nodes, vec![], 1).is_err());
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).is_err());
         assert_eq!(g.node_count().unwrap(), 0);
     }
 
@@ -424,7 +420,7 @@ strict = true
             "RESOLVED_BY",
             "case1.docx",
         )];
-        apply_upsert(&g, &ont, nodes1, edges1, 1).unwrap();
+        apply_upsert(&g, &ont, nodes1, edges1, 1, dir.path()).unwrap();
 
         // Second upsert: DIFFERENT id but SAME label (different case + extra space) → dedup
         let nodes2 = vec![
@@ -447,7 +443,7 @@ strict = true
             "RESOLVED_BY",
             "case2.docx",
         )];
-        apply_upsert(&g, &ont, nodes2, edges2, 2).unwrap();
+        apply_upsert(&g, &ont, nodes2, edges2, 2, dir.path()).unwrap();
 
         // Only 1 Symptom node (deduped — first id wins)
         let all = g.all_nodes().unwrap();
@@ -489,7 +485,7 @@ strict = true
             "RESOLVED_BY",
             "test.docx",
         )];
-        apply_upsert(&g, &ont, nodes, edges, 1).unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, dir.path()).unwrap();
 
         assert_eq!(g.node_count().unwrap(), 2);
         assert_eq!(g.edge_count().unwrap(), 1);
@@ -525,6 +521,7 @@ strict = true
             vec![node("sym:test", "Symptom", "Test symptom", "test.docx")],
             vec![],
             1,
+            dir.path(),
         )
         .unwrap();
 
@@ -560,6 +557,7 @@ strict = true
             )],
             vec![],
             1,
+            dir.path(),
         )
         .unwrap();
 

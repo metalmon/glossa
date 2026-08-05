@@ -1285,7 +1285,7 @@ fn main() -> anyhow::Result<()> {
                 let now = glossa::trace::now_ms();
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let (pruned, n, ed) =
-                    glossa::graph::io::import_replace_layer(&g, &ont, export, now)?;
+                    glossa::graph::io::import_replace_layer(&g, &ont, export, now, &path)?;
                 println!("graph import: pruned {pruned}, +{n} nodes, +{ed} edges");
                 Ok(())
             }

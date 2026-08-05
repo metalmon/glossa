@@ -321,12 +321,13 @@ pub fn import_replace_layer(
     ont: &Ontology,
     e: GraphExport,
     now: u64,
+    root: &std::path::Path,
 ) -> anyhow::Result<(usize, usize, usize)> {
     let mut pruned = 0usize;
     for t in &e.exported_types {
         pruned += g.delete_by_type(t)?;
     }
-    let r = apply_upsert(g, ont, e.nodes, e.edges, now)?;
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root)?;
     Ok((pruned, r.nodes_written, r.edges_written))
 }
 
@@ -463,7 +464,7 @@ to = ["Resolution"]
             range: None,
             confidence: None,
         }];
-        apply_upsert(&g, &ont, nodes, edges, 1).unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, dir.path()).unwrap();
 
         // Also insert a structural Document node directly
         g.put_node(&Node {
@@ -493,7 +494,7 @@ to = ["Resolution"]
         // import_replace_layer into a fresh store
         let dir2 = tempfile::tempdir().unwrap();
         let g2 = GraphStore::open(dir2.path()).unwrap();
-        let (pruned, n, ed) = import_replace_layer(&g2, &ont, export, 2).unwrap();
+        let (pruned, n, ed) = import_replace_layer(&g2, &ont, export, 2, dir2.path()).unwrap();
         assert_eq!(pruned, 0); // nothing to prune in a fresh store
         assert_eq!(n, 2);
         assert_eq!(ed, 1);

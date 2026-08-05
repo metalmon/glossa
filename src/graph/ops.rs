@@ -835,7 +835,7 @@ pub fn graph_upsert(
         .collect();
 
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
-    match apply_upsert(g, ont, nodespecs, edgespecs, now) {
+    match apply_upsert(g, ont, nodespecs, edgespecs, now, &idx.root) {
         Ok(result) => {
             // Author node_validity for each node that supplied a bound. `result.merged` is
             // (requested_id → canonical_id) for every node that converged into an EXISTING
@@ -2371,6 +2371,7 @@ strict = true
             }],
             vec![],
             1,
+            dir.path(),
         )
         .unwrap();
 
@@ -2647,6 +2648,7 @@ strict = true
             }],
             vec![],
             1,
+            dir.path(),
         )
         .unwrap();
 

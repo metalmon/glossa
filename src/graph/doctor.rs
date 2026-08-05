@@ -125,10 +125,17 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
             });
         }
     }
-    // count grounded nodes we could not verify (file_sig None on an agent-authored node)
+    // Count nodes we SHOULD be able to verify but can't: agent-authored, of a type the
+    // ontology declares `requires_grounding`, with no stored file_sig. Excludes
+    // ungrounded-by-design reasoning node types (requires_grounding == false) — those never
+    // carry a file_sig and are not a doubt, just not source-verifiable by design.
     rep.unverifiable = nodes
         .iter()
-        .filter(|n| n.prov.origin == "agent" && n.prov.file_sig.is_none())
+        .filter(|n| {
+            n.prov.origin == "agent"
+                && n.prov.file_sig.is_none()
+                && ont.requires_grounding(&n.node_type)
+        })
         .count();
     Ok(rep)
 }
