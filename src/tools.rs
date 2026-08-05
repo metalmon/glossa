@@ -201,6 +201,29 @@ fn read_node(
         }
     }
     let mut text = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
+    if let Ok(Some(v)) = g.validity_for(&node.id) {
+        let from_disp = v.valid_from_raw.as_deref().unwrap_or("(open)");
+        let to_disp = v.valid_to_raw.as_deref().unwrap_or("(open)");
+        let now = crate::graph::temporal::epoch_to_rfc3339((crate::trace::now_ms() / 1000) as i64);
+        let superseded = g
+            .incoming(&node.id)
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.edge_type == "SUPERSEDES");
+        let status = crate::graph::temporal::status(
+            v.valid_from.as_deref(),
+            v.valid_to.as_deref(),
+            superseded,
+            &now,
+        );
+        let status_str = match status {
+            crate::graph::temporal::Status::Future => "future",
+            crate::graph::temporal::Status::Current => "current",
+            crate::graph::temporal::Status::Expired => "expired",
+            crate::graph::temporal::Status::Superseded => "superseded",
+        };
+        text.push_str(&format!("\nvalid:  {from_disp} .. {to_disp}\nstatus: {status_str}"));
+    }
     if chunks.is_empty() {
         text.push_str("\n(no source chunk linked to this node)");
     }
@@ -562,6 +585,7 @@ fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) ->
 /// hop is one indented line `→ REL  [Type] label  — read <anchor>`; deeper hops indent further.
 /// `seen` breaks cycles. SIMILAR/structural edges are intentionally skipped — they belong to
 /// `related`, not the answer chain.
+#[allow(clippy::too_many_arguments)]
 fn chain_lines(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -570,6 +594,7 @@ fn chain_lines(
     depth: usize,
     seen: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,
+    at: Option<&str>,
 ) {
     for e in g.outgoing(id).unwrap_or_default() {
         if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
@@ -577,6 +602,11 @@ fn chain_lines(
         }
         if !seen.insert(e.to.clone()) {
             continue;
+        }
+        if let Some(a) = at {
+            if !g.visible_at(&e.to, a).unwrap_or(true) {
+                continue;
+            }
         }
         let Ok(Some(node)) = g.get_node(&e.to) else {
             continue;
@@ -590,7 +620,7 @@ fn chain_lines(
             meta_suffix(g, &node.id),
             read_anchor(idx, g, &node.id),
         ));
-        chain_lines(idx, g, &node.id, spec, depth + 1, seen, out);
+        chain_lines(idx, g, &node.id, spec, depth + 1, seen, out, at);
     }
 }
 
@@ -599,14 +629,21 @@ fn chain_lines(
 /// (Symptom/Cause/Task/…) shows its `id [type] label` then, walked from it along the ontology's
 /// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
 /// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `related`.
-/// Empty → `"(no matches)"`.
+/// Empty → `"(no matches)"`. `as_of` (when `Some`), normalized via `temporal::normalize_point`,
+/// hides any resolved node (and any chain hop) outside its authored validity interval
+/// (`GraphStore::visible_at`); a timeless node (no validity row) is always shown.
 pub fn glossary(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     name: &str,
     spec: &ChainSpec,
     trace: &TraceLog,
+    as_of: Option<&str>,
 ) -> String {
+    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+        Ok(a) => a,
+        Err(e) => return format!("as_of error: {e}"),
+    };
     match g.resolve(name) {
         Ok(ids) => {
             trace.log(
@@ -619,6 +656,10 @@ pub fn glossary(
             }
             let lines: Vec<String> = ids
                 .iter()
+                .filter(|id| {
+                    at.as_deref()
+                        .is_none_or(|a| g.visible_at(id, a).unwrap_or(true))
+                })
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
@@ -644,7 +685,16 @@ pub fn glossary(
                                 let mut seen = std::collections::HashSet::new();
                                 seen.insert(node.id.clone());
                                 let mut chain = Vec::new();
-                                chain_lines(idx, g, &node.id, spec, 0, &mut seen, &mut chain);
+                                chain_lines(
+                                    idx,
+                                    g,
+                                    &node.id,
+                                    spec,
+                                    0,
+                                    &mut seen,
+                                    &mut chain,
+                                    at.as_deref(),
+                                );
                                 if chain.is_empty() {
                                     head
                                 } else {
@@ -656,7 +706,11 @@ pub fn glossary(
                     _ => id.clone(),
                 })
                 .collect();
-            lines.join("\n")
+            if lines.is_empty() {
+                "(no matches)".to_string()
+            } else {
+                lines.join("\n")
+            }
         }
         Err(e) => format!("glossary error: {e}"),
     }
@@ -696,6 +750,10 @@ fn resolve_node_ref(
     Err("need a node id (from glossary) or a (path, n) chunk".to_string())
 }
 
+/// `as_of` (when `Some`), normalized via `temporal::normalize_point`, drops any SIMILAR/COMMUNITY
+/// endpoint outside its authored validity interval (`GraphStore::visible_at`); a timeless node
+/// (no validity row) is always shown.
+#[allow(clippy::too_many_arguments)]
 pub fn related(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -703,15 +761,22 @@ pub fn related(
     path: Option<&str>,
     n: Option<u64>,
     trace: &TraceLog,
+    as_of: Option<&str>,
 ) -> String {
     let id = match resolve_node_ref(idx, node, path, n) {
         Ok(i) => i,
         Err(m) => return m,
     };
+    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+        Ok(a) => a,
+        Err(e) => return format!("as_of error: {e}"),
+    };
+    let visible =
+        |nid: &str| at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true));
     let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
     for e in g.outgoing(&id).unwrap_or_default() {
-        if e.edge_type == "SIMILAR" && seen.insert(e.to.clone()) {
+        if e.edge_type == "SIMILAR" && visible(&e.to) && seen.insert(e.to.clone()) {
             lines.push(format!(
                 "SIMILAR  {}{}{}",
                 endpoint_ref(idx, g, &e.to),
@@ -721,7 +786,7 @@ pub fn related(
         }
     }
     for e in g.incoming(&id).unwrap_or_default() {
-        if e.edge_type == "SIMILAR" && seen.insert(e.from.clone()) {
+        if e.edge_type == "SIMILAR" && visible(&e.from) && seen.insert(e.from.clone()) {
             lines.push(format!(
                 "SIMILAR  {}{}{}",
                 endpoint_ref(idx, g, &e.from),
@@ -735,7 +800,7 @@ pub fn related(
         if let Some(comm) = meta.community {
             if let Ok(siblings) = g.community_siblings(comm, &id, COMMUNITY_TOP_LIMIT) {
                 for (sib_id, _) in siblings {
-                    if seen.insert(sib_id.clone()) {
+                    if visible(&sib_id) && seen.insert(sib_id.clone()) {
                         lines.push(format!(
                             "COMMUNITY  {}{}{}",
                             endpoint_ref(idx, g, &sib_id),
@@ -781,7 +846,9 @@ fn edge_line(
 
 /// Structural 1-hop neighbors: the node's actual typed edges (e.g. REFERENCES, CONSTRAINED_BY),
 /// each with its real direction. `direction` filters to outgoing (`"out"`), incoming (`"in"`) or
-/// both; `edge_types` (when set) keeps only those relation names.
+/// both; `edge_types` (when set) keeps only those relation names. `as_of` (when `Some`),
+/// normalized via `temporal::normalize_point`, drops any endpoint outside its authored validity
+/// interval (`GraphStore::visible_at`); a timeless endpoint (no validity row) is always shown.
 #[allow(clippy::too_many_arguments)]
 pub fn neighbors(
     idx: &DocIndex,
@@ -792,16 +859,23 @@ pub fn neighbors(
     edge_types: Option<&[String]>,
     direction: &str,
     trace: &TraceLog,
+    as_of: Option<&str>,
 ) -> String {
     let id = match resolve_node_ref(idx, node, path, n) {
         Ok(i) => i,
         Err(m) => return m,
     };
+    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+        Ok(a) => a,
+        Err(e) => return format!("as_of error: {e}"),
+    };
+    let visible =
+        |nid: &str| at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true));
     let want = |et: &str| edge_types.is_none_or(|ts| ts.iter().any(|t| t == et));
     let mut lines = Vec::new();
     if direction != "in" {
         for e in g.outgoing(&id).unwrap_or_default() {
-            if want(&e.edge_type) {
+            if want(&e.edge_type) && visible(&e.to) {
                 lines.push(edge_line(idx, g, &e.edge_type, true, &e.to));
             }
         }
@@ -813,7 +887,7 @@ pub fn neighbors(
             if e.from == id && direction != "in" {
                 continue;
             }
-            if want(&e.edge_type) {
+            if want(&e.edge_type) && visible(&e.from) {
                 lines.push(edge_line(idx, g, &e.edge_type, false, &e.from));
             }
         }
@@ -1662,11 +1736,73 @@ mod tests {
     }
 
     #[test]
+    fn glossary_as_of_omits_node_outside_validity_window() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        // sym:loss is authored as valid only 2020-01-01 .. 2023-12-31.
+        g.upsert_validity(
+            "sym:loss",
+            &crate::graph::store::NodeValidity {
+                valid_from: Some(crate::graph::temporal::normalize_from("2020-01-01").unwrap()),
+                valid_to: Some(crate::graph::temporal::normalize_to("2023-12-31").unwrap()),
+                valid_from_raw: Some("2020-01-01".into()),
+                valid_to_raw: Some("2023-12-31".into()),
+            },
+        )
+        .unwrap();
+        let t = TraceLog::disabled();
+        // No as_of: node is visible as usual.
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None);
+        assert!(out.contains("[Symptom]"), "{out}");
+        // as_of after the validity window: the node is filtered out entirely.
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"));
+        assert_eq!(out, "(no matches)", "{out}");
+        // as_of inside the window: still visible.
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"));
+        assert!(out.contains("[Symptom]"), "{out}");
+    }
+
+    #[test]
+    fn read_of_node_shows_validity_and_status() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        g.upsert_validity(
+            "sym:loss",
+            &crate::graph::store::NodeValidity {
+                valid_from: Some(crate::graph::temporal::normalize_from("2020-01-01").unwrap()),
+                valid_to: Some(crate::graph::temporal::normalize_to("2023-12-31").unwrap()),
+                valid_from_raw: Some("2020-01-01".into()),
+                valid_to_raw: Some("2023-12-31".into()),
+            },
+        )
+        .unwrap();
+        let t = TraceLog::disabled();
+        let out = read(_d.path(), &i, Some(&g), "sym:loss", 1, false, &t);
+        assert!(
+            out.text.contains("valid:  2020-01-01 .. 2023-12-31"),
+            "{}",
+            out.text
+        );
+        // "now" (real system time) is long past the 2023-12-31 valid_to.
+        assert!(out.text.contains("status: expired"), "{}", out.text);
+    }
+
+    #[test]
+    fn read_of_node_without_validity_row_omits_status() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        let out = read(_d.path(), &i, Some(&g), "sym:loss", 1, false, &t);
+        assert!(!out.text.contains("valid:"), "{}", out.text);
+        assert!(!out.text.contains("status:"), "{}", out.text);
+    }
+
+    #[test]
     fn glossary_renders_full_chain_in_one_call() {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
             out.contains("[Symptom]") && out.contains("Bus link dropout"),
@@ -1698,7 +1834,7 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(&i, &g, "Bus link dropout", &empty, &t);
+        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None);
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -1711,7 +1847,7 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
         assert!(
             out.contains("SIMILAR")
                 && out.contains("Update module firmware")
@@ -1779,7 +1915,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:a"), None, None, &t);
+        let out = related(&i, &g, Some("sym:a"), None, None, &t, None);
         assert!(
             out.contains("COMMUNITY"),
             "expected community siblings: {out}"
@@ -1803,7 +1939,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
         assert!(
             out.contains("SIMILAR") && out.contains("Update module firmware"),
             "{out}"
@@ -1867,7 +2003,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert_eq!(
             community_lines.len(),
@@ -1895,11 +2031,31 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         g.put_edge(&edge("a", "REFERENCES", "b")).unwrap();
         g.put_edge(&edge("c", "CONSTRAINED_BY", "a")).unwrap();
 
-        let both = neighbors(&idx, &g, Some("a"), None, None, None, "both", &TraceLog::disabled());
+        let both = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            None,
+            "both",
+            &TraceLog::disabled(),
+            None,
+        );
         assert!(both.contains("REFERENCES") && both.contains("->"));
         assert!(both.contains("CONSTRAINED_BY") && both.contains("<-"));
 
-        let out = neighbors(&idx, &g, Some("a"), None, None, None, "out", &TraceLog::disabled());
+        let out = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            None,
+            "out",
+            &TraceLog::disabled(),
+            None,
+        );
         assert!(out.contains("REFERENCES") && !out.contains("CONSTRAINED_BY"));
 
         let filtered = neighbors(
@@ -1911,6 +2067,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             Some(&["CONSTRAINED_BY".to_string()]),
             "both",
             &TraceLog::disabled(),
+            None,
         );
         assert!(filtered.contains("CONSTRAINED_BY") && !filtered.contains("REFERENCES"));
 
@@ -1923,6 +2080,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             Some(&["NOPE".to_string()]),
             "both",
             &TraceLog::disabled(),
+            None,
         );
         assert_eq!(empty, "(no structural edges)");
     }
@@ -1937,14 +2095,44 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         g.put_edge(&edge("a", "LINKS", "a")).unwrap();
 
         // `both` must not print the self-loop twice.
-        let both = neighbors(&idx, &g, Some("a"), None, None, None, "both", &TraceLog::disabled());
+        let both = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            None,
+            "both",
+            &TraceLog::disabled(),
+            None,
+        );
         assert_eq!(both.matches("LINKS").count(), 1, "self-loop rendered twice: {both}");
 
         // Direction-scoped views still show it once, with the matching arrow.
-        let out = neighbors(&idx, &g, Some("a"), None, None, None, "out", &TraceLog::disabled());
+        let out = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            None,
+            "out",
+            &TraceLog::disabled(),
+            None,
+        );
         assert_eq!(out.matches("LINKS").count(), 1);
         assert!(out.contains("->"));
-        let inc = neighbors(&idx, &g, Some("a"), None, None, None, "in", &TraceLog::disabled());
+        let inc = neighbors(
+            &idx,
+            &g,
+            Some("a"),
+            None,
+            None,
+            None,
+            "in",
+            &TraceLog::disabled(),
+            None,
+        );
         assert_eq!(inc.matches("LINKS").count(), 1);
         assert!(inc.contains("<-"));
     }
@@ -2462,13 +2650,13 @@ strict = true
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
-        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
+        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
         assert!(
             result.contains("org:acme"),
             "expected node id in result, got: {result}"
         );
         assert_eq!(
-            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t),
+            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None),
             "(no matches)"
         );
     }
@@ -2481,7 +2669,7 @@ strict = true
         let t = TraceLog::disabled();
 
         // Before the pass there is no node_meta → output is unannotated (back-compat).
-        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
+        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
         assert!(
             !before.contains("comm "),
             "no meta annotation before generalize: {before}"
@@ -2491,7 +2679,7 @@ strict = true
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
-        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t);
+        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None);
         assert!(
             after.contains("org:acme"),
             "still shows the node id: {after}"
@@ -2539,7 +2727,7 @@ strict = true
 
         // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
         // so the agent sees the causal chain without a separate call.
-        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t);
+        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
             out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
@@ -2573,12 +2761,12 @@ strict = true
         let t = TraceLog::disabled();
 
         // "Intro" is a Section node; glossary should render it as "path  #1 · Intro".
-        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t);
+        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None);
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
         assert_eq!(
-            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t),
+            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None),
             "(no matches)"
         );
     }

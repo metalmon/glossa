@@ -246,6 +246,10 @@ enum GraphAction {
         /// concept in your own words, e.g. "connection loss"
         query: String,
         path: Option<PathBuf>,
+        /// Show the graph as it was valid on this date (ISO-8601); a matched node outside its
+        /// validity interval is hidden. Timeless nodes are always shown.
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
     },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
@@ -394,37 +398,10 @@ enum OntologyAction {
 
 /// Unix seconds (UTC) -> the strict `YYYY-MM-DDThh:mm:ssZ` form `temporal::normalize_point`
 /// accepts unchanged. Used as the `graph node` status reference when neither `--as-of` nor
-/// `--now` is given (system time). Hand-rolled — no date crate, consistent with `graph::temporal`
-/// (Howard Hinnant's `civil_from_days`: http://howardhinnant.github.io/date_algorithms.html).
+/// `--now` is given (system time). Thin delegate — the actual (hand-rolled, no date crate) logic
+/// lives in `graph::temporal` so the lib crate's `read` renderer can share it.
 fn epoch_to_rfc3339(secs: i64) -> String {
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    let (h, mi, se) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
-}
-
-#[cfg(test)]
-mod temporal_cli_tests {
-    use super::epoch_to_rfc3339;
-
-    #[test]
-    fn epoch_to_rfc3339_known_instants() {
-        assert_eq!(epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(epoch_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
-        assert_eq!(epoch_to_rfc3339(1_719_788_645), "2024-06-30T23:04:05Z");
-        // leap day
-        assert_eq!(epoch_to_rfc3339(1_709_222_400), "2024-02-29T16:00:00Z");
-    }
+    glossa::graph::temporal::epoch_to_rfc3339(secs)
 }
 
 fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
@@ -981,7 +958,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
-            GraphAction::Glossary { query, path } => {
+            GraphAction::Glossary { query, path, as_of } => {
                 let path = glossa::root::resolve_root(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
@@ -992,7 +969,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 println!(
                     "{}",
-                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace)
+                    glossa::tools::glossary(&idx, &g, &query, &spec, &trace, as_of.as_deref())
                 );
                 Ok(())
             }

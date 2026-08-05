@@ -147,8 +147,12 @@ pub fn exec(
         }
         "glossary" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // Loose like the MCP surface: a JSON string or a bare number both work.
+            let as_of: Option<String> = args.get("as_of").and_then(|v| {
+                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+            });
             let body = match graph {
-                Some(g) => glossa::tools::glossary(idx, g, name, spec, trace),
+                Some(g) => glossa::tools::glossary(idx, g, name, spec, trace, as_of.as_deref()),
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -163,8 +167,11 @@ pub fn exec(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
             let n = args.get("n").and_then(parse_n);
+            let as_of: Option<String> = args.get("as_of").and_then(|v| {
+                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+            });
             let body = match graph {
-                Some(g) => glossa::tools::related(idx, g, node, path, n, trace),
+                Some(g) => glossa::tools::related(idx, g, node, path, n, trace, as_of.as_deref()),
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -185,6 +192,9 @@ pub fn exec(
                 glossa::json_util::deserialize_opt_vec_string_loose(v).ok().flatten()
             });
             let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+            let as_of: Option<String> = args.get("as_of").and_then(|v| {
+                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+            });
             let body = match graph {
                 Some(g) => glossa::tools::neighbors(
                     idx,
@@ -195,6 +205,7 @@ pub fn exec(
                     edge_types.as_deref(),
                     direction,
                     trace,
+                    as_of.as_deref(),
                 ),
                 None => "(graph unavailable)".to_string(),
             };
@@ -476,7 +487,7 @@ mod tests {
         let path = "p.md".to_string(); // canonical key: corpus-root-relative
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out = glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace);
+        let mcp_out = glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None);
         // Eval path: dispatch through exec().
         let eval_out = exec(
             "related",

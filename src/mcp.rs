@@ -507,6 +507,14 @@ struct RelatedArgs {
     )]
     #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
     n: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
+    #[schemars(
+        description = "show the graph as it was valid on this date (ISO-8601); a related node outside its validity interval is hidden. Timeless nodes are always shown."
+    )]
+    as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -532,6 +540,28 @@ struct NeighborsArgs {
     #[serde(default)]
     #[schemars(description = "which edges: `out`, `in`, or `both` (default `both`)")]
     direction: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
+    #[schemars(
+        description = "show the graph as it was valid on this date (ISO-8601); a neighbor outside its validity interval is hidden. Timeless nodes are always shown."
+    )]
+    as_of: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GlossaryArgs {
+    #[schemars(description = "concept in your own words, e.g. \"connection loss\"")]
+    name: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
+    #[schemars(
+        description = "show the graph as it was valid on this date (ISO-8601); a matched node outside its validity interval is hidden. Timeless nodes are always shown."
+    )]
+    as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -985,14 +1015,14 @@ impl GlossaServer {
     )]
     async fn glossary(
         &self,
-        Parameters(a): Parameters<NameArg>,
+        Parameters(a): Parameters<GlossaryArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace),
+            crate::tools::glossary(&idx, &g, &a.name, &spec, &self.trace, a.as_of.as_deref()),
         )]))
     }
 
@@ -1014,6 +1044,7 @@ impl GlossaServer {
                 a.path.as_deref(),
                 a.n,
                 &self.trace,
+                a.as_of.as_deref(),
             ),
         )]))
     }
@@ -1039,6 +1070,7 @@ impl GlossaServer {
                 a.edge_types.as_deref(),
                 direction,
                 &self.trace,
+                a.as_of.as_deref(),
             ),
         )]))
     }
@@ -1539,12 +1571,26 @@ mod tests {
         assert_eq!(g.multiline, Some(true));
 
         let ne: NeighborsArgs = serde_json::from_str(
-            r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out"}"#,
+            r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out","as_of":"2022"}"#,
         )
         .unwrap();
         assert_eq!(ne.n, Some(3));
         assert_eq!(ne.edge_types, Some(vec!["REFERENCES".to_string()]));
         assert_eq!(ne.direction, Some("out".to_string()));
+        assert_eq!(ne.as_of, Some("2022".to_string()));
+
+        // as_of also accepts a bare JSON number (a model writing a year unquoted).
+        let ne2: NeighborsArgs =
+            serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
+        assert_eq!(ne2.as_of, Some("2022".to_string()));
+
+        let gl: GlossaryArgs =
+            serde_json::from_str(r#"{"name":"loss","as_of":"2022-06-01"}"#).unwrap();
+        assert_eq!(gl.as_of, Some("2022-06-01".to_string()));
+
+        let re: RelatedArgs =
+            serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
+        assert_eq!(re.as_of, Some("2022".to_string()));
 
         let pa: PathArgs = serde_json::from_str(
             r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9"}"#,
