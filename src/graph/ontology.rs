@@ -221,6 +221,8 @@ pub struct Ontology {
     descriptions: BTreeMap<String, String>,
     /// Entity types whose nodes must carry a `MENTIONS` grounding edge.
     grounding_types: std::collections::BTreeSet<String>,
+    /// Entity types whose nodes must carry a valid-time interval.
+    validity_types: std::collections::BTreeSet<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -242,6 +244,16 @@ impl Ontology {
             .iter()
             .filter_map(|(name, v)| {
                 v.get("requires_grounding")
+                    .and_then(|b| b.as_bool())
+                    .filter(|&b| b)
+                    .map(|_| name.clone())
+            })
+            .collect();
+        let validity_types = raw
+            .entities
+            .iter()
+            .filter_map(|(name, v)| {
+                v.get("requires_validity")
                     .and_then(|b| b.as_bool())
                     .filter(|&b| b)
                     .map(|_| name.clone())
@@ -339,6 +351,7 @@ impl Ontology {
             tables,
             descriptions,
             grounding_types,
+            validity_types,
         })
     }
 
@@ -371,6 +384,11 @@ impl Ontology {
     /// Whether nodes of `node_type` must carry a `MENTIONS` grounding edge.
     pub fn requires_grounding(&self, node_type: &str) -> bool {
         self.grounding_types.contains(node_type)
+    }
+
+    /// Whether nodes of `node_type` must carry a valid-time interval.
+    pub fn requires_validity(&self, node_type: &str) -> bool {
+        self.validity_types.contains(node_type)
     }
 
     /// The reasoning spines — the valid shapes a node must lie on a complete instance of to
@@ -806,5 +824,19 @@ requires_grounding = true
         assert!(ont.requires_grounding("Resolution"));
         assert!(!ont.requires_grounding("Symptom"));
         assert!(!ont.requires_grounding("Cause")); // undeclared → false, no panic
+    }
+
+    #[test]
+    fn requires_validity_flag_parses() {
+        let toml = r#"
+[entities.Record]
+requires_validity = true
+[entities.Note]
+props = []
+"#;
+        let ont = Ontology::parse(toml).unwrap();
+        assert!(ont.requires_validity("Record"));
+        assert!(!ont.requires_validity("Note"));
+        assert!(!ont.requires_validity("Absent")); // undeclared → false, no panic
     }
 }
