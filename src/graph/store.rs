@@ -432,6 +432,19 @@ impl GraphStore {
             for t in node_types {
                 params.push(Box::new(t.clone()));
             }
+            // node_validity is authored, source-of-truth data with no FK cascade — clean it up
+            // with the exact same predicate, while the node ids are still resolvable, before the
+            // nodes go away. These agent/table-compile nodes are exactly the category that can
+            // carry authored validity.
+            c.execute(
+                &format!(
+                    "DELETE FROM node_validity WHERE node_id IN \
+                     (SELECT id FROM nodes WHERE source_path = ?1 AND origin = 'agent' \
+                      AND node_type IN ({in_list}))"
+                ),
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            )
+            .context("delete node_validity for table-compile nodes")?;
             // Do not cascade-delete non-compiler edges (MENTIONS, …) off these nodes.
             c.execute(
                 &format!(
@@ -455,6 +468,15 @@ impl GraphStore {
     /// structure from documents without destroying hand/agent-built knowledge. Returns count removed.
     pub fn delete_auto(&self) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
+        // auto-* nodes never carry authored validity today, but clean up defensively so every
+        // node-delete path is covered — no FK cascade in this store, and this stays correct if
+        // that assumption ever changes.
+        c.execute(
+            "DELETE FROM node_validity WHERE node_id IN \
+             (SELECT id FROM nodes WHERE origin LIKE 'auto-%')",
+            [],
+        )
+        .context("delete node_validity for auto nodes")?;
         c.execute("DELETE FROM nodes WHERE origin LIKE 'auto-%'", [])
             .context("delete auto nodes")?;
         let nodes_deleted = c.changes() as usize;
@@ -1495,6 +1517,50 @@ mod tests {
         assert!(
             g.validity_for("agent:timed").unwrap().is_none(),
             "node_validity must not be orphaned by delete_by_type"
+        );
+    }
+
+    /// `delete_agent_table_compile_layer` deletes `origin = 'agent' AND node_type IN (...)`
+    /// nodes — exactly the validity-bearing agent category — and must clean up `node_validity`
+    /// too, or a table-compile re-run silently leaves a stale interval behind forever.
+    #[test]
+    fn delete_agent_table_compile_layer_removes_node_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let agent_prov = Provenance {
+            source_path: "doc.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 1.0,
+            created_at: 0,
+        };
+        g.put_node(&Node {
+            id: "agent:field:timed".into(),
+            node_type: "Field".into(),
+            label: "agent:field:timed".into(),
+            aliases: vec![],
+            prov: agent_prov,
+        })
+        .unwrap();
+        g.upsert_validity(
+            "agent:field:timed",
+            &NodeValidity {
+                valid_from: Some("2020-01-01T00:00:00Z".into()),
+                valid_to: None,
+                valid_from_raw: None,
+                valid_to_raw: None,
+            },
+        )
+        .unwrap();
+        assert!(g.validity_for("agent:field:timed").unwrap().is_some());
+
+        g.delete_agent_table_compile_layer("doc.md", &[], &["Field".to_string()])
+            .unwrap();
+        assert!(g.get_node("agent:field:timed").unwrap().is_none());
+        assert!(
+            g.validity_for("agent:field:timed").unwrap().is_none(),
+            "node_validity must not be orphaned by delete_agent_table_compile_layer"
         );
     }
 
