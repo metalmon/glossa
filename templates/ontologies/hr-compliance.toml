@@ -9,6 +9,7 @@ aliases = ["ehs", "labor"]
 [entities.Role]
 id_prefix = "rol"
 props = []
+requires_grounding = true
 [entities.Record]
 id_prefix = "rec"
 props = []

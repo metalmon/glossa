@@ -8,6 +8,7 @@ aliases = ["handbook", "regulation"]
 [entities.Policy]
 id_prefix = "pol"
 props = []
+requires_grounding = true
 [entities.Rule]
 id_prefix = "rul"
 props = []
@@ -15,6 +16,7 @@ requires_grounding = true
 [entities.Exception]
 id_prefix = "exc"
 props = []
+requires_grounding = true
 [entities.Scope]
 id_prefix = "scp"
 props = []

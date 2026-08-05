@@ -12,6 +12,7 @@ requires_grounding = true
 [entities.Risk]
 id_prefix = "rsk"
 props = []
+requires_grounding = true
 [entities.Evidence]
 id_prefix = "evd"
 props = []

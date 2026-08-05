@@ -8,9 +8,11 @@ aliases = ["rfp", "bid"]
 [entities.TenderRequirement]
 id_prefix = "req"
 props = []
+requires_grounding = true
 [entities.Response]
 id_prefix = "rsp"
 props = []
+requires_grounding = true
 [entities.Evidence]
 id_prefix = "evd"
 props = []

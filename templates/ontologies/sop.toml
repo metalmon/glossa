@@ -8,6 +8,7 @@ aliases = ["howto", "runbook", "onboarding"]
 [entities.Procedure]
 id_prefix = "prc"
 props = []
+requires_grounding = true
 [entities.Step]
 id_prefix = "stp"
 props = []
@@ -15,9 +16,11 @@ requires_grounding = true
 [entities.Tool]
 id_prefix = "tol"
 props = []
+requires_grounding = true
 [entities.Precondition]
 id_prefix = "pre"
 props = []
+requires_grounding = true
 
 [relations.HAS_STEP]
 from = ["Procedure"]

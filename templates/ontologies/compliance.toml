@@ -8,9 +8,11 @@ aliases = ["normocontrol", "conformance", "normative"]
 [entities.NormativeRequirement]  # one checkable requirement pulled from a standard/spec
 id_prefix = "req"
 props = []
+requires_grounding = true
 [entities.Field]                 # a constrained parameter of the checked document
 id_prefix = "fld"
 props = []
+requires_grounding = true
 [entities.Evidence]              # the place in the document that satisfies a requirement
 id_prefix = "evd"
 props = []
@@ -18,6 +20,7 @@ requires_grounding = true
 [entities.Standard]              # a cited standard / regulation
 id_prefix = "std"
 props = []
+requires_grounding = true
 
 [relations.CONSTRAINS]
 from = ["NormativeRequirement"]

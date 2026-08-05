@@ -8,6 +8,7 @@ aliases = ["skills", "l&d"]
 [entities.Role]
 id_prefix = "rol"
 props = []
+requires_grounding = true
 [entities.Skill]
 id_prefix = "skl"
 props = []
@@ -15,6 +16,7 @@ requires_grounding = true
 [entities.Person]
 id_prefix = "per"
 props = []
+requires_grounding = true
 
 [relations.REQUIRES_SKILL]
 from = ["Role"]

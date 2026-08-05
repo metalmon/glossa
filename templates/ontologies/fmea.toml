@@ -8,12 +8,15 @@ aliases = ["reliability", "safety"]
 [entities.FailureMode]
 id_prefix = "fm"
 props = []
+requires_grounding = true
 [entities.Effect]
 id_prefix = "eff"
 props = []
+requires_grounding = true
 [entities.Cause]
 id_prefix = "cau"
 props = []
+requires_grounding = true
 [entities.Control]
 id_prefix = "ctl"
 props = []

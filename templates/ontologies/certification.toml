@@ -9,12 +9,15 @@ aliases = ["conformity"]
 [entities.Product]
 id_prefix = "prd"
 props = []
+requires_grounding = true
 [entities.TechReg]
 id_prefix = "trg"
 props = []
+requires_grounding = true
 [entities.Test]
 id_prefix = "tst"
 props = []
+requires_grounding = true
 [entities.Evidence]
 id_prefix = "evd"
 props = []

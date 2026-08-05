@@ -315,4 +315,25 @@ mod tests {
         }
         assert_eq!(TEMPLATES.len(), 26, "expected 26 presets");
     }
+
+    #[test]
+    fn grounding_coverage_marks_extracted_exempts_synthesized() {
+        use crate::graph::ontology::Ontology;
+        let g = |preset: &str, ty: &str| {
+            Ontology::parse(raw(preset).unwrap()).unwrap().requires_grounding(ty)
+        };
+        // concrete extracted nouns are grounded
+        assert!(g("qa-inspection", "Parameter"));
+        assert!(g("compliance", "Field"));
+        assert!(g("vendor", "Service"));
+        assert!(g("data-privacy", "Processor"));
+        assert!(g("support", "Component"));
+        // synthesized anchors + abstract carriers are NOT
+        assert!(!g("support", "Symptom"));
+        assert!(!g("support", "Task"));
+        assert!(!g("compliance", "Literal"));
+        assert!(!g("customer-journey", "PainPoint"));
+        // reg-change Standard gains validity
+        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Standard"));
+    }
 }

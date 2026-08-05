@@ -13,10 +13,12 @@ requires_grounding = true
 [entities.Obligation]
 id_prefix = "obl"
 props = []
+requires_grounding = true
 requires_validity = true
 [entities.Party]
 id_prefix = "pty"
 props = []
+requires_grounding = true
 [entities.PlaybookPosition]
 id_prefix = "pbp"
 props = []
