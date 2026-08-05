@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-08-06**. Version **0.2.7** (tag `v0.2.7`).
+Status as of **2026-08-06**. Version **0.3.0** (tag `v0.3.0`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -8,7 +8,7 @@ For the reasoning graph’s inference-method direction (abduction / deduction / 
 
 Legend used below: **Shipped** = in a release today; **Partial** = exists but incomplete vs the goal; **Open** = not built.
 
-> **Post-v0.2.7, on `master` (committed, pending push/release):** baked ontology presets + `kb ontology` CLI, mandatory grounding (`requires_grounding`), valid-time Phase 1, graph doctor (ungrounded/stale/incomplete), and the offline HTML graph explorer. These are marked **Shipped** below but are not yet in a tagged release.
+> **New in 0.3.0** (tagged locally, not yet pushed to origin): baked ontology presets + `kb ontology` CLI, mandatory grounding (`requires_grounding`), valid-time Phase 1, graph doctor (ungrounded/stale/incomplete), the offline HTML graph explorer, and `get_source_file` (docx→pdf). Marked **Shipped** below.
 
 ---
 

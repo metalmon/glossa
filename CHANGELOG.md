@@ -6,10 +6,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-06
+
 ### Added
 
+- **Baked ontology presets + `kb ontology` CLI**: 26 ready-made task ontologies ship inside the binary — Tier 1 conformance/compliance shapes (`compliance`, `tender`, `contract`, `certification`, `qa-inspection`, `audit`, `reg-change`, `data-privacy`, `access-governance`, `hr-compliance`, `risk-register`, `fmea`, `policy`) and Tier 2 operational shapes (`support`, `sop`, `faq`, `traceability`, `vendor`, `product-catalog`, `customer-journey`, `okr`, `project-schedule`, `decision-log`, `timeline`, `competency`, `org-roles`). Pick one at first index with `kb index --ontology <name>` (materializes `.glossa/ontology.toml`, then indexes) or manage them with `kb ontology list` / `show` / `init` / `suggest` — offline fuzzy + free-text matching, aliases, and typo hints, no model call. Each preset is a thin reasoning skeleton with exactly one grounded terminal (no separate Evidence/citation-proxy node). The on-disk file is always the source of truth; `--force` to overwrite an existing one.
+- **Valid-time (temporality Phase 1)**: a reasoning node can carry a validity interval (`valid_from`/`valid_to`, any ISO-8601 granularity, raw expression preserved), stored in an authored `node_validity` side table that survives `generalize`/reindex. A per-entity `requires_validity` flag (mirror of `requires_grounding`) makes `graph_upsert` reject an untimed node of that type. Graph reads take `--as-of <date>` (CLI `glossary`/`ls`/`near`/`node`/`dump`) and `as_of` (MCP `glossary`/`neighbors`/`related`), hiding facts outside their window; `read`/`node` report per-node status (current/future/expired/superseded) and a `SUPERSEDES` relation chains revisions. World time ≠ document time throughout — validity is when a fact holds, provenance is when it was recorded.
+- **Graph doctor (`kb graph doctor` + MCP `graph_doctor`)**: one consolidated health report over three doubts — `ungrounded` (a `requires_grounding` node lost its live `MENTIONS`), **`stale`** (the node's source file signature drifted since it was grounded), and `incomplete` (off the reasoning spine). The CLI offers targeted `--prune-ungrounded` / `--prune-incomplete` (destructive); the MCP tool is report-only; stale is never pruned — it is re-grounded. Reader-facing `read`/`glossary`/`neighbors` now show an inline `⚠ stale` marker so an answering agent can de-prioritize a drifted fact and re-read the source.
 - **Mandatory grounding for reasoning nodes**: an ontology entity may set `requires_grounding = true` (e.g. `Resolution`). `graph_upsert` then rejects the whole call if such a node has no `MENTIONS` edge to a source section — in the batch or already in the graph — with an actionable message (document-agnostic: the `MENTIONS` may cite any indexed document). `graph generalize` treats a required node that lost a *live* `MENTIONS` (none, or a dangling target after its source was removed) as a **separate `ungrounded` bucket** from off-spine `prune_candidates`: it reports them (in `graph_generalize` output, for re-grounding) and prunes them only under the new CLI flag `--prune-ungrounded` (MCP stays non-destructive). Grounding is transitive — only the spine's grounding node needs a direct `MENTIONS`.
-- **`kb graph dump -f html` — self-contained offline graph explorer**: emits a single HTML file with the graph library (Cytoscape.js) and data embedded, so it pulls nothing at runtime and works fully offline. Search-first UX: a glossary search returns matching nodes; selecting one opens a focused local view (the node centred with its typed relations, similar nodes, and `MENTIONS` sources) that you traverse by clicking. Density is label-aware — nodes pack tightly and spread only where their texts would overlap — and text stays at a readable size (the view never shrinks it). Colours/legend are derived from the data; light/dark theme follows the system with a manual toggle; UI is English, switching to Russian on a `ru` locale; responsive for mobile.
+- **`get_ontology` advertises grounding/validity**: the exported ontology now carries per-entity `requires_grounding` / `requires_validity` booleans plus a validity convention note, so an enricher prepares `MENTIONS` and valid-time up front instead of learning by `graph_upsert` rejection.
+- **`kb graph dump -f html` — self-contained offline graph explorer**: emits a single HTML file with the graph library (Cytoscape.js) and data embedded, so it pulls nothing at runtime and works fully offline. Search-first UX: a glossary search returns matching nodes; selecting one opens a focused local view (the node centred with its typed relations, similar nodes, and `MENTIONS` sources) that you traverse by clicking. Density is label-aware — nodes pack tightly and spread only where their texts would overlap — and text stays at a readable size (the view never shrinks it). Colours/legend are derived from the data; light/dark theme follows the system with a manual toggle; UI is English, switching to Russian on a `ru` locale; responsive for mobile. Viewer refinements: infinite-scroll glossary search, dark theme, a mini-stat header, and temporal display.
+
+### Changed
+
+- **`generalize` is derived-layer only**: `graph generalize` / `graph_generalize` now recompute just the derived layer (closure, SIMILAR, communities, centrality). All hygiene — ungrounded/incomplete detection and pruning — moved to `graph doctor`; `graph_generalize` no longer reports `ungrounded_candidates` and the `--prune-*` flags moved off `generalize`.
+
+### Removed
+
+- **Dead PDF table-detection fallback**: the structured PDF table path (`extract_tables` → markdown) was gated behind an empty-text branch, so it fired only on text-less pages (where the detector has nothing to work with) and never on real tables. It is removed along with `src/extract/pdf_table.rs`; PDF extraction is flat layout-text as before (no behavior change). Merged-cell densification remains on the Office path; a real PDF-table feature can revive the merge later.
+
+### Fixed
+
+- **Grounding `file_sig` resolved against the corpus root**: the producer (`graph_upsert`) and the consumers now resolve `source_path` against the same base (the corpus root, not the CWD), so staleness detection works under a normal off-CWD MCP deployment.
+- **`requires_validity` on dedup-merge**: valid-time is remapped through `apply_upsert`'s merge, so a node deduped onto a canonical id keeps its interval.
+- **Traceability preset closure**: the requirement→test shortcut closure and certification wording were corrected.
+- **Glob backslash normalization**: `\` is normalized to `/` in glob patterns so slash handling is idempotent across platforms.
 
 ## [0.2.7] - 2026-08-04
 
@@ -130,7 +151,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Initial public release: file-first index, graph, MCP server, BM25 search, grep, glob, read.
 
-[Unreleased]: https://github.com/metalmon/glossa/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/metalmon/glossa/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/metalmon/glossa/compare/v0.2.7...v0.3.0
 [0.1.1]: https://github.com/metalmon/glossa/compare/v1.2.0...v0.1.1
 [1.2.0]: https://github.com/metalmon/glossa/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/metalmon/glossa/compare/v1.0.0...v1.1.0
