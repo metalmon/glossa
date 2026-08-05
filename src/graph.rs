@@ -1,3 +1,4 @@
+pub mod doctor;
 pub mod node_index;
 pub mod ontology;
 pub mod ontology_export;
