@@ -317,7 +317,13 @@ impl Ontology {
                 note: raw.meta.note.filter(|d| !d.is_empty()),
                 family: raw.meta.family.filter(|d| !d.is_empty()),
                 tier: raw.meta.tier.unwrap_or(2),
-                aliases: raw.meta.aliases,
+                aliases: raw
+                    .meta
+                    .aliases
+                    .into_iter()
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect(),
             },
             entity_types: raw.entities.keys().cloned().collect(),
             id_prefixes,
@@ -602,6 +608,14 @@ props = []
         assert_eq!(o2.meta().tier, 2);
         assert!(o2.meta().family.is_none());
         assert!(o2.meta().aliases.is_empty());
+
+        // empty family string → None; blank/whitespace aliases are trimmed away
+        let o3 = Ontology::parse(
+            "[meta]\nfamily = \"\"\naliases = [\"  spaced  \", \"\", \"   \"]\n[entities.X]\nprops=[]\n",
+        )
+        .unwrap();
+        assert!(o3.meta().family.is_none());
+        assert_eq!(o3.meta().aliases, vec!["spaced".to_string()]);
     }
 
     #[test]

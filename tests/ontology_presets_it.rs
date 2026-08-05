@@ -68,3 +68,47 @@ fn ontology_list_show_init_suggest() {
     assert!(std::fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap()
         .contains("NormativeRequirement"));
 }
+
+#[test]
+fn ontology_init_refuses_existing_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+    fs::write(dir.path().join(".glossa").join("ontology.toml"), b"# mine\n").unwrap();
+
+    // without --force → error, file untouched
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "init", "--template", "support", dir.path().to_str().unwrap()])
+        .assert().failure()
+        .stderr(contains("--force"));
+    assert!(fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap().contains("# mine"));
+
+    // with --force → replaced
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "init", "--template", "support", "--force", dir.path().to_str().unwrap()])
+        .assert().success();
+    assert!(fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap().contains("Symptom"));
+}
+
+#[test]
+fn ontology_list_family_filter() {
+    // --family narrows to that family only
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "list", "--family", "risk"])
+        .assert().success()
+        .stdout(contains("risk-register").and(contains("support").not()));
+}
+
+#[test]
+fn ontology_suggest_empty_and_show_unknown() {
+    // a query that overlaps nothing → explicit "no match" line, still exits 0
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "suggest", "zzzzqqq wwwwxyz"])
+        .assert().success()
+        .stdout(contains("no preset matched"));
+
+    // show of an unknown name → error suggesting the closest preset
+    Command::cargo_bin("kb").unwrap()
+        .args(["ontology", "show", "complaince"])
+        .assert().failure()
+        .stderr(contains("compliance"));
+}

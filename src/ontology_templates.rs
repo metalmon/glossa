@@ -3,6 +3,7 @@
 include!(concat!(env!("OUT_DIR"), "/ontology_templates.rs"));
 
 use crate::graph::ontology::Ontology;
+use std::sync::LazyLock;
 
 /// Catalog entry for one preset, derived from its `[meta]`.
 #[derive(Debug, Clone)]
@@ -14,8 +15,10 @@ pub struct TemplateInfo {
     pub aliases: Vec<String>,
 }
 
-/// Parse every embedded preset's `[meta]` into a catalog.
-pub fn catalog() -> Vec<TemplateInfo> {
+/// The catalog, parsed once from the embedded `[meta]` blocks. The templates are
+/// baked at build time and never change at runtime, so a single parse suffices —
+/// `resolve`/`nearest`/`suggest`/`catalog` all read this instead of re-parsing.
+static CATALOG: LazyLock<Vec<TemplateInfo>> = LazyLock::new(|| {
     TEMPLATES
         .iter()
         .map(|(name, toml)| {
@@ -30,6 +33,11 @@ pub fn catalog() -> Vec<TemplateInfo> {
             }
         })
         .collect()
+});
+
+/// The preset catalog (parsed once; see [`CATALOG`]).
+pub fn catalog() -> Vec<TemplateInfo> {
+    CATALOG.clone()
 }
 
 /// Resolve a preset name OR alias to its canonical name. Trims whitespace.
@@ -90,7 +98,7 @@ pub fn nearest(query: &str, k: usize) -> Vec<String> {
 fn tokenize(s: &str) -> Vec<String> {
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 2)
+        .filter(|t| t.chars().count() > 2)
         .map(str::to_string)
         .collect()
 }
@@ -216,8 +224,31 @@ mod tests {
         assert!(matches!(write_template(root, "normocontrol", true).unwrap(), Written::Overwritten));
         assert!(std::fs::read_to_string(&target).unwrap().contains("NormativeRequirement"));
 
-        // unknown → error
-        assert!(write_template(root, "does-not-exist", false).is_err());
+        // unknown → error whose message suggests the closest preset(s)
+        let err = write_template(root, "compliancee", false).unwrap_err().to_string();
+        assert!(err.contains("compliance"), "error should suggest a candidate: {err}");
+        assert!(err.contains("kb ontology list"), "error should point at the list: {err}");
+    }
+
+    #[test]
+    fn resolve_and_raw_stay_in_sync() {
+        // Every catalog name and alias must resolve to a canonical name that `raw`
+        // can materialize — this is the invariant `write_template`/`show` rely on
+        // when they `expect`/`unwrap` after `resolve`.
+        for t in catalog() {
+            assert_eq!(resolve(&t.name).as_deref(), Some(t.name.as_str()));
+            assert!(raw(&t.name).is_some(), "{}: raw() missing for a catalog name", t.name);
+            for a in &t.aliases {
+                assert_eq!(
+                    resolve(a).as_deref(),
+                    Some(t.name.as_str()),
+                    "alias {a} should resolve to {}",
+                    t.name
+                );
+                let canon = resolve(a).unwrap();
+                assert!(raw(&canon).is_some(), "alias {a} resolves to a non-embedded name");
+            }
+        }
     }
 
     #[test]
