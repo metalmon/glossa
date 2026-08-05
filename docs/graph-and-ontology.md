@@ -107,7 +107,7 @@ requires_validity = true
 ```
 
 `graph_upsert` rejects a node of that type with no `valid_from` — supplied in
-the same batch or already on record — naming the node and the fields to add.
+the same batch or already on record — naming the node and the fields to add. Like `requires_grounding`, this flag is advertised by `get_ontology` so an enricher can prepare validity fields upfront.
 Presets that model time-bound facts (`hr-compliance`, `data-privacy`,
 `contract`, `reg-change`, `certification`) mark their timed type this way; see
 [Ontology presets](ontology-presets.md).
@@ -169,6 +169,12 @@ kb graph generalize ./my-corpus --prune-ungrounded   # remove required nodes tha
 ```
 
 The non-destructive run still **reports** `ungrounded=<n>` and lists those nodes (see [Grounding](#grounding)) so an agent can re-ground them.
+
+### Discovering grounding and validity requirements upfront
+
+The `get_ontology` MCP tool returns per-entity `requires_grounding` and `requires_validity` boolean flags. This lets an enricher agent know the constraints before calling `graph_upsert` — it can prepare `MENTIONS` edges or `valid_from` fields rather than waiting for a rejection.
+
+**Grounding convention.** Document-extracted concrete nouns — a `Product` or `Parameter` named in source text — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`.
 
 ### 4. Inspect
 
