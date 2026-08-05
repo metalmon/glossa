@@ -8,8 +8,8 @@
 //! - Near-dup MERGE (#3 shared-evidence, Tier-1) is always COMPUTED, but only APPLIED when
 //!   `opts.apply_merges` is set — it mutates/deletes agent nodes, so the safe default is report-only.
 
-use super::{centrality, closure, community, hygiene, linkpred, merge, similarity, Triple};
-use crate::graph::ontology::{Ontology, Spine};
+use super::{centrality, closure, community, linkpred, merge, similarity, Triple};
+use crate::graph::ontology::Ontology;
 use crate::graph::store::{Edge, GraphStore, NodeMeta, Provenance};
 use std::collections::{HashMap, HashSet};
 
@@ -40,16 +40,6 @@ pub struct Opts {
     pub closure_rules: Vec<(String, String, String)>,
     /// Structural (never-reasoning) types excluded from merge/similar, from `[reasoning].structural`.
     pub structural: Vec<String>,
-    /// Hygiene: delete degenerate reasoning chains (report-only when false). CLI `--prune-incomplete`.
-    pub prune_incomplete: bool,
-    /// Hygiene: the ontology reasoning spines; empty → hygiene is a no-op. From `[reasoning].spines`.
-    pub spines: Vec<Spine>,
-    /// Hygiene: entity types that are endpoints of spine relations (to tell doomed from auxiliary).
-    pub spine_types: HashSet<String>,
-    /// Hygiene: entity types that must be grounded (from ontology `requires_grounding`).
-    pub grounding_types: HashSet<String>,
-    /// Hygiene: delete ungrounded required nodes (report-only when false). CLI `--prune-ungrounded`.
-    pub prune_ungrounded: bool,
     pub now: u64,
 }
 
@@ -68,30 +58,16 @@ impl Opts {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            prune_incomplete: false,
-            spines: vec![],
-            spine_types: HashSet::new(),
-            grounding_types: HashSet::new(),
-            prune_ungrounded: false,
             now,
         }
     }
 
-    /// Source the domain rules (spine, closure, mentions anchor, structural types) from the
-    /// ontology's `[reasoning]` section; other tunables keep their defaults. `prune_incomplete`
-    /// stays false — callers opt in (CLI `--prune-incomplete`).
+    /// Source the domain rules (closure rules, structural types) from the ontology's
+    /// `[reasoning]` section; other tunables keep their defaults.
     pub fn from_ontology(ont: &Ontology, now: u64) -> Self {
         Opts {
             closure_rules: ont.closure_rules(),
             structural: ont.structural(),
-            spines: ont.spines(),
-            spine_types: ont.spine_types(),
-            grounding_types: ont
-                .entity_types()
-                .iter()
-                .filter(|t| ont.requires_grounding(t))
-                .cloned()
-                .collect(),
             ..Opts::defaults(now)
         }
     }
@@ -99,16 +75,11 @@ impl Opts {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Report {
-    pub prune_candidates: usize,
-    pub pruned_nodes: usize,
     pub inferred_edges: usize,
     pub similar_edges: usize,
     pub communities: usize,
     pub merge_candidates: usize,
     pub merged_nodes: usize,
-    pub ungrounded_candidates: usize,
-    pub ungrounded_pruned: usize,
-    pub ungrounded: Vec<String>,
 }
 
 fn derived_prov(now: u64, confidence: f32) -> Provenance {
@@ -126,44 +97,6 @@ fn derived_prov(now: u64, confidence: f32) -> Provenance {
 /// candidates (applied only when `opts.apply_merges`). Returns counts.
 pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     let mut report = Report::default();
-
-    // (Hygiene) cull degenerate reasoning chains BEFORE anything is derived/merged over them.
-    // Report-only unless opts.prune_incomplete; empty spine → no-op. Deleting here means the
-    // merge/closure/meta passes below see the cleaned graph (they reload from `g`).
-    {
-        let id_types: Vec<(String, String)> = g
-            .all_nodes()?
-            .into_iter()
-            .map(|n| (n.id, n.node_type))
-            .collect();
-        let edges: Vec<Triple> = g
-            .all_edges()?
-            .into_iter()
-            .map(|e| (e.from, e.edge_type, e.to))
-            .collect();
-        let structural: HashSet<String> = opts.structural.iter().cloned().collect();
-        let doomed = hygiene::incomplete_nodes(
-            &id_types,
-            &edges,
-            &opts.spines,
-            &opts.spine_types,
-            &structural,
-        );
-        report.prune_candidates = doomed.len();
-        if opts.prune_incomplete && !doomed.is_empty() {
-            report.pruned_nodes = g.delete_nodes(&doomed)?;
-        }
-
-        // (Hygiene) grounding-required nodes lacking a live MENTIONS — a SEPARATE bucket from the
-        // structural prune above (never merged: a node can be complete-but-ungrounded or
-        // doomed-but-grounded). Report-only unless opts.prune_ungrounded.
-        let ungrounded = hygiene::ungrounded_nodes(&id_types, &edges, &opts.grounding_types);
-        report.ungrounded_candidates = ungrounded.len();
-        if opts.prune_ungrounded && !ungrounded.is_empty() {
-            report.ungrounded_pruned = g.delete_nodes(&ungrounded)?;
-        }
-        report.ungrounded = ungrounded;
-    }
 
     // (Tier 1) near-dup MERGE from shared evidence: reasoning nodes that MENTION the same chunk.
     // Computed first (before deriving edges) on the original graph; applied only if requested.
@@ -496,70 +429,6 @@ strict = false
     }
 
     #[test]
-    fn generalize_prune_reports_only_by_default() {
-        // a degenerate Symptom→Resolution (no Cause): both are doomed, but the default is
-        // report-only — nothing is deleted.
-        let dir = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(dir.path()).unwrap();
-        let ont = Ontology::parse(ONT).unwrap();
-        let nodes = vec![
-            node("sym:s", "Symptom", "S"),
-            node("res:r", "Resolution", "R"),
-        ];
-        let edges = vec![edge("sym:s", "RESOLVED_BY", "res:r")];
-        g.upsert(&ont, &nodes, &edges).unwrap();
-
-        let rep = generalize(&g, &Opts::from_ontology(&ont, 100)).unwrap();
-        assert_eq!(
-            rep.prune_candidates, 2,
-            "sym:s and res:r are both degenerate"
-        );
-        assert_eq!(rep.pruned_nodes, 0, "report-only by default");
-        assert!(
-            g.get_node("sym:s").unwrap().is_some(),
-            "nothing deleted without the flag"
-        );
-        assert!(g.get_node("res:r").unwrap().is_some());
-    }
-
-    #[test]
-    fn generalize_prune_applies_with_flag() {
-        // complete S1→C1→R1 survives; degenerate S2→R2 (no Cause) is culled under the flag.
-        let dir = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(dir.path()).unwrap();
-        let ont = Ontology::parse(ONT).unwrap();
-        let nodes = vec![
-            node("sym:s1", "Symptom", "S1"),
-            node("cau:c1", "Cause", "C1"),
-            node("res:r1", "Resolution", "R1"),
-            node("sym:s2", "Symptom", "S2"),
-            node("res:r2", "Resolution", "R2"),
-        ];
-        let edges = vec![
-            edge("sym:s1", "CAUSED_BY", "cau:c1"),
-            edge("cau:c1", "RESOLVED_BY", "res:r1"),
-            edge("sym:s2", "RESOLVED_BY", "res:r2"),
-        ];
-        g.upsert(&ont, &nodes, &edges).unwrap();
-
-        let mut opts = Opts::from_ontology(&ont, 100);
-        opts.prune_incomplete = true;
-        let rep = generalize(&g, &opts).unwrap();
-
-        assert_eq!(rep.prune_candidates, 2, "sym:s2 + res:r2 are degenerate");
-        assert_eq!(rep.pruned_nodes, 2, "and they are deleted under the flag");
-        // the complete chain survived
-        assert!(g.get_node("sym:s1").unwrap().is_some());
-        assert!(g.get_node("cau:c1").unwrap().is_some());
-        assert!(g.get_node("res:r1").unwrap().is_some());
-        // the degenerate pair is gone
-        assert!(g.get_node("sym:s2").unwrap().is_none());
-        assert!(g.get_node("res:r2").unwrap().is_none());
-        // closure still inferred on the cleaned graph: S1 -RESOLVED_BY-> R1
-        assert_eq!(rep.inferred_edges, 1);
-    }
-
-    #[test]
     fn merge_applied_collapses_dups_and_reattaches_edges() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
@@ -597,69 +466,4 @@ strict = false
             .any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"));
     }
 
-    #[test]
-    fn generalize_reports_and_prunes_ungrounded() {
-        let dir = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(dir.path()).unwrap();
-        // A live Section, a grounded Resolution, and an ungrounded one (dangling MENTIONS).
-        let prov = |src: &str| Provenance {
-            source_path: src.into(),
-            range: None,
-            file_sig: None,
-            origin: "agent".into(),
-            confidence: 1.0,
-            created_at: 1,
-        };
-        for (id, ty, label) in [
-            ("sec:1", "Section", "S1"),
-            ("res:a", "Resolution", "Grounded"),
-            ("res:b", "Resolution", "Ungrounded"),
-        ] {
-            g.put_node(&Node {
-                id: id.into(),
-                node_type: ty.into(),
-                label: label.into(),
-                aliases: vec![],
-                prov: prov("doc.md"),
-            })
-            .unwrap();
-        }
-        g.put_edge(&Edge {
-            from: "res:a".into(),
-            to: "sec:1".into(),
-            edge_type: "MENTIONS".into(),
-            prov: prov("doc.md"),
-        })
-        .unwrap();
-        g.put_edge(&Edge {
-            from: "res:b".into(),
-            to: "sec:gone".into(),
-            edge_type: "MENTIONS".into(),
-            prov: prov("doc.md"),
-        })
-        .unwrap();
-
-        let mut gt = std::collections::HashSet::new();
-        gt.insert("Resolution".to_string());
-
-        // report-only
-        let mut opts = Opts::defaults(1);
-        opts.grounding_types = gt.clone();
-        let r = generalize(&g, &opts).unwrap();
-        assert_eq!(r.ungrounded_candidates, 1);
-        assert_eq!(r.ungrounded, vec!["res:b".to_string()]);
-        assert_eq!(r.ungrounded_pruned, 0);
-        assert!(
-            g.get_node("res:b").unwrap().is_some(),
-            "report-only must not delete"
-        );
-
-        // prune
-        let mut opts2 = Opts::defaults(2);
-        opts2.grounding_types = gt;
-        opts2.prune_ungrounded = true;
-        let r2 = generalize(&g, &opts2).unwrap();
-        assert_eq!(r2.ungrounded_pruned, 1);
-        assert!(g.get_node("res:b").unwrap().is_none(), "pruned");
-    }
 }

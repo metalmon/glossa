@@ -971,32 +971,16 @@ pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
 
 /// Recompute the graph's DERIVED layer (transitive-closure edges, SIMILAR links, communities,
 /// centrality) non-destructively and report the counts. Shared by the MCP `graph_generalize`
-/// tool and the eval enricher so both emit identical output. `prune_incomplete`/`apply_merges`
-/// stay off (from_ontology defaults), so it never deletes or merges — pruning is a CLI action.
+/// tool and the eval enricher so both emit identical output. `apply_merges` stays off
+/// (from_ontology defaults), so it never deletes or merges nodes. Hygiene (ungrounded/stale/
+/// incomplete detection + prune) is a separate concern — see `graph::doctor`.
 pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     let opts = crate::graph::generalize::apply::Opts::from_ontology(ont, now);
     match crate::graph::generalize::apply::generalize(g, &opts) {
-        Ok(r) => {
-            let mut s = format!(
-                "generalized: prune_candidates={} ungrounded={} inferred_edges={} \
-                 similar_edges={} communities={} merge_candidates={}",
-                r.prune_candidates,
-                r.ungrounded_candidates,
-                r.inferred_edges,
-                r.similar_edges,
-                r.communities,
-                r.merge_candidates
-            );
-            if !r.ungrounded.is_empty() {
-                s.push_str("\nungrounded (re-ground these — add a MENTIONS to their source section):");
-                for id in r.ungrounded.iter().take(25) {
-                    if let Ok(Some(n)) = g.get_node(id) {
-                        s.push_str(&format!("\n- {} [{}] {}  (source: {})", n.id, n.node_type, n.label, n.prov.source_path));
-                    }
-                }
-            }
-            s
-        }
+        Ok(r) => format!(
+            "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
+            r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
+        ),
         Err(e) => format!("graph_generalize error: {e}"),
     }
 }
@@ -2479,7 +2463,10 @@ strict = true
     }
 
     #[test]
-    fn graph_generalize_text_reports_ungrounded() {
+    fn graph_generalize_text_is_derived_layer_only() {
+        // generalize no longer runs/reports hygiene (ungrounded/incomplete detection moved to
+        // `graph::doctor` — see doctor::tests::doctor_reports_three_buckets for that coverage).
+        // An ungrounded node must NOT show up in the generalize summary.
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let prov = crate::graph::store::Provenance {
@@ -2492,8 +2479,15 @@ strict = true
         }).unwrap();
         let ont = Ontology::parse(GROUNDING_ONT).unwrap();
         let text = graph_generalize(&g, &ont, 1);
-        assert!(text.contains("ungrounded=1"), "{text}");
-        assert!(text.contains("Ungrounded"), "{text}");
+        assert!(
+            text.contains("inferred_edges=")
+                && text.contains("similar_edges=")
+                && text.contains("communities=")
+                && text.contains("merge_candidates="),
+            "{text}"
+        );
+        assert!(!text.contains("ungrounded"), "{text}");
+        assert!(!text.contains("Ungrounded"), "{text}");
     }
 
     const VALIDITY_ONT: &str = r#"

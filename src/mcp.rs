@@ -1324,7 +1324,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`related`). Non-destructive — it never deletes or merges nodes. It also REPORTS how many degenerate reasoning chains exist as `prune_candidates` (a node off the reasoning spine) without removing them; actual pruning is a deliberate operator action. Run it after a batch of edits to refresh the derived view."
+        description = "Recompute the graph's DERIVED layer from what is currently stored: transitive-closure edges, SIMILAR links, communities and centrality (these surface in `glossary`/`related`). Non-destructive — it never deletes or merges nodes. Run it after a batch of edits to refresh the derived view."
     )]
     async fn graph_generalize(
         &self,

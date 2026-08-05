@@ -278,14 +278,6 @@ enum GraphAction {
             help = "also collapse near-duplicate nodes (destructive)"
         )]
         merge: bool,
-        #[arg(
-            short = 'p',
-            long,
-            help = "delete degenerate reasoning chains off the ontology spine (destructive)"
-        )]
-        prune_incomplete: bool,
-        #[arg(long, help = "delete required nodes that lost their MENTIONS grounding (destructive)")]
-        prune_ungrounded: bool,
     },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
@@ -1025,12 +1017,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Generalize {
-                path,
-                merge,
-                prune_incomplete,
-                prune_ungrounded,
-            } => {
+            GraphAction::Generalize { path, merge } => {
                 let path = glossa::root::resolve_root(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
@@ -1039,22 +1026,11 @@ fn main() -> anyhow::Result<()> {
                     glossa::trace::now_ms(),
                 );
                 opts.apply_merges = merge;
-                opts.prune_incomplete = prune_incomplete;
-                opts.prune_ungrounded = prune_ungrounded;
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
                 println!(
-                    "generalize: prune_candidates={} pruned_nodes={} inferred_edges={} \
-                     similar_edges={} communities={} merge_candidates={} merged_nodes={} \
-                     ungrounded_candidates={} ungrounded_pruned={}",
-                    r.prune_candidates,
-                    r.pruned_nodes,
-                    r.inferred_edges,
-                    r.similar_edges,
-                    r.communities,
-                    r.merge_candidates,
-                    r.merged_nodes,
-                    r.ungrounded_candidates,
-                    r.ungrounded_pruned,
+                    "generalize: inferred_edges={} similar_edges={} communities={} \
+                     merge_candidates={} merged_nodes={}",
+                    r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates, r.merged_nodes,
                 );
                 Ok(())
             }
