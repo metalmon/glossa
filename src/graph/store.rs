@@ -2,6 +2,7 @@ use crate::graph::ontology::Ontology;
 use crate::index::manifest::FileSig;
 use anyhow::Context;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
@@ -55,6 +56,18 @@ pub struct NodeMeta {
     pub degree: Option<i64>,
 }
 
+/// Authored (source-of-truth) validity interval for a node, stored in the `node_validity` side
+/// table (1:1 with a node, by `node_id`). Unlike `node_meta`, this is NOT derived/regenerable —
+/// it survives `generalize` and must be deleted explicitly whenever a node is deleted (no FK
+/// cascade in this store).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeValidity {
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub valid_from_raw: Option<String>,
+    pub valid_to_raw: Option<String>,
+}
+
 /// Count of nodes and edges removed by [`GraphStore::delete_agent_table_compile_layer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentLayerDeleteStats {
@@ -91,7 +104,16 @@ impl GraphStore {
              CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(efrom);
              CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(eto);
              CREATE TABLE IF NOT EXISTS node_meta (
-               id TEXT PRIMARY KEY, community INTEGER, pagerank REAL, degree INTEGER);",
+               id TEXT PRIMARY KEY, community INTEGER, pagerank REAL, degree INTEGER);
+             CREATE TABLE IF NOT EXISTS node_validity (
+               node_id        TEXT PRIMARY KEY,
+               valid_from     TEXT,
+               valid_to       TEXT,
+               valid_from_raw TEXT,
+               valid_to_raw   TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_node_validity_from ON node_validity(valid_from);
+             CREATE INDEX IF NOT EXISTS idx_node_validity_to   ON node_validity(valid_to);",
         )
         .context("init schema")?;
         let node_index =
@@ -592,6 +614,11 @@ impl GraphStore {
                 "DELETE FROM node_meta WHERE id = ?1",
                 rusqlite::params![dup],
             );
+            // mirror node_meta cleanup — no FK cascade in this store
+            let _ = txn.execute(
+                "DELETE FROM node_validity WHERE node_id = ?1",
+                rusqlite::params![dup],
+            );
         }
         Self::put_node_c(&txn, &canon)?;
         txn.commit().context("commit merge")?;
@@ -617,6 +644,11 @@ impl GraphStore {
             )
             .context("delete_nodes: incident edges")?;
             let _ = txn.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![id]);
+            // mirror node_meta cleanup — no FK cascade in this store
+            let _ = txn.execute(
+                "DELETE FROM node_validity WHERE node_id = ?1",
+                rusqlite::params![id],
+            );
             removed += txn
                 .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
                 .context("delete_nodes: node")?;
@@ -695,6 +727,54 @@ impl GraphStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Insert or replace the authored validity interval for a node (1:1 by `node_id`).
+    pub fn upsert_validity(&self, node_id: &str, v: &NodeValidity) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO node_validity (node_id, valid_from, valid_to, valid_from_raw, valid_to_raw) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(node_id) DO UPDATE SET \
+               valid_from=excluded.valid_from, valid_to=excluded.valid_to, \
+               valid_from_raw=excluded.valid_from_raw, valid_to_raw=excluded.valid_to_raw",
+            rusqlite::params![node_id, v.valid_from, v.valid_to, v.valid_from_raw, v.valid_to_raw],
+        )
+        .context("upsert_validity")?;
+        Ok(())
+    }
+
+    /// The authored validity interval for a node, or None if it has none recorded.
+    pub fn validity_for(&self, node_id: &str) -> anyhow::Result<Option<NodeValidity>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT valid_from, valid_to, valid_from_raw, valid_to_raw FROM node_validity WHERE node_id = ?1",
+                rusqlite::params![node_id],
+                |r| {
+                    Ok(NodeValidity {
+                        valid_from: r.get(0)?,
+                        valid_to: r.get(1)?,
+                        valid_from_raw: r.get(2)?,
+                        valid_to_raw: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .context("validity_for")?;
+        Ok(row)
+    }
+
+    /// A node is visible at `at` if it has no validity row, or its interval covers `at`.
+    pub fn visible_at(&self, node_id: &str, at: &str) -> anyhow::Result<bool> {
+        match self.validity_for(node_id)? {
+            None => Ok(true),
+            Some(v) => {
+                let from_ok = v.valid_from.as_deref().map(|f| f <= at).unwrap_or(true);
+                let to_ok = v.valid_to.as_deref().map(|t| t >= at).unwrap_or(true);
+                Ok(from_ok && to_ok)
+            }
+        }
     }
 
     /// Number of rows in `node_meta` (0 until generalize has run).
@@ -877,6 +957,11 @@ impl GraphStore {
             .context("delete node")?;
         let nodes_deleted = c.changes() as usize;
         let _ = c.execute("DELETE FROM node_meta WHERE id = ?1", rusqlite::params![id]);
+        // mirror node_meta cleanup — no FK cascade in this store
+        let _ = c.execute(
+            "DELETE FROM node_validity WHERE node_id = ?1",
+            rusqlite::params![id],
+        );
         Ok(nodes_deleted + edges_deleted)
     }
 
@@ -1315,6 +1400,44 @@ mod tests {
         // empty / missing ids are no-ops
         assert_eq!(g.delete_nodes(&[]).unwrap(), 0);
         assert_eq!(g.delete_nodes(&["zzz".into()]).unwrap(), 0);
+    }
+
+    #[test]
+    fn node_validity_roundtrip_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&Node {
+            id: "res:x".into(),
+            node_type: "Symptom".into(),
+            label: "res:x".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+
+        g.upsert_validity(
+            "res:x",
+            &NodeValidity {
+                valid_from: Some("2020-01-01T00:00:00Z".into()),
+                valid_to: Some("2023-12-31T23:59:59Z".into()),
+                valid_from_raw: Some("2020".into()),
+                valid_to_raw: Some("2023".into()),
+            },
+        )
+        .unwrap();
+
+        let v = g.validity_for("res:x").unwrap().unwrap();
+        assert_eq!(v.valid_from.as_deref(), Some("2020-01-01T00:00:00Z"));
+        assert_eq!(v.valid_to_raw.as_deref(), Some("2023"));
+
+        assert!(g.visible_at("res:x", "2022-06-01T00:00:00Z").unwrap());
+        assert!(!g.visible_at("res:x", "2024-06-01T00:00:00Z").unwrap());
+        // a node with NO validity row is always visible
+        assert!(g.visible_at("some:timeless", "2024-06-01T00:00:00Z").unwrap());
+
+        // deleting the node removes its validity row
+        g.delete_nodes(&["res:x".into()]).unwrap();
+        assert!(g.validity_for("res:x").unwrap().is_none());
     }
 
     #[test]
