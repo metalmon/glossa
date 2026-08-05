@@ -11,6 +11,7 @@
 
 use super::Triple;
 use crate::graph::ontology::Spine;
+use crate::index::manifest::FileSig;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Ids to delete: non-structural nodes not on a complete instance of ANY `spine`, and not
@@ -99,6 +100,29 @@ pub fn ungrounded_nodes(
         .collect();
     out.sort();
     out.dedup();
+    out
+}
+
+/// Node ids whose stored source signature no longer matches the file on disk.
+/// `nodes` = (id, source_path, stored_file_sig). A `None` stored sig, a missing
+/// or unreadable source, or an equal sig → not stale.
+pub fn stale_nodes(
+    root: &std::path::Path,
+    nodes: &[(String, String, Option<FileSig>)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    // cache re-stats per source_path (many nodes share a doc)
+    let mut seen: HashMap<&str, Option<FileSig>> = HashMap::new();
+    for (id, source_path, stored) in nodes {
+        let Some(stored) = stored else { continue };
+        let cur = *seen.entry(source_path.as_str()).or_insert_with(|| {
+            crate::index::store::file_sig(&root.join(source_path)).ok()
+        });
+        match cur {
+            Some(cur) if cur != *stored => out.push(id.clone()),
+            _ => {} // equal, or file missing/unreadable → not stale
+        }
+    }
     out
 }
 
@@ -333,5 +357,30 @@ mod tests {
         assert_eq!(out, vec!["res:b".to_string(), "res:c".to_string()]);
         // Empty grounding_types → no-op.
         assert!(ungrounded_nodes(&nodes, &edges, &std::collections::HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn stale_nodes_detects_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = root.join("doc.md");
+        std::fs::write(&p, b"v1").unwrap();
+        let sig0 = crate::index::store::file_sig(&p).unwrap();
+
+        // same sig → not stale
+        let nodes = vec![("n1".to_string(), "doc.md".to_string(), Some(sig0))];
+        assert!(stale_nodes(root, &nodes).is_empty());
+
+        // rewrite with different size → stale
+        std::fs::write(&p, b"v2-longer").unwrap();
+        assert_eq!(stale_nodes(root, &nodes), vec!["n1".to_string()]);
+
+        // stored None → never stale
+        let none_nodes = vec![("n2".to_string(), "doc.md".to_string(), None)];
+        assert!(stale_nodes(root, &none_nodes).is_empty());
+
+        // missing source → not stale (ungrounded's job)
+        let missing = vec![("n3".to_string(), "gone.md".to_string(), Some(sig0))];
+        assert!(stale_nodes(root, &missing).is_empty());
     }
 }
