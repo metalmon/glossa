@@ -50,7 +50,8 @@ Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=
 | `graph_build` | | ✓* | ✓* | Compile `.csp` limit tables into constraint graph; only available with `--features constraint` |
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
-| `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive) |
+| `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive; no longer reports ungrounded) |
+| `graph_doctor` | | ✓ | ✓ | Report ungrounded, stale, and incomplete nodes (report-only; pruning is CLI-only via `kb graph doctor`) |
 | `graph_stats` | | ✓ | ✓ | Node/edge counts and community overview |
 | `purge` | | | ✓ | Delete entire `.glossa/` |
 

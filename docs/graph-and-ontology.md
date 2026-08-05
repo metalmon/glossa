@@ -132,6 +132,35 @@ into the graph today with a `valid_from` years in the past, or scheduled with a
 `valid_from` in the future — the two clocks are independent, and only the
 former is queried by `--as-of`.
 
+## Graph doctor
+
+The graph accumulates three types of doubts as documents and reasoning edges evolve. The `graph doctor` command reports all three, and offers targeted pruning options for two:
+
+**Three doubts:**
+
+- **`ungrounded`** — a reasoning node marked `requires_grounding = true` in the ontology has no `MENTIONS` edge pointing to an indexed section (or a `MENTIONS` edge whose target section no longer exists in the index). This means the source evidence was deleted or lost.
+- **`stale`** — a reasoning node's source document has changed on disk since the node was grounded. The grounding captured a file signature (`file_sig`) at write time; a subsequent file edit changed that signature, so the node's reasoning may no longer align with the current source text.
+- **`incomplete`** — a reasoning node is off the reasoning spine (not reachable from a grounding type via the ontology's declared relations). Such nodes do not participate in derived-layer reasoning (SIMILAR, closure, communities) and often indicate a malformed edge or a type that was removed from the ontology.
+
+Use the doctor to audit and heal:
+
+```bash
+kb graph doctor ./my-corpus                      # report all doubts
+kb graph doctor ./my-corpus --prune-ungrounded   # delete ungrounded nodes (destructive)
+kb graph doctor ./my-corpus --prune-incomplete   # remove off-spine nodes (destructive)
+```
+
+The **healing loop** for stale nodes:
+
+1. Run `kb graph doctor` and identify stale nodes.
+2. **Read** the source document to see what changed: `kb graph read node_id ./my-corpus` or open the citation directly.
+3. **Re-ground** by calling `graph_upsert` with the updated node or a refreshed `MENTIONS` edge. On upsert, glossa re-stat the source file, recompute `file_sig`, and clear the stale flag. Alternatively, retract the node if the reasoning no longer holds.
+4. Repeat until `graph doctor` reports no stale nodes.
+
+**No `--prune-stale`.** Stale nodes are never deleted by the doctor — they are re-grounded instead. A stale flag is a signal to re-read the source, not a reason to discard reasoning.
+
+**Inline stale marker.** When reading or querying the graph via `read`, `glossary`, or `neighbors`, stale nodes are marked with `⚠ stale` so an answering agent can de-prioritize drifted facts and re-fetch the source if needed.
+
 ## Operator workflow
 
 ### 1. Deploy ontology
@@ -154,25 +183,33 @@ kb index ./my-corpus
 
 The `kb-train enrich` command reverse-traces solved cases into reasoning edges. See [eval-and-training.md](eval-and-training.md).
 
-### 3. Generalize
+### 3. Diagnose (optional)
 
-Recompute SIMILAR links, communities, and closure:
+Inspect the three types of doubts before recomputing:
+
+```bash
+kb graph doctor ./my-corpus    # report ungrounded, stale, and incomplete nodes
+```
+
+See [Graph doctor](#graph-doctor) for healing workflows and pruning options (`--prune-ungrounded`, `--prune-incomplete`). Pruning is CLI-only; MCP `graph_doctor` is report-only.
+
+### 4. Generalize
+
+Recompute SIMILAR links, communities, and closure — derived-layer only, no hygiene:
 
 ```bash
 kb graph generalize ./my-corpus
 ```
 
-Or via MCP: `graph_generalize`. Non-destructive by default. Destructive options on CLI only:
+Or via MCP: `graph_generalize`. Non-destructive; collapses near-duplicates with:
 
 ```bash
 kb graph generalize ./my-corpus --merge              # collapse near-duplicates
-kb graph generalize ./my-corpus --prune-incomplete   # remove off-spine nodes
-kb graph generalize ./my-corpus --prune-ungrounded   # remove required nodes that lost MENTIONS grounding
 ```
 
-The non-destructive run still **reports** `ungrounded=<n>` and lists those nodes (see [Grounding](#grounding)) so an agent can re-ground them.
+`generalize` no longer reports ungrounded nodes (use `graph doctor` instead).
 
-### 4. Inspect
+### 5. Inspect
 
 ```bash
 kb graph stats ./my-corpus
@@ -185,7 +222,7 @@ kb graph path sym:abc123 res:def456 ./my-corpus       # bounded path between two
 
 MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
 
-### 5. Export, import, prune
+### 6. Export, import, prune
 
 ```bash
 kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml/html)
