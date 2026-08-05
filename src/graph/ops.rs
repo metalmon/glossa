@@ -837,12 +837,23 @@ pub fn graph_upsert(
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
     match apply_upsert(g, ont, nodespecs, edgespecs, now) {
         Ok(result) => {
-            // Author node_validity for each node that supplied a bound. A write failure here
-            // (store error) surfaces as a dropped-item note — the node itself is already
-            // committed, so this does not roll the batch back.
+            // Author node_validity for each node that supplied a bound. `result.merged` is
+            // (requested_id → canonical_id) for every node that converged into an EXISTING
+            // graph node under a different id (dedup by normalized label+type in apply_upsert).
+            // A node in validity_writes still carries its pre-merge id (that's what nodespecs
+            // held before the move above) — remap through `merged` so the row lands on the id
+            // the node actually got stored under; otherwise it's authored under an id nothing
+            // is stored at, and validity_for(canonical_id) silently misses it. A node that did
+            // NOT merge keeps its own id (it IS the canonical id).
+            let canonical_of: std::collections::HashMap<&str, &str> = result
+                .merged
+                .iter()
+                .map(|(requested, canonical)| (requested.as_str(), canonical.as_str()))
+                .collect();
             for (id, v) in &validity_writes {
+                let target = canonical_of.get(id.as_str()).copied().unwrap_or(id.as_str());
                 if let Err(e) = g.upsert_validity(
-                    id,
+                    target,
                     &NodeValidity {
                         valid_from: v.valid_from_norm.clone(),
                         valid_to: v.valid_to_norm.clone(),
@@ -850,7 +861,7 @@ pub fn graph_upsert(
                         valid_to_raw: v.valid_to_raw.clone(),
                     },
                 ) {
-                    errs.push(format!("node \"{id}\" validity not recorded: {e}"));
+                    errs.push(format!("node \"{target}\" validity not recorded: {e}"));
                 }
             }
             let out = UpsertOutcome {
@@ -2548,5 +2559,67 @@ strict = true
         };
         let out2 = graph_upsert(&idx, &g, &ont, vec![timed], vec![], 0);
         assert!(!out2.rejected, "{}", out2.message);
+    }
+
+    /// A node that DEDUP-MERGES into an existing graph node under a different id (same
+    /// scenario as `dedup_reports_merged_in_response`) must have its validity authored under
+    /// the id it actually landed on (the pre-existing "legacy" id), not the pre-merge
+    /// `id_for()`-derived id — nothing is ever stored under that id, so a row written there
+    /// would be a silent orphan invisible to `validity_for(canonical_id)`.
+    #[test]
+    fn validity_write_follows_merge_to_canonical_id() {
+        use crate::graph::agent::{apply_upsert, NodeSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        // Pre-existing node under a "legacy" id that does NOT match id_for(type, label).
+        apply_upsert(
+            &g,
+            &ont,
+            vec![NodeSpec {
+                id: "sym:legacy-id".into(),
+                node_type: "Symptom".into(),
+                label: "Connection loss".into(),
+                aliases: vec![],
+                source_path: "case1.docx".into(),
+                range: None,
+                confidence: None,
+            }],
+            vec![],
+            1,
+        )
+        .unwrap();
+
+        // Upsert the SAME type+label with a validity bound — apply_upsert will dedup this
+        // into "sym:legacy-id" (same as dedup_reports_merged_in_response).
+        let node = UpsertNode {
+            valid_from: Some("2021-01-01".into()),
+            valid_to: Some("2022-01-01".into()),
+            ..unode("Symptom", "Connection loss", "case1.docx")
+        };
+        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 2);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0, "deduped node not created");
+        assert!(out.message.contains("sym:legacy-id"), "{}", out.message);
+
+        // The validity row must be on the canonical (stored) id...
+        let v = g
+            .validity_for("sym:legacy-id")
+            .unwrap()
+            .expect("validity authored under the canonical/stored id");
+        assert_eq!(v.valid_from.as_deref(), Some("2021-01-01T00:00:00Z"));
+        assert_eq!(v.valid_to.as_deref(), Some("2022-01-01T23:59:59Z"));
+
+        // ...and NOT orphaned under the pre-merge id_for()-derived id (nothing is stored there).
+        let pre_merge_id = id_for(&ont, "Symptom", "Connection loss");
+        assert_ne!(pre_merge_id, "sym:legacy-id");
+        assert!(
+            g.validity_for(&pre_merge_id).unwrap().is_none(),
+            "no orphan row under the pre-merge id"
+        );
     }
 }
