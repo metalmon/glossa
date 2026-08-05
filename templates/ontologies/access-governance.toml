@@ -16,9 +16,6 @@ props = []
 id_prefix = "grn"
 props = []
 requires_grounding = true
-[entities.Literal]
-id_prefix = "lit"
-props = []
 
 [relations.GRANTS]
 from = ["Role"]

@@ -10,8 +10,10 @@ id_prefix = "rol"
 props = []
 requires_grounding = true
 [entities.Team]
+id_prefix = "tea"
 props = []
 [entities.Process]
+id_prefix = "pro"
 props = []
 
 [relations.REPORTS_TO]

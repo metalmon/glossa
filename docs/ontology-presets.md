@@ -29,7 +29,7 @@ and compliance shapes; the rest cover everyday operational knowledge.
 ## Browsing and choosing
 
 ```bash
-kb ontology list                 # the full catalog, grouped by tier and family
+kb ontology list                 # the full catalog, listed by tier, then family
 kb ontology list --family risk   # just one family
 kb ontology show compliance      # print a preset's TOML before committing to it
 kb ontology suggest "we receive supplier bids and must check every requirement is answered"

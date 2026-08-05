@@ -17,6 +17,7 @@ id_prefix = "ctr"
 props = []
 requires_grounding = true
 [entities.Sla]
+id_prefix = "sla"
 props = []
 
 [relations.PROVIDES]

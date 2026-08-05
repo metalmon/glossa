@@ -10,10 +10,13 @@ id_prefix = "dat"
 props = []
 requires_grounding = true
 [entities.Purpose]     # why the data is processed
+id_prefix = "pur"
 props = []
 [entities.LegalBasis]  # the lawful basis for processing
+id_prefix = "lgb"
 props = []
 [entities.Processor]   # who processes the data
+id_prefix = "prc"
 props = []
 [entities.Literal]
 id_prefix = "lit"

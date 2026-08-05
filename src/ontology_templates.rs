@@ -222,6 +222,12 @@ mod tests {
 
     #[test]
     fn all_presets_well_formed() {
+        // Core structural node types, always valid as a relation endpoint even though
+        // they are never declared as `[entities.*]` in a preset. Mirrors
+        // `crate::graph::STRUCTURAL_NODES` (kept as a literal here so this test doesn't
+        // silently pass if that constant's contents ever drift).
+        const CORE_NODES: &[&str] = &["Document", "Section", "Term", "Topic"];
+
         let mut seen_names = std::collections::HashSet::new();
         let mut seen_aliases = std::collections::HashSet::new();
         for (name, toml) in TEMPLATES {
@@ -236,9 +242,45 @@ mod tests {
                 assert!(seen_aliases.insert(a.clone()), "{name}: duplicate alias {a}");
                 assert!(raw(a).is_none(), "{name}: alias {a} collides with a preset name");
             }
-            // every requires_grounding type is a declared entity
-            // (validated indirectly: parse succeeds and strict validation is on)
             assert!(o.strict(), "{name}: presets must set strict = true");
+
+            // Cross-reference integrity: `Ontology::parse` does NOT validate that a
+            // relation endpoint names a declared type, or that a spine's relations
+            // exist — those are only enforced at `graph_upsert` runtime. Assert both
+            // here so a dangling reference in a preset fails the build, not a
+            // production run.
+            let entity_types = o.entity_types();
+            let constraint_types = o.constraint_types();
+            let relations = o.raw_relations();
+            let endpoint_ok = |t: &str| {
+                t == "*"
+                    || CORE_NODES.contains(&t)
+                    || entity_types.contains(t)
+                    || constraint_types.contains_key(t)
+            };
+            for (rel_name, r) in relations {
+                for t in &r.from {
+                    assert!(
+                        endpoint_ok(t),
+                        "{name}: relations.{rel_name}.from references undeclared type '{t}'"
+                    );
+                }
+                for t in &r.to {
+                    assert!(
+                        endpoint_ok(t),
+                        "{name}: relations.{rel_name}.to references undeclared type '{t}'"
+                    );
+                }
+            }
+            for spine in o.spines() {
+                for rel_name in &spine.relations {
+                    assert!(
+                        relations.contains_key(rel_name),
+                        "{name}: reasoning spine (anchor {}) references undeclared relation '{rel_name}'",
+                        spine.anchor
+                    );
+                }
+            }
         }
         assert_eq!(TEMPLATES.len(), 26, "expected 26 presets");
     }
