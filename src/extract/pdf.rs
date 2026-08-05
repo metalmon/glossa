@@ -1,4 +1,3 @@
-use crate::extract::pdf_table::{expand_table, table_to_markdown};
 use crate::extract::Extractor;
 use crate::model::Chunk;
 use std::path::Path;
@@ -29,17 +28,7 @@ impl Extractor for PdfExtractor {
 
                 let mut out = Vec::with_capacity(page_count as usize);
                 for i in 0..page_count as usize {
-                    let mut text = doc.extract_text(i).unwrap_or_default();
-                    if text.trim().is_empty() {
-                        text = doc
-                            .extract_tables(i)
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|table| table_to_markdown(&expand_table(table)))
-                            .filter(|markdown| !markdown.trim().is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                    }
+                    let text = doc.extract_text(i).unwrap_or_default();
                     out.push(Chunk {
                         doc_path: path_buf.clone(),
                         location: format!("p.{}", i + 1),
@@ -283,9 +272,9 @@ mod tests {
     fn extracts_table_content_as_flat_text() {
         let bytes = include_bytes!("../../tests/fixtures/table.pdf");
         let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
-        // Layout-text is the primary path now: a table is flattened to readable rows on p.1 (its
-        // cell VALUES are preserved). The markdown-table partition is a fallback when pdf_oxide
-        // mis-detects multi-column prose as tables and mangles the words. p.1 also locks the
+        // Layout-text is the only path: a table is flattened to readable rows on p.1 (its cell
+        // VALUES are preserved). We deliberately do NOT run pdf_oxide's structured table detector
+        // — it mis-detected multi-column prose as tables and mangled the words. p.1 also locks the
         // 1-based `p.N` page mapping the read contract rests on.
         assert_eq!(chunks[0].location, "p.1");
         let joined = chunks
