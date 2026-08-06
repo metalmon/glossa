@@ -125,7 +125,7 @@ pub fn rel_key(root: &Path, abs: &Path) -> String {
     // Canonical key uses forward slashes. `/` is JSON/transport-safe — a lone `\` is an escape
     // character and gets dropped/mangled through tool args and MCP — while Windows accepts `/` in
     // paths natively. This is the ONE place the stored separator is decided, so the index and the
-    // graph stay uniform (no mixed `БД/От\Рук…` keys) and every displayed path round-trips cleanly.
+    // graph stay uniform (no mixed `docs/sub\file` keys) and every displayed path round-trips cleanly.
     abs.strip_prefix(root)
         .unwrap_or(abs)
         .to_string_lossy()
