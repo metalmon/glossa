@@ -1105,7 +1105,13 @@ impl GraphStore {
         let count: i64 = c
             .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
             .context("count nodes")?;
-        if self.node_index.num_docs() as i64 != count {
+        // Rebuild when the index has drifted from the node table. Count alone misses in-place
+        // content edits (an added alias, a bulk `\`->`/` id/path migration) — they change what a
+        // node reads as without changing how many there are — so also compare a cheap content
+        // signature over (id, label, aliases). The sig is derived straight from SQLite, so even a
+        // raw out-of-band UPDATE self-heals on the next resolve.
+        let sig = Self::node_content_sig(&c)?;
+        if self.node_index.num_docs() as i64 != count || self.node_index.built_sig() != Some(sig) {
             let docs: Vec<(String, Vec<String>)> = Self::all_nodes_c(&c)?
                 .into_iter()
                 .map(|n| {
@@ -1116,8 +1122,29 @@ impl GraphStore {
                 })
                 .collect();
             self.node_index.rebuild(&docs)?;
+            self.node_index.set_built_sig(sig)?;
         }
         self.node_index.search(name, 10)
+    }
+
+    /// A cheap content fingerprint of the node table — a hash of every `(id, label, aliases)` in
+    /// id order. Changes on any node add/remove AND on any in-place edit, so it catches drift the
+    /// raw count misses. Deterministic (`DefaultHasher` has fixed keys), so it survives across
+    /// process runs and can be persisted beside the index.
+    fn node_content_sig(c: &rusqlite::Connection) -> anyhow::Result<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut stmt = c.prepare("SELECT id, label, aliases FROM nodes ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            let label: String = r.get(1)?;
+            let aliases: String = r.get(2)?;
+            id.hash(&mut h);
+            label.hash(&mut h);
+            aliases.hash(&mut h);
+        }
+        Ok(h.finish())
     }
 }
 
@@ -1181,6 +1208,30 @@ strict = true
             vec!["org:acme".to_string()]
         );
         assert_eq!(g.resolve("ACME").unwrap(), vec!["org:acme".to_string()]);
+    }
+
+    #[test]
+    fn resolve_rebuilds_when_alias_added_in_place() {
+        // Adding an alias to an EXISTING node leaves the node count unchanged, so the old
+        // count-gated rebuild would never pick it up. The content signature catches the in-place
+        // edit and rebuilds, so the alias becomes searchable.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let mk = |aliases: Vec<String>| Node {
+            id: "org:acme".into(),
+            node_type: "Organization".into(),
+            label: "Acme Corp".into(),
+            aliases,
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[mk(vec![])], &[]).unwrap();
+        // First resolve builds the index; the not-yet-added alias must miss.
+        assert!(g.resolve("Zephyrion").unwrap().is_empty());
+        // Add the alias in place — count stays at one node.
+        g.upsert(&ont, &[mk(vec!["Zephyrion".into()])], &[]).unwrap();
+        // Signature drift must force a rebuild so the new alias resolves.
+        assert_eq!(g.resolve("Zephyrion").unwrap(), vec!["org:acme".to_string()]);
     }
 
     #[test]

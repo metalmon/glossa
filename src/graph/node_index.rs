@@ -19,6 +19,9 @@ pub struct NodeIndex {
     reader: IndexReader,
     id: Field,
     text: Field,
+    /// Sidecar holding the node-table content signature this index was last rebuilt from, so
+    /// `resolve` can detect drift the raw doc count misses (see `GraphStore::resolve`).
+    sig_path: std::path::PathBuf,
 }
 
 fn nodes_dir(dir: &Path) -> std::path::PathBuf {
@@ -52,7 +55,20 @@ impl NodeIndex {
             reader,
             id,
             text,
+            sig_path: p.with_extension("sig"),
         })
+    }
+
+    /// The node-table content signature this index was last rebuilt from, if recorded.
+    pub fn built_sig(&self) -> Option<u64> {
+        std::fs::read_to_string(&self.sig_path).ok()?.trim().parse().ok()
+    }
+
+    /// Persist the content signature the index was just rebuilt from, beside the segment dir.
+    pub fn set_built_sig(&self, sig: u64) -> anyhow::Result<()> {
+        std::fs::write(&self.sig_path, sig.to_string())
+            .with_context(|| format!("write node-index sig {:?}", self.sig_path))?;
+        Ok(())
     }
 
     /// Number of indexed nodes (non-deleted). The `GraphStore` compares this to the node-table
