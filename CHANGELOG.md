@@ -31,6 +31,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`requires_validity` on dedup-merge**: valid-time is remapped through `apply_upsert`'s merge, so a node deduped onto a canonical id keeps its interval.
 - **Traceability preset closure**: the requirement→test shortcut closure and certification wording were corrected.
 - **Glob backslash normalization**: `\` is normalized to `/` in glob patterns so slash handling is idempotent across platforms.
+- **Stored path keys normalized to forward slash**: the index and graph now key a document by its forward-slash relative path, decided in one place (`rel_key`). A lone backslash is an escape character that gets mangled through MCP tool args, so mixed-separator keys could split the same document across the index and graph; forward slashes are JSON/transport-safe and Windows-native, so every displayed path round-trips. Also drops a redundant `@owner` suffix in glossary output.
+- **Node search index rebuilds on content drift, not just document count**: the glossary/resolve BM25 node index was rebuilt only when the document count changed, so same-count edits (alias adds, path migrations) were missed and glossary/resolve went stale. It now rebuilds when the underlying content drifts.
 
 ## [0.2.7] - 2026-08-04
 
