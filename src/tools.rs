@@ -719,20 +719,20 @@ pub fn glossary(
                             Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id, stale)),
                             // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
-                                // Node ids are label-only, so the owner document is not in the id.
-                                // Always show it (`@<doc>`) — the read-anchor doc is conditional on a
-                                // MENTIONS edge and may point to a *different* doc (cross-standard
-                                // reference), so the owner is not otherwise guaranteed in the head.
-                                let owner = if node.prov.source_path.is_empty() {
+                                // The `— read` anchor (MENTIONS grounding) is the actionable source
+                                // pointer. When it exists, drop the separate `@owner`: showing a
+                                // second, possibly different document (the node's nominal owner vs
+                                // the grounded doc — e.g. a component doc vs the standard it cites)
+                                // made agents read the wrong one. Fall back to `@owner` only for an
+                                // ungrounded node, where it is the only pointer to a document.
+                                let anchor = read_anchor(idx, g, &node.id);
+                                let owner = if node.prov.source_path.is_empty() || !anchor.is_empty() {
                                     String::new()
                                 } else {
                                     format!("  @{}", node.prov.source_path)
                                 };
-                                let head = format!(
-                                    "{base}{owner}{}{}",
-                                    meta_suffix(g, &node.id, stale),
-                                    read_anchor(idx, g, &node.id),
-                                );
+                                let head =
+                                    format!("{base}{owner}{}{anchor}", meta_suffix(g, &node.id, stale));
                                 let mut seen = std::collections::HashSet::new();
                                 seen.insert(node.id.clone());
                                 let mut chain = Vec::new();

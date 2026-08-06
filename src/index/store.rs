@@ -122,10 +122,14 @@ fn canonicalize_stripped(path: &Path) -> Option<PathBuf> {
 /// the index and the graph; `DocIndex::doc_file` turns it back into a real file path. Built once,
 /// at the walk boundary, so the stored key never depends on how the corpus was addressed.
 pub fn rel_key(root: &Path, abs: &Path) -> String {
+    // Canonical key uses forward slashes. `/` is JSON/transport-safe — a lone `\` is an escape
+    // character and gets dropped/mangled through tool args and MCP — while Windows accepts `/` in
+    // paths natively. This is the ONE place the stored separator is decided, so the index and the
+    // graph stay uniform (no mixed `БД/От\Рук…` keys) and every displayed path round-trips cleanly.
     abs.strip_prefix(root)
         .unwrap_or(abs)
         .to_string_lossy()
-        .to_string()
+        .replace('\\', "/")
 }
 
 impl DocIndex {
