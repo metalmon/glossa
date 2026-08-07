@@ -40,8 +40,14 @@ jobs:
           done
           exit 1
 
-      - name: cargo test (glossa)
-        run: cargo test -p glossa --release --locked
+      # Minimal build — no default features, notebook explicitly on (the one non-core feature we
+      # always ship). Guards that nothing outside `notebook` leaked a hard dependency.
+      - name: cargo test (glossa, minimal + notebook)
+        run: cargo test -p glossa --release --locked --no-default-features --features notebook
+
+      # Full build — every feature (notebook + lingua + constraint).
+      - name: cargo test (glossa, all features)
+        run: cargo test -p glossa --release --locked --all-features
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked

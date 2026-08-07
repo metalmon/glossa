@@ -1290,6 +1290,9 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let mut next = Manifest::default();
 
     let mut links: Vec<(String, String)> = Vec::new();
+    // Files we actually (re)indexed this pass — re-stat'd at the end so a file that changed while
+    // we were indexing it holds back its dir's dirsig entry (see `unsettled_dirs`).
+    let mut indexed: Vec<(String, FileSig)> = Vec::new();
     eprintln!("indexing files under {}...", idx.root.display());
     crate::walk::walk_files(&idx.root, None, true, &mut |path| {
         let path_str = rel_key(&idx.root, path);
@@ -1304,6 +1307,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
         eprintln!("  + {path_str}");
         index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?;
+        indexed.push((path_str.clone(), sig));
         stats.added += 1;
         Ok(())
     })?;
@@ -1373,7 +1377,12 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     writer.commit()?;
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(dir)?;
-    write_dirsig(dir, &dir_mtime_map(dir).unwrap_or_default());
+    // Advance dirsig, holding back any dir whose file changed mid-pass so a full index can't poison
+    // the dir-mtime gate either (mirrors reindex_dirs_locked).
+    let cur = dir_mtime_map(dir).unwrap_or_default();
+    let stored = read_dirsig(dir).unwrap_or_default();
+    let unsettled = unsettled_dirs(&idx.root, &indexed);
+    write_dirsig(dir, &settled_dirsig(&cur, &stored, &unsettled));
     Ok(stats)
 }
 
@@ -1423,6 +1432,50 @@ fn parent_dir_key(rel_file: &str) -> String {
     }
 }
 
+/// Given files just indexed under `root` with the signature we recorded for each, re-stat every one
+/// and return the set of `c:`-prefixed parent DIR KEYS (as produced by `dir_mtime_map`) whose
+/// content is NOT settled: the file's current on-disk signature no longer matches what we indexed
+/// (it changed while we were indexing it) or it can no longer be stat'd. Such a directory must not
+/// have its `.glossa/dirsig` entry advanced, or the change would be lost — a later content write
+/// does not re-bump the directory mtime, so the dir-mtime gate would never re-trigger. O(indexed
+/// files), one stat each.
+fn unsettled_dirs(root: &Path, indexed: &[(String, FileSig)]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for (rel, indexed_sig) in indexed {
+        match file_sig(&root.join(rel)) {
+            Ok(cur) if &cur == indexed_sig => {} // settled: on disk matches what we indexed
+            _ => {
+                out.insert(parent_dir_key(rel)); // changed under us, or vanished → hold back
+            }
+        }
+    }
+    out
+}
+
+/// Build the dir-signature map to persist to `.glossa/dirsig`: start from the freshly observed
+/// `cur` map, but for every directory flagged `unsettled` fall back to its previously `stored`
+/// value (so the next freshen re-diffs and retries it), or drop the key entirely when it has no
+/// prior entry (a newly-added dir → re-classifies as `added` next pass). Keeps the invariant
+/// "dirsig[d] == mtime(d) ⟹ every file in d is indexed at its current signature".
+fn settled_dirsig(
+    cur: &BTreeMap<String, u128>,
+    stored: &BTreeMap<String, u128>,
+    unsettled: &std::collections::HashSet<String>,
+) -> BTreeMap<String, u128> {
+    let mut out = cur.clone();
+    for d in unsettled {
+        match stored.get(d) {
+            Some(&old) => {
+                out.insert(d.clone(), old); // retry next freshen against the old signature
+            }
+            None => {
+                out.remove(d); // newly-added dir not captured → re-classify as `added`
+            }
+        }
+    }
+    out
+}
+
 /// Scoped reindex of only the corpus dirs the caller determined changed/added/removed (typically
 /// from a `dir_mtime_map` diff), assuming `index.lock` is already held. Reindexes just the
 /// affected dirs' files (via `index_file_into`), drops files/dirs that vanished (cleaning graph
@@ -1445,6 +1498,9 @@ pub fn reindex_dirs_locked(
     let mut links: Vec<(String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stats = IndexStats::default();
+    // Files we actually (re)indexed this pass, with the signature we captured — re-stat'd at the
+    // end so a file that changed WHILE we were indexing it holds back its dir's dirsig entry.
+    let mut indexed: Vec<(String, FileSig)> = Vec::new();
 
     // 1. Rescan affected dirs: index new/changed IMMEDIATE files of each changed/added corpus dir
     // (same ignore semantics as the corpus walk, but depth-1 since only that dir's own files can
@@ -1477,6 +1533,7 @@ pub fn reindex_dirs_locked(
                 && index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?.is_some()
             {
                 manifest.files.insert(rel.clone(), sig);
+                indexed.push((rel.clone(), sig));
                 stats.added += 1;
             }
         }
@@ -1560,7 +1617,11 @@ pub fn reindex_dirs_locked(
 
     writer.commit()?;
     manifest.save(dir)?;
-    write_dirsig(dir, cur_map);
+    // Advance dirsig, but hold back any dir whose file changed under us (still being written): the
+    // lock is held, so the on-disk dirsig is still the value we diffed against (`stored`).
+    let stored = read_dirsig(dir).unwrap_or_default();
+    let unsettled = unsettled_dirs(&idx.root, &indexed);
+    write_dirsig(dir, &settled_dirsig(cur_map, &stored, &unsettled));
     Ok(stats)
 }
 
@@ -3197,6 +3258,49 @@ mod tests {
         assert!(idx.index.schema().get_field("body_trigrams").is_ok());
         let hits = idx.search("hello", 5).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn unsettled_dirs_flags_a_file_that_changed_after_indexing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"one").unwrap();
+        let indexed_sig = file_sig(&dir.path().join("a.md")).unwrap();
+        // A settled file — current sig equals what we indexed — is NOT flagged.
+        assert!(unsettled_dirs(dir.path(), &[("a.md".to_string(), indexed_sig)]).is_empty());
+        // The file grows after we recorded `indexed_sig` (mid-write / partial copy). Its dir is
+        // now unsettled, so its dirsig entry must be held back.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("a.md"), b"one two three four").unwrap();
+        let u = unsettled_dirs(dir.path(), &[("a.md".to_string(), indexed_sig)]);
+        assert!(u.contains("c:"), "root dir flagged unsettled: {u:?}");
+        // A file in a subdir flags its own dir key, not the root.
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.md"), b"x").unwrap();
+        let sub_sig = file_sig(&dir.path().join("sub").join("b.md")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.path().join("sub").join("b.md"), b"xyz longer").unwrap();
+        let u2 = unsettled_dirs(
+            dir.path(),
+            &[(format!("sub{}b.md", std::path::MAIN_SEPARATOR), sub_sig)],
+        );
+        assert!(u2.contains("c:sub") && !u2.contains("c:"), "only sub flagged: {u2:?}");
+    }
+
+    #[test]
+    fn settled_dirsig_holds_back_unsettled_dirs() {
+        let mut cur = BTreeMap::new();
+        cur.insert("c:".to_string(), 100u128);
+        cur.insert("c:sub".to_string(), 200u128);
+        cur.insert("c:new".to_string(), 300u128); // a directory added this pass
+        let mut stored = BTreeMap::new();
+        stored.insert("c:".to_string(), 50u128);
+        stored.insert("c:sub".to_string(), 150u128);
+        let unsettled: std::collections::HashSet<String> =
+            ["c:sub".to_string(), "c:new".to_string()].into_iter().collect();
+        let out = settled_dirsig(&cur, &stored, &unsettled);
+        assert_eq!(out.get("c:"), Some(&100), "settled dir advances to current");
+        assert_eq!(out.get("c:sub"), Some(&150), "unsettled dir keeps its stored value");
+        assert_eq!(out.get("c:new"), None, "unsettled newly-added dir is dropped");
     }
 
     #[test]
