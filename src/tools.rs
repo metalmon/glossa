@@ -6,19 +6,61 @@ use crate::index::store::{DocIndex, RankedHit};
 use crate::trace::TraceLog;
 use serde_json::json;
 
-/// Indexed document path suggestions for a failed path lookup (basename glob, up to 3).
+/// Indexed document path suggestions for a failed path lookup. First a literal basename
+/// substring glob (`*<base>*`); when that finds nothing — because the model swapped the
+/// filename's spaces for underscores, or mangled a word — fall back to ranking every indexed
+/// basename by how many word-tokens it shares with the failed basename, so a near-miss still
+/// surfaces the real file. Up to 3 suggestions.
 pub fn document_path_hints(idx: &DocIndex, path: &str) -> String {
     let base = path.rsplit(['\\', '/']).next().unwrap_or(path);
     if base.len() < 4 {
         return String::new();
     }
-    crate::glob::glob_docs(idx, &format!("*{base}*"))
-        .ok()
-        .map(|hits| {
-            let hints: Vec<String> = hits.into_iter().take(3).map(|(p, _)| p).collect();
-            crate::cli_fmt::format_did_you_mean(&hints)
+    let mut hints: Vec<String> = crate::glob::glob_docs(idx, &format!("*{base}*"))
+        .map(|hits| hits.into_iter().take(3).map(|(p, _)| p).collect())
+        .unwrap_or_default();
+    if hints.is_empty() {
+        hints = token_overlap_hints(idx, base);
+    }
+    crate::cli_fmt::format_did_you_mean(&hints)
+}
+
+/// Lowercased alphanumeric word-tokens of a filename, extension and 1-char tokens dropped —
+/// the unit of comparison for a mangled-path suggestion, so a space/underscore swap or a
+/// single wrong word still shares most tokens with the real name.
+fn path_tokens(name: &str) -> std::collections::HashSet<String> {
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+    stem.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 2)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Rank indexed documents by word-token overlap with a failed basename `base`. Returns up to
+/// 3 paths (best-first) whose basename shares the most tokens — at least 2, or all of them
+/// when `base` has fewer than 2 tokens; empty when nothing meaningfully overlaps. Only a hint,
+/// so a loose match is fine; the exact/tolerant lookup already ran and missed.
+fn token_overlap_hints(idx: &DocIndex, base: &str) -> Vec<String> {
+    let want = path_tokens(base);
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let min_shared = want.len().min(2).max(1);
+    let all = match crate::glob::glob_docs(idx, "*") {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut scored: Vec<(usize, String)> = all
+        .into_iter()
+        .filter_map(|(p, _)| {
+            let cand = p.rsplit(['\\', '/']).next().unwrap_or(&p);
+            let shared = path_tokens(cand).intersection(&want).count();
+            (shared >= min_shared).then_some((shared, p))
         })
-        .unwrap_or_default()
+        .collect();
+    // Most overlap first; path order as a deterministic tiebreak.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(3).map(|(_, p)| p).collect()
 }
 
 fn path_not_found(idx: &DocIndex, path: &str) -> String {
@@ -2543,6 +2585,40 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "resolved despite doubled backslash: {}",
             out2.text
         );
+    }
+
+    #[test]
+    fn path_hints_recover_underscored_and_mangled_basename() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        // The real (spaced) PDF, plus underscore-named siblings that mislead the model into
+        // regularizing the spaced name and — separately — mistyping one word's ending.
+        for p in [
+            "Обновлённые руководства/Руководство по настройке и программированию АБАК ПЛК_v_1_12.pdf",
+            "v_3.0/1_1_naznachenie.htm",
+            "v_3.0/2_2_vneshnij_vid.htm",
+        ] {
+            i.write_chunks(&[Chunk {
+                doc_path: PathBuf::from(p),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "x".into(),
+            }])
+            .unwrap();
+        }
+        // Model swapped spaces for underscores AND mistyped программированию → программирования;
+        // the literal `*base*` glob finds nothing, so the token-overlap fallback must still name
+        // the real file (7 of 8 tokens overlap).
+        let hint = document_path_hints(
+            &i,
+            "Обновлённые руководства/Руководство_по_настройке_и_программирования_АБАК_ПЛК_v_1_12.pdf",
+        );
+        assert!(
+            hint.contains("Руководство по настройке и программированию АБАК ПЛК_v_1_12.pdf"),
+            "token-overlap hint should surface the real spaced file: {hint}"
+        );
+        // A basename that shares no real tokens with any indexed doc yields no suggestion.
+        assert_eq!(document_path_hints(&i, "totally_unrelated_xyzzy.txt"), "");
     }
 
     #[test]

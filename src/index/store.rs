@@ -581,14 +581,29 @@ impl DocIndex {
         if self.has_document(input).unwrap_or(false) {
             return Some(input.to_string());
         }
-        self.resolve_path(input).ok().flatten()
+        if let Some(p) = self.resolve_path(input).ok().flatten() {
+            return Some(p);
+        }
+        // `glossary` prints an ungrounded reasoning node's owner document as `@<path>` (the
+        // node has no chunk anchor, so the source path is its only pointer). The model copies
+        // that sigil verbatim into read/graph_upsert. Retry once with a leading `@` stripped —
+        // but only as a fallback, AFTER the exact/tolerant matches above, so a document whose
+        // real path genuinely begins with `@` (e.g. `@types/foo.md`) still resolves first.
+        if let Some(stripped) = input.strip_prefix('@') {
+            if self.has_document(stripped).unwrap_or(false) {
+                return Some(stripped.to_string());
+            }
+            return self.resolve_path(stripped).ok().flatten();
+        }
+        None
     }
 
     /// Resolve a possibly-mangled `input` path to the real indexed path by collapsing runs of
-    /// whitespace (the model routinely turns a document's double space into a single one when
-    /// copying a path) and stripping spurious leading path segments (e.g. a corpus-folder prefix
-    /// the model prepends even though search results omit it). Returns the exact path only when
-    /// exactly one indexed document matches — never guesses between ambiguous candidates.
+    /// whitespace and underscores (the model routinely turns a document's double space into a
+    /// single one, or swaps spaces for underscores, when copying a path) and stripping spurious
+    /// leading path segments (e.g. a corpus-folder prefix the model prepends even though search
+    /// results omit it). Returns the exact path only when exactly one indexed document matches —
+    /// never guesses between ambiguous candidates.
     pub fn resolve_path(&self, input: &str) -> anyhow::Result<Option<String>> {
         /// Normalize path separators: collapse runs of `/` or `\` into one,
         /// replace with host OS separator.
@@ -613,12 +628,18 @@ impl DocIndex {
             out
         }
         fn norm(s: &str) -> String {
-            // Normalize separators first, then collapse whitespace.
+            // Normalize separators first, then collapse runs of whitespace AND underscores
+            // to a single space. A corpus that mixes spaced and underscored filenames (e.g. a
+            // spaced PDF sitting next to underscore-named HTML/PNG siblings) leads the model to
+            // "regularize" one style into the other when copying a path, so treat `_` and space
+            // as equivalent. Applied to both the input and every stored path, so the fold is
+            // symmetric; `match_normalized` still resolves only when exactly one document
+            // matches, so this never guesses between two names that differ only by `_` vs space.
             let normalized = normalize_path(s);
             let mut out = String::with_capacity(normalized.len());
             let mut prev_ws = false;
             for c in normalized.chars() {
-                if c.is_whitespace() {
+                if c.is_whitespace() || c == '_' {
                     if !prev_ws && !out.is_empty() {
                         out.push(' ');
                     }
@@ -2543,6 +2564,69 @@ mod search_tests {
         );
         // Stripping the anchor does not resolve a document that is not indexed.
         assert!(idx.canonical_document_path("missing.pdf#2").is_none());
+    }
+
+    #[test]
+    fn canonical_document_path_strips_glossary_owner_sigil() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("dir/manual.pdf"),
+                location: "p.1".into(),
+                file_type: "pdf".into(),
+                text: "x".into(),
+            },
+            // A document whose real path legitimately begins with `@` must still win exactly.
+            Chunk {
+                doc_path: PathBuf::from("@types/react.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "y".into(),
+            },
+        ])
+        .unwrap();
+        // glossary prints an ungrounded node's owner as `@<path>`; read must strip the sigil.
+        assert_eq!(
+            idx.canonical_document_path("@dir/manual.pdf").as_deref(),
+            Some("dir/manual.pdf")
+        );
+        // Combined with a trailing section anchor (`@<path>#<ord>`), both are stripped.
+        assert_eq!(
+            idx.canonical_document_path("@dir/manual.pdf#350").as_deref(),
+            Some("dir/manual.pdf")
+        );
+        // A real path starting with `@` resolves to itself — the strip is a fallback only.
+        assert_eq!(
+            idx.canonical_document_path("@types/react.md").as_deref(),
+            Some("@types/react.md")
+        );
+        // Stripping the sigil off a non-indexed path still returns None (hallucination guard).
+        assert!(idx.canonical_document_path("@dir/missing.pdf").is_none());
+    }
+
+    #[test]
+    fn canonical_document_path_folds_underscores_and_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        // Real filename is spaced (a PDF), but the corpus is full of underscore-named siblings,
+        // so the model copies the path back with every space turned into an underscore.
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("Руководство по настройке ПЛК_v_1.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        assert_eq!(
+            idx.canonical_document_path("Руководство_по_настройке_ПЛК_v_1.pdf")
+                .as_deref(),
+            Some("Руководство по настройке ПЛК_v_1.pdf")
+        );
+        // The fold does not turn a genuinely different name into a false match.
+        assert!(idx
+            .canonical_document_path("Совсем_другой_документ.pdf")
+            .is_none());
     }
 
     #[test]
