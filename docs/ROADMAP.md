@@ -85,7 +85,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Valid-time (Phase 1, as-of) | **Shipped** *(post-v0.2.7)* | `node_validity` side table, `requires_validity`, `--as-of`/`as_of`, `SUPERSEDES`, status; see Temporality below |
 | Offline HTML graph explorer | **Shipped** *(post-v0.2.7)* | `kb graph dump -f html`, self-contained; infinite-scroll search, dark theme, temporal display |
 | Crash atomicity per file | **Open** | Chunk graph writes autocommit; no one-txn-per-file |
-| Cross-process `graph_upsert` lock | **Open** | Advisory `.glossa/graph.lock` (fs4), like `generalize.lock` / `notebook.lock`; today only in-process Mutex on SQLite |
+| Cross-process `graph_upsert` lock | **Shipped** | Advisory `.glossa/graph.lock` (fs4, bounded-wait) wraps `graph_upsert` / `graph_update` / `graph_delete`; serializes agent read-modify-write across processes (WAL already prevents corruption, not the lost update from a read-before-txn). `graph::lock::with_graph_write_lock` |
 | Glossary `--expand` | **Open** | Term/co-occurrence layer not built; `CO_OCCURS` declared, no lexical indexer |
 | Induction/deduction ontology | **Open** | Environment/Heuristic/INDICATES/APPLIES_TO; dual build vs answer agents; see [graph-reasoning-directions.md](graph-reasoning-directions.md) |
 | Tailored ontology error messages | **Partial** | `edge_validation_hint()` in `ontology.rs` covers constraint fields; domain-specific messages (e.g. Task → CAUSED_BY → Cause) not yet added |

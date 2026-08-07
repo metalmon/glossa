@@ -18,6 +18,7 @@ pub mod agent;
 pub mod build;
 pub mod generalize;
 pub mod io;
+pub mod lock;
 pub mod ops;
 pub mod temporal;
 pub mod traverse;

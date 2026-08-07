@@ -1294,11 +1294,16 @@ impl GlossaServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let out = crate::graph::ops::graph_upsert(&idx, &g, &ont, a.nodes, a.edges, now);
-        let message = if a.parse_notes.is_empty() {
-            out.message
-        } else {
-            format!("{}\n{}", a.parse_notes.join("\n"), out.message)
+        let (nodes, edges, parse_notes) = (a.nodes, a.edges, a.parse_notes);
+        let res = crate::graph::lock::with_graph_write_lock(
+            &self.root,
+            std::time::Duration::from_secs(5),
+            || Ok(crate::graph::ops::graph_upsert(&idx, &g, &ont, nodes, edges, now)),
+        );
+        let message = match res {
+            Ok(out) if parse_notes.is_empty() => out.message,
+            Ok(out) => format!("{}\n{}", parse_notes.join("\n"), out.message),
+            Err(e) => e.to_string(),
         };
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
@@ -1322,7 +1327,15 @@ impl GlossaServer {
                 to: e.to,
             })
             .collect();
-        let msg = crate::graph::ops::graph_delete(&idx, &g, a.nodes, refs);
+        let nodes = a.nodes;
+        let msg = match crate::graph::lock::with_graph_write_lock(
+            &self.root,
+            std::time::Duration::from_secs(5),
+            || Ok(crate::graph::ops::graph_delete(&idx, &g, nodes, refs)),
+        ) {
+            Ok(m) => m,
+            Err(e) => e.to_string(),
+        };
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
@@ -1334,7 +1347,15 @@ impl GlossaServer {
         Parameters(a): Parameters<GraphUpdateArgs>,
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
-        let msg = crate::graph::ops::graph_update(&g, a.into_updates());
+        let updates = a.into_updates();
+        let msg = match crate::graph::lock::with_graph_write_lock(
+            &self.root,
+            std::time::Duration::from_secs(5),
+            || Ok(crate::graph::ops::graph_update(&g, updates)),
+        ) {
+            Ok(m) => m,
+            Err(e) => e.to_string(),
+        };
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
@@ -1680,6 +1701,36 @@ mod tests {
             Some(crate::index::store::file_sig(&dir.path().join("a.md")).unwrap()),
             "cache reloaded after mtime bump"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_upsert_reports_busy_when_graph_lock_held() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        // Another process holds the agent-graph write lock.
+        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.path().join(".glossa").join("graph.lock"))
+            .unwrap();
+        held.try_lock().unwrap();
+        let out = srv
+            .graph_upsert(Parameters(GraphUpsertArgs {
+                nodes: vec![],
+                edges: vec![],
+                parse_notes: vec![],
+            }))
+            .await
+            .unwrap();
+        assert!(
+            format!("{out:?}").contains("retry"),
+            "graph_upsert must surface the busy message, not run under contention: {out:?}"
+        );
+        fs4::FileExt::unlock(&held).unwrap();
     }
 
     #[tokio::test]
