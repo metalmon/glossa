@@ -45,7 +45,7 @@ fn token_overlap_hints(idx: &DocIndex, base: &str) -> Vec<String> {
     if want.is_empty() {
         return Vec::new();
     }
-    let min_shared = want.len().min(2).max(1);
+    let min_shared = want.len().clamp(1, 2);
     let all = match crate::glob::glob_docs(idx, "*") {
         Ok(v) => v,
         Err(_) => return Vec::new(),
