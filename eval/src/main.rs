@@ -35,6 +35,9 @@ enum Cmd {
         /// Expose only search+read to the agent (graph/index hidden).
         #[arg(long = "no-graph")]
         no_graph: bool,
+        /// On-disk dataset shape to parse.
+        #[arg(long, value_enum, default_value = "hotpot")]
+        format: DatasetFormatArg,
         // --- openai backend ---
         /// OpenAI-compatible base URL (LM Studio default).
         #[arg(long, default_value = "http://localhost:1234")]
@@ -97,6 +100,23 @@ enum BackendKind {
     Tensorzero,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DatasetFormatArg {
+    Hotpot,
+    Musique,
+    Questions,
+}
+
+impl From<DatasetFormatArg> for kb_eval::dataset::DatasetFormat {
+    fn from(f: DatasetFormatArg) -> Self {
+        match f {
+            DatasetFormatArg::Hotpot => Self::Hotpot,
+            DatasetFormatArg::Musique => Self::Musique,
+            DatasetFormatArg::Questions => Self::Questions,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -109,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             timeout_secs,
             profile,
             no_graph,
+            format,
             endpoint,
             model,
             api_key_env,
@@ -187,6 +208,7 @@ fn main() -> anyhow::Result<()> {
                 &kb_bin,
                 &work,
                 fullwiki.as_deref(),
+                format.into(),
             )?;
             let json_path = format!("eval-{}-{}.json", report.backend, glossa::trace::now_ms());
             std::fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;

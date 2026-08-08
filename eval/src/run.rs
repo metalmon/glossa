@@ -37,6 +37,7 @@ pub struct Report {
     pub mrr_mean: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_eval(
     dataset_path: &Path,
     backend: &dyn AgentBackend,
@@ -45,9 +46,10 @@ pub fn run_eval(
     kb_bin: &str,
     work: &Path,
     fullwiki: Option<&Path>,
+    format: dataset::DatasetFormat,
 ) -> anyhow::Result<Report> {
-    let json = std::fs::read_to_string(dataset_path)?;
-    let mut questions = dataset::parse_hotpot(&json)?;
+    let text = std::fs::read_to_string(dataset_path)?;
+    let mut questions = dataset::parse_dataset(format, &text)?;
     if limit > 0 && questions.len() > limit {
         questions.truncate(limit);
     }
@@ -136,9 +138,14 @@ fn eval_one(
         0.0
     };
     let titles = score::ranked_titles(&entries);
+    // Accept the primary gold OR any alias (MuSiQue/SQuAD-style). With no aliases this is
+    // identical to single-gold scoring, so hotpot/tensorzero runs are unaffected.
+    let golds: Vec<String> = std::iter::once(q.answer.clone())
+        .chain(q.answer_aliases.iter().cloned())
+        .collect();
     Row {
-        em: score::exact_match(&pred, &q.answer),
-        f1: score::token_f1(&pred, &q.answer),
+        em: score::exact_match_any(&pred, &golds),
+        f1: score::token_f1_any(&pred, &golds),
         retrieval_recall: recall,
         recall_at_5: score::recall_at_k(&titles, &q.supporting_titles, 5),
         recall_at_10: score::recall_at_k(&titles, &q.supporting_titles, 10),
@@ -184,6 +191,7 @@ mod fullwiki_tests {
             "kb",
             dir.path(),
             Some(corpus.as_path()),
+            dataset::DatasetFormat::Hotpot,
         )
         .unwrap();
 
@@ -210,7 +218,17 @@ mod fullwiki_tests {
         let be = MockBackend {
             canned: HashMap::new(),
         };
-        let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), None).unwrap();
+        let report = run_eval(
+            &dataset,
+            &be,
+            "mock",
+            0,
+            "kb",
+            dir.path(),
+            None,
+            dataset::DatasetFormat::Hotpot,
+        )
+        .unwrap();
 
         assert_eq!(report.rows.len(), 1);
         assert!(
@@ -234,6 +252,42 @@ mod fullwiki_tests {
     }
 
     #[test]
+    fn scores_a_predicted_alias_as_exact_match() {
+        // Fixed-corpus questions file: gold primary is "New York City" with alias "NYC". A backend
+        // that answers "NYC" must score EM=1/F1=1 — MuSiQue accepts any gold surface form.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("wiki");
+        std::fs::create_dir_all(&corpus).unwrap();
+
+        let dataset = dir.path().join("q.jsonl");
+        std::fs::write(
+            &dataset,
+            br#"{"id":"a1","question":"Where?","answer":"New York City","answer_aliases":["NYC"],"supporting_titles":["New York City"]}"#,
+        )
+        .unwrap();
+
+        let mut canned = HashMap::new();
+        canned.insert("a1".to_string(), "NYC".to_string());
+        let be = MockBackend { canned };
+        let report = run_eval(
+            &dataset,
+            &be,
+            "mock",
+            0,
+            "kb",
+            dir.path(),
+            Some(corpus.as_path()),
+            dataset::DatasetFormat::Questions,
+        )
+        .unwrap();
+
+        assert_eq!(report.rows.len(), 1);
+        assert!(report.rows[0].em, "alias 'NYC' must count as an exact match");
+        assert_eq!(report.em_mean, 1.0);
+        assert_eq!(report.f1_mean, 1.0);
+    }
+
+    #[test]
     fn tensorzero_style_backend_skips_hotpot_corpus_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Sentinel.md"), b"# Sentinel\nkeep me\n").unwrap();
@@ -247,7 +301,17 @@ mod fullwiki_tests {
         .unwrap();
 
         let be = NoRebuildBackend;
-        let report = run_eval(&dataset, &be, "mock", 0, "kb", dir.path(), None).unwrap();
+        let report = run_eval(
+            &dataset,
+            &be,
+            "mock",
+            0,
+            "kb",
+            dir.path(),
+            None,
+            dataset::DatasetFormat::Hotpot,
+        )
+        .unwrap();
         assert_eq!(report.rows.len(), 1);
         assert!(
             dir.path().join("Sentinel.md").exists(),
