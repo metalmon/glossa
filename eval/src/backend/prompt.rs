@@ -34,28 +34,16 @@ const FLAT_SYSTEM_PROMPT: &str =
      - Examples: `ANSWER: Chief of Protocol` · `ANSWER: yes` · `ANSWER: Animorphs` · `ANSWER: 1972`.";
 
 const GRAPH_SYSTEM_PROMPT: &str =
-    "You answer a question using glossa over a corpus that has a PRE-BUILT REASONING GRAPH: entities \
-     grounded to source text and linked by typed relations (part-of, created-by, family-of, \
-     located-in, member-of, …), with time-scoped facts as dated events. A strong model already did \
-     the multi-hop wiring; your job is to FOLLOW it, not re-derive it. Tools:\n\
-     - glossary(name): START HERE. Look up a named entity from the question — returns its grounded graph node and its typed relations.\n\
-     - neighbors(node): follow ONE hop — the direct typed edges from a node (use it to reach the bridge entity).\n\
-     - path(from, to): the shortest chain linking two entities — ideal once you know both endpoints.\n\
-     - related(node): widen to a node's neighborhood when a direct hop isn't enough.\n\
-     - search(query) / read(path): flat BM25 fallback — use only to fill a gap the graph doesn't cover, or to read the source chunk before answering.\n\
-     Strategy (follow it):\n\
-     1. Pull the named entities out of the question.\n\
-     2. Call glossary on the main entity FIRST — one call.\n\
-     3. If glossary returns that entity with useful relations, follow neighbors / path to the answer, then read the grounding chunk.\n\
-     4. If glossary returns `(no matches)` or doesn't cover what the question needs, STOP using graph tools and switch to search / read immediately — do NOT keep probing the graph for entities that aren't in it. The graph covers only part of the corpus; flat search is the reliable fallback.\n\
-     5. Don't loop: a handful of tool calls is enough. As soon as you can answer, answer — never keep searching once you have it.\n\
-     6. If neither the graph nor search finds it, give your best answer anyway.\n\
-     ANSWER FORMAT (strict — graded by exact match):\n\
-     - Output ONLY one final line beginning with `ANSWER:` and nothing after it.\n\
-     - The answer must be the SHORTEST exact span that answers the question — usually 1-4 words (a name, place, date, number).\n\
-     - No explanation, no full sentence, no extra context, do not restate the question, no trailing punctuation.\n\
-     - For yes/no questions answer exactly `yes` or `no`.\n\
-     - Examples: `ANSWER: Chief of Protocol` · `ANSWER: yes` · `ANSWER: Animorphs` · `ANSWER: 1972`.";
+    "You answer a question using a corpus that has a PRE-BUILT REASONING GRAPH: entities grounded to \
+     source text and linked by typed relations (located-in, part-of, created-by, family-of, \
+     member-of). A strong model already wired the multi-hop connections — follow them to the answer.\n\
+     Path to the answer:\n\
+     1. Take the entity in the question and call glossary on it. It prints that entity with its relations as a chain, e.g. `Senica -> LOCATED_IN -> Senica District`.\n\
+     2. The answer is usually a neighbour in that chain. Match the question to the relation and read that node: located-in / part-of -> the place it sits in; created-by -> whoever made / voiced / founded it; family-of -> the relative. Answer at the level asked — the district when it asks for a district.\n\
+     3. For an answer one more hop away, call neighbors(node id) or path(from id, to id) and follow the typed edges.\n\
+     4. Confirm on the source with read(path, n), then answer.\n\
+     5. When glossary shows only `[Section]` / `[Document]` lines (no typed relations), the graph is thin here — reach the answer with search(keywords) + read instead. Answer your best even if the corpus is quiet.\n\
+     Reply with one line: `ANSWER: <shortest exact span>` — a name, place, date, or number, usually 1-4 words (or `yes` / `no`). Examples: `ANSWER: Chief of Protocol` · `ANSWER: 1972`.";
 
 /// The per-question user turn.
 pub fn user_prompt(q: &Question) -> String {
