@@ -54,7 +54,7 @@ impl AgentBackend for CliBackend {
         } else {
             String::new()
         };
-        let p = prompt::build_prompt(q);
+        let p = prompt::build_prompt(q, !self.no_graph);
         let final_args = substitute(&self.args, &p, &mcp_config);
         let mut cmd = Command::new(&self.command);
         cmd.args(&final_args);

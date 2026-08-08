@@ -83,7 +83,7 @@ impl AgentBackend for OpenAiBackend {
         };
 
         let messages = vec![
-            json!({ "role": "system", "content": prompt::system_prompt() }),
+            json!({ "role": "system", "content": prompt::system_prompt(graph.is_some()) }),
             json!({ "role": "user", "content": prompt::user_prompt(q) }),
         ];
         let raw = run_agent_loop(chat, messages, exec, MAX_ROUNDS)?;
@@ -93,99 +93,100 @@ impl AgentBackend for OpenAiBackend {
 
 /// OpenAI function-tool schema for glossa's search/read.
 fn tools_schema(graph_on: bool) -> Value {
-    let mut tools = vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "search",
-                "description": "Full-text BM25 search over the knowledge base. Pass short KEYWORDS (morphology-aware), not a sentence. Returns ranked results as `path:location: snippet  [score]`.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "keywords to search for" },
-                        "limit": { "type": "integer", "description": "max results (default 10)" }
-                    },
-                    "required": ["query"]
-                }
+    let search = json!({
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Full-text BM25 search over the knowledge base. Pass short KEYWORDS (morphology-aware), not a sentence. Returns ranked results as `path:location: snippet  [score]`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "keywords to search for" },
+                    "limit": { "type": "integer", "description": "max results (default 10)" }
+                },
+                "required": ["query"]
             }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "read",
-                "description": "Read a document's text. `path` is a path returned by search; `location` optionally narrows to a heading/sheet/page substring.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "document path from a search result" },
-                        "location": { "type": "string", "description": "optional heading/page substring" }
-                    },
-                    "required": ["path"]
-                }
+        }
+    });
+    let read = json!({
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a document's text. `path` is a path returned by search; `location` optionally narrows to a heading/sheet/page substring.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "document path from a search result" },
+                    "location": { "type": "string", "description": "optional heading/page substring" }
+                },
+                "required": ["path"]
             }
-        }),
-    ];
-    // graph-ON arm: advertise the reasoning-graph tools so the model can FOLLOW a pre-built
-    // multi-hop chain instead of re-deriving it with many flat searches.
-    if graph_on {
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "glossary",
-                "description": "Look up a term/entity in the reasoning graph: returns its grounded node(s) plus their chain (what it relates to / causes / is caused by), each anchored to a source chunk. Prefer this over many searches when a question needs several hops.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "name": { "type": "string", "description": "the term or entity to look up" } },
-                    "required": ["name"]
-                }
-            }
-        }));
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "related",
-                "description": "Nodes related to a graph node (by label) or a document path — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "node": { "type": "string", "description": "node label" },
-                        "path": { "type": "string", "description": "document path (alternative to node)" }
-                    }
-                }
-            }
-        }));
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "neighbors",
-                "description": "Typed 1-hop edges from a node (by label) or document path — the direct relations (e.g. spouse-of, part-of) stored in the graph.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "node": { "type": "string", "description": "node label" },
-                        "path": { "type": "string", "description": "document path (alternative to node)" },
-                        "direction": { "type": "string", "description": "out | in | both (default both)" }
-                    }
-                }
-            }
-        }));
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "path",
-                "description": "Shortest connection between two entities/nodes in the graph — the reasoning chain linking `from` to `to`. Ideal for a multi-hop question: name both endpoints and read the chain.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "from": { "type": "string", "description": "start entity/node label" },
-                        "to": { "type": "string", "description": "end entity/node label" }
-                    },
-                    "required": ["from", "to"]
-                }
-            }
-        }));
+        }
+    });
+    if !graph_on {
+        return Value::Array(vec![search, read]);
     }
-    Value::Array(tools)
+    // graph-ON arm: lead with the reasoning-graph tools so the model FOLLOWS the pre-built
+    // multi-hop chain instead of re-deriving it with many flat searches. Ordering matters — a weak
+    // model reaches for the first-listed tool — so `glossary` (the entry point) comes before
+    // `search`, which stays as a fallback.
+    let glossary = json!({
+        "type": "function",
+        "function": {
+            "name": "glossary",
+            "description": "START HERE for any named entity in the question. Looks it up in the pre-built reasoning graph: returns its grounded node plus its typed relations (part-of, created-by, family-of, located-in, member-of, …), each anchored to a source chunk. One call surfaces the chain that would otherwise take several searches.",
+            "parameters": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "the term or entity to look up" } },
+                "required": ["name"]
+            }
+        }
+    });
+    let neighbors = json!({
+        "type": "function",
+        "function": {
+            "name": "neighbors",
+            "description": "Follow ONE hop: the typed 1-hop edges from a node (by label) or document path — the direct relations (e.g. created-by, part-of, family-of) stored in the graph. Use it to step from an entity to the bridge entity.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node": { "type": "string", "description": "node label" },
+                    "path": { "type": "string", "description": "document path (alternative to node)" },
+                    "direction": { "type": "string", "description": "out | in | both (default both)" }
+                }
+            }
+        }
+    });
+    let path = json!({
+        "type": "function",
+        "function": {
+            "name": "path",
+            "description": "Shortest connection between two entities/nodes in the graph — the reasoning chain linking `from` to `to`. Ideal when you know both endpoints of a multi-hop question: name both and read the chain.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "start entity/node label" },
+                    "to": { "type": "string", "description": "end entity/node label" }
+                },
+                "required": ["from", "to"]
+            }
+        }
+    });
+    let related = json!({
+        "type": "function",
+        "function": {
+            "name": "related",
+            "description": "Nodes related to a graph node (by label) or a document path — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood when a direct hop isn't enough.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node": { "type": "string", "description": "node label" },
+                    "path": { "type": "string", "description": "document path (alternative to node)" }
+                }
+            }
+        }
+    });
+    Value::Array(vec![glossary, neighbors, path, related, search, read])
 }
 
 /// Drive a tool-calling chat to a final textual answer.
@@ -364,6 +365,17 @@ mod schema_tests {
                     .map(String::from)
             })
             .collect()
+    }
+
+    #[test]
+    fn graph_tools_lead_in_graph_on() {
+        // Ordering nudges tool choice: a weak model reaches for the first-listed tool. In graph-ON
+        // the graph entry point (glossary) must precede the flat `search`, so the model probes the
+        // pre-built chain before falling back to keyword search.
+        let names = tool_names(&tools_schema(true));
+        let gi = names.iter().position(|n| n == "glossary").expect("glossary present");
+        let si = names.iter().position(|n| n == "search").expect("search present");
+        assert!(gi < si, "graph tools must lead search in graph-ON; got {names:?}");
     }
 
     #[test]
