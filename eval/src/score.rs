@@ -56,6 +56,18 @@ pub fn token_f1(pred: &str, gold: &str) -> f32 {
     2.0 * precision * recall / (precision + recall)
 }
 
+/// EM against a set of acceptable gold answers (primary answer + any aliases) — MuSiQue/SQuAD
+/// style: correct if the prediction exactly matches ANY gold form. Empty set → never matches.
+pub fn exact_match_any(pred: &str, golds: &[String]) -> bool {
+    golds.iter().any(|g| exact_match(pred, g))
+}
+
+/// Token-F1 against a set of gold answers, taking the max over golds (best-matching form), as
+/// MuSiQue/SQuAD do. Empty set → 0.0.
+pub fn token_f1_any(pred: &str, golds: &[String]) -> f32 {
+    golds.iter().map(|g| token_f1(pred, g)).fold(0.0, f32::max)
+}
+
 /// Fraction of gold supporting paragraphs whose file appeared in the trace's seen files or
 /// seen locations, matched by sanitized-title substring.
 ///
@@ -227,5 +239,29 @@ mod retrieval_at_k_tests {
     fn matching_is_normalized() {
         let ranked = vec!["The Beatles".to_string()];
         assert_eq!(recall_at_k(&ranked, &["the beatles".to_string()], 1), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod alias_score_tests {
+    use super::*;
+
+    #[test]
+    fn exact_match_any_accepts_primary_or_alias() {
+        let golds = vec!["Barack Obama".to_string(), "Obama".to_string()];
+        assert!(exact_match_any("obama", &golds), "matches an alias, normalized");
+        assert!(exact_match_any("Barack Obama", &golds), "matches the primary");
+        assert!(!exact_match_any("Joe Biden", &golds), "matches neither");
+        assert!(!exact_match_any("anything", &[]), "empty gold set never matches");
+    }
+
+    #[test]
+    fn token_f1_any_takes_the_best_gold() {
+        let golds = vec!["completely different".to_string(), "new york city".to_string()];
+        assert!(
+            (token_f1_any("New York City", &golds) - 1.0).abs() < 1e-6,
+            "F1 is the max over golds (perfect on the second)"
+        );
+        assert_eq!(token_f1_any("x", &[]), 0.0, "empty gold set → 0.0");
     }
 }

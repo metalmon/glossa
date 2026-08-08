@@ -31,6 +31,7 @@ mod tests {
             question: "?".into(),
             answer: "".into(),
             paragraphs: vec![],
+            answer_aliases: vec![],
             supporting_titles: vec![],
         };
         assert_eq!(b.answer(Path::new("."), &q).unwrap(), "Bob Page");

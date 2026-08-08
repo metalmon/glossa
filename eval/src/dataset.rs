@@ -12,6 +12,9 @@ pub struct Question {
     pub id: String,
     pub question: String,
     pub answer: String,
+    /// Alternative gold surface forms (MuSiQue ships `answer_aliases`); empty for datasets
+    /// without them. Used so EM does not penalize a correct-but-differently-spelled answer.
+    pub answer_aliases: Vec<String>,
     pub paragraphs: Vec<Paragraph>,
     pub supporting_titles: Vec<String>,
 }
@@ -58,6 +61,7 @@ pub fn parse_hotpot(json: &str) -> anyhow::Result<Vec<Question>> {
                 id: r.id,
                 question: r.question,
                 answer: r.answer,
+                answer_aliases: Vec::new(),
                 paragraphs: r
                     .context
                     .into_iter()
@@ -67,6 +71,67 @@ pub fn parse_hotpot(json: &str) -> anyhow::Result<Vec<Question>> {
             }
         })
         .collect())
+}
+
+#[derive(Deserialize)]
+struct RawMusique {
+    id: String,
+    question: String,
+    answer: String,
+    #[serde(default)]
+    answer_aliases: Vec<String>,
+    #[serde(default)]
+    paragraphs: Vec<RawMusiqueParagraph>,
+}
+
+#[derive(Deserialize)]
+struct RawMusiqueParagraph {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    paragraph_text: String,
+    #[serde(default)]
+    is_supporting: bool,
+}
+
+/// Parse MuSiQue (`.jsonl`, one record per line) into the shared `Question` shape. Each MuSiQue
+/// paragraph is one text block, so it becomes a single-sentence `Paragraph`; `supporting_titles`
+/// are the titles of the `is_supporting` paragraphs (sorted + deduped, mirroring `parse_hotpot`).
+/// `answer_aliases` are carried for fair EM. Blank lines are skipped.
+pub fn parse_musique(jsonl: &str) -> anyhow::Result<Vec<Question>> {
+    let mut out = Vec::new();
+    for (i, line) in jsonl.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let r: RawMusique =
+            serde_json::from_str(line).with_context(|| format!("parse musique line {}", i + 1))?;
+        let mut titles: Vec<String> = r
+            .paragraphs
+            .iter()
+            .filter(|p| p.is_supporting)
+            .map(|p| p.title.clone())
+            .collect();
+        titles.sort();
+        titles.dedup();
+        out.push(Question {
+            id: r.id,
+            question: r.question,
+            answer: r.answer,
+            answer_aliases: r.answer_aliases,
+            paragraphs: r
+                .paragraphs
+                .into_iter()
+                .map(|p| Paragraph {
+                    title: p.title,
+                    sentences: vec![p.paragraph_text],
+                })
+                .collect(),
+            supporting_titles: titles,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -107,5 +172,34 @@ mod tests {
     fn sanitize_title_is_fs_safe() {
         assert_eq!(sanitize_title("Bob Page"), "Bob_Page");
         assert_eq!(sanitize_title("A/B: C?"), "A_B__C_");
+    }
+
+    #[test]
+    fn parses_musique_jsonl_with_aliases_and_supporting() {
+        let jsonl = concat!(
+            r#"{"id":"2hop__1_2","question":"Q hop?","answer":"Final","answer_aliases":["Final Ans","F."],"paragraphs":[{"idx":0,"title":"Doc A","paragraph_text":"A text.","is_supporting":true},{"idx":1,"title":"Doc B","paragraph_text":"B text.","is_supporting":false},{"idx":2,"title":"Doc C","paragraph_text":"C text.","is_supporting":true}]}"#,
+            "\n",
+            r#"{"id":"2hop__3_4","question":"Q2?","answer":"Ans2","paragraphs":[{"idx":0,"title":"Doc D","paragraph_text":"D text.","is_supporting":true}]}"#,
+            "\n"
+        );
+        let qs = parse_musique(jsonl).unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0].id, "2hop__1_2");
+        assert_eq!(qs[0].answer, "Final");
+        assert_eq!(
+            qs[0].answer_aliases,
+            vec!["Final Ans".to_string(), "F.".to_string()]
+        );
+        assert_eq!(qs[0].paragraphs.len(), 3);
+        assert_eq!(qs[0].paragraphs[0].title, "Doc A");
+        assert_eq!(qs[0].paragraphs[0].sentences, vec!["A text.".to_string()]);
+        // Only the is_supporting paragraphs, sorted + deduped.
+        assert_eq!(
+            qs[0].supporting_titles,
+            vec!["Doc A".to_string(), "Doc C".to_string()]
+        );
+        // Second record: no aliases; single supporting doc.
+        assert!(qs[1].answer_aliases.is_empty());
+        assert_eq!(qs[1].supporting_titles, vec!["Doc D".to_string()]);
     }
 }

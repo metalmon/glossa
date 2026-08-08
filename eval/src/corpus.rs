@@ -53,6 +53,7 @@ mod tests {
                 title: "Bob Page".into(),
                 sentences: vec!["b1.".into(), "b2.".into()],
             }],
+            answer_aliases: vec![],
             supporting_titles: vec!["Bob Page".into()],
         }
     }

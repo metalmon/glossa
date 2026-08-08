@@ -57,6 +57,7 @@ mod tests {
             question: "Who?".into(),
             answer: "".into(),
             paragraphs: vec![],
+            answer_aliases: vec![],
             supporting_titles: vec![],
         }
     }
