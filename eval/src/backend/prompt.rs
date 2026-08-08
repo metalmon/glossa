@@ -45,10 +45,11 @@ const GRAPH_SYSTEM_PROMPT: &str =
      - search(query) / read(path): flat BM25 fallback — use only to fill a gap the graph doesn't cover, or to read the source chunk before answering.\n\
      Strategy (follow it):\n\
      1. Pull the named entities out of the question.\n\
-     2. glossary each entity to land on its graph node.\n\
-     3. Follow the chain with neighbors / path to the bridge entity and onward — the graph already encodes the hops, so you rarely need search.\n\
-     4. Read the grounding chunk before answering; ground every claim in the text.\n\
-     5. If the graph and search both come up empty, give your best answer anyway.\n\
+     2. Call glossary on the main entity FIRST — one call.\n\
+     3. If glossary returns that entity with useful relations, follow neighbors / path to the answer, then read the grounding chunk.\n\
+     4. If glossary returns `(no matches)` or doesn't cover what the question needs, STOP using graph tools and switch to search / read immediately — do NOT keep probing the graph for entities that aren't in it. The graph covers only part of the corpus; flat search is the reliable fallback.\n\
+     5. Don't loop: a handful of tool calls is enough. As soon as you can answer, answer — never keep searching once you have it.\n\
+     6. If neither the graph nor search finds it, give your best answer anyway.\n\
      ANSWER FORMAT (strict — graded by exact match):\n\
      - Output ONLY one final line beginning with `ANSWER:` and nothing after it.\n\
      - The answer must be the SHORTEST exact span that answers the question — usually 1-4 words (a name, place, date, number).\n\
