@@ -135,6 +135,7 @@ fn main() -> anyhow::Result<()> {
                         model,
                         api_key,
                         timeout,
+                        use_graph: !no_graph,
                     })
                 }
                 BackendKind::Cli => {

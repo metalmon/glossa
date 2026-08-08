@@ -54,3 +54,4 @@ gepa-out/gepa-long.current
 
 tmp/
 .claude/settings.local.json
+eval/.data/

@@ -18,6 +18,9 @@ pub struct OpenAiBackend {
     pub model: String,
     pub api_key: Option<String>,
     pub timeout: Duration,
+    /// graph-ON arm when true (opens the graph and advertises the graph tools); graph-OFF
+    /// baseline when false (flat search/read only). The A/B knob for the graph-transfer eval.
+    pub use_graph: bool,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -32,7 +35,12 @@ impl AgentBackend for OpenAiBackend {
             "{}/v1/chat/completions",
             self.endpoint.trim_end_matches('/')
         );
-        let tools = tools_schema();
+        let graph = if self.use_graph {
+            glossa::graph::store::GraphStore::open(work).ok()
+        } else {
+            None
+        };
+        let tools = tools_schema(graph.is_some());
         let chat = |messages: &[Value]| -> anyhow::Result<Value> {
             let body = json!({
                 "model": self.model,
@@ -66,7 +74,6 @@ impl AgentBackend for OpenAiBackend {
         // Open the index once per question; the closure reuses it (cached reader) for every
         // search/read in the agent loop instead of reopening per tool call.
         let idx = glossa::index::store::DocIndex::open_or_create(work)?;
-        let graph = glossa::graph::store::GraphStore::open(work).ok();
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),
@@ -85,9 +92,9 @@ impl AgentBackend for OpenAiBackend {
 }
 
 /// OpenAI function-tool schema for glossa's search/read.
-fn tools_schema() -> Value {
-    json!([
-        {
+fn tools_schema(graph_on: bool) -> Value {
+    let mut tools = vec![
+        json!({
             "type": "function",
             "function": {
                 "name": "search",
@@ -101,8 +108,8 @@ fn tools_schema() -> Value {
                     "required": ["query"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "read",
@@ -116,8 +123,69 @@ fn tools_schema() -> Value {
                     "required": ["path"]
                 }
             }
-        }
-    ])
+        }),
+    ];
+    // graph-ON arm: advertise the reasoning-graph tools so the model can FOLLOW a pre-built
+    // multi-hop chain instead of re-deriving it with many flat searches.
+    if graph_on {
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "glossary",
+                "description": "Look up a term/entity in the reasoning graph: returns its grounded node(s) plus their chain (what it relates to / causes / is caused by), each anchored to a source chunk. Prefer this over many searches when a question needs several hops.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "name": { "type": "string", "description": "the term or entity to look up" } },
+                    "required": ["name"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "related",
+                "description": "Nodes related to a graph node (by label) or a document path — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node": { "type": "string", "description": "node label" },
+                        "path": { "type": "string", "description": "document path (alternative to node)" }
+                    }
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "neighbors",
+                "description": "Typed 1-hop edges from a node (by label) or document path — the direct relations (e.g. spouse-of, part-of) stored in the graph.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node": { "type": "string", "description": "node label" },
+                        "path": { "type": "string", "description": "document path (alternative to node)" },
+                        "direction": { "type": "string", "description": "out | in | both (default both)" }
+                    }
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "path",
+                "description": "Shortest connection between two entities/nodes in the graph — the reasoning chain linking `from` to `to`. Ideal for a multi-hop question: name both endpoints and read the chain.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string", "description": "start entity/node label" },
+                        "to": { "type": "string", "description": "end entity/node label" }
+                    },
+                    "required": ["from", "to"]
+                }
+            }
+        }));
+    }
+    Value::Array(tools)
 }
 
 /// Drive a tool-calling chat to a final textual answer.
@@ -279,5 +347,40 @@ mod tests {
         let out = run_agent_loop(chat, vec![], exec, 3).unwrap();
         assert_eq!(out, "giving up");
         assert_eq!(*calls.borrow(), 4); // 3 rounds + 1 final
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    fn tool_names(v: &Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| {
+                t.pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tools_schema_gates_graph_tools_on_graph_on() {
+        let off = tool_names(&tools_schema(false));
+        assert!(off.contains(&"search".into()) && off.contains(&"read".into()));
+        assert!(
+            !off.contains(&"glossary".into()),
+            "graph-OFF must NOT advertise graph tools"
+        );
+        let on = tool_names(&tools_schema(true));
+        for t in ["glossary", "related", "neighbors", "path"] {
+            assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
+        }
+        assert!(
+            on.contains(&"search".into()) && on.contains(&"read".into()),
+            "flat tools remain in graph-ON"
+        );
     }
 }
