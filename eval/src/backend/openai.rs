@@ -112,14 +112,14 @@ fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "read",
-            "description": "Read a document's text. `path` is a path returned by search; `location` optionally narrows to a heading/sheet/page substring.",
+            "description": "Read a chunk's full text. `path` is a document path from a search/glossary result; `n` is the chunk number shown as `[#n]`.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "document path from a search result" },
-                    "location": { "type": "string", "description": "optional heading/page substring" }
+                    "path": { "type": "string", "description": "document path, exactly as shown in a search result" },
+                    "n": { "type": "integer", "description": "chunk number to read, exactly as shown in `[#n]` (page number for PDFs)" }
                 },
-                "required": ["path"]
+                "required": ["path", "n"]
             }
         }
     });
@@ -146,12 +146,13 @@ fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "neighbors",
-            "description": "Follow ONE hop: the typed 1-hop edges from a node (by label) or document path — the direct relations (e.g. created-by, part-of, family-of) stored in the graph. Use it to step from an entity to the bridge entity.",
+            "description": "Follow ONE hop: the typed 1-hop edges from a graph node — the direct relations (e.g. created-by, part-of, family-of) stored in the graph. Use it to step from an entity to the bridge entity.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node": { "type": "string", "description": "node label" },
-                    "path": { "type": "string", "description": "document path (alternative to node)" },
+                    "node": { "type": "string", "description": "graph node id, exactly as shown on a `glossary` line (e.g. `person:clancy-brown`) — the id, NOT the label" },
+                    "path": { "type": "string", "description": "document path (use with `n` instead of `node`)" },
+                    "n": { "type": "integer", "description": "chunk number (use with `path`)" },
                     "direction": { "type": "string", "description": "out | in | both (default both)" }
                 }
             }
@@ -161,12 +162,12 @@ fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "path",
-            "description": "Shortest connection between two entities/nodes in the graph — the reasoning chain linking `from` to `to`. Ideal when you know both endpoints of a multi-hop question: name both and read the chain.",
+            "description": "Shortest connection between two graph nodes — the reasoning chain linking `from` to `to`. Ideal when you know both endpoints of a multi-hop question: name both ids and read the chain.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "from": { "type": "string", "description": "start entity/node label" },
-                    "to": { "type": "string", "description": "end entity/node label" }
+                    "from": { "type": "string", "description": "start: graph node id from a `glossary` line (e.g. `person:clancy-brown`)" },
+                    "to": { "type": "string", "description": "end: graph node id from a `glossary` line" }
                 },
                 "required": ["from", "to"]
             }
@@ -176,12 +177,12 @@ fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "related",
-            "description": "Nodes related to a graph node (by label) or a document path — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood when a direct hop isn't enough.",
+            "description": "Nodes related to a graph node — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood when a direct hop isn't enough.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node": { "type": "string", "description": "node label" },
-                    "path": { "type": "string", "description": "document path (alternative to node)" }
+                    "node": { "type": "string", "description": "graph node id from a `glossary` line (e.g. `person:clancy-brown`)" },
+                    "path": { "type": "string", "description": "document path (use with `n` instead of `node`)" }
                 }
             }
         }
