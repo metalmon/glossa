@@ -227,7 +227,8 @@ MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
 ```bash
 kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml/html)
 kb graph dump ./my-corpus -f html > kb.html # self-contained offline graph explorer (see below)
-kb graph import graph.json ./my-corpus     # replace the semantic layer from a graph file (file = source of truth)
+kb graph import graph.json ./my-corpus     # MERGE the graph file into the existing graph (default; upsert, keeps prior content)
+kb graph import graph.json ./my-corpus --mode replace  # replace the semantic layer instead (prune the file's types first; file = source of truth)
 kb graph prune ./my-corpus -t Symptom      # delete all nodes of a type (and edges touching them)
 ```
 

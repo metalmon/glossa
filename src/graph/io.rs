@@ -368,6 +368,48 @@ pub fn to_html(g: &GraphStore, e: &GraphExport, root: &std::path::Path) -> Strin
         .replace("/*__CYTOSCAPE_LIB__*/", &lib)
 }
 
+/// How an import reconciles with the existing graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportMode {
+    /// Upsert the file into the existing graph, leaving everything else untouched (the default —
+    /// safe to accumulate several files, or top up a graph without losing prior content).
+    #[default]
+    Merge,
+    /// Treat the file as the source of truth for the types it carries: prune every exported type
+    /// first, then upsert. Nodes of those types not in the file are removed.
+    Replace,
+}
+
+/// Import an export according to `mode`. Returns `(pruned, nodes_written, edges_written)`
+/// (`pruned` is always 0 for `Merge`).
+pub fn import_layer(
+    g: &GraphStore,
+    ont: &Ontology,
+    e: GraphExport,
+    now: u64,
+    root: &std::path::Path,
+    mode: ImportMode,
+) -> anyhow::Result<(usize, usize, usize)> {
+    match mode {
+        ImportMode::Merge => import_merge_layer(g, ont, e, now, root),
+        ImportMode::Replace => import_replace_layer(g, ont, e, now, root),
+    }
+}
+
+/// Merge an export into the graph: upsert its nodes/edges, leaving all other graph content in
+/// place. Same-id/label nodes are updated; nodes absent from the file survive. Never prunes.
+pub fn import_merge_layer(
+    g: &GraphStore,
+    ont: &Ontology,
+    e: GraphExport,
+    now: u64,
+    root: &std::path::Path,
+) -> anyhow::Result<(usize, usize, usize)> {
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root)?;
+    Ok((0, r.nodes_written, r.edges_written))
+}
+
+/// Replace the semantic layer for the file's exported types: prune those types, then upsert.
 pub fn import_replace_layer(
     g: &GraphStore,
     ont: &Ontology,
@@ -550,5 +592,161 @@ to = ["Resolution"]
         assert_eq!(pruned, 0); // nothing to prune in a fresh store
         assert_eq!(n, 2);
         assert_eq!(ed, 1);
+    }
+
+    /// Merge import must ADD to the existing graph without wiping same-type nodes that aren't in
+    /// the incoming file — the difference from replace, which prunes every exported type first.
+    #[test]
+    fn import_merge_preserves_existing_same_type_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        // A Symptom already in the graph, NOT present in the incoming import.
+        apply_upsert(
+            &g,
+            &ont,
+            vec![NodeSpec {
+                id: "s_existing".into(),
+                node_type: "Symptom".into(),
+                label: "Existing symptom".into(),
+                aliases: vec![],
+                source_path: "old.md".into(),
+                range: None,
+                confidence: None,
+            }],
+            vec![],
+            1,
+            dir.path(),
+        )
+        .unwrap();
+
+        // Incoming export carries a DIFFERENT Symptom (+ a Resolution and an edge).
+        let export = make_export(); // s1/Label A (Symptom), r1/Fix it (Resolution), s1->r1
+        let (pruned, n, ed) =
+            import_merge_layer(&g, &ont, export, 2, dir.path()).unwrap();
+        assert_eq!(pruned, 0, "merge must never prune");
+        assert_eq!(n, 2);
+        assert_eq!(ed, 1);
+
+        // Both the pre-existing Symptom AND the imported one survive (replace would keep only s1).
+        let symptoms = g
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|node| node.node_type == "Symptom")
+            .count();
+        assert_eq!(symptoms, 2, "merge preserved the pre-existing symptom");
+        assert!(g.get_node("s_existing").unwrap().is_some());
+        assert!(g.get_node("s1").unwrap().is_some());
+    }
+
+    /// Mirror of the merge test: replace (via `import_layer`) MUST prune the file's types first, so
+    /// a pre-existing same-type node absent from the file is removed. Together the two tests pin the
+    /// merge/replace distinction — collapsing either mode into the other fails one of them.
+    #[test]
+    fn import_replace_removes_existing_same_type_nodes_absent_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        apply_upsert(
+            &g,
+            &ont,
+            vec![NodeSpec {
+                id: "s_existing".into(),
+                node_type: "Symptom".into(),
+                label: "Existing symptom".into(),
+                aliases: vec![],
+                source_path: "old.md".into(),
+                range: None,
+                confidence: None,
+            }],
+            vec![],
+            1,
+            dir.path(),
+        )
+        .unwrap();
+
+        // Replace with a file that carries a DIFFERENT Symptom → the pre-existing one is pruned.
+        let (pruned, n, _ed) =
+            import_layer(&g, &ont, make_export(), 2, dir.path(), ImportMode::Replace).unwrap();
+        assert_eq!(pruned, 1, "replace pruned the pre-existing Symptom");
+        assert_eq!(n, 2);
+        assert!(
+            g.get_node("s_existing").unwrap().is_none(),
+            "replace removed the node absent from the file"
+        );
+        assert!(g.get_node("s1").unwrap().is_some(), "imported node present");
+    }
+
+    /// `import_layer(Merge)` and `import_merge_layer` are the same path; default mode is Merge.
+    #[test]
+    fn import_layer_default_mode_is_merge() {
+        assert_eq!(ImportMode::default(), ImportMode::Merge);
+    }
+
+    /// Idempotency is a property of the resulting STATE, not the write counter: re-importing the
+    /// same file must not duplicate nodes/edges (identity = normalized label + type). The reported
+    /// `nodes_written` stays 2 because same-id nodes are re-upserted in place — that's fine; what
+    /// matters is the graph doesn't grow.
+    #[test]
+    fn import_merge_same_file_twice_is_idempotent_in_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        import_merge_layer(&g, &ont, make_export(), 1, dir.path()).unwrap();
+        import_merge_layer(&g, &ont, make_export(), 2, dir.path()).unwrap();
+
+        let nonstructural = g
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
+            .count();
+        assert_eq!(nonstructural, 2, "re-import must not duplicate nodes");
+        assert_eq!(g.edge_count().unwrap(), 1, "re-import must not duplicate edges");
+    }
+
+    /// Sharp edge, pinned: identity is label+type, but the store key is the id. If an incoming file
+    /// reuses an existing node's id with a DIFFERENT label (no label match to dedup on), the upsert
+    /// overwrites that node in place — last-writer-by-id wins. Callers exporting from one graph and
+    /// merging into another with a different id scheme should know this can clobber.
+    #[test]
+    fn import_merge_id_reuse_with_new_label_overwrites_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        // Pre-existing node with id "s1" but a different label than the incoming file's "s1".
+        apply_upsert(
+            &g,
+            &ont,
+            vec![NodeSpec {
+                id: "s1".into(),
+                node_type: "Symptom".into(),
+                label: "Old label".into(),
+                aliases: vec![],
+                source_path: "old.md".into(),
+                range: None,
+                confidence: None,
+            }],
+            vec![],
+            1,
+            dir.path(),
+        )
+        .unwrap();
+
+        // make_export() carries id "s1" with label "Label A".
+        import_merge_layer(&g, &ont, make_export(), 2, dir.path()).unwrap();
+
+        let s1 = g.get_node("s1").unwrap().unwrap();
+        assert_eq!(s1.label, "Label A", "same id + new label overwrites in place");
+        // The old label is gone — it was the same node id, now relabelled.
+        assert!(
+            !g.all_nodes().unwrap().iter().any(|n| n.label == "Old label"),
+            "the clobbered label no longer exists"
+        );
     }
 }

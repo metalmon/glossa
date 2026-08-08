@@ -226,6 +226,23 @@ enum McpTransport {
     StreamableHttp,
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ImportModeArg {
+    /// Upsert into the existing graph, keeping everything already there (default).
+    Merge,
+    /// Prune the file's exported types first, then upsert (file = source of truth).
+    Replace,
+}
+
+impl From<ImportModeArg> for glossa::graph::io::ImportMode {
+    fn from(m: ImportModeArg) -> Self {
+        match m {
+            ImportModeArg::Merge => Self::Merge,
+            ImportModeArg::Replace => Self::Replace,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum McpAction {
     /// Regenerate TensorZero tool config from the live MCP tool definitions (one source of truth).
@@ -345,12 +362,16 @@ enum GraphAction {
         #[arg(long)]
         now: Option<String>,
     },
-    /// Import a graph file (JSON), replacing the semantic layer (file = source of truth).
+    /// Import a graph file (JSON). Default MERGES into the existing graph; `--mode replace` treats
+    /// the file as source of truth for its types (prunes them first).
     Import {
         file: PathBuf,
         path: PathBuf,
         #[arg(short = 'f', long)]
         format: Option<String>,
+        /// merge (default) = upsert into the existing graph; replace = prune the file's types first.
+        #[arg(long, value_enum, default_value = "merge")]
+        mode: ImportModeArg,
     },
     /// Delete all nodes of the given type (and edges touching them) — clean-slate a semantic layer.
     Prune {
@@ -1269,7 +1290,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Import { file, path, format } => {
+            GraphAction::Import { file, path, format, mode } => {
                 let fmt = format.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
                     file.extension()
                         .and_then(|e| e.to_str())
@@ -1285,8 +1306,14 @@ fn main() -> anyhow::Result<()> {
                 let now = glossa::trace::now_ms();
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let (pruned, n, ed) =
-                    glossa::graph::io::import_replace_layer(&g, &ont, export, now, &path)?;
-                println!("graph import: pruned {pruned}, +{n} nodes, +{ed} edges");
+                    glossa::graph::io::import_layer(&g, &ont, export, now, &path, mode.into())?;
+                println!(
+                    "graph import ({}): pruned {pruned}, +{n} nodes, +{ed} edges",
+                    match mode {
+                        ImportModeArg::Merge => "merge",
+                        ImportModeArg::Replace => "replace",
+                    }
+                );
                 Ok(())
             }
             GraphAction::Prune { path, node_type } => {

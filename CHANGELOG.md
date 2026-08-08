@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-09
+
+### Added
+
+- **`kb graph import` now MERGES by default** (was: always replace). Import upserts a graph JSON into the existing graph, keeping everything already there — so you can top up a graph or accumulate several files without losing prior content. Node identity is normalized `label` + type, so re-importing the same file is idempotent (the graph does not grow) and imports from different sources converge. The previous behavior is available with `--mode replace` (prune the file's exported types first, then upsert — file = source of truth for those types). One sharp edge, by design: an incoming file that reuses an existing node's id with a different label overwrites that node in place (last-writer-by-id), since the store key is the id.
+
+### Fixed
+
+- **Concurrent agent graph writes are now safe**: `graph_upsert` takes a cross-process lock, so multiple MCP clients / agents writing the same `graph.sqlite` no longer race, corrupt, or drop writes.
+- **Index freshness**: the directory signature never advances while a file inside is mid-write, so a racing indexer can't record a half-written file as up-to-date.
+- **Path lookups** tolerate mangled/rewritten document paths, so a citation still resolves instead of missing.
+
+### Changed
+
+- Path clamping uses `clamp` instead of a hand-rolled `min`/`max` chain (internal cleanup, no behavior change).
+
+### Tooling (kb-eval / kb-train — built from source, not shipped in the `kb` binary)
+
+- Graph-transfer eval foundations: a MuSiQue loader with alias-aware EM/F1 scoring, and the OpenAI reader backend now exposes the graph tools (`glossary`/`related`/`neighbors`/`path`) for a graph-ON arm alongside a `--no-graph` flat baseline.
+
 ## [0.3.0] — 2026-08-06
 
 ### Added
