@@ -82,18 +82,37 @@ fn push_cells(out: &mut Vec<TableCell>, empty_run: &mut usize, cell: TableCell, 
     }
 }
 
+/// A row is "empty" (deferrable/clampable, like `number-rows-repeated` trailing
+/// blank rows) when every cell's text content is blank.
+fn row_is_empty(cells: &[TableCell]) -> bool {
+    cells.iter().all(|c| {
+        c.content.iter().all(|el| match el {
+            Element::Paragraph(p) => p.content.iter().all(|ic| match ic {
+                InlineContent::Text(t) => t.text.trim().is_empty(),
+                _ => false,
+            }),
+            _ => false,
+        })
+    })
+}
+
 fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
+    let mut sections: Vec<Section> = Vec::new(); // ODS: one per <table:table>; ODT: single, pushed at EOF
     let mut elements: Vec<Element> = Vec::new();
     let mut buf = String::new();          // active paragraph/heading text
     let mut pending_heading: Option<u8> = None; // Some(level) while inside a heading-ish block
     let mut in_table = false;
+    let mut current_sheet: Option<String> = None; // ODS: table:name of the table in progress
     let mut rows: Vec<TableRow> = Vec::new();
     let mut cur_cells: Vec<TableCell> = Vec::new();
     let mut cell_span: usize = 1;
+    let mut cell_repeat: usize = 1; // number-columns-repeated, stashed at cell Start
     let mut empty_run: usize = 0; // deferred trailing-empty cells (ODS repeats; harmless for ODT)
+    let mut row_repeat: usize = 1; // number-rows-repeated, stashed at row Start
+    let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (clamped like empty_run)
     let mut ev = Vec::new();
 
     loop {
@@ -130,15 +149,32 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         .as_deref()
                         .and_then(heading_level_from_style);
                 }
-                b"table" => { in_table = true; rows.clear(); }
-                b"table-row" => { cur_cells = Vec::new(); empty_run = 0; }
+                b"table" => {
+                    in_table = true;
+                    rows.clear();
+                    pending_empty_rows = 0;
+                    if ext == "ods" {
+                        current_sheet = attr(&e, b"name");
+                    }
+                }
+                b"table-row" => {
+                    cur_cells = Vec::new();
+                    empty_run = 0;
+                    row_repeat = attr(&e, b"number-rows-repeated")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1)
+                        .max(1);
+                }
                 b"table-cell" => {
                     buf.clear();
                     cell_span = attr(&e, b"number-columns-spanned")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(1)
                         .max(1);
-                    // number-columns-repeated handled at End (Task 3); default 1 here.
+                    cell_repeat = attr(&e, b"number-columns-repeated")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1)
+                        .max(1);
                 }
                 _ => {}
             },
@@ -164,7 +200,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 b"table-cell" => {
                     let text = buf.trim().to_string();
                     buf.clear();
-                    let repeat = 1usize; // Task 3 sets this from number-columns-repeated
+                    let repeat = cell_repeat;
                     let is_empty = text.is_empty();
                     let cell = TableCell {
                         content: vec![para(text)],
@@ -173,15 +209,36 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     };
                     push_cells(&mut cur_cells, &mut empty_run, cell, is_empty, repeat);
                     cell_span = 1;
+                    cell_repeat = 1;
                 }
                 b"covered-table-cell" => { /* span already consumed the column; skip */ }
                 b"table-row" => {
-                    empty_run = 0; // drop trailing empty cells (clamp)
-                    rows.push(TableRow { cells: std::mem::take(&mut cur_cells), ..Default::default() });
+                    empty_run = 0; // drop trailing empty cells within the row (clamp)
+                    let cells = std::mem::take(&mut cur_cells);
+                    if row_is_empty(&cells) {
+                        // Defer: number-rows-repeated (or a bare empty row) may just be
+                        // trailing padding — only materialize it if content follows.
+                        pending_empty_rows += row_repeat;
+                    } else {
+                        for _ in 0..pending_empty_rows {
+                            rows.push(TableRow::default());
+                        }
+                        pending_empty_rows = 0;
+                        for _ in 0..row_repeat {
+                            rows.push(TableRow { cells: cells.clone(), ..Default::default() });
+                        }
+                    }
+                    row_repeat = 1;
                 }
                 b"table" => {
                     in_table = false;
-                    elements.push(Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() }));
+                    pending_empty_rows = 0; // drop trailing empty rows (clamp)
+                    let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
+                    if ext == "ods" {
+                        sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
+                    } else {
+                        elements.push(table);
+                    }
                 }
                 _ => {}
             },
@@ -190,11 +247,11 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
         ev.clear();
     }
 
-    let _ = ext; // ODS branch (Task 3) will switch on `office:spreadsheet`
-    Ok(DocumentIR {
-        sections: vec![Section { elements, ..Default::default() }],
-        ..Default::default()
-    })
+    if ext != "ods" {
+        // ODT: single section, heading-scoped chunking happens downstream in chunk_ir.
+        sections.push(Section { elements, ..Default::default() });
+    }
+    Ok(DocumentIR { sections, ..Default::default() })
 }
 
 impl Extractor for OdfExtractor {
@@ -291,5 +348,29 @@ mod tests {
 
         assert!(cell_text.contains("foo"), "first paragraph lost, cell text: {cell_text:?}");
         assert!(cell_text.contains("bar"), "second paragraph lost, cell text: {cell_text:?}");
+    }
+
+    const ODS: &[u8] = include_bytes!("../../tests/fixtures/sample.ods");
+
+    #[test]
+    fn ods_one_chunk_per_sheet_with_names() {
+        let chunks = extract(ODS, "sample.ods");
+        assert!(chunks.iter().all(|c| c.file_type == "ods"));
+        let locs: Vec<&str> = chunks.iter().map(|c| c.location.as_str()).collect();
+        assert!(locs.iter().any(|l| l.contains("Sheet1")), "locs: {locs:?}");
+        assert!(locs.iter().any(|l| l.contains("Data")), "locs: {locs:?}");
+    }
+
+    #[test]
+    fn ods_repeats_expand_and_clamp() {
+        let chunks = extract(ODS, "sample.ods");
+        let data = chunks.iter().find(|c| c.location.contains("Data")).unwrap();
+        // number-columns-repeated=3 on "dup" → three dup columns between x and y
+        assert!(data.text.contains("| x | dup | dup | dup | y |"),
+            "repeated non-empty cell not expanded:\n{}", data.text);
+        let sheet1 = chunks.iter().find(|c| c.location.contains("Sheet1")).unwrap();
+        // trailing repeated empty cells (repeated=6) must be clamped, not 6+ empty columns
+        let widest = sheet1.text.lines().map(|l| l.matches('|').count()).max().unwrap_or(0);
+        assert!(widest <= 4, "trailing empties not clamped (cols≈{}):\n{}", widest, sheet1.text);
     }
 }
