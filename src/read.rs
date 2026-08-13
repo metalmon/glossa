@@ -197,17 +197,37 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
                 return Ok(Vec::new());
             }
             let bytes = std::fs::read(path)?;
-            Ok(legacy_ole_images(office_oxide::doc::images::extract_images(&bytes), max))
+            Ok(legacy_ole_images_guarded(bytes, office_oxide::doc::images::extract_images, max))
         }
         "xls" => {
             if max == 0 {
                 return Ok(Vec::new());
             }
             let bytes = std::fs::read(path)?;
-            Ok(legacy_ole_images(office_oxide::xls::images::extract_images(&bytes), max))
+            Ok(legacy_ole_images_guarded(bytes, office_oxide::xls::images::extract_images, max))
         }
         _ => extract_zip_media(path, max),
     }
+}
+
+/// Run an office_oxide legacy-OLE BLIP scanner (`doc::images::extract_images`
+/// or `xls::images::extract_images`) under `catch_unwind`, then map the
+/// result the same way as `legacy_ole_images`. These scanners run a fragile
+/// CFB/OfficeArt parser over ARBITRARY user bytes and return a bare `Vec`
+/// (not `Result`), with no panic guard of their own — any input the
+/// vendored parser doesn't defensively validate would otherwise panic and
+/// abort the whole index/read request. Same norm as
+/// `src/extract/pdf.rs`'s `PdfDocument::from_bytes` guard ("Any PDF parser
+/// can panic on a malformed file; catch it so indexing never aborts."): a
+/// caught panic degrades to an empty image list for this file, never
+/// propagates.
+fn legacy_ole_images_guarded(
+    bytes: Vec<u8>,
+    extract: fn(&[u8]) -> Vec<office_oxide::cfb::blip::BlipImage>,
+    max: usize,
+) -> Vec<DocImage> {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || extract(&bytes)));
+    legacy_ole_images(caught.unwrap_or_default(), max)
 }
 
 /// Map office_oxide's legacy-OLE BLIP images (.doc/.xls embedded pictures) to
@@ -564,6 +584,29 @@ mod image_tests {
         let imgs = extract_images(&p, 1, 10).unwrap();
         assert!(!imgs.is_empty(), "expected at least one embedded image in sample_legacy.xls");
         assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn legacy_doc_garbage_bytes_degrade_not_panic() {
+        // office_oxide's legacy-OLE BLIP scanner runs a fragile CFB/OfficeArt
+        // parser over arbitrary user bytes and returns a bare Vec (not
+        // Result) with no panic guard of its own. A malformed/garbage .doc
+        // must degrade to "no images", not panic and abort the whole
+        // index/read request.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("garbage.doc");
+        std::fs::write(&p, b"not a real ole doc at all, just garbage bytes").unwrap();
+        let imgs = extract_images(&p, 1, 10).unwrap(); // must not panic
+        assert!(imgs.is_empty(), "garbage bytes should yield no images, got {}", imgs.len());
+    }
+
+    #[test]
+    fn legacy_xls_garbage_bytes_degrade_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("garbage.xls");
+        std::fs::write(&p, b"not a real ole doc at all, just garbage bytes").unwrap();
+        let imgs = extract_images(&p, 1, 10).unwrap(); // must not panic
+        assert!(imgs.is_empty(), "garbage bytes should yield no images, got {}", imgs.len());
     }
 
     #[test]
