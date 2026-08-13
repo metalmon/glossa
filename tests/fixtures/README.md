@@ -15,6 +15,10 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
 - `sample.odp` — OpenDocument presentation; two slides (`Slide1`, `Slide2`) with heading + body
   text (one carries the `glossa sample` marker), plus an embedded 1×1 PNG under `Pictures/` in the
   zip (exercises the ODF branch of `extract_zip_media`).
+- `sample_chart.docx` — the minimal `sample.docx` with an added `word/charts/chart1.xml` part (a
+  synthetic English bar chart: title "Sales by quarter", series "Series 1"/"Series 2", categories
+  Q1–Q3, cached values). Exercises OOXML chart-data extraction. Hand-built (not Office-generated —
+  real Office files carry locale boilerplate); the chart part is unreferenced, inert to the text path.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
