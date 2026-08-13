@@ -45,6 +45,7 @@ chardetng = "1.0"
 encoding_rs = "0.8"
 fs4 = "1.1"
 glossa-constraint = { path = "constraint", optional = true }
+quick-xml = "0.41"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

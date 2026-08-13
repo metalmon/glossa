@@ -1346,6 +1346,7 @@ dependencies = [
  "pdf_oxide",
  "postcard",
  "predicates",
+ "quick-xml 0.41.0",
  "rdocx",
  "regex",
  "regex-syntax",

@@ -14,6 +14,7 @@ pub mod html;
 pub mod image;
 pub mod links;
 pub mod markdown;
+pub mod odf;
 pub mod office;
 pub mod office_chunk;
 pub mod office_table;
