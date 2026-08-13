@@ -48,6 +48,7 @@ pub(crate) fn parse_chart_xml(xml: &str) -> ChartData {
     let mut field = Field::None;
     let mut in_ser = false;
     let mut in_f = false;
+    let mut in_plot_area = false;
     let mut buf = Vec::new();
 
     loop {
@@ -59,7 +60,11 @@ pub(crate) fn parse_chart_xml(xml: &str) -> ChartData {
                 t if cd.kind.is_empty() && t.ends_with(b"Chart") => {
                     cd.kind = String::from_utf8_lossy(t).into_owned();
                 }
-                b"title" if !in_ser => field = Field::Title,
+                b"plotArea" => in_plot_area = true,
+                // the real chart title is a direct child of <c:chart>, before
+                // <c:plotArea>; axis titles (<c:catAx>/<c:valAx>) live inside
+                // plotArea and must not be mistaken for the chart title.
+                b"title" if !in_ser && !in_plot_area => field = Field::Title,
                 b"ser" => {
                     in_ser = true;
                     cd.series.push(Series::default());
@@ -71,6 +76,7 @@ pub(crate) fn parse_chart_xml(xml: &str) -> ChartData {
                 _ => {}
             },
             Ok(Event::End(e)) => match local(e.name().as_ref()) {
+                b"plotArea" => in_plot_area = false,
                 b"title" => field = Field::None,
                 b"ser" => in_ser = false,
                 b"tx" | b"cat" | b"val" => field = Field::None,
@@ -143,7 +149,8 @@ fn chart_to_table(cd: &ChartData) -> Table {
 
     let mut header = vec![cell("")];
     for (i, s) in cd.series.iter().enumerate() {
-        header.push(cell(s.name.as_deref().unwrap_or(&format!("Series {}", i + 1))));
+        let name = s.name.clone().unwrap_or_else(|| format!("Series {}", i + 1));
+        header.push(cell(&name));
     }
     rows.push(TableRow { cells: header, ..Default::default() });
 
@@ -205,7 +212,12 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         let table = chart_to_table(&cd);
         let body = table_to_markdown(&table);
         let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", i + 1));
-        let text = format!("Chart: {} ({})\n\n{}", title, cd.kind, body);
+        let header = if cd.kind.is_empty() {
+            format!("Chart: {}", title)
+        } else {
+            format!("Chart: {} ({})", title, cd.kind)
+        };
+        let text = format!("{}\n\n{}", header, body);
         out.push(Chunk {
             doc_path: path.to_path_buf(),
             location: title,
@@ -290,6 +302,29 @@ mod tests {
         assert!(!cd.series[0].vals.contains(&"Sheet1!$B$1".to_string()));
     }
 
+    #[test]
+    fn axis_title_is_not_mistaken_for_chart_title() {
+        // No chart-level <c:title> (direct child of <c:chart>, before plotArea);
+        // only an axis title inside <c:plotArea>/<c:catAx>. Must NOT be adopted
+        // as the chart title.
+        const AXIS_ONLY: &str = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:chart>
+ <c:plotArea><c:barChart>
+  <c:ser>
+   <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>
+   <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>4.3</c:v></c:pt></c:numCache></c:numRef></c:val>
+  </c:ser>
+  <c:catAx>
+   <c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>
+  </c:catAx>
+ </c:barChart></c:plotArea>
+</c:chart></c:chartSpace>"#;
+        let cd = parse_chart_xml(AXIS_ONLY);
+        assert_eq!(cd.title, None, "axis title must not become the chart title: {cd:?}");
+    }
+
     use crate::model::Chunk;
     use std::path::Path;
 
@@ -331,5 +366,38 @@ mod tests {
         }
         let cs = extract_charts(Path::new("garbage.docx"), &buf, "docx");
         assert!(cs.is_empty(), "garbage chart part should yield no chunks, got: {cs:?}");
+    }
+
+    /// When no plot-type (…Chart) tag was captured, `cd.kind` is empty; the
+    /// rendered header must omit the empty parens rather than reading
+    /// "Chart: Chart 1 ()".
+    #[test]
+    fn no_empty_parens_when_kind_absent() {
+        use std::io::Write as _;
+        const NO_KIND: &str = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+<c:chart><c:plotArea>
+ <c:ser>
+  <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>
+  <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>4.3</c:v></c:pt></c:numCache></c:numRef></c:val>
+ </c:ser>
+</c:plotArea></c:chart></c:chartSpace>"#;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("word/charts/chart1.xml", opts).unwrap();
+            zw.write_all(NO_KIND.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let cs = extract_charts(Path::new("nokind.docx"), &buf, "docx");
+        assert_eq!(cs.len(), 1, "expected one chart chunk: {cs:?}");
+        assert!(!cs[0].text.contains("()"), "empty kind parens leaked:\n{}", cs[0].text);
+        assert!(
+            cs[0].text.starts_with("Chart: Chart 1\n\n"),
+            "expected kind-less header, got:\n{}",
+            cs[0].text
+        );
     }
 }
