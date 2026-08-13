@@ -19,6 +19,10 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   synthetic English bar chart: title "Sales by quarter", series "Series 1"/"Series 2", categories
   Q1–Q3, cached values). Exercises OOXML chart-data extraction. Hand-built (not Office-generated —
   real Office files carry locale boilerplate); the chart part is unreferenced, inert to the text path.
+- `sample_chart.ods` — the minimal `sample.ods` with an injected `Object 1/` embedded chart
+  sub-document (`chart:bar`, title "Sales by quarter", a LOCAL `<table:table>` data cache: Series
+  1/2, Q1–Q3). Exercises ODF chart-data extraction. Hand-built English; mirrors how LibreOffice/odfpy
+  embed ODF charts (local data table), the primary ODF-chart form.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
