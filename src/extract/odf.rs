@@ -146,6 +146,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut in_table = false; // derived: table_depth > 0
     let mut table_depth: usize = 0; // nesting depth of <table:table>; only 0<->1 starts/emits
     let mut current_sheet: Option<String> = None; // ODS: table:name of the outermost table in progress
+    let mut current_slide: Option<String> = None; // ODP: draw:name of the draw:page in progress
     let mut rows: Vec<TableRow> = Vec::new();
     let mut cur_cells: Vec<TableCell> = Vec::new();
     let mut cell_span: usize = 1;
@@ -205,6 +206,13 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     pending_heading = attr(&e, b"style-name")
                         .as_deref()
                         .and_then(heading_level_from_style);
+                }
+                b"page" if ext == "odp" => {
+                    // ODP: each <draw:page> is a slide and becomes its own
+                    // Section (mirrors ODS's section-per-<table:table>, but
+                    // keyed on the whole slide rather than just one table).
+                    current_slide = attr(&e, b"name");
+                    elements.clear(); // start this slide's element list fresh
                 }
                 b"tab" | b"line-break" => buf.push(' '),
                 b"s" => {
@@ -381,6 +389,11 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         }
                     }
                 }
+                b"page" if ext == "odp" => {
+                    // Slide close: emit everything accumulated for this slide
+                    // (headings/paragraphs/tables) as one titled Section.
+                    sections.push(Section { title: current_slide.take(), elements: std::mem::take(&mut elements), ..Default::default() });
+                }
                 _ => {}
             },
             _ => {}
@@ -415,8 +428,19 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
         }
     }
 
-    if ext != "ods" {
-        // ODT: single section, heading-scoped chunking happens downstream in chunk_ir.
+    if ext == "ods" {
+        // Sections were already built per-<table:table> during the loop; nothing
+        // left to flush here (any stray non-table content is dropped, as before).
+    } else if ext == "odp" {
+        if current_slide.is_some() || !elements.is_empty() {
+            // Truncated/malformed file: the last <draw:page> never closed (or
+            // there's stray content outside any page) — flush what we have as
+            // its own final section instead of silently dropping it.
+            sections.push(Section { title: current_slide.take(), elements: std::mem::take(&mut elements), ..Default::default() });
+        }
+    } else {
+        // ODT (and any other/unknown ext): single section, heading-scoped
+        // chunking happens downstream in chunk_ir.
         sections.push(Section { elements, ..Default::default() });
     }
     Ok(DocumentIR { sections, ..Default::default() })
@@ -424,7 +448,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
 
 impl Extractor for OdfExtractor {
     fn file_types(&self) -> &'static [&'static str] {
-        &["odt", "ods"]
+        &["odt", "ods", "odp"]
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
@@ -1099,5 +1123,75 @@ mod tests {
             .join(" ");
 
         assert!(text.contains("a   b"), "text:s repeat count not expanded to 3 spaces: {text:?}");
+    }
+
+    const ODP: &[u8] = include_bytes!("../../tests/fixtures/sample.odp");
+
+    #[test]
+    fn odp_section_per_slide_with_names() {
+        // The odf.rs-level deliverable: each <draw:page> becomes its own
+        // Section, titled from draw:name. (chunk_ir's `location` is NOT
+        // asserted here — it prioritizes an in-slide heading's text over
+        // section_title whenever the slide has one, which both fixture
+        // slides do; see the report for the full explanation. That's
+        // existing, shared, out-of-scope behavior in office_chunk.rs.)
+        let xml = read_content_xml(ODP, Path::new("sample.odp")).unwrap();
+        let ir = parse_to_ir(&xml, "odp").unwrap();
+
+        assert_eq!(ir.sections.len(), 2, "expected one section per slide, got {}", ir.sections.len());
+        assert_eq!(ir.sections[0].title.as_deref(), Some("Slide1"));
+        assert_eq!(ir.sections[1].title.as_deref(), Some("Slide2"));
+    }
+
+    #[test]
+    fn odp_extract_yields_odp_chunks_with_both_slides_text() {
+        let chunks = extract(ODP, "sample.odp");
+        assert!(chunks.iter().all(|c| c.file_type == "odp"));
+        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(all_text.contains("glossa sample slide"), "marker missing: {all_text}");
+        assert!(all_text.contains("Second Heading"), "second slide heading missing: {all_text}");
+        // Section-per-slide boundary actually applies at chunk granularity too:
+        // each slide's marker text must land in its OWN chunk, not be merged
+        // into one big blob.
+        let slide1_chunk = chunks.iter().find(|c| c.text.contains("glossa sample slide"));
+        let slide2_chunk = chunks.iter().find(|c| c.text.contains("Second Heading"));
+        assert!(slide1_chunk.is_some() && slide2_chunk.is_some());
+        assert_ne!(
+            slide1_chunk.unwrap().text,
+            slide2_chunk.unwrap().text,
+            "slide1/slide2 text ended up in the same chunk — section-per-slide boundary not applied"
+        );
+    }
+
+    #[test]
+    fn odp_unterminated_final_slide_flushed_on_eof() {
+        // Truncated file: a <draw:page> with its own text-box content that
+        // never sees a closing </draw:page> (or the rest of the document).
+        // Must still surface as its own final section, not be silently dropped.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0">
+<office:body><office:presentation>
+<draw:page draw:name="OnlySlide"><draw:frame><draw:text-box><text:p>truncated slide text</text:p></draw:text-box></draw:frame>"#;
+
+        let ir = parse_to_ir(xml, "odp").unwrap();
+        assert_eq!(ir.sections.len(), 1, "unterminated slide should still be flushed as one section");
+        assert_eq!(ir.sections[0].title.as_deref(), Some("OnlySlide"));
+        let text: String = ir.sections[0]
+            .elements
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("truncated slide text"), "unterminated slide text lost: {text:?}");
     }
 }

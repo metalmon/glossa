@@ -304,6 +304,9 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
             n.starts_with("word/media/")
                 || n.starts_with("xl/media/")
                 || n.starts_with("ppt/media/")
+                // ODF (odt/ods/odp) stores embedded images under Pictures/ at
+                // the zip root, not under an OOXML-style media/ subdirectory.
+                || n.starts_with("Pictures/")
         })
         .map(|s| s.to_string())
         .collect();
@@ -478,6 +481,19 @@ mod image_tests {
             .join("tests")
             .join("fixtures")
             .join("sample.pdf")
+    }
+
+    #[test]
+    fn extracts_png_media_from_odf_pictures_dir() {
+        // ODF (odt/ods/odp) stores embedded images under Pictures/ at the zip
+        // root, unlike OOXML's word/xl/ppt media/ subdirectories.
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample.odp");
+        let imgs = extract_zip_media(&p, 10).unwrap();
+        assert!(!imgs.is_empty(), "expected at least one image from Pictures/ in sample.odp");
+        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
     }
 
     #[test]
