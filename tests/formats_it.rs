@@ -15,3 +15,16 @@ fn collects_chunks_across_office_and_pdf_fixtures() {
         "marker text not found in any chunk"
     );
 }
+
+#[test]
+fn collects_odf_chunks() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let chunks = collect_chunks(&fixtures, None, true).unwrap();
+    assert!(chunks.iter().any(|c| c.file_type == "odt"), "no odt chunks");
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.file_type == "ods" && c.text.contains("---")),
+        "no ods GFM table"
+    );
+}
