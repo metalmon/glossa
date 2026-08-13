@@ -12,6 +12,9 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
 - `sample.ods` — OpenDocument spreadsheet; two sheets (`Sheet1`, `Data`) exercising
   `number-columns-repeated`: a repeated non-empty cell (must expand) and trailing repeated empty
   cells (must be clamped to the used range).
+- `sample.odp` — OpenDocument presentation; two slides (`Slide1`, `Slide2`) with heading + body
+  text (one carries the `glossa sample` marker), plus an embedded 1×1 PNG under `Pictures/` in the
+  zip (exercises the ODF branch of `extract_zip_media`).
 
 Do **not** replace these with real business/client documents — this repository is public.
 To add fixtures for other formats (xlsx/pptx/doc/xls/ppt), create equally neutral synthetic
