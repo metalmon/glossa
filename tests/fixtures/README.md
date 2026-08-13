@@ -15,6 +15,11 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
 - `sample.odp` — OpenDocument presentation; two slides (`Slide1`, `Slide2`) with heading + body
   text (one carries the `glossa sample` marker), plus an embedded 1×1 PNG under `Pictures/` in the
   zip (exercises the ODF branch of `extract_zip_media`).
+- `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
+  97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
+  extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
+  (`RemoveDocumentInformation`) — no author/username. Note: native charts are NOT embedded images
+  and are not extracted; `.ppt` yields no images via office_oxide (both out of scope here).
 
 Do **not** replace these with real business/client documents — this repository is public.
 To add fixtures for other formats (xlsx/pptx/doc/xls/ppt), create equally neutral synthetic
