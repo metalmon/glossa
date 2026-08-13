@@ -15,6 +15,7 @@ pub mod image;
 pub mod links;
 pub mod markdown;
 pub mod odf;
+pub mod odf_chart;
 pub mod office;
 pub mod ooxml_chart;
 pub mod office_chunk;

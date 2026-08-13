@@ -48,3 +48,15 @@ fn collects_odf_chunks() {
         "no ods GFM table"
     );
 }
+
+#[test]
+fn collects_odf_chart_chunks() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let chunks = collect_chunks(&fixtures, None, true).unwrap();
+    // a chart chunk from sample_chart.ods (Object 1/content.xml, local table)
+    let ods_chart_chunks = chunks
+        .iter()
+        .filter(|c| c.file_type == "ods" && c.text.starts_with("Chart:"))
+        .count();
+    assert_eq!(ods_chart_chunks, 1, "expected exactly one ods chart chunk");
+}

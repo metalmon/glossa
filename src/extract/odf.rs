@@ -456,7 +456,8 @@ impl Extractor for OdfExtractor {
         let xml = read_content_xml(bytes, path)?;
         let mut ir = parse_to_ir(&xml, &ext)?;
         expand_merged_tables(&mut ir);
-        let chunks = chunk_ir(path, &ir, &ext);
+        let mut chunks = chunk_ir(path, &ir, &ext);
+        chunks.extend(crate::extract::odf_chart::extract_odf_charts(path, bytes, &ext));
         if chunks.is_empty() {
             return Err(anyhow!("odf produced no chunks for {}", path.display()));
         }
