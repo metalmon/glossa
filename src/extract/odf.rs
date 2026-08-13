@@ -206,7 +206,20 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         .as_deref()
                         .and_then(heading_level_from_style);
                 }
-                b"tab" | b"s" | b"line-break" => buf.push(' '),
+                b"tab" | b"line-break" => buf.push(' '),
+                b"s" => {
+                    // <text:s text:c="N"/> is a run of N spaces (default 1 when
+                    // the attribute is absent). Cap it small so a malformed/
+                    // adversarial count can't push an unbounded String.
+                    let count = attr(&e, b"c")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .max(1)
+                        .min(1000);
+                    for _ in 0..count {
+                        buf.push(' ');
+                    }
+                }
                 b"table" => {
                     // Nested <table:table> (a table inside a cell) must NOT reset the
                     // outer table's state — only the outermost table's own open/close
@@ -314,29 +327,40 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                             // fills those grid slots purely from the origin's row_span).
                             cells.push(TableCell { content: vec![para(String::new())], ..Default::default() });
                         }
-                        let row_len = cells.len();
-                        // 0-cell padding rows (deferred empties); still capped so a huge
-                        // repeated-empty-row chain can't allocate an unbounded Vec.
-                        for _ in 0..pending_empty_rows.min(MAX_TABLE_CELLS) {
+                        // Budget guard: MAX_REPEAT already bounds a single row/column
+                        // repeat attribute, but many rows each near that cap — or a
+                        // long chain of deferred-empty padding rows flushed here —
+                        // can still multiply into an unbounded allocation. Every
+                        // materialized row, real OR 0-cell padding, costs at least 1
+                        // against the table's cell budget: padding rows can't slip
+                        // the cap just because they have 0 cells of their own (each
+                        // flush previously got its own uncounted allowance).
+                        let row_cost = cells.len().max(1);
+                        let mut over_budget = false;
+                        for _ in 0..pending_empty_rows {
+                            if table_cell_count >= MAX_TABLE_CELLS {
+                                over_budget = true;
+                                break;
+                            }
+                            table_cell_count += 1;
                             rows.push(TableRow::default());
                         }
                         pending_empty_rows = 0;
-                        for _ in 0..row_repeat {
-                            // Budget guard: MAX_REPEAT already bounds a single
-                            // row/column repeat attribute, but many rows each near
-                            // that cap can still multiply into an unbounded
-                            // allocation — cap the table's total materialized cells.
-                            if table_cell_count.saturating_add(row_len) > MAX_TABLE_CELLS {
-                                if !table_cell_budget_warned {
-                                    tracing::warn!(
-                                        "odf .{ext}: table exceeds {MAX_TABLE_CELLS}-cell budget, dropping further rows"
-                                    );
-                                    table_cell_budget_warned = true;
+                        if !over_budget {
+                            for _ in 0..row_repeat {
+                                if table_cell_count.saturating_add(row_cost) > MAX_TABLE_CELLS {
+                                    over_budget = true;
+                                    break;
                                 }
-                                break;
+                                table_cell_count += row_cost;
+                                rows.push(TableRow { cells: cells.clone(), ..Default::default() });
                             }
-                            table_cell_count += row_len;
-                            rows.push(TableRow { cells: cells.clone(), ..Default::default() });
+                        }
+                        if over_budget && !table_cell_budget_warned {
+                            tracing::warn!(
+                                "odf .{ext}: table exceeds {MAX_TABLE_CELLS}-cell budget, dropping further rows"
+                            );
+                            table_cell_budget_warned = true;
                         }
                     }
                     row_repeat = 1;
@@ -424,6 +448,23 @@ mod tests {
 
     fn extract(bytes: &[u8], name: &str) -> Vec<Chunk> {
         OdfExtractor.extract(Path::new(name), bytes).unwrap()
+    }
+
+    /// Build a minimal in-memory ODF zip (just `content.xml`) for tests that
+    /// need to go through the full `Extractor::extract` path (read_content_xml
+    /// -> parse_to_ir -> expand_merged_tables -> chunk_ir), not just parse_to_ir.
+    fn make_odf_zip(content_xml: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("content.xml", opts).unwrap();
+            zw.write_all(content_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
     }
 
     /// Flatten a TableCell's paragraph text runs into one string.
@@ -994,5 +1035,69 @@ mod tests {
         assert_eq!(heading_level_from_style("Heading 2"), Some(2), "space-separated form regressed");
         assert_eq!(heading_level_from_style("Heading_20_2"), Some(2), "encoded-space form regressed");
         assert_eq!(heading_level_from_style("HeadingSomethingElse"), None, "non-numeric suffix must not false-positive");
+    }
+
+    #[test]
+    fn ods_merge_origin_row_span_exceeds_available_rows_no_panic() {
+        // FIX P (CRITICAL) regression, odf-level: a merge origin's row_span can
+        // end up exceeding the number of rows actually materialized once its
+        // covered continuation row is dropped by the ODS-only trailing-empty-
+        // row clamp (FIX 3, an earlier wave — deliberately left as-is; a
+        // covered-only row is "empty" and, if trailing, gets clamped away).
+        // Before FIX P this reached expand_table with row_span=3 on a 1-row
+        // table and panicked (grid[r+dr] index out of bounds). Runs through
+        // the FULL Extractor::extract path (real zip, expand_merged_tables,
+        // chunk_ir) so the whole pipeline is exercised, not just parse_to_ir.
+        let content_xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row>
+<table:table-cell table:number-rows-spanned="3"><text:p>tall</text:p></table:table-cell>
+</table:table-row>
+<table:table-row>
+<table:covered-table-cell/>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let bytes = make_odf_zip(content_xml);
+        let chunks = OdfExtractor.extract(Path::new("merge.ods"), &bytes).unwrap(); // must not panic
+        assert!(!chunks.is_empty());
+        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(all_text.contains("tall"), "merge origin text lost: {all_text}");
+    }
+
+    #[test]
+    fn odt_text_s_repeat_count_expands_to_multiple_spaces() {
+        // FIX R (MINOR): <text:s text:c="N"/> was treated as a single space,
+        // ignoring its repeat count.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:text>
+<text:p>a<text:s text:c="3"/>b</text:p>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let text: String = ir.sections[0]
+            .elements
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(text.contains("a   b"), "text:s repeat count not expanded to 3 spaces: {text:?}");
     }
 }
