@@ -14,8 +14,29 @@ use std::path::Path;
 
 pub struct OdfExtractor;
 
+/// Cap on `number-columns-repeated` / `number-rows-repeated` / `number-columns-spanned`
+/// expansion. Real LibreOffice output tops out around ~1024; this is well above that
+/// but still bounds the allocation a malformed/adversarial file can trigger (glossa
+/// indexes arbitrary user files).
+const MAX_REPEAT: usize = 4096;
+
+/// Parse a `number-*` repeat/span attribute, defaulting to 1 and clamping to
+/// `MAX_REPEAT`. Clamping is logged (never silent) so a truncated expansion is
+/// discoverable rather than looking like a parser bug.
+fn bounded_repeat(raw: Option<String>, attr_name: &str, ext: &str) -> usize {
+    let n = raw.and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1);
+    if n > MAX_REPEAT {
+        tracing::warn!(
+            "odf {attr_name}={n} exceeds cap {MAX_REPEAT} in .{ext} file; clamping"
+        );
+        MAX_REPEAT
+    } else {
+        n
+    }
+}
+
 fn read_content_xml(bytes: &[u8], path: &Path) -> anyhow::Result<String> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .with_context(|| format!("odf not a zip: {}", path.display()))?;
     let mut f = zip
         .by_name("content.xml")
@@ -160,21 +181,24 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 b"table-row" => {
                     cur_cells = Vec::new();
                     empty_run = 0;
-                    row_repeat = attr(&e, b"number-rows-repeated")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                        .max(1);
+                    row_repeat = bounded_repeat(
+                        attr(&e, b"number-rows-repeated"),
+                        "number-rows-repeated",
+                        ext,
+                    );
                 }
                 b"table-cell" => {
                     buf.clear();
-                    cell_span = attr(&e, b"number-columns-spanned")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                        .max(1);
-                    cell_repeat = attr(&e, b"number-columns-repeated")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                        .max(1);
+                    cell_span = bounded_repeat(
+                        attr(&e, b"number-columns-spanned"),
+                        "number-columns-spanned",
+                        ext,
+                    );
+                    cell_repeat = bounded_repeat(
+                        attr(&e, b"number-columns-repeated"),
+                        "number-columns-repeated",
+                        ext,
+                    );
                 }
                 _ => {}
             },
@@ -372,5 +396,55 @@ mod tests {
         // trailing repeated empty cells (repeated=6) must be clamped, not 6+ empty columns
         let widest = sheet1.text.lines().map(|l| l.matches('|').count()).max().unwrap_or(0);
         assert!(widest <= 4, "trailing empties not clamped (cols≈{}):\n{}", widest, sheet1.text);
+    }
+
+    #[test]
+    fn ods_row_repeated_expands_and_trailing_empty_clamped() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row table:number-rows-repeated="3">
+<table:table-cell><text:p>rowval</text:p></table:table-cell>
+</table:table-row>
+<table:table-row table:number-rows-repeated="1000">
+<table:table-cell/>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "ods").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        // number-rows-repeated=3 on a non-empty row → 3 identical rows; the
+        // trailing number-rows-repeated=1000 EMPTY row must be clamped away
+        // entirely (not materialized as 1000 extra blank rows).
+        assert_eq!(table.rows.len(), 3, "expected 3 expanded rows (empty trailing row not clamped), got {}", table.rows.len());
+        for row in &table.rows {
+            let text: String = row.cells[0]
+                .content
+                .iter()
+                .map(|el| match el {
+                    Element::Paragraph(p) => p
+                        .content
+                        .iter()
+                        .map(|c| match c {
+                            InlineContent::Text(t) => t.text.clone(),
+                            _ => String::new(),
+                        })
+                        .collect::<String>(),
+                    _ => String::new(),
+                })
+                .collect::<String>();
+            assert_eq!(text, "rowval", "expanded row content mismatch");
+        }
     }
 }
