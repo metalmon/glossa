@@ -20,6 +20,13 @@ pub struct OdfExtractor;
 /// indexes arbitrary user files).
 const MAX_REPEAT: usize = 4096;
 
+/// Cap on the total number of cells a single table may materialize (summed
+/// across all rows, after row/column repeat expansion). `MAX_REPEAT` bounds a
+/// single dimension (one row's column-repeat, or one row's repeat count); this
+/// bounds the PRODUCT across many rows, so an adversarial/malformed file can't
+/// combine many largish-but-under-cap repeats into an unbounded allocation.
+const MAX_TABLE_CELLS: usize = 1_000_000;
+
 /// Parse a `number-*` repeat/span attribute, defaulting to 1 and clamping to
 /// `MAX_REPEAT`. Clamping is logged (never silent) so a truncated expansion is
 /// discoverable rather than looking like a parser bug.
@@ -64,10 +71,13 @@ fn attr<'a>(e: &'a quick_xml::events::BytesStart, want: &[u8]) -> Option<String>
 }
 
 /// Map an ODF paragraph style name to a heading level, if it is a heading style.
-/// LibreOffice/converted docs use `Heading_20_N` (encoded space); some use `Heading N`.
+/// LibreOffice/converted docs use `Heading_20_N` (encoded space); some use
+/// `Heading N`; some (no separator at all) use `Heading1`..`Heading6`.
 fn heading_level_from_style(style: &str) -> Option<u8> {
     let norm = style.replace("_20_", " ");
-    let rest = norm.strip_prefix("Heading ")?;
+    let rest = norm
+        .strip_prefix("Heading ")
+        .or_else(|| norm.strip_prefix("Heading"))?;
     rest.trim().parse::<u8>().ok().filter(|n| (1..=6).contains(n))
 }
 
@@ -120,13 +130,22 @@ fn row_is_empty(cells: &[TableCell]) -> bool {
 fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
+    // Deliver every self-closing element (<table:table-cell .../>, <text:tab/>,
+    // <text:line-break/>, ...) as a Start immediately followed by an End, instead
+    // of a separate Event::Empty. This gives self-closing and "open ... close"
+    // elements ONE shared code path: an interior self-closing empty table-cell
+    // now flows through the exact same Start/End handling (and push_cells'
+    // empty-run deferral) as a real `<table:table-cell></table:table-cell>`,
+    // instead of being silently skipped and misaligning every later column.
+    reader.config_mut().expand_empty_elements = true;
 
     let mut sections: Vec<Section> = Vec::new(); // ODS: one per <table:table>; ODT: single, pushed at EOF
     let mut elements: Vec<Element> = Vec::new();
     let mut buf = String::new();          // active paragraph/heading text
     let mut pending_heading: Option<u8> = None; // Some(level) while inside a heading-ish block
-    let mut in_table = false;
-    let mut current_sheet: Option<String> = None; // ODS: table:name of the table in progress
+    let mut in_table = false; // derived: table_depth > 0
+    let mut table_depth: usize = 0; // nesting depth of <table:table>; only 0<->1 starts/emits
+    let mut current_sheet: Option<String> = None; // ODS: table:name of the outermost table in progress
     let mut rows: Vec<TableRow> = Vec::new();
     let mut cur_cells: Vec<TableCell> = Vec::new();
     let mut cell_span: usize = 1;
@@ -135,6 +154,8 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut empty_run: usize = 0; // deferred trailing-empty cells (ODS repeats; harmless for ODT)
     let mut row_repeat: usize = 1; // number-rows-repeated, stashed at row Start
     let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (ODS only; clamped like empty_run)
+    let mut table_cell_count: usize = 0; // running total of cells materialized in the current outer table
+    let mut table_cell_budget_warned = false; // emit the MAX_TABLE_CELLS warning at most once per table
     // Did this row contain a REAL <table:table-cell>? Deliberately excludes
     // <table:covered-table-cell> — a covered-only row (the continuation of a
     // vertical merge) must stay a genuine 0-cell TableRow, since expand_table
@@ -185,13 +206,25 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         .as_deref()
                         .and_then(heading_level_from_style);
                 }
+                b"tab" | b"s" | b"line-break" => buf.push(' '),
                 b"table" => {
-                    in_table = true;
-                    rows.clear();
-                    pending_empty_rows = 0;
-                    if ext == "ods" {
-                        current_sheet = attr(&e, b"name");
+                    // Nested <table:table> (a table inside a cell) must NOT reset the
+                    // outer table's state — only the outermost table's own open/close
+                    // (depth 0<->1) starts/emits. Deeper opens/closes are no-ops here;
+                    // their rows/cells fold into the same `rows`/`cur_cells` state as
+                    // the outer table (lossy but not corrupting — no wiped outer rows,
+                    // no cells leaking to document level, no panic).
+                    table_depth += 1;
+                    if table_depth == 1 {
+                        rows.clear();
+                        pending_empty_rows = 0;
+                        table_cell_count = 0;
+                        table_cell_budget_warned = false;
+                        if ext == "ods" {
+                            current_sheet = attr(&e, b"name");
+                        }
                     }
+                    in_table = table_depth > 0;
                 }
                 b"table-row" => {
                     cur_cells = Vec::new();
@@ -224,10 +257,10 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 }
                 _ => {}
             },
-            Ok(Event::Empty(e)) => match local(e.name().as_ref()) {
-                b"tab" | b"s" => buf.push(' '),
-                _ => {}
-            },
+            // No Event::Empty arm: `expand_empty_elements = true` (set above) means
+            // every self-closing element (<table:table-cell/>, <text:tab/>, ...)
+            // arrives as Start immediately followed by End instead — one shared
+            // code path, handled by the Start/End arms above/below.
             Ok(Event::End(e)) => match local(e.name().as_ref()) {
                 b"h" | b"p" => {
                     if !in_table {
@@ -281,24 +314,47 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                             // fills those grid slots purely from the origin's row_span).
                             cells.push(TableCell { content: vec![para(String::new())], ..Default::default() });
                         }
-                        for _ in 0..pending_empty_rows {
+                        let row_len = cells.len();
+                        // 0-cell padding rows (deferred empties); still capped so a huge
+                        // repeated-empty-row chain can't allocate an unbounded Vec.
+                        for _ in 0..pending_empty_rows.min(MAX_TABLE_CELLS) {
                             rows.push(TableRow::default());
                         }
                         pending_empty_rows = 0;
                         for _ in 0..row_repeat {
+                            // Budget guard: MAX_REPEAT already bounds a single
+                            // row/column repeat attribute, but many rows each near
+                            // that cap can still multiply into an unbounded
+                            // allocation — cap the table's total materialized cells.
+                            if table_cell_count.saturating_add(row_len) > MAX_TABLE_CELLS {
+                                if !table_cell_budget_warned {
+                                    tracing::warn!(
+                                        "odf .{ext}: table exceeds {MAX_TABLE_CELLS}-cell budget, dropping further rows"
+                                    );
+                                    table_cell_budget_warned = true;
+                                }
+                                break;
+                            }
+                            table_cell_count += row_len;
                             rows.push(TableRow { cells: cells.clone(), ..Default::default() });
                         }
                     }
                     row_repeat = 1;
                 }
                 b"table" => {
-                    in_table = false;
-                    pending_empty_rows = 0; // drop trailing empty rows (clamp)
-                    let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
-                    if ext == "ods" {
-                        sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
-                    } else {
-                        elements.push(table);
+                    // Only the outermost table's close (depth 1->0) emits an Element.
+                    // A nested table's close just steps back up a level; its rows/cells
+                    // already folded into `rows` above (see the Start arm's comment).
+                    table_depth = table_depth.saturating_sub(1);
+                    in_table = table_depth > 0;
+                    if table_depth == 0 {
+                        pending_empty_rows = 0; // drop trailing empty rows (clamp)
+                        let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
+                        if ext == "ods" {
+                            sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
+                        } else {
+                            elements.push(table);
+                        }
                     }
                 }
                 _ => {}
@@ -368,6 +424,36 @@ mod tests {
 
     fn extract(bytes: &[u8], name: &str) -> Vec<Chunk> {
         OdfExtractor.extract(Path::new(name), bytes).unwrap()
+    }
+
+    /// Flatten a TableCell's paragraph text runs into one string.
+    fn cell_text(cell: &TableCell) -> String {
+        cell.content
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn find_table(ir: &DocumentIR) -> &Table {
+        ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR")
     }
 
     #[test]
@@ -753,5 +839,160 @@ mod tests {
                 row.cells.len()
             );
         }
+    }
+
+    // FIX A (CRITICAL): a self-closing interior empty <table:table-cell/> used to
+    // fall to `_ => {}` in the old Event::Empty arm and vanish entirely (never
+    // reaching push_cells), silently misaligning every later column. Fixed via
+    // `expand_empty_elements = true` — self-closing cells now flow through the
+    // same Start/End path as explicit `<table:table-cell></table:table-cell>`.
+
+    #[test]
+    fn odt_interior_self_closing_empty_cell_preserves_column_count() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>A</text:p></table:table-cell>
+<table:table-cell/>
+<table:table-cell><text:p>B</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let table = find_table(&ir);
+
+        assert_eq!(
+            table.rows[0].cells.len(),
+            3,
+            "interior self-closing empty cell dropped a column, got {} cells",
+            table.rows[0].cells.len()
+        );
+        assert_eq!(cell_text(&table.rows[0].cells[0]), "A");
+        assert_eq!(cell_text(&table.rows[0].cells[1]), "", "interior empty cell should stay a real (empty) cell");
+        assert_eq!(cell_text(&table.rows[0].cells[2]), "B", "B landed under the wrong column after the dropped cell");
+    }
+
+    #[test]
+    fn ods_interior_self_closing_empty_cell_preserves_column_count() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row>
+<table:table-cell><text:p>A</text:p></table:table-cell>
+<table:table-cell/>
+<table:table-cell><text:p>B</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "ods").unwrap();
+        let table = find_table(&ir);
+
+        assert_eq!(
+            table.rows[0].cells.len(),
+            3,
+            "interior self-closing empty cell dropped a column, got {} cells",
+            table.rows[0].cells.len()
+        );
+        assert_eq!(cell_text(&table.rows[0].cells[0]), "A");
+        assert_eq!(cell_text(&table.rows[0].cells[1]), "", "interior empty cell should stay a real (empty) cell");
+        assert_eq!(cell_text(&table.rows[0].cells[2]), "B", "B landed under the wrong column after the dropped cell");
+    }
+
+    #[test]
+    fn odt_nested_table_no_panic_outer_cell_text_survives() {
+        // FIX B (IMPORTANT): a bare `bool in_table` meant an inner <table:table>
+        // (nested inside an outer table's cell) ran `rows.clear()` on Start and
+        // `in_table = false` on End — wiping the outer table's already-closed
+        // rows and leaking the outer table's remaining cells out to document
+        // level. Fixed with a `table_depth` counter: only the 0->1 transition
+        // resets/starts, only the 1->0 transition emits. Inner rows/cells
+        // folding into the outer table's row list is an accepted trade-off; what
+        // must not happen is a wiped table, leaked cells, or a panic.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>innertext</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+<text:p>outertext</text:p>
+</table:table-cell>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap(); // must not panic
+
+        let table = find_table(&ir);
+        let all_text: String = table
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .map(cell_text)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(all_text.contains("outertext"), "outer cell's own text lost after nested table: {all_text:?}");
+        // No document-level leak: everything folded into the single table element.
+        assert!(
+            ir.sections[0].elements.iter().all(|el| matches!(el, Element::Table(_))),
+            "outer table cells leaked out to document level: {:?}",
+            ir.sections[0].elements
+        );
+    }
+
+    #[test]
+    fn odt_line_break_inserts_space_not_concatenation() {
+        // FIX C (MINOR): <text:line-break/> was unhandled, so "a<text:line-break/>b"
+        // rendered as the run-together "ab" instead of "a b".
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:text>
+<text:p>a<text:line-break/>b</text:p>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let text: String = ir.sections[0]
+            .elements
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(text.contains("a b"), "line-break didn't insert a separating space: {text:?}");
+        assert!(!text.contains("ab"), "line-break text ran together: {text:?}");
+    }
+
+    #[test]
+    fn heading_style_no_separator_form_recognised() {
+        // FIX E (MINOR): some producers write `Heading1`..`Heading6` with no
+        // separator at all (vs. `Heading_20_N` or `Heading N`).
+        assert_eq!(heading_level_from_style("Heading2"), Some(2));
+        assert_eq!(heading_level_from_style("Heading 2"), Some(2), "space-separated form regressed");
+        assert_eq!(heading_level_from_style("Heading_20_2"), Some(2), "encoded-space form regressed");
+        assert_eq!(heading_level_from_style("HeadingSomethingElse"), None, "non-numeric suffix must not false-positive");
     }
 }
