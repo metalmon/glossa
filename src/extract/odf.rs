@@ -116,7 +116,16 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     );
                 }
                 b"p" => {
-                    buf.clear();
+                    if in_table {
+                        // Table cells may hold multiple <text:p> — accumulate across
+                        // all of them (the table-cell Start already reset buf), with
+                        // a space separator so words don't run together.
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                    } else {
+                        buf.clear();
+                    }
                     pending_heading = attr(&e, b"style-name")
                         .as_deref()
                         .and_then(heading_level_from_style);
@@ -156,12 +165,13 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     let text = buf.trim().to_string();
                     buf.clear();
                     let repeat = 1usize; // Task 3 sets this from number-columns-repeated
+                    let is_empty = text.is_empty();
                     let cell = TableCell {
-                        content: vec![para(text.clone())],
+                        content: vec![para(text)],
                         col_span: cell_span as u32,
                         ..Default::default()
                     };
-                    push_cells(&mut cur_cells, &mut empty_run, cell, text.is_empty(), repeat);
+                    push_cells(&mut cur_cells, &mut empty_run, cell, is_empty, repeat);
                     cell_span = 1;
                 }
                 b"covered-table-cell" => { /* span already consumed the column; skip */ }
@@ -237,5 +247,49 @@ mod tests {
         // number-columns-spanned=2 → expand_merged_tables duplicates the origin value
         // into the covered cell (see office_table.rs densified_cell/expand_table).
         assert!(t.contains("| wide | wide |"), "spanned cell not expanded to 2 columns:\n{t}");
+    }
+
+    #[test]
+    fn odt_table_cell_multi_paragraph_keeps_all_text() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>foo</text:p><text:p>bar</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        let cell_text: String = table.rows[0].cells[0]
+            .content
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(cell_text.contains("foo"), "first paragraph lost, cell text: {cell_text:?}");
+        assert!(cell_text.contains("bar"), "second paragraph lost, cell text: {cell_text:?}");
     }
 }
