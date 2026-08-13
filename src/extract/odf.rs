@@ -130,10 +130,12 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut rows: Vec<TableRow> = Vec::new();
     let mut cur_cells: Vec<TableCell> = Vec::new();
     let mut cell_span: usize = 1;
+    let mut cell_row_span: usize = 1; // number-rows-spanned, stashed at cell Start
     let mut cell_repeat: usize = 1; // number-columns-repeated, stashed at cell Start
     let mut empty_run: usize = 0; // deferred trailing-empty cells (ODS repeats; harmless for ODT)
     let mut row_repeat: usize = 1; // number-rows-repeated, stashed at row Start
-    let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (clamped like empty_run)
+    let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (ODS only; clamped like empty_run)
+    let mut row_has_cell = false; // did this row contain any <table-cell>/<covered-table-cell>?
     let mut ev = Vec::new();
 
     loop {
@@ -150,7 +152,15 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
             }
             Ok(Event::Start(e)) => match local(e.name().as_ref()) {
                 b"h" => {
-                    buf.clear();
+                    if in_table {
+                        // Same rule as <text:p>: a heading inside a cell just adds
+                        // more cell text, it must not wipe out prior cell content.
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                    } else {
+                        buf.clear();
+                    }
                     pending_heading = Some(
                         attr(&e, b"outline-level").and_then(|v| v.parse().ok()).unwrap_or(1),
                     );
@@ -181,6 +191,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 b"table-row" => {
                     cur_cells = Vec::new();
                     empty_run = 0;
+                    row_has_cell = false;
                     row_repeat = bounded_repeat(
                         attr(&e, b"number-rows-repeated"),
                         "number-rows-repeated",
@@ -189,9 +200,15 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 }
                 b"table-cell" => {
                     buf.clear();
+                    row_has_cell = true;
                     cell_span = bounded_repeat(
                         attr(&e, b"number-columns-spanned"),
                         "number-columns-spanned",
+                        ext,
+                    );
+                    cell_row_span = bounded_repeat(
+                        attr(&e, b"number-rows-spanned"),
+                        "number-rows-spanned",
                         ext,
                     );
                     cell_repeat = bounded_repeat(
@@ -200,10 +217,12 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         ext,
                     );
                 }
+                b"covered-table-cell" => { row_has_cell = true; }
                 _ => {}
             },
             Ok(Event::Empty(e)) => match local(e.name().as_ref()) {
                 b"tab" | b"s" => buf.push(' '),
+                b"covered-table-cell" => { row_has_cell = true; }
                 _ => {}
             },
             Ok(Event::End(e)) => match local(e.name().as_ref()) {
@@ -229,21 +248,32 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     let cell = TableCell {
                         content: vec![para(text)],
                         col_span: cell_span as u32,
+                        row_span: cell_row_span as u32,
                         ..Default::default()
                     };
                     push_cells(&mut cur_cells, &mut empty_run, cell, is_empty, repeat);
                     cell_span = 1;
+                    cell_row_span = 1;
                     cell_repeat = 1;
                 }
                 b"covered-table-cell" => { /* span already consumed the column; skip */ }
                 b"table-row" => {
                     empty_run = 0; // drop trailing empty cells within the row (clamp)
-                    let cells = std::mem::take(&mut cur_cells);
-                    if row_is_empty(&cells) {
+                    let mut cells = std::mem::take(&mut cur_cells);
+                    if ext == "ods" && row_is_empty(&cells) {
                         // Defer: number-rows-repeated (or a bare empty row) may just be
                         // trailing padding — only materialize it if content follows.
+                        // ODS only: number-rows-repeated is a spreadsheet-only attribute,
+                        // and ODT tables should never silently drop a real row.
                         pending_empty_rows += row_repeat;
                     } else {
+                        if cells.is_empty() && row_has_cell {
+                            // The row did contain cell elements, but column-level
+                            // clamping (all-empty single-column cells deferred into
+                            // `empty_run`) dropped every one of them — keep the row as
+                            // one valid blank GFM cell rather than a zero-cell row.
+                            cells.push(TableCell { content: vec![para(String::new())], ..Default::default() });
+                        }
                         for _ in 0..pending_empty_rows {
                             rows.push(TableRow::default());
                         }
@@ -269,6 +299,33 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
             _ => {}
         }
         ev.clear();
+    }
+
+    // Flush a pending in-progress table (truncated/malformed XML — EOF or an XML
+    // error hit mid-table) instead of silently dropping accumulated rows.
+    if in_table && (!rows.is_empty() || !cur_cells.is_empty()) {
+        if !cur_cells.is_empty() {
+            rows.push(TableRow { cells: std::mem::take(&mut cur_cells), ..Default::default() });
+        }
+        tracing::warn!(
+            "odf .{ext}: unterminated <table:table>, flushing {} pending row(s)",
+            rows.len()
+        );
+        let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
+        if ext == "ods" {
+            sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
+        } else {
+            elements.push(table);
+        }
+    } else if !in_table {
+        // Flush a pending trailing paragraph/heading that never saw its closing tag.
+        let text = buf.trim().to_string();
+        if !text.is_empty() {
+            match pending_heading.take() {
+                Some(level) => elements.push(heading(level, text)),
+                None => elements.push(para(text)),
+            }
+        }
     }
 
     if ext != "ods" {
@@ -446,5 +503,187 @@ mod tests {
                 .collect::<String>();
             assert_eq!(text, "rowval", "expanded row content mismatch");
         }
+    }
+
+    #[test]
+    fn odt_unterminated_table_flushed_on_eof() {
+        // Truncated file: one full row (own open+close tags) inside an open
+        // <table:table> that never gets a closing </table:table>, and the rest
+        // of the document (office:text/body/document-content) is also missing.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>truncated</text:p></table:table-cell>
+</table:table-row>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("unterminated table should still be flushed into the IR, not dropped");
+
+        let cell_text: String = table.rows[0].cells[0]
+            .content
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<String>();
+
+        assert!(cell_text.contains("truncated"), "unterminated table row lost, cell text: {cell_text:?}");
+    }
+
+    #[test]
+    fn odt_table_cell_heading_does_not_wipe_prior_text() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>starttext</text:p><text:h text:outline-level="1">headtext</text:h></table:table-cell>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        let cell_text: String = table.rows[0].cells[0]
+            .content
+            .iter()
+            .map(|el| match el {
+                Element::Paragraph(p) => p
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        InlineContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(cell_text.contains("starttext"), "text before the in-cell heading was wiped: {cell_text:?}");
+        assert!(cell_text.contains("headtext"), "in-cell heading text lost: {cell_text:?}");
+    }
+
+    #[test]
+    fn odt_trailing_empty_row_kept_with_one_blank_cell() {
+        // FIX 3: ODT rows are never deferred/dropped as "trailing empty" (that
+        // clamp is ODS-only, since number-rows-repeated is spreadsheet-only).
+        // FIX 4: a row that did have a <table:table-cell> but ended up with zero
+        // cells (column-level empty_run clamp) must render as one blank cell,
+        // not a zero-cell row.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell><text:p>real</text:p></table:table-cell>
+</table:table-row>
+<table:table-row>
+<table:table-cell><text:p></text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "odt").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        assert_eq!(table.rows.len(), 2, "ODT trailing empty row must not be dropped/deferred (FIX 3)");
+        assert_eq!(
+            table.rows[1].cells.len(),
+            1,
+            "all-empty row collapsed to zero cells instead of one blank cell (FIX 4)"
+        );
+    }
+
+    #[test]
+    fn ods_number_columns_repeated_clamped_to_max_repeat() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Huge">
+<table:table-row>
+<table:table-cell office:value-type="string" table:number-columns-repeated="100000"><text:p>dup</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "ods").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        assert_eq!(
+            table.rows[0].cells.len(),
+            MAX_REPEAT,
+            "number-columns-repeated=100000 should clamp to MAX_REPEAT ({MAX_REPEAT}), got {}",
+            table.rows[0].cells.len()
+        );
+    }
+
+    #[test]
+    fn ods_number_rows_spanned_sets_cell_row_span() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Merged">
+<table:table-row>
+<table:table-cell table:number-rows-spanned="3"><text:p>tall</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let ir = parse_to_ir(xml, "ods").unwrap();
+        let table = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+
+        assert_eq!(table.rows[0].cells[0].row_span, 3, "number-rows-spanned not carried onto TableCell.row_span");
     }
 }
