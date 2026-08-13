@@ -37,7 +37,9 @@ impl Extractor for OfficeExtractor {
             .map_err(|e| anyhow!("office parse failed for {}: {e}", path.display()))?;
         let mut ir = doc.to_ir();
         expand_merged_tables(&mut ir);
-        Ok(chunk_ir(path, &ir, &ext))
+        let mut chunks = chunk_ir(path, &ir, &ext);
+        chunks.extend(crate::extract::ooxml_chart::extract_charts(path, bytes, &ext));
+        Ok(chunks)
     }
 }
 
@@ -85,6 +87,26 @@ mod tests {
         assert!(
             joined.contains('|') && joined.contains("---"),
             "expected a GFM pipe table from the docx table, got:\n{joined}"
+        );
+    }
+
+    /// End-to-end through OfficeExtractor: office_oxide must open the
+    /// synthetic fixture (an injected, undeclared chart part must be inert
+    /// to the text path) AND the wiring in `extract` must append the chart
+    /// chunk after the doc's text chunks.
+    #[test]
+    fn office_extractor_appends_chart_chunk() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart.docx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart.docx"), bytes)
+            .unwrap();
+        assert!(
+            chunks.iter().any(|c| !c.text.starts_with("Chart:")),
+            "expected at least one non-chart (text) chunk, got: {chunks:?}"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.starts_with("Chart:")),
+            "expected a chart chunk appended, got: {chunks:?}"
         );
     }
 }

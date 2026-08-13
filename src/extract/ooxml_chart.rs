@@ -2,14 +2,13 @@
 //! chunks. Charts are neither embedded images nor part of office_oxide's IR;
 //! their data lives in the chart part's cache. Type-agnostic: bar/line/pie/…
 //! all use the same `c:ser → c:cat/c:val` shape.
-//!
-//! `ChartData`/`parse_chart_xml` are not yet called from `office.rs` — that
-//! wiring (zip scanning + `extract_charts` + IR-Table rendering) is a
-//! follow-up task. Allow dead_code until then.
-#![allow(dead_code)]
-
+use crate::extract::office_table::table_to_markdown;
+use crate::model::Chunk;
+use office_oxide::ir::{Element, InlineContent, Paragraph, Table, TableCell, TableRow, TextSpan};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::io::{Cursor, Read};
+use std::path::Path;
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Series {
@@ -124,6 +123,99 @@ pub(crate) fn parse_chart_xml(xml: &str) -> ChartData {
     cd
 }
 
+fn cell(text: &str) -> TableCell {
+    TableCell {
+        content: vec![Element::Paragraph(Paragraph {
+            content: vec![InlineContent::Text(TextSpan { text: text.to_string(), ..Default::default() })],
+            ..Default::default()
+        })],
+        ..Default::default()
+    }
+}
+
+/// Pivot ChartData into an IR table: header ["" , series names...], one body
+/// row per category index with the value from each series at that index.
+fn chart_to_table(cd: &ChartData) -> Table {
+    let n_rows = cd.series.iter().map(|s| s.vals.len()).max().unwrap_or(0);
+    // category labels: take the longest cats list among series (they usually match)
+    let cats = cd.series.iter().map(|s| &s.cats).max_by_key(|c| c.len());
+    let mut rows = Vec::new();
+
+    let mut header = vec![cell("")];
+    for (i, s) in cd.series.iter().enumerate() {
+        header.push(cell(s.name.as_deref().unwrap_or(&format!("Series {}", i + 1))));
+    }
+    rows.push(TableRow { cells: header, ..Default::default() });
+
+    for r in 0..n_rows {
+        let label = cats.and_then(|c| c.get(r)).cloned().unwrap_or_else(|| (r + 1).to_string());
+        let mut cells = vec![cell(&label)];
+        for s in &cd.series {
+            cells.push(cell(s.vals.get(r).map(String::as_str).unwrap_or("")));
+        }
+        rows.push(TableRow { cells, ..Default::default() });
+    }
+    Table { rows, ..Default::default() }
+}
+
+fn chart_names_for(ext: &str) -> bool {
+    matches!(ext, "docx" | "xlsx" | "pptx")
+}
+
+/// Scan the OOXML zip for `*/charts/chart*.xml` parts and render each into a
+/// searchable chunk (title + GFM data table). Infallible by design: any
+/// problem (bad zip, unreadable part, empty parse) skips that chart with a
+/// warning rather than failing the whole file's extraction.
+pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
+    if !chart_names_for(ext) {
+        return Vec::new();
+    }
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    // early-out: only pay for charts if any exist
+    let parts: Vec<String> = zip
+        .file_names()
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("/charts/chart") && n.ends_with(".xml") && !n.contains("colors") && !n.contains("style")
+        })
+        .map(|s| s.to_string())
+        .collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (i, name) in parts.iter().enumerate() {
+        let mut xml = String::new();
+        let read_ok = zip
+            .by_name(name)
+            .ok()
+            .and_then(|mut f| f.read_to_string(&mut xml).ok())
+            .is_some();
+        if !read_ok {
+            tracing::warn!("chart part {name} unreadable in {}", path.display());
+            continue;
+        }
+        let cd = parse_chart_xml(&xml);
+        if cd.series.is_empty() {
+            tracing::warn!("chart {name} in {} had no series data", path.display());
+            continue;
+        }
+        let table = chart_to_table(&cd);
+        let body = table_to_markdown(&table);
+        let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", i + 1));
+        let text = format!("Chart: {} ({})\n\n{}", title, cd.kind, body);
+        out.push(Chunk {
+            doc_path: path.to_path_buf(),
+            location: title,
+            file_type: ext.to_string(),
+            text,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +288,48 @@ mod tests {
         assert!(!cd.series[0].cats.contains(&"Sheet1!$A$1".to_string()));
         assert_eq!(cd.series[0].vals, vec!["4.3"]);
         assert!(!cd.series[0].vals.contains(&"Sheet1!$B$1".to_string()));
+    }
+
+    use crate::model::Chunk;
+    use std::path::Path;
+
+    fn charts(fixture: &str) -> Vec<Chunk> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
+        let bytes = std::fs::read(&path).unwrap();
+        let ext = fixture.rsplit('.').next().unwrap();
+        super::extract_charts(&path, &bytes, ext)
+    }
+
+    #[test]
+    fn docx_chart_yields_data_table_chunk() {
+        let cs = charts("sample_chart.docx");
+        assert!(!cs.is_empty(), "expected a chart chunk");
+        let t = cs.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(t.contains("Chart:") && t.contains("Sales by quarter"), "chart header/title missing:\n{t}");
+        assert!(t.contains('|') && t.contains("---"), "GFM table missing:\n{t}");
+        // English cached data from the synthetic fixture
+        assert!(t.contains("Series 1") && t.contains("Series 2"), "series names missing:\n{t}");
+        assert!(t.contains("Q1") && t.contains("4.3") && t.contains("2.4"), "categories/values missing:\n{t}");
+        // the c:f formula ref (Sheet1!$B$2:$B$4) must NOT leak into the table
+        assert!(!t.contains("Sheet1!"), "formula ref leaked into chart table:\n{t}");
+        assert!(cs.iter().all(|c| c.file_type == "docx"));
+    }
+
+    /// A zip with a `word/charts/chart1.xml` part containing garbage bytes
+    /// must never panic; extract_charts should just skip it (empty result).
+    #[test]
+    fn garbage_chart_part_no_panic() {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("word/charts/chart1.xml", opts).unwrap();
+            zw.write_all(b"not xml at all <<< \x00\x01\x02 garbage").unwrap();
+            zw.finish().unwrap();
+        }
+        let cs = extract_charts(Path::new("garbage.docx"), &buf, "docx");
+        assert!(cs.is_empty(), "garbage chart part should yield no chunks, got: {cs:?}");
     }
 }
