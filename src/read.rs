@@ -186,8 +186,52 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
         }
         "pdf" => extract_pdf_page_images(path, page, max),
         "htm" | "html" => extract_html_images(path, max),
+        // Legacy binary Office (OLE compound, not a zip): office_oxide scans
+        // for OfficeArt BLIP records directly in the raw bytes. Not
+        // paginated, so `page` doesn't apply here either (same as the zip
+        // media path below). `.ppt` deliberately has no arm — office_oxide
+        // extracts nothing from it — so it falls through to the
+        // extract_zip_media no-op (not a zip either, so also empty).
+        "doc" => {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            let bytes = std::fs::read(path)?;
+            Ok(legacy_ole_images(office_oxide::doc::images::extract_images(&bytes), max))
+        }
+        "xls" => {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            let bytes = std::fs::read(path)?;
+            Ok(legacy_ole_images(office_oxide::xls::images::extract_images(&bytes), max))
+        }
         _ => extract_zip_media(path, max),
     }
+}
+
+/// Map office_oxide's legacy-OLE BLIP images (.doc/.xls embedded pictures) to
+/// our `DocImage`, keeping only raster formats the vision path can consume
+/// (PNG/JPEG/BMP/TIFF) and skipping vector metafiles (EMF/WMF/PICT) and
+/// unrecognized BLIP types — those would need rasterization first, out of
+/// scope here. Caps at `max` RASTER images (vector/unknown BLIPs skipped
+/// before the cap is applied, so they don't crowd out real images).
+fn legacy_ole_images(images: Vec<office_oxide::cfb::blip::BlipImage>, max: usize) -> Vec<DocImage> {
+    use office_oxide::cfb::blip::BlipFormat;
+    images
+        .into_iter()
+        .filter(|im| {
+            matches!(
+                im.format,
+                BlipFormat::Png | BlipFormat::Jpeg | BlipFormat::Dib | BlipFormat::Tiff
+            )
+        })
+        .take(max)
+        .map(|im| DocImage {
+            mime: im.format.mime_type().to_string(),
+            bytes: im.data,
+        })
+        .collect()
 }
 
 fn extract_pdf_page_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<DocImage>> {
@@ -493,6 +537,32 @@ mod image_tests {
             .join("sample.odp");
         let imgs = extract_zip_media(&p, 10).unwrap();
         assert!(!imgs.is_empty(), "expected at least one image from Pictures/ in sample.odp");
+        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn extracts_png_from_legacy_doc() {
+        // Legacy binary .doc (OLE compound, not a zip) stores embedded images
+        // as OfficeArt BLIP records in the Data stream.
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample_legacy.doc");
+        let imgs = extract_images(&p, 1, 10).unwrap();
+        assert!(!imgs.is_empty(), "expected at least one embedded image in sample_legacy.doc");
+        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn extracts_png_from_legacy_xls() {
+        // Legacy binary .xls (OLE compound, not a zip) stores embedded images
+        // as OfficeArt BLIP records nested in MSODRAWINGGROUP records.
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample_legacy.xls");
+        let imgs = extract_images(&p, 1, 10).unwrap();
+        assert!(!imgs.is_empty(), "expected at least one embedded image in sample_legacy.xls");
         assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
     }
 
