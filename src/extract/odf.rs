@@ -135,7 +135,12 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut empty_run: usize = 0; // deferred trailing-empty cells (ODS repeats; harmless for ODT)
     let mut row_repeat: usize = 1; // number-rows-repeated, stashed at row Start
     let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (ODS only; clamped like empty_run)
-    let mut row_has_cell = false; // did this row contain any <table-cell>/<covered-table-cell>?
+    // Did this row contain a REAL <table:table-cell>? Deliberately excludes
+    // <table:covered-table-cell> — a covered-only row (the continuation of a
+    // vertical merge) must stay a genuine 0-cell TableRow, since expand_table
+    // (office_table.rs) fills those grid slots purely from the origin cell's
+    // row_span; padding a phantom blank cell here would widen the whole table.
+    let mut row_has_cell = false;
     let mut ev = Vec::new();
 
     loop {
@@ -217,12 +222,10 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         ext,
                     );
                 }
-                b"covered-table-cell" => { row_has_cell = true; }
                 _ => {}
             },
             Ok(Event::Empty(e)) => match local(e.name().as_ref()) {
                 b"tab" | b"s" => buf.push(' '),
-                b"covered-table-cell" => { row_has_cell = true; }
                 _ => {}
             },
             Ok(Event::End(e)) => match local(e.name().as_ref()) {
@@ -268,10 +271,14 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         pending_empty_rows += row_repeat;
                     } else {
                         if cells.is_empty() && row_has_cell {
-                            // The row did contain cell elements, but column-level
-                            // clamping (all-empty single-column cells deferred into
-                            // `empty_run`) dropped every one of them — keep the row as
-                            // one valid blank GFM cell rather than a zero-cell row.
+                            // The row did contain real <table:table-cell> elements, but
+                            // column-level clamping (all-empty single-column cells
+                            // deferred into `empty_run`) dropped every one of them —
+                            // keep the row as one valid blank GFM cell rather than a
+                            // zero-cell row. row_has_cell is NOT set by covered-table-cell,
+                            // so a covered-only vertical-merge continuation row stays a
+                            // genuine 0-cell TableRow (expand_table in office_table.rs
+                            // fills those grid slots purely from the origin's row_span).
                             cells.push(TableCell { content: vec![para(String::new())], ..Default::default() });
                         }
                         for _ in 0..pending_empty_rows {
@@ -685,5 +692,66 @@ mod tests {
             .expect("expected a table element in the parsed IR");
 
         assert_eq!(table.rows[0].cells[0].row_span, 3, "number-rows-spanned not carried onto TableCell.row_span");
+    }
+
+    #[test]
+    fn odt_vertical_merge_covered_row_stays_zero_cells_no_grid_widen() {
+        // Regression test (FIX 4 x FIX 6 interaction): row1 has ONE real cell
+        // with number-rows-spanned="2"; row2 is a covered-only continuation
+        // row (<table:covered-table-cell/>, no real <table:table-cell>). FIX
+        // 4's blank-cell padding must NOT fire for row2 — otherwise
+        // expand_merged_tables treats the phantom cell as a real placement and
+        // widens the WHOLE table to 2 columns instead of the correct 1.
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:text>
+<table:table>
+<table:table-row>
+<table:table-cell table:number-rows-spanned="2"><text:p>tall</text:p></table:table-cell>
+</table:table-row>
+<table:table-row>
+<table:covered-table-cell/>
+</table:table-row>
+</table:table>
+</office:text></office:body>
+</office:document-content>"#;
+
+        let mut ir = parse_to_ir(xml, "odt").unwrap();
+        let table_before = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element in the parsed IR");
+        // Pre-expand: the covered-only row must stay a genuine 0-cell row —
+        // no phantom blank cell padded in for it.
+        assert_eq!(
+            table_before.rows[1].cells.len(),
+            0,
+            "covered-only continuation row should stay 0-cell before expand_merged_tables, got {} cells",
+            table_before.rows[1].cells.len()
+        );
+
+        expand_merged_tables(&mut ir);
+        let table_after = ir.sections[0]
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("expected a table element after expand_merged_tables");
+
+        assert_eq!(table_after.rows.len(), 2, "both rows should survive expand_merged_tables");
+        for (i, row) in table_after.rows.iter().enumerate() {
+            assert_eq!(
+                row.cells.len(),
+                1,
+                "row {i} should stay 1 column wide after expand_merged_tables, got {} cells (table widened by phantom cell)",
+                row.cells.len()
+            );
+        }
     }
 }
