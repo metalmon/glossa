@@ -23,6 +23,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Upgraded the MCP SDK `rmcp` 1.8 → 3.1** (a one-line source change: `Content` → `ContentBlock`). Unblocks the MCP Apps (`ext apps`) direction; all tests and the streamable-http handshake/tool-call path verified.
 - **Reindex reads the tree once, not up to three times** (`ensure_fresh` → `index_dir` no longer re-walks) — restores earlier-version speed on large corpora.
 - **Images are not read at index time** — they are indexed by filename only, so a large/scanned image is never slurped into memory just to be dropped.
 - **Heading-only markdown is indexed by its title** instead of producing no searchable chunk.

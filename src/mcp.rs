@@ -5,7 +5,8 @@ use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, ProtocolVersion, ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock as Content, ProtocolVersion, ResourceContents, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
