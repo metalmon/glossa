@@ -222,6 +222,12 @@ enum Cmd {
         /// Default permits loopback only — set your gateway/public host(s) for a prod deployment.
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
+        /// Optional bearer token guarding the streamable-http `/mcp` endpoint. If set (flag or
+        /// `GLOSSA_MCP_TOKEN`), every `/mcp` request must send `Authorization: Bearer <token>` or is
+        /// rejected with 401; `/health`, `/ready`, `/metrics` stay open for probes. Unset → no auth
+        /// (the loopback default). Ignored for `--transport stdio` (a local subprocess).
+        #[arg(long = "auth-token", env = "GLOSSA_MCP_TOKEN", hide_env_values = true)]
+        auth_token: Option<String>,
         /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
         #[arg(long = "windows-service", hide = true)]
@@ -470,6 +476,8 @@ pub(crate) struct ServeParams {
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
+    /// Optional bearer token for the streamable-http `/mcp` endpoint (None → unauthenticated).
+    pub auth_token: Option<String>,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -488,6 +496,7 @@ pub(crate) fn run_serve(
     let transport = p.transport;
     let bind = p.bind;
     let allowed_hosts = p.allowed_hosts;
+    let auth_token = p.auth_token;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         if handle_signals {
@@ -514,8 +523,15 @@ pub(crate) fn run_serve(
                 cancel.cancel();
             }
             McpTransport::StreamableHttp => {
-                serve_streamable_http(server, &bind, allowed_hosts, cancel, on_transport_ready)
-                    .await?;
+                serve_streamable_http(
+                    server,
+                    &bind,
+                    allowed_hosts,
+                    auth_token,
+                    cancel,
+                    on_transport_ready,
+                )
+                .await?;
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -555,6 +571,7 @@ async fn serve_streamable_http(
     server: glossa::mcp::GlossaServer,
     bind: &str,
     allowed_hosts: Vec<String>,
+    auth_token: Option<String>,
     cancel: tokio_util::sync::CancellationToken,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
@@ -575,6 +592,23 @@ async fn serve_streamable_http(
         std::sync::Arc::new(LocalSessionManager::default()),
         config,
     );
+    // Guard ONLY the /mcp endpoint; /health, /ready, /metrics stay open so probes/monitoring work
+    // without a token. Unset token → no auth (the loopback default).
+    let mut mcp = axum::Router::new().nest_service("/mcp", service);
+    match auth_token {
+        Some(token) => {
+            tracing::info!("MCP auth: bearer token required on /mcp (health endpoints stay open)");
+            mcp = mcp.layer(axum::middleware::from_fn_with_state(
+                std::sync::Arc::new(token),
+                bearer_auth_layer,
+            ));
+        }
+        None => {
+            tracing::info!(
+                "MCP auth: DISABLED (no --auth-token / GLOSSA_MCP_TOKEN) — serve on loopback or behind a TLS/auth gateway"
+            );
+        }
+    }
     let app = axum::Router::new()
         // Liveness: the process is up.
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -600,7 +634,7 @@ async fn serve_streamable_http(
                 async move { s.metrics_text() }
             }),
         )
-        .nest_service("/mcp", service)
+        .merge(mcp)
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(
@@ -615,6 +649,36 @@ async fn serve_streamable_http(
         .await?;
     tracing::info!("glossa MCP (streamable-http) stopped");
     Ok(())
+}
+
+/// axum middleware: require `Authorization: Bearer <token>` on the guarded `/mcp` routes. A missing
+/// or wrong token is rejected with 401 and logged (a first audit signal for failed access — the IB
+/// track wants auth events recorded). The token compare is constant-time (see `mcp_auth`).
+async fn bearer_auth_layer(
+    axum::extract::State(expected): axum::extract::State<std::sync::Arc<String>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ok = {
+        let header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        glossa::mcp_auth::bearer_ok(header, &expected)
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        let via = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        tracing::warn!("MCP auth: 401 — missing/invalid bearer token on /mcp (x-forwarded-for={via})");
+        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -963,6 +1027,7 @@ fn main() -> anyhow::Result<()> {
             transport,
             bind,
             allowed_hosts,
+            auth_token,
             windows_service,
             service_name: _service_name,
         } => match action {
@@ -986,6 +1051,7 @@ fn main() -> anyhow::Result<()> {
                     transport,
                     bind,
                     allowed_hosts,
+                    auth_token,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
