@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-14
+
+### Added
+
+- **OpenDocument extraction (`.odt` / `.ods` / `.odp`).** glossa now reads OpenDocument text, spreadsheets, and presentations directly — a built-in `content.xml` parser builds the same `DocumentIR` the Office path uses, so odt/ods/odp get the same heading-scoped chunking and GFM tables (with merged-cell densify, `number-columns/rows-repeated` expansion and used-range clamping) as docx/xlsx/pptx. Headings are recognized both as structural `<text:h>` and as styled paragraphs (`Heading_20_N`, as LibreOffice/converted docs emit); ODS becomes section-per-sheet, ODP section-per-slide.
+- **Chart data extraction (Office + ODF).** Charts are no longer invisible: their underlying data (series, categories, values, title) is extracted into a searchable GFM table — one chunk per chart. OOXML reads the `charts/chartN.xml` cache; ODF reads the chart object's embedded local `<table:table>`, or, when the chart references sheet cells instead, resolves the `cell-range-address` ranges against the document's own sheet (A1 addressing with merged-cell / repeat handling, quoted sheet names, and bounded allocation). Charts are extracted as **data**, not rendered images.
+- **Embedded images delivered to vision agents.** With `--vision`, `read(page_image: true)` now returns embedded images from more sources: zip-based Office/ODF media (`word|xl|ppt/media/` and ODF `Pictures/`) and raster pictures embedded in legacy binary `.doc` / `.xls`. Legacy OLE image extraction is wrapped in a panic guard so a malformed file degrades to "no images" instead of aborting the read.
+
+### Notes
+
+- **Out of scope (documented):** charts are data-not-rendered (no bundled renderer; use a PDF source for a rendered visual), legacy binary `.doc/.xls/.ppt` charts are not extracted, and `.ppt` embedded images / vector metafiles (EMF/WMF/PICT) are not delivered. See `docs/architecture.md` → "Known extraction limitations". A design direction for reading engineering drawings / CAD (three layers + native render + MCP Apps) is in `docs/cad-drawing-reading-design.md`.
+
 ## [0.3.1] — 2026-08-09
 
 ### Added
