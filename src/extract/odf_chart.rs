@@ -53,6 +53,7 @@ pub(crate) fn parse_odf_chart_xml(xml: &str) -> OdfChartData {
     let mut field = Field::None;
     let mut in_axis = false;
     let mut in_table = false;
+    let mut table_done = false;
     let mut in_cell = false;
     let mut buf = String::new();
     let mut cur_row: Vec<String> = Vec::new();
@@ -76,9 +77,9 @@ pub(crate) fn parse_odf_chart_xml(xml: &str) -> OdfChartData {
                 b"axis" => in_axis = true,
                 b"title" if !in_axis => field = Field::Title,
                 // the chart's own local data table; not nested inside another table.
-                b"table" if !in_table => {
+                // A chart part has one local data table; ignore any extras (keep the first).
+                b"table" if !in_table && !table_done => {
                     in_table = true;
-                    cd.rows.clear();
                 }
                 b"table-row" if in_table => cur_row = Vec::new(),
                 b"table-cell" if in_table => {
@@ -104,7 +105,10 @@ pub(crate) fn parse_odf_chart_xml(xml: &str) -> OdfChartData {
                         cd.rows.push(std::mem::take(&mut cur_row));
                     }
                 }
-                b"table" => in_table = false,
+                b"table" => {
+                    in_table = false;
+                    table_done = true;
+                }
                 _ => {}
             },
             Ok(Event::Text(t)) => {
@@ -179,7 +183,7 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (i, name) in names.iter().enumerate() {
+    for name in &names {
         let mut xml = String::new();
         let read_ok = zip
             .by_name(name)
@@ -192,6 +196,8 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         }
         // Object N may be any embedded OLE object, not necessarily a chart
         // (e.g. an embedded spreadsheet); only chart sub-documents qualify.
+        // Fast pre-filter assuming the conventional `chart:` prefix; the streaming
+        // parser below is prefix-agnostic (matches on local name) and is the source of truth.
         if !xml.contains("chart:chart") {
             continue;
         }
@@ -207,7 +213,9 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         }
         let table = rows_to_table(&cd.rows);
         let body = table_to_markdown(&table);
-        let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", i + 1));
+        // number by emitted charts (out.len()), not scan index, so a chart
+        // following a skipped non-chart Object doesn't get an inflated number.
+        let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", out.len() + 1));
         let header = if cd.kind.is_empty() {
             format!("Chart: {}", title)
         } else {
@@ -329,6 +337,56 @@ mod tests {
         }
         let cs = extract_odf_charts(Path::new("garbage.ods"), &buf, "ods");
         assert!(cs.is_empty(), "garbage chart part should yield no chunks, got: {cs:?}");
+    }
+
+    /// Fallback chart numbering must count EMITTED charts, not the scan-loop
+    /// index: `Object 1` is a non-chart part (skipped at the `chart:chart`
+    /// gate) and `Object 2` is an untitled chart, which must still be "Chart 1".
+    #[test]
+    fn fallback_title_numbers_by_emitted_charts_not_scan_index() {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("Object 1/content.xml", opts).unwrap();
+            zw.write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+ xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">
+<office:body><office:spreadsheet/></office:body></office:document-content>"#,
+            )
+            .unwrap();
+            zw.start_file("Object 2/content.xml", opts).unwrap();
+            zw.write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+ xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0"
+ xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:chart>
+<chart:chart chart:class="chart:bar">
+<table:table table:name="local-table">
+<table:table-row>
+ <table:table-cell><text:p></text:p></table:table-cell>
+ <table:table-cell><text:p>Series 1</text:p></table:table-cell>
+</table:table-row>
+<table:table-row>
+ <table:table-cell><text:p>Q1</text:p></table:table-cell>
+ <table:table-cell><text:p>4.3</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</chart:chart>
+</office:chart></office:body></office:document-content>"#,
+            )
+            .unwrap();
+            zw.finish().unwrap();
+        }
+        let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods");
+        assert_eq!(cs.len(), 1, "expected exactly one chart chunk, got: {cs:?}");
+        assert_eq!(cs[0].location, "Chart 1", "untitled chart after a skipped object must be Chart 1: {cs:?}");
     }
 
     /// A truncated/malformed zip entirely must not panic either.
