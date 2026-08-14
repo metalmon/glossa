@@ -247,6 +247,12 @@ enum Cmd {
         /// (the loopback default). Ignored for `--transport stdio` (a local subprocess).
         #[arg(long = "auth-token", env = "GLOSSA_MCP_TOKEN", hide_env_values = true)]
         auth_token: Option<String>,
+        /// Idle-session timeout in seconds for the streamable-http transport: a session that makes no
+        /// request for this long is refused with 404 on its next request, so the client
+        /// re-initializes (a cheap handshake; the KB holds no per-session state). OPT-IN — `0`
+        /// (default) disables it. Set e.g. `900` (15 min) for a corporate policy.
+        #[arg(long = "session-idle-secs", env = "GLOSSA_MCP_SESSION_IDLE_SECS", default_value_t = 0)]
+        session_idle_secs: u64,
         /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
         #[arg(long = "windows-service", hide = true)]
@@ -497,6 +503,8 @@ pub(crate) struct ServeParams {
     pub allowed_hosts: Vec<String>,
     /// Optional bearer token for the streamable-http `/mcp` endpoint (None → unauthenticated).
     pub auth_token: Option<String>,
+    /// Idle-session timeout (seconds) for streamable-http; 0 disables (opt-in).
+    pub session_idle_secs: u64,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -516,6 +524,7 @@ pub(crate) fn run_serve(
     let bind = p.bind;
     let allowed_hosts = p.allowed_hosts;
     let auth_token = p.auth_token;
+    let session_idle_secs = p.session_idle_secs;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         if handle_signals {
@@ -547,6 +556,7 @@ pub(crate) fn run_serve(
                     &bind,
                     allowed_hosts,
                     auth_token,
+                    session_idle_secs,
                     cancel,
                     on_transport_ready,
                 )
@@ -591,6 +601,7 @@ async fn serve_streamable_http(
     bind: &str,
     allowed_hosts: Vec<String>,
     auth_token: Option<String>,
+    session_idle_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
@@ -615,6 +626,20 @@ async fn serve_streamable_http(
     // Guard ONLY the /mcp endpoint; /health, /ready, /metrics stay open so probes/monitoring work
     // without a token. Unset token → no auth (the loopback default).
     let mut mcp = axum::Router::new().nest_service("/mcp", service);
+    // Idle-session timeout (opt-in), applied INNER so bearer auth (added after, thus outer) runs
+    // first: an unauthenticated request gets 401 before we ever look at its session.
+    let idle_ms = session_idle_secs.saturating_mul(1000);
+    let activity = std::sync::Arc::new(glossa::session_idle::SessionActivity::new());
+    if idle_ms > 0 {
+        tracing::info!("MCP idle-session timeout: {session_idle_secs}s on /mcp (expired → 404, client re-inits)");
+        mcp = mcp.layer(axum::middleware::from_fn_with_state(
+            IdleState {
+                activity: activity.clone(),
+                idle_ms,
+            },
+            session_idle_layer,
+        ));
+    }
     match auth_token {
         Some(token) => {
             tracing::info!("MCP auth: bearer token required on /mcp (health endpoints stay open)");
@@ -675,6 +700,22 @@ async fn serve_streamable_http(
         f();
     }
     tokio::spawn(async move { freshen_srv.freshen_now().await });
+    if idle_ms > 0 {
+        // Housekeeping: periodically drop sessions abandoned past the idle window so the activity
+        // map can't grow unbounded. Stops with the server (shares `cancel`).
+        let reaper = activity.clone();
+        let rcancel = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = rcancel.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        reaper.reap(idle_ms, glossa::trace::now_ms());
+                    }
+                }
+            }
+        });
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;
@@ -714,9 +755,8 @@ async fn bearer_auth_layer(
             .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("-")
-            .to_string();
-        tracing::warn!("MCP auth: 401 — missing/invalid bearer token on /mcp (x-forwarded-for={via})");
+            .unwrap_or("-");
+        glossa::audit::security_event("auth", "bearer_reject", "denied", via, "/mcp");
         (axum::http::StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
     }
 }
@@ -735,6 +775,49 @@ async fn http_metrics_layer(
     m.dec_in_flight();
     m.record(resp.status().as_u16(), start.elapsed().as_secs_f64());
     resp
+}
+
+/// State for the idle-session middleware: the shared activity clock and the threshold (ms).
+#[derive(Clone)]
+struct IdleState {
+    activity: std::sync::Arc<glossa::session_idle::SessionActivity>,
+    idle_ms: u64,
+}
+
+/// axum middleware: enforce the idle-session timeout on `/mcp`. A request carrying an
+/// `Mcp-Session-Id` that has been idle past the threshold is refused with 404 (the streamable-http
+/// signal for a terminated session → the client re-initializes); the expiry is audited. Requests
+/// without a session id (e.g. `initialize`) pass through untouched.
+async fn session_idle_layer(
+    axum::extract::State(st): axum::extract::State<IdleState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let session_id = req
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let Some(sid) = session_id {
+        if !st
+            .activity
+            .check_and_touch(&sid, st.idle_ms, glossa::trace::now_ms())
+        {
+            let source = req
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            glossa::audit::security_event("session", "idle_expired", "denied", source, &sid);
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                "session expired — reinitialize\n",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1096,6 +1179,7 @@ fn main() -> anyhow::Result<()> {
             bind,
             allowed_hosts,
             auth_token,
+            session_idle_secs,
             windows_service,
             service_name: _service_name,
         } => match action {
@@ -1120,6 +1204,7 @@ fn main() -> anyhow::Result<()> {
                     bind,
                     allowed_hosts,
                     auth_token,
+                    session_idle_secs,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the

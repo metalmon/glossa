@@ -1269,6 +1269,7 @@ impl GlossaServer {
         &self,
         Parameters(args): Parameters<GraphBuildArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_build");
         #[cfg(feature = "constraint")]
         {
             let idx =
@@ -1297,6 +1298,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphUpsertArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_upsert");
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -1326,6 +1328,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphDeleteArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_delete");
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -1498,6 +1501,7 @@ impl GlossaServer {
         description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Notes are free-form: pick any extension (e.g. `.md`) that fits the content. Without append, an existing file is OVERWRITTEN; pass append=true to add to it. The `.csp` extension is a special validated limit-table format (tab-separated rows, first line = column headers) used only by the constraint-graph workflow — don't use it for ordinary notes. Use ls/read/del with paths from ls afterward."
     )]
     async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "note");
         #[cfg(feature = "notebook")]
         {
             let idx =
@@ -1553,6 +1557,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<NotebookPathArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "del");
         #[cfg(feature = "notebook")]
         {
             let idx =

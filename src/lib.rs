@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod cli_fmt;
 pub mod convert;
 pub mod default_ignore;
@@ -16,6 +17,7 @@ pub mod query;
 pub mod read;
 pub mod root;
 pub mod search;
+pub mod session_idle;
 pub mod tables;
 pub mod tools;
 pub mod trace;
