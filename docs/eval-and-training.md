@@ -296,7 +296,7 @@ just eval-metrics
 
 ## Playbook 5b — Constraint GEPA: improve `constraint_validate` prompts
 
-Target: [`eval/tensorzero/config/constraint_validate/system.minijinja`](../eval/tensorzero/config/constraint_validate/system.minijinja) (phase-A table extraction).
+Target: the constraint SOP slices in [`eval/sops/example/SOP.md`](../eval/sops/example/SOP.md) (the 5-step table-extraction SOP). `gepa-constraint-apply` runs `kb-train apply-sop-slices` to merge optimized slices back into the SOP.
 
 Unlike main GEPA (chunk retrieval), constraint GEPA uses **five micro-task pools** aligned with the 5-step SOP (Discover → Materialize → Compile → Coverage → Validate). Production stays **one agent** with five merged prompt slices.
 

@@ -59,7 +59,7 @@ Incremental: changed files are re-extracted; removed files drop from the index a
 kb index ./my-corpus --force
 ```
 
-Indexing respects `.gitignore` by default. Use `kb search --no-ignore` when you need to include ignored paths in scans.
+Indexing respects `.gitignore`/`.ignore` by default. On a corpus with no ignore file, the first `kb index` seeds a default `.ignore` that whitelists the file types glossa can extract (documents, images, common text/code) so installers, archives and temp files aren't read as text — edit it to tune what's indexed. A corrupt/unreadable file is skipped and listed in the run's error summary, never aborting the index. Use `kb search --no-ignore` when you need to include ignored paths in scans.
 
 ## Search
 

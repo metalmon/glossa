@@ -103,7 +103,7 @@ Environment fallbacks: `GLOSSA_MCP_TRANSPORT`, `GLOSSA_MCP_BIND`.
 
 Quickstart helpers: [`scripts/start-mcp-http.sh`](../scripts/start-mcp-http.sh) / [`scripts/start-mcp-http.ps1`](../scripts/start-mcp-http.ps1) start a streamable-http server against a corpus and print ready-to-paste Cursor `mcpServers` JSON.
 
-Ops endpoints: `/health`, `/ready`, `/metrics` (Prometheus). Details in [deploy/mcp-server.md](deploy/mcp-server.md).
+Ops endpoints: `/health`, `/ready`, `/metrics` (Prometheus). Bearer auth (`--auth-token`), idle-session timeout (`--session-idle-secs`), JSON logs (`GLOSSA_LOG_FORMAT=json`), and audit events: [security-and-operations.md](security-and-operations.md). Deployment topology: [deploy/mcp-server.md](deploy/mcp-server.md).
 
 ## IDE configuration
 

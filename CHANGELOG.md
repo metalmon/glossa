@@ -6,6 +6,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-08-15
+
+### Added
+
+- **Bearer-token auth for the network endpoint.** `kb mcp --transport streamable-http --auth-token <TOKEN>` (or env `GLOSSA_MCP_TOKEN`) requires `Authorization: Bearer <TOKEN>` on every `/mcp` request — anything else gets `401`. `/health`, `/ready` and `/metrics` stay open for probes. Unset → unauthenticated (the loopback default); ignored for `--transport stdio`. The token compare is constant-time. An interim integration-key guard ahead of full OIDC/IdP.
+- **HTTP request metrics.** `/metrics` now also exposes request-rate/latency: `glossa_http_requests_total`, `glossa_http_responses_total{class}`, `glossa_http_requests_in_flight`, a `glossa_http_request_duration_seconds` histogram, and `glossa_mcp_auth_rejected_total`, next to the existing index/graph gauges.
+- **JSON logs.** `GLOSSA_LOG_FORMAT=json` emits one JSON object per log line (for a SIEM / log pipeline); default stays human-readable. Both go to stderr.
+- **Security audit events.** Dedicated structured events on the `glossa::audit` tracing target (JSON-filterable): auth rejections (`bearer_reject`, with source IP) and every write/admin tool (`graph_upsert`, `graph_delete`, `graph_build`, `note`, `del`). Schema: `category / action / outcome / source / object`.
+- **Opt-in idle-session timeout.** `kb mcp … --session-idle-secs <N>` (env `GLOSSA_MCP_SESSION_IDLE_SECS`, default `0` = disabled) refuses a streamable-http session idle longer than `N` seconds with `404` on its next request, so a spec-compliant client re-initializes (a cheap handshake; the KB holds no per-session state).
+- **`kb --version`.**
+- **Default `.ignore` whitelist.** `kb index` seeds a `.ignore` (gitignore-whitelist idiom) on a corpus that has none, so a first index only reads types glossa can actually extract — installers, archives and temp files are no longer slurped as text. Editable; never clobbers an existing `.ignore`/`.gitignore`.
+- **Index error summary.** `kb index` prints `N skipped(errors)` in its stats line and an end-of-run list of files that failed to extract, so corrupt files aren't lost in terminal scroll.
+- **Root reporting.** Every command prints the resolved `root:` and warns on the nested-corpus / deleted-`.glossa`-walks-up traps (a deleted corpus `.glossa` otherwise silently reindexes into an ancestor).
+- **`docs/security-and-operations.md`** — hardening, observability, and an enterprise-readiness scorecard for the streamable-http server.
+
+### Changed
+
+- **Reindex reads the tree once, not up to three times** (`ensure_fresh` → `index_dir` no longer re-walks) — restores earlier-version speed on large corpora.
+- **Images are not read at index time** — they are indexed by filename only, so a large/scanned image is never slurped into memory just to be dropped.
+- **Heading-only markdown is indexed by its title** instead of producing no searchable chunk.
+
+### Fixed
+
+- **Nested/deleted `.glossa` root-resolution traps** that let the CLI and MCP server drift onto different indexes (split-brain).
+- **A corrupt or unreadable file no longer aborts the whole index** (e.g. a `.doc` with a bad CFB header) — it is logged, skipped, and reported in the error summary.
+- **Content finalized after a mid-copy freshen** is now picked up (the dir-mtime gate held a just-written dir for one more pass).
+
 ## [0.3.2] — 2026-08-14
 
 ### Added

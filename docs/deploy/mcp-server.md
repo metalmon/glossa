@@ -58,18 +58,29 @@ All knobs are CLI flags, with env fallback (flag overrides env):
 | `--bind <addr>` | `GLOSSA_MCP_BIND` | `127.0.0.1:8080` |
 | `--profile reader\|editor\|full` | — | `editor` |
 | `--allowed-host <h>` (repeatable) | — | loopback only |
+| `--auth-token <TOKEN>` (bearer on `/mcp`; 401 on miss) | `GLOSSA_MCP_TOKEN` | none (unauthenticated) |
+| `--session-idle-secs <N>` (opt-in idle timeout; 404→re-init) | `GLOSSA_MCP_SESSION_IDLE_SECS` | `0` (disabled) |
 | `--service-name <name>` (Windows SCM) | `GLOSSA_SERVICE_NAME` | `glossa` |
-| `RUST_LOG` (log level) | `RUST_LOG` | `info,tantivy=warn` |
+| `RUST_LOG` (log level) | `RUST_LOG` | `info,tantivy=warn,pdf_oxide=error` |
+| log format (`json` → one JSON object per line) | `GLOSSA_LOG_FORMAT` | text |
+
+See **[security-and-operations.md](../security-and-operations.md)** for the auth, idle-timeout,
+metrics, JSON-logs, and audit-event details plus an enterprise-readiness scorecard.
 
 ## Ops endpoints (streamable-http)
 
 - `GET /health` — liveness (200 `ok`).
 - `GET /ready` — readiness: index + graph openable (200 `ready`, else 503).
-- `GET /metrics` — Prometheus: `glossa_up`, `glossa_index_chunks`, `glossa_graph_nodes`,
-  `glossa_graph_edges`, `glossa_graph_dirty`, `glossa_indexing`.
+- `GET /metrics` — Prometheus. Index/graph gauges (`glossa_up`, `glossa_index_chunks`,
+  `glossa_graph_nodes`, `glossa_graph_edges`, `glossa_graph_dirty`, `glossa_indexing`) plus HTTP
+  request metrics (`glossa_http_requests_total`, `glossa_http_responses_total{class}`,
+  `glossa_http_requests_in_flight`, `glossa_http_request_duration_seconds` histogram,
+  `glossa_mcp_auth_rejected_total`). `/health`, `/ready`, `/metrics` are exempt from `--auth-token`.
 
-Logs go to **stderr** (stdout is the stdio JSON-RPC channel). Each HTTP request is traced
-(method/path/status/latency).
+Logs go to **stderr** (stdout is the stdio JSON-RPC channel); `GLOSSA_LOG_FORMAT=json` makes them
+one JSON object per line. Each HTTP request is traced (method/path/status/latency). Security **audit
+events** (auth rejections, idle-session expiries, write-tool invocations) are emitted on the
+`glossa::audit` tracing target — see [security-and-operations.md](../security-and-operations.md).
 
 ## Graceful shutdown
 

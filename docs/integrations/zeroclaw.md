@@ -36,7 +36,7 @@ args = [
 **Windows** — set `command` to the full path of `kb.exe`:
 
 ```toml
-command = "C:\\Program Files\\glossa\\glossa-1.0.0-x86_64-pc-windows-msvc\\kb.exe"
+command = "C:\\Program Files\\glossa\\kb.exe"
 args = ["mcp", "C:\\Users\\you\\Documents\\my-kb", "--profile", "reader", "--transport", "stdio"]
 ```
 
