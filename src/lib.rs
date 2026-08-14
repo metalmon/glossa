@@ -1,5 +1,6 @@
 pub mod cli_fmt;
 pub mod convert;
+pub mod default_ignore;
 pub mod extract;
 pub mod glob;
 pub mod graph;

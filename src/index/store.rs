@@ -715,6 +715,9 @@ pub struct IndexStats {
     pub added: usize,
     pub removed: usize,
     pub unchanged: usize,
+    /// Files that were reached but failed to extract (corrupt/unreadable), as `(path, error)`. The
+    /// pass continues past them; the CLI prints this list at the end so they aren't lost in scroll.
+    pub errors: Vec<(String, String)>,
 }
 
 pub fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
@@ -1041,6 +1044,7 @@ pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
             added: 0,
             removed: 0,
             unchanged: delta.next.files.len() + delta.next.notes.len(),
+            ..Default::default()
         });
     }
     // Something changed → take the lock and index. index_dir recomputes the delta FRESH inside the
@@ -1287,6 +1291,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             added: 0,
             removed: 0,
             unchanged: delta.next.files.len() + delta.next.notes.len(),
+            ..Default::default()
         });
     }
 
@@ -1318,12 +1323,16 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         // next.files, so a later pass treats it as unchanged and doesn't retry it every time.
         if let Err(e) = index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links) {
             eprintln!("skip {}: {e}", abs.display());
+            stats.errors.push((path_str.clone(), e.to_string()));
             continue;
         }
         indexed.push((path_str.clone(), sig));
         stats.added += 1;
     }
-    stats.unchanged = next.files.len().saturating_sub(stats.added);
+    stats.unchanged = next
+        .files
+        .len()
+        .saturating_sub(stats.added + stats.errors.len());
 
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
@@ -1567,7 +1576,10 @@ pub fn reindex_dirs_locked(
                         stats.added += 1;
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("skip {}: {e}", path.display()),
+                    Err(e) => {
+                        eprintln!("skip {}: {e}", path.display());
+                        stats.errors.push((rel.clone(), e.to_string()));
+                    }
                 }
             }
         }
@@ -1842,6 +1854,9 @@ mod incremental_tests {
         std::fs::write(dir.path().join("bad.doc"), b"this is not a real CFB .doc file").unwrap();
         let stats = index_dir(dir.path(), false).expect("a corrupt .doc must not abort the index");
         assert!(stats.added >= 1, "the good doc is indexed despite the corrupt one");
+        // The failure is collected (not lost): reported to the CLI as an end-of-run error summary.
+        assert_eq!(stats.errors.len(), 1, "the corrupt .doc is recorded as an error");
+        assert!(stats.errors[0].0.contains("bad.doc"), "error names the offending file");
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx
             .search("hello", 10)

@@ -810,14 +810,34 @@ fn main() -> anyhow::Result<()> {
                     glossa::ontology_templates::Written::Overwritten => unreachable!("force=false"),
                 }
             }
+            // Seed a default whitelist `.ignore` on a corpus that has none, so a first index doesn't
+            // slurp installers/archives/temp files as text. Never clobbers an existing ignore setup.
+            if let Some(p) = glossa::default_ignore::seed_if_absent(&root) {
+                eprintln!(
+                    "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
+                    p.display()
+                );
+            }
             let stats = glossa::index::store::index_dir(&root, force)?;
+            let skipped = if stats.errors.is_empty() {
+                String::new()
+            } else {
+                format!(", {} skipped(errors)", stats.errors.len())
+            };
             println!(
-                "indexed: {} added, {} removed, {} unchanged in {}",
+                "indexed: {} added, {} removed, {} unchanged{} in {}",
                 stats.added,
                 stats.removed,
                 stats.unchanged,
+                skipped,
                 glossa::cli_fmt::format_elapsed(started.elapsed())
             );
+            if !stats.errors.is_empty() {
+                eprintln!("errors ({}):", stats.errors.len());
+                for (p, e) in &stats.errors {
+                    eprintln!("  {p}: {e}");
+                }
+            }
             if force {
                 // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
                 // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:

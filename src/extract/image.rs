@@ -33,6 +33,11 @@ impl Extractor for ImageExtractor {
         &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"]
     }
 
+    /// Images are indexed by filename only (see `label_for`), so the body is never read.
+    fn needs_bytes(&self) -> bool {
+        false
+    }
+
     fn extract(&self, path: &Path, _bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
         let ext = path
             .extension()
