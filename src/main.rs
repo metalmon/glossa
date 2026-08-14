@@ -8,18 +8,37 @@ use std::path::PathBuf;
 #[cfg(windows)]
 mod winsvc;
 
-/// Resolve the KB root and print it — plus any ambiguity warnings — to stderr, so the operator can
-/// SEE which `.glossa` a command actually used. The nested-corpus and deleted-`.glossa`-walks-up
-/// traps are otherwise silent (a deleted corpus `.glossa` makes `kb index` recreate the index in an
-/// ANCESTOR, splitting CLI and MCP apart). Logging goes to stderr so stdout stays machine-clean.
-fn resolve_root_logged(explicit: Option<PathBuf>) -> PathBuf {
+/// Resolve the KB root and report it — plus any ambiguity warnings — so the operator can SEE which
+/// `.glossa` a command actually used. The nested-corpus and deleted-`.glossa`-walks-up traps are
+/// otherwise silent (a deleted corpus `.glossa` makes `kb index` recreate the index in an ANCESTOR,
+/// splitting CLI and MCP apart). `via_tracing` picks the channel: interactive CLI commands print
+/// plain lines to stderr; the long-lived server routes them through `tracing` so they match its
+/// other logs (and become JSON under `GLOSSA_LOG_FORMAT=json`).
+fn resolve_root_reported(explicit: Option<PathBuf>, via_tracing: bool) -> PathBuf {
     let r = glossa::root::resolve_root_verbose(explicit);
     let shown = std::path::absolute(&r.root).unwrap_or_else(|_| r.root.clone());
-    eprintln!("root: {}", shown.display());
-    for a in r.advisories() {
-        eprintln!("warning: {a}");
+    if via_tracing {
+        tracing::info!(root = %shown.display(), "resolved kb root");
+        for a in r.advisories() {
+            tracing::warn!("{a}");
+        }
+    } else {
+        eprintln!("root: {}", shown.display());
+        for a in r.advisories() {
+            eprintln!("warning: {a}");
+        }
     }
     r.root
+}
+
+/// Root resolution for interactive CLI commands — reports to stderr as plain lines.
+fn resolve_root_logged(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_root_reported(explicit, false)
+}
+
+/// Root resolution for the long-lived MCP server — reports through `tracing` (structured, JSON-able).
+fn resolve_root_traced(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_root_reported(explicit, true)
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1089,7 +1108,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             None => {
-                let path = resolve_root_logged(path);
+                let path = resolve_root_traced(path);
                 let params = ServeParams {
                     path,
                     profile: glossa::mcp::Profile::parse(&profile),
