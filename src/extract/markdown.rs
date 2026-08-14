@@ -74,8 +74,11 @@ mod tests {
         let chunks = MarkdownExtractor
             .extract(Path::new("latin.md"), &bytes)
             .unwrap();
-        assert_eq!(chunks.len(), 0); // header-only file: heading recorded, no body chunk
-                                     // Now with a body line.
+        // Header-only file: still indexed as one chunk carrying the heading text, so a title-only
+        // doc stays findable by its title instead of vanishing from search.
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("caf"));
+        // Now with a body line.
         let mut b2 = bytes.clone();
         b2.extend_from_slice("body\n".as_bytes());
         let c2 = MarkdownExtractor.extract(Path::new("latin.md"), &b2).unwrap();
