@@ -292,23 +292,55 @@ fn grid_cell(grid: &[Vec<String>], row: usize, col: usize) -> Option<String> {
 /// Flatten a (typically single-column or single-row) range into an ordered
 /// list of cell texts. Missing/out-of-grid cells become `""` rather than
 /// shrinking the list, so category/value alignment by index still holds.
-/// Span is clamped to `MAX_REPEAT` per dimension to bound a malformed range.
-fn grid_range_values(grid: &[Vec<String>], range: &CellRange) -> Vec<String> {
+///
+/// Bounded two ways: span is clamped to `MAX_REPEAT` per dimension (mirrors
+/// the grid builder's repeat-attribute clamp), AND the total cell count
+/// (rows*cols, saturating) is separately capped at `MAX_GRID_CELLS` — a
+/// crafted 2D range (e.g. `$A$1:$FZ$4096`) can still multiply out to
+/// ~4096*4096 ≈ 16.7M cells even with each dimension individually within
+/// MAX_REPEAT, so the per-dimension clamp alone does not bound the product.
+/// Over budget: truncate (best-effort, matching the file's other rows) and
+/// warn once, rather than refuse outright or allocate unbounded. `what` and
+/// `file_ctx` are only used to name the range in that warning.
+fn grid_range_values(grid: &[Vec<String>], range: &CellRange, what: &str, file_ctx: &str) -> Vec<String> {
     let r2 = range.r1 + (range.r2 - range.r1).min(MAX_REPEAT - 1);
     let c2 = range.c1 + (range.c2 - range.c1).min(MAX_REPEAT - 1);
-    let mut out = Vec::new();
+    let rows_n = r2 - range.r1 + 1;
+    let cols_n = c2 - range.c1 + 1;
+    let total = rows_n.saturating_mul(cols_n);
+    let mut budget = total.min(MAX_GRID_CELLS);
+    if total > MAX_GRID_CELLS {
+        tracing::warn!(
+            "odf {file_ctx}: {what} range on sheet {:?} (cols {}..{c2}, rows {}..{r2}) spans \
+             {rows_n}x{cols_n}={total} cells, exceeds cap {MAX_GRID_CELLS}; truncating",
+            range.sheet, range.c1, range.r1
+        );
+    }
+    let mut out = Vec::with_capacity(budget);
     if range.c1 == c2 {
         for row in range.r1..=r2 {
+            if budget == 0 {
+                break;
+            }
             out.push(grid_cell(grid, row, range.c1).unwrap_or_default());
+            budget -= 1;
         }
     } else if range.r1 == r2 {
         for col in range.c1..=c2 {
+            if budget == 0 {
+                break;
+            }
             out.push(grid_cell(grid, range.r1, col).unwrap_or_default());
+            budget -= 1;
         }
     } else {
-        for row in range.r1..=r2 {
+        'rows: for row in range.r1..=r2 {
             for col in range.c1..=c2 {
+                if budget == 0 {
+                    break 'rows;
+                }
                 out.push(grid_cell(grid, row, col).unwrap_or_default());
+                budget -= 1;
             }
         }
     }
@@ -327,11 +359,13 @@ fn resolve_single_cell(addr: &str, grids: &SheetGrid) -> Option<String> {
 /// sheet grid into the same `rows` shape the local-table path produces:
 /// header `["", series1, series2, ...]`, then one row per category.
 /// Best-effort/infallible: `None` means "give up on this chart" (bad sheet,
-/// bad range, or no series), never a panic.
-fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid) -> Option<Vec<Vec<String>>> {
+/// bad range, or no series), never a panic. `path`/`chart_name` are only
+/// used to name the file/chart in an oversized-range warning, if one fires.
+fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid, path: &Path, chart_name: &str) -> Option<Vec<Vec<String>>> {
+    let file_ctx = format!("chart {chart_name} in {}", path.display());
     let cat_range = cd.categories_ref.as_deref().and_then(parse_cell_range)?;
     let cat_grid = grids.get(&cat_range.sheet)?;
-    let categories = grid_range_values(cat_grid, &cat_range);
+    let categories = grid_range_values(cat_grid, &cat_range, "categories", &file_ctx);
     if categories.is_empty() {
         return None;
     }
@@ -341,7 +375,8 @@ fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid) -> Option<Vec<Vec<Str
     for (i, s) in cd.series_refs.iter().enumerate() {
         let Some(values_range) = s.values_ref.as_deref().and_then(parse_cell_range) else { continue };
         let Some(values_grid) = grids.get(&values_range.sheet) else { continue };
-        let values = grid_range_values(values_grid, &values_range);
+        let values =
+            grid_range_values(values_grid, &values_range, &format!("series {} values", i + 1), &file_ctx);
         let label = s
             .label_ref
             .as_deref()
@@ -551,7 +586,7 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
             // ref-only chart: no local table, but it has cell-range refs into
             // the container's own sheet data — resolve those.
             let grid = sheet_grid.get_or_insert_with(|| load_sheet_grid(&mut zip, path));
-            match resolve_ref_chart(&cd, grid) {
+            match resolve_ref_chart(&cd, grid, path, name) {
                 Some(r) => r,
                 None => {
                     tracing::warn!(
@@ -965,5 +1000,86 @@ mod tests {
         }
         let cs = extract_odf_charts(Path::new("bad_range.ods"), &buf, "ods");
         assert!(cs.is_empty(), "bad series range must skip the chart, not panic: {cs:?}");
+    }
+
+    /// A crafted 2D range (`$A$1:$ZZ$4096` ≈ 4096 rows x 702 cols ≈ 2.9M
+    /// cells) has each dimension individually within `MAX_REPEAT`, so the
+    /// per-dimension clamp alone doesn't stop the product from ballooning.
+    /// `grid_range_values` must additionally cap the total emitted cells at
+    /// `MAX_GRID_CELLS` — this must return quickly, without panicking or
+    /// allocating anywhere near the raw product, even against a tiny grid.
+    #[test]
+    fn grid_range_values_caps_oversized_2d_range_no_oom_or_panic() {
+        let range = parse_cell_range("Sheet1.$A$1:.$ZZ$4096").expect("range should parse");
+        assert!(
+            (range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1) > MAX_GRID_CELLS,
+            "test range must actually be adversarial (product > cap): {range:?}"
+        );
+        let grid = vec![vec!["x".to_string()]];
+        let out = grid_range_values(&grid, &range, "adversarial", "test-file");
+        assert!(
+            out.len() <= MAX_GRID_CELLS,
+            "expected result capped at MAX_GRID_CELLS ({MAX_GRID_CELLS}), got {}",
+            out.len()
+        );
+        assert!(!out.is_empty(), "expected a truncated but non-empty result: {}", out.len());
+    }
+
+    /// Same adversarial range, but through the full `extract_odf_charts`
+    /// pipeline (crafted `chart:values-cell-range-address`, tiny real
+    /// sheet): the whole file's extraction must complete without panicking
+    /// or hanging.
+    #[test]
+    fn extract_odf_charts_handles_adversarial_2d_range_without_panic() {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+
+            zw.start_file("content.xml", opts).unwrap();
+            zw.write_all(
+                br#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row><table:table-cell><text:p>Q1</text:p></table:table-cell><table:table-cell><text:p>1</text:p></table:table-cell></table:table-row>
+<table:table-row><table:table-cell><text:p>Q2</text:p></table:table-cell><table:table-cell><text:p>2</text:p></table:table-cell></table:table-row>
+</table:table>
+</office:spreadsheet></office:body></office:document-content>"#,
+            )
+            .unwrap();
+
+            // Object 1: ref-only chart with an adversarial 2D values range
+            // (~4096 rows x 702 cols) against a real 2-row sheet.
+            zw.start_file("Object 1/content.xml", opts).unwrap();
+            zw.write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+ xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0"
+ xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:chart>
+<chart:chart chart:class="chart:bar">
+<chart:title><text:p>Adversarial</text:p></chart:title>
+<chart:plot-area>
+<chart:series chart:values-cell-range-address="Sheet1.$A$1:.$ZZ$4096" chart:label-cell-address="Sheet1.$B$1">
+<chart:categories table:cell-range-address="Sheet1.$A$1:.$A$2"/>
+</chart:series>
+</chart:plot-area>
+</chart:chart>
+</office:chart></office:body></office:document-content>"#,
+            )
+            .unwrap();
+            zw.finish().unwrap();
+        }
+        // The only hard requirement is "returns promptly without panicking";
+        // whether it resolves (truncated) or gives up cleanly is secondary.
+        let cs = extract_odf_charts(Path::new("adversarial.ods"), &buf, "ods");
+        if let Some(chart) = cs.first() {
+            assert!(chart.text.starts_with("Chart:"), "{}", chart.text);
+        }
     }
 }
