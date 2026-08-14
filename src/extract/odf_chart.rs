@@ -228,13 +228,40 @@ fn col_letters_to_index(s: &str) -> Option<usize> {
 
 /// Parse one `[Sheet.]$COL$ROW` component. `inherit_sheet` fills in a sheet
 /// name when the component omits its own (e.g. the second half of a range).
+///
+/// ODF quotes a sheet name that contains special characters (e.g. a literal
+/// `.`) as `'Name'.$COL$ROW`, with `''` escaping a literal `'` inside the
+/// name — a naive `split_once('.')` breaks on the first `.` inside such a
+/// name. When the address starts with `'`, take everything up to the
+/// matching (non-escaped) closing quote as the sheet name instead.
 fn parse_cell_addr(part: &str, inherit_sheet: &str) -> Option<CellAddr> {
     let part = part.trim();
-    let (sheet_part, cell_part) = match part.split_once('.') {
-        Some((s, c)) => (s, c),
-        None => ("", part),
+    let (sheet_part, cell_part) = if let Some(rest) = part.strip_prefix('\'') {
+        let bytes = rest.as_bytes();
+        let mut i = 0;
+        let mut close = None;
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2; // `''` — escaped literal quote inside the name
+                    continue;
+                }
+                close = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let close = close?; // unterminated quote — unparseable
+        let name = rest[..close].replace("''", "'");
+        let cell = rest[close + 1..].strip_prefix('.')?;
+        (name, cell.to_string())
+    } else {
+        match part.split_once('.') {
+            Some((s, c)) => (s.to_string(), c.to_string()),
+            None => (String::new(), part.to_string()),
+        }
     };
-    let sheet = if sheet_part.is_empty() { inherit_sheet.to_string() } else { sheet_part.to_string() };
+    let sheet = if sheet_part.is_empty() { inherit_sheet.to_string() } else { sheet_part };
     let stripped: String = cell_part.chars().filter(|&c| c != '$').collect();
     let split_at = stripped.find(|c: char| c.is_ascii_digit())?;
     let (col_s, row_s) = stripped.split_at(split_at);
@@ -400,11 +427,54 @@ fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid, path: &Path, chart_na
     Some(rows)
 }
 
+/// Push `repeat` copies of a grid cell's text into the current row. Empty
+/// cells are deferred into `empty_run` rather than materialized immediately,
+/// so trailing empty padding (real `.ods` rows commonly end in a huge
+/// `table:number-columns-repeated` empty run) can be clamped away instead of
+/// eating the grid budget; a non-empty cell first flushes any pending
+/// empties so they land at their correct column. Mirrors `odf.rs`'s
+/// `push_cells`, adapted to a flat `Vec<String>` grid row.
+fn push_grid_cell(cur_row: &mut Vec<String>, empty_run: &mut usize, text: &str, repeat: usize) {
+    if text.is_empty() {
+        *empty_run += repeat;
+        return;
+    }
+    for _ in 0..*empty_run {
+        cur_row.push(String::new());
+    }
+    *empty_run = 0;
+    for _ in 0..repeat {
+        cur_row.push(text.to_string());
+    }
+}
+
+/// A grid row is "empty" (deferrable/clampable trailing padding) when every
+/// cell materialized in it is blank. Mirrors `odf.rs`'s `row_is_empty`.
+fn grid_row_is_empty(cells: &[String]) -> bool {
+    cells.iter().all(|c| c.trim().is_empty())
+}
+
 /// Parse the container's top-level `content.xml` (`office:spreadsheet >
 /// table:table`) into a dense per-sheet grid, `sheet_name -> [row][col]`,
 /// expanding `table:number-columns-repeated` / `table:number-rows-repeated`
-/// so ODF A1-style addressing lines up. Infallible: malformed XML yields
-/// whatever sheets were parsed before the error.
+/// so ODF A1-style addressing lines up.
+///
+/// Two extra alignment concerns beyond simple repeat-expansion, both mirrored
+/// from `odf.rs`'s table reader:
+/// - Horizontal merges (`table:number-columns-spanned` + the
+///   `<table:covered-table-cell>` fillers a compliant writer emits for the
+///   rest of the span) must still leave later cells in the row at their
+///   correct column — the origin's own declared span reserves the columns,
+///   and any literal covered-cell tokens that follow consume that same
+///   reservation (not additional columns), so real files that emit both
+///   don't get double-counted.
+/// - Trailing empty cells/rows (repeat-expanded padding with nothing real
+///   after it) are deferred and clamped away rather than materialized, so a
+///   real cell deep in a tall/wide sheet doesn't get truncated out of the
+///   shared `MAX_GRID_CELLS` budget by padding earlier in the file.
+///
+/// Infallible: malformed XML yields whatever sheets were parsed before the
+/// error.
 fn parse_sheet_grid(xml: &str) -> SheetGrid {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -415,8 +485,12 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
     let mut table_name: Option<String> = None;
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut cur_row: Vec<String> = Vec::new();
+    let mut empty_run: usize = 0; // deferred trailing-empty cells within the current row
+    let mut pending_empty_rows: usize = 0; // deferred trailing all-empty rows
     let mut row_repeat: usize = 1;
     let mut col_repeat: usize = 1;
+    let mut col_span: usize = 1; // number-columns-spanned, stashed at cell Start
+    let mut span_owed: usize = 0; // placeholder columns still owed by the last spanned cell in this row
     let mut in_cell = false;
     let mut value_attr: Option<String> = None;
     let mut buf = String::new();
@@ -435,15 +509,26 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
                     in_table = true;
                     table_name = attr(&e, b"name");
                     rows = Vec::new();
+                    pending_empty_rows = 0;
                 }
                 b"table-row" if in_table => {
                     cur_row = Vec::new();
+                    empty_run = 0;
+                    span_owed = 0;
                     row_repeat = attr(&e, b"number-rows-repeated")
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(1)
                         .clamp(1, MAX_REPEAT);
                 }
                 b"table-cell" if in_table => {
+                    // Flush any placeholder columns still owed by a preceding
+                    // spanned cell in this row (FIX 1) before this cell's own
+                    // value lands — handles a spanned cell with no literal
+                    // covered-cell tokens after it.
+                    if span_owed > 0 {
+                        push_grid_cell(&mut cur_row, &mut empty_run, "", span_owed);
+                        span_owed = 0;
+                    }
                     in_cell = true;
                     buf.clear();
                     value_attr = attr(&e, b"value");
@@ -451,6 +536,27 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(1)
                         .clamp(1, MAX_REPEAT);
+                    col_span = attr(&e, b"number-columns-spanned")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .clamp(1, MAX_REPEAT);
+                }
+                b"covered-table-cell" if in_table => {
+                    // A horizontal merge's filler, or a whole covered-only
+                    // continuation row (vertical merge) — either way it
+                    // occupies grid column(s) so later cells keep their
+                    // correct A1 column. Each occurrence first consumes a
+                    // column from any span still owed by the preceding cell
+                    // (so a spec-compliant file that emits BOTH
+                    // number-columns-spanned and the covered-cell fillers
+                    // isn't double-counted); any repeat beyond that owed
+                    // budget still occupies a fresh column.
+                    let repeat = attr(&e, b"number-columns-repeated")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .clamp(1, MAX_REPEAT);
+                    push_grid_cell(&mut cur_row, &mut empty_run, "", repeat);
+                    span_owed = span_owed.saturating_sub(repeat);
                 }
                 b"p" if in_cell && !buf.is_empty() => buf.push(' '),
                 _ => {}
@@ -464,30 +570,57 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
                         } else {
                             trimmed.to_string()
                         };
-                        for _ in 0..col_repeat {
-                            cur_row.push(text.clone());
-                        }
+                        push_grid_cell(&mut cur_row, &mut empty_run, &text, col_repeat);
+                        // Record any additional columns this cell's span still
+                        // owes — flushed either by the next cell/covered-cell
+                        // in this row, or (if this was the row's last cell)
+                        // at table-row End. Repeated cells are never treated
+                        // as spanned too (repeat + span together isn't a
+                        // realistic file shape).
+                        span_owed = if col_repeat == 1 { col_span.saturating_sub(1) } else { 0 };
                     }
                     buf.clear();
                     value_attr = None;
                     in_cell = false;
                     col_repeat = 1;
+                    col_span = 1;
                 }
                 b"table-row" => {
                     if in_table {
-                        for _ in 0..row_repeat {
-                            total_cells += cur_row.len();
-                            rows.push(cur_row.clone());
-                            if total_cells >= MAX_GRID_CELLS {
-                                break;
+                        if span_owed > 0 {
+                            push_grid_cell(&mut cur_row, &mut empty_run, "", span_owed);
+                            span_owed = 0;
+                        }
+                        empty_run = 0; // drop trailing empty cells within the row (clamp)
+                        let cells = std::mem::take(&mut cur_row);
+                        if grid_row_is_empty(&cells) {
+                            // Defer: may just be trailing padding — only
+                            // materialize it if real content follows.
+                            pending_empty_rows += row_repeat;
+                        } else {
+                            for _ in 0..pending_empty_rows {
+                                if total_cells >= MAX_GRID_CELLS {
+                                    break;
+                                }
+                                total_cells += 1;
+                                rows.push(Vec::new());
+                            }
+                            pending_empty_rows = 0;
+                            let row_cost = cells.len().max(1);
+                            for _ in 0..row_repeat {
+                                if total_cells.saturating_add(row_cost) > MAX_GRID_CELLS {
+                                    break;
+                                }
+                                total_cells += row_cost;
+                                rows.push(cells.clone());
                             }
                         }
-                        cur_row = Vec::new();
                     }
                     row_repeat = 1;
                 }
                 b"table" => {
                     if in_table {
+                        pending_empty_rows = 0; // drop trailing empty rows (clamp)
                         if let Some(name) = table_name.take() {
                             grids.insert(name, std::mem::take(&mut rows));
                         }
@@ -714,6 +847,25 @@ mod tests {
         assert!(chart.text.contains("---"), "expected a GFM table:\n{}", chart.text);
     }
 
+    /// FIX 4: ODF chart extraction is container-agnostic — the same
+    /// embedded local-table chart (`Object N/content.xml`) works from a text
+    /// document or a presentation, not just a spreadsheet.
+    #[test]
+    fn odf_extractor_yields_chart_chunk_from_odt_and_odp() {
+        for fixture in ["sample_chart.odt", "sample_chart.odp"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {fixture}: {e}"));
+            let chunks = OdfExtractor.extract(&path, &bytes).unwrap_or_else(|e| panic!("extract {fixture}: {e}"));
+            let chart = chunks
+                .iter()
+                .find(|c| c.text.starts_with("Chart: Sales by quarter"))
+                .unwrap_or_else(|| panic!("{fixture}: expected a chart chunk, got: {chunks:?}"));
+            assert!(chart.text.contains("Series 1"), "{fixture}: {}", chart.text);
+            assert!(chart.text.contains("4.3"), "{fixture}: {}", chart.text);
+            assert!(chart.text.contains('|') && chart.text.contains("---"), "{fixture}: expected a GFM table:\n{}", chart.text);
+        }
+    }
+
     /// A zip with an `Object 1/content.xml` part containing garbage/truncated
     /// XML must never panic; extract_odf_charts should just skip it.
     #[test]
@@ -825,6 +977,34 @@ mod tests {
         assert!(parse_cell_range("garbage").is_none());
     }
 
+    /// FIX 2: ODF quotes a sheet name containing special characters (here, a
+    /// literal `.`) as `'Name'.$COL$ROW`. A naive `split_once('.')` breaks
+    /// inside the quotes and never finds the sheet — must take the sheet name
+    /// as everything between the quotes instead.
+    #[test]
+    fn parse_cell_range_handles_quoted_sheet_name_with_dots() {
+        let r = parse_cell_range("'My.Sheet'.$B$2").expect("quoted-sheet range should parse");
+        assert_eq!(r.sheet, "My.Sheet", "quoted sheet name mismatch: {r:?}");
+        assert_eq!((r.c1, r.r1, r.c2, r.r2), (2, 2, 2, 2), "col B, row 2: {r:?}");
+
+        // A range: the second half omits the sheet and must inherit the
+        // (quoted) first half's sheet name.
+        let range = parse_cell_range("'My.Sheet'.$B$2:.$B$4").expect("quoted-sheet range should parse");
+        assert_eq!(range.sheet, "My.Sheet");
+        assert_eq!((range.r1, range.r2), (2, 4));
+
+        // `''` inside the quotes is an escaped literal `'`.
+        let escaped = parse_cell_range("'It''s Mine'.$A$1").expect("escaped-quote sheet name should parse");
+        assert_eq!(escaped.sheet, "It's Mine", "escaped quote not un-doubled: {escaped:?}");
+
+        // Unquoted names must keep working.
+        let plain = parse_cell_range("Sheet1.$B$2").expect("plain sheet name should still parse");
+        assert_eq!(plain.sheet, "Sheet1");
+
+        // Unterminated quote is unparseable, not a panic.
+        assert!(parse_cell_range("'Unterminated.$A$1").is_none());
+    }
+
     const GRID_XML: &str = r#"<?xml version='1.0' encoding='UTF-8'?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
 <office:body><office:spreadsheet>
@@ -848,6 +1028,110 @@ mod tests {
         assert_eq!(row, &vec!["a", "dup", "dup", "dup", "z"], "repeat expansion mismatch: {row:?}");
         assert_eq!(grid_cell(sheet, 1, 1).as_deref(), Some("a"));
         assert_eq!(grid_cell(sheet, 1, 5).as_deref(), Some("z"), "z must be at col 5 after expansion");
+    }
+
+    /// FIX 1: a `table:number-columns-spanned` cell must widen the grid
+    /// column cursor even when the file doesn't literally emit the
+    /// `<table:covered-table-cell>` fillers for the rest of the span (a
+    /// simplified/hand-written file) — a later real cell in the row must
+    /// still land at its correct A1 column, not shifted left by the merge.
+    #[test]
+    fn sheet_grid_reader_spanned_cell_without_covered_tokens_keeps_later_cell_aligned() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row>
+<table:table-cell table:number-columns-spanned="3"><text:p>wide</text:p></table:table-cell>
+<table:table-cell><text:p>tail</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body></office:document-content>"#;
+        let grid = parse_sheet_grid(xml);
+        let sheet = grid.get("Sheet1").expect("Sheet1 present in grid");
+        assert_eq!(grid_cell(sheet, 1, 1).as_deref(), Some("wide"));
+        assert_eq!(
+            grid_cell(sheet, 1, 4).as_deref(),
+            Some("tail"),
+            "later cell shifted left by the merge, expected col D (4): {sheet:?}"
+        );
+    }
+
+    /// FIX 1: real (LibreOffice-written) ODF files emit BOTH
+    /// `number-columns-spanned` on the origin cell AND the literal
+    /// `<table:covered-table-cell>` fillers for the rest of the span, in the
+    /// same row. The grid reader must treat those as one width, not two —
+    /// otherwise a later real cell in the row lands one merge-width too far
+    /// right (double-counted).
+    #[test]
+    fn sheet_grid_reader_spanned_cell_with_explicit_covered_cells_no_double_count() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+<table:table-row>
+<table:table-cell table:number-columns-spanned="3"><text:p>wide</text:p></table:table-cell>
+<table:covered-table-cell/>
+<table:covered-table-cell/>
+<table:table-cell><text:p>tail</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body></office:document-content>"#;
+        let grid = parse_sheet_grid(xml);
+        let sheet = grid.get("Sheet1").expect("Sheet1 present in grid");
+        assert_eq!(grid_cell(sheet, 1, 1).as_deref(), Some("wide"));
+        assert_eq!(
+            grid_cell(sheet, 1, 4).as_deref(),
+            Some("tail"),
+            "tail must land at col 4, not shifted right by double-counted span: {sheet:?}"
+        );
+    }
+
+    /// FIX 3: real `.ods` rows commonly end in a huge trailing
+    /// `table:number-columns-repeated` EMPTY pad. Materializing that
+    /// faithfully across many rows would by itself exceed `MAX_GRID_CELLS`
+    /// and truncate the sheet — the trailing pad must be clamped away
+    /// instead, so a real cell far down a tall sheet still resolves.
+    #[test]
+    fn sheet_grid_reader_clamps_trailing_repeated_empty_pad_preserves_budget() {
+        let mut xml = String::from(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+<office:body><office:spreadsheet>
+<table:table table:name="Sheet1">
+"#,
+        );
+        const N_ROWS: usize = 300;
+        for i in 0..N_ROWS {
+            xml.push_str(&format!(
+                "<table:table-row>\n\
+                 <table:table-cell><text:p>r{i}c1</text:p></table:table-cell>\n\
+                 <table:table-cell><text:p>r{i}c2</text:p></table:table-cell>\n\
+                 <table:table-cell table:number-columns-repeated=\"60000\"><text:p></text:p></table:table-cell>\n\
+                 </table:table-row>\n"
+            ));
+        }
+        xml.push_str("</table:table></office:spreadsheet></office:body></office:document-content>");
+
+        let grid = parse_sheet_grid(&xml);
+        let sheet = grid.get("Sheet1").expect("Sheet1 present in grid");
+        assert_eq!(
+            sheet.len(),
+            N_ROWS,
+            "expected all {N_ROWS} rows present (not truncated by trailing pad): got {}",
+            sheet.len()
+        );
+        let last = N_ROWS - 1;
+        assert_eq!(
+            grid_cell(sheet, N_ROWS, 1).as_deref(),
+            Some(format!("r{last}c1").as_str()),
+            "last row col A truncated by pad-exhausted budget: {:?}",
+            sheet.last()
+        );
+        assert_eq!(grid_cell(sheet, N_ROWS, 2).as_deref(), Some(format!("r{last}c2").as_str()));
+        // The huge trailing pad itself must not have consumed the grid budget.
+        let total: usize = sheet.iter().map(|r| r.len()).sum();
+        assert!(total < MAX_GRID_CELLS, "trailing pad not clamped away, total cells materialized={total}");
     }
 
     /// The committed ref-only fixture: `Object 1/content.xml` has a
