@@ -587,6 +587,7 @@ async fn serve_streamable_http(
     let ready_srv = server.clone();
     let metrics_srv = server.clone();
     let freshen_srv = server.clone();
+    let http = server.http_metrics();
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
@@ -599,7 +600,10 @@ async fn serve_streamable_http(
         Some(token) => {
             tracing::info!("MCP auth: bearer token required on /mcp (health endpoints stay open)");
             mcp = mcp.layer(axum::middleware::from_fn_with_state(
-                std::sync::Arc::new(token),
+                AuthState {
+                    token: std::sync::Arc::new(token),
+                    metrics: http.clone(),
+                },
                 bearer_auth_layer,
             ));
         }
@@ -609,7 +613,10 @@ async fn serve_streamable_http(
             );
         }
     }
-    let app = axum::Router::new()
+    // Request metrics wrap /health, /ready and /mcp. /metrics is registered AFTER this `.layer`, so
+    // scraping it is NOT counted as a served request (axum applies a layer only to routes added
+    // before it) — the scrape must not measure itself.
+    let observed = axum::Router::new()
         // Liveness: the process is up.
         .route("/health", axum::routing::get(|| async { "ok" }))
         // Readiness: the index + graph are openable (the server can actually serve).
@@ -626,7 +633,13 @@ async fn serve_streamable_http(
                 }
             }),
         )
-        // Prometheus metrics (index/graph size, derived-layer staleness).
+        .merge(mcp)
+        .layer(axum::middleware::from_fn_with_state(
+            http.clone(),
+            http_metrics_layer,
+        ));
+    let app = observed
+        // Prometheus metrics (index/graph size, derived-layer staleness, HTTP request metrics).
         .route(
             "/metrics",
             axum::routing::get(move || {
@@ -634,7 +647,6 @@ async fn serve_streamable_http(
                 async move { s.metrics_text() }
             }),
         )
-        .merge(mcp)
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(
@@ -651,11 +663,19 @@ async fn serve_streamable_http(
     Ok(())
 }
 
+/// State for the bearer-auth middleware: the expected token plus the metrics handle (so a rejection
+/// bumps `glossa_mcp_auth_rejected_total`).
+#[derive(Clone)]
+struct AuthState {
+    token: std::sync::Arc<String>,
+    metrics: std::sync::Arc<glossa::http_metrics::HttpMetrics>,
+}
+
 /// axum middleware: require `Authorization: Bearer <token>` on the guarded `/mcp` routes. A missing
-/// or wrong token is rejected with 401 and logged (a first audit signal for failed access — the IB
-/// track wants auth events recorded). The token compare is constant-time (see `mcp_auth`).
+/// or wrong token is rejected with 401, counted, and logged (a first audit signal for failed access
+/// — the IB track wants auth events recorded). The token compare is constant-time (see `mcp_auth`).
 async fn bearer_auth_layer(
-    axum::extract::State(expected): axum::extract::State<std::sync::Arc<String>>,
+    axum::extract::State(st): axum::extract::State<AuthState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -665,11 +685,12 @@ async fn bearer_auth_layer(
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
-        glossa::mcp_auth::bearer_ok(header, &expected)
+        glossa::mcp_auth::bearer_ok(header, &st.token)
     };
     if ok {
         next.run(req).await
     } else {
+        st.metrics.inc_auth_rejected();
         let via = req
             .headers()
             .get("x-forwarded-for")
@@ -681,19 +702,47 @@ async fn bearer_auth_layer(
     }
 }
 
+/// axum middleware: time each served request and record it into the shared HTTP metrics (total,
+/// status class, in-flight gauge, latency histogram). Applied to /health, /ready and /mcp — not to
+/// /metrics itself.
+async fn http_metrics_layer(
+    axum::extract::State(m): axum::extract::State<std::sync::Arc<glossa::http_metrics::HttpMetrics>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    m.inc_in_flight();
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    m.dec_in_flight();
+    m.record(resp.status().as_u16(), start.elapsed().as_secs_f64());
+    resp
+}
+
 fn main() -> anyhow::Result<()> {
     // Structured logs go to STDERR — stdout is the stdio JSON-RPC channel and must never carry logs.
-    // Level via RUST_LOG (default `info`). Best-effort init (a second init in tests is a no-op).
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // Our logs at info; silence noisy deps. RUST_LOG overrides.
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
-                }),
-        )
-        .with_writer(std::io::stderr)
-        .try_init();
+    // Level via RUST_LOG (default `info`). `GLOSSA_LOG_FORMAT=json` emits one JSON object per line
+    // (for a SIEM / log pipeline); anything else is the human-readable default. Best-effort init (a
+    // second init in tests is a no-op). Read from the env directly — logging is set up before Cli
+    // parsing so parse errors are still logged.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        // Our logs at info; silence noisy deps. RUST_LOG overrides.
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error"));
+    let json_logs = std::env::var("GLOSSA_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json_logs {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .json()
+            .flatten_event(true)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Search {

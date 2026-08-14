@@ -5,6 +5,7 @@ pub mod extract;
 pub mod glob;
 pub mod graph;
 pub mod grep;
+pub mod http_metrics;
 pub mod index;
 pub mod json_util;
 pub mod mcp;

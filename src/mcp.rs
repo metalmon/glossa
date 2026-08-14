@@ -50,6 +50,9 @@ pub struct GlossaServer {
     no_image: bool,
     /// In-process cache of `manifest.json`, invalidated by the file's mtime.
     manifest_cache: Arc<Mutex<ManifestCache>>,
+    /// HTTP request metrics (streamable-http): shared with the axum middleware, rendered by
+    /// `metrics_text`. Inert under stdio (no middleware records into it).
+    http: Arc<crate::http_metrics::HttpMetrics>,
 }
 
 #[derive(Default)]
@@ -161,7 +164,14 @@ impl GlossaServer {
             indexing: Arc::new(AtomicUsize::new(0)),
             no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
+            http: Arc::new(crate::http_metrics::HttpMetrics::default()),
         }
+    }
+
+    /// Shared HTTP metrics handle — the streamable-http middleware records requests into it and
+    /// `metrics_text` renders it.
+    pub fn http_metrics(&self) -> Arc<crate::http_metrics::HttpMetrics> {
+        self.http.clone()
     }
 
     /// Run `f` against the in-process manifest cache, reloading it when `manifest.json`'s mtime advanced
@@ -347,7 +357,8 @@ impl GlossaServer {
              # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
              # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n\
              # HELP glossa_indexing A freshen (freshen_now) is in progress (1) or idle (0)\n\
-             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n"
+             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n{http}",
+            http = self.http.render(),
         )
     }
 
