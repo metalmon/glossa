@@ -23,6 +23,9 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   sub-document (`chart:bar`, title "Sales by quarter", a LOCAL `<table:table>` data cache: Series
   1/2, Q1–Q3). Exercises ODF chart-data extraction. Hand-built English; mirrors how LibreOffice/odfpy
   embed ODF charts (local data table), the primary ODF-chart form.
+- `sample_chart.odt` / `sample_chart.odp` — the minimal `sample.odt`/`sample.odp` with the same
+  injected `Object 1/` embedded chart (local `<table:table>`, "Sales by quarter") — confirms ODF
+  chart extraction is container-agnostic (odt/ods/odp all via the `Object*/content.xml` scan).
 - `sample_chart_ref.ods` — an ODS whose embedded chart (`Object 1/`) references SHEET CELLS
   (`chart:values-cell-range-address="Sheet1.$B$2:.$B$4"` etc.) instead of embedding a local data
   table — the Excel→ODS export form. Sheet1 holds the data (Cat / Series 1; Q1–Q3; 4.3/2.5/3.5).
