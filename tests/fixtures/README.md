@@ -23,6 +23,10 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   sub-document (`chart:bar`, title "Sales by quarter", a LOCAL `<table:table>` data cache: Series
   1/2, Q1–Q3). Exercises ODF chart-data extraction. Hand-built English; mirrors how LibreOffice/odfpy
   embed ODF charts (local data table), the primary ODF-chart form.
+- `sample_chart_ref.ods` — an ODS whose embedded chart (`Object 1/`) references SHEET CELLS
+  (`chart:values-cell-range-address="Sheet1.$B$2:.$B$4"` etc.) instead of embedding a local data
+  table — the Excel→ODS export form. Sheet1 holds the data (Cat / Series 1; Q1–Q3; 4.3/2.5/3.5).
+  Exercises ref-only chart resolution (resolve the ranges against the sheet). English, hand-built.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
