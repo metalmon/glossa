@@ -1312,7 +1312,14 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         };
         eprintln!("  + {path_str}");
         let abs = idx.root.join(path_str);
-        index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links)?;
+        // A single unreadable/corrupt file (e.g. a .doc with a bad CFB header) must NOT abort the
+        // whole index — log and skip it, exactly as the old walk_files-driven loop did (walk_files
+        // caught the visit closure's error and printed "skip …"). The file stays recorded in
+        // next.files, so a later pass treats it as unchanged and doesn't retry it every time.
+        if let Err(e) = index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links) {
+            eprintln!("skip {}: {e}", abs.display());
+            continue;
+        }
         indexed.push((path_str.clone(), sig));
         stats.added += 1;
     }
@@ -1549,12 +1556,19 @@ pub fn reindex_dirs_locked(
                 Err(_) => continue,
             };
             seen.insert(rel.clone());
-            if manifest.files.get(&rel) != Some(&sig)
-                && index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?.is_some()
-            {
-                manifest.files.insert(rel.clone(), sig);
-                indexed.push((rel.clone(), sig));
-                stats.added += 1;
+            if manifest.files.get(&rel) != Some(&sig) {
+                // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
+                // resilience of the `kb index` walk. On error the file is left unrecorded so a later
+                // freshen can retry it once it changes.
+                match index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links) {
+                    Ok(Some(_)) => {
+                        manifest.files.insert(rel.clone(), sig);
+                        indexed.push((rel.clone(), sig));
+                        stats.added += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("skip {}: {e}", path.display()),
+                }
             }
         }
     }
@@ -1815,6 +1829,36 @@ mod incremental_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let hits = idx.search("hello", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("ok.md")));
+    }
+
+    #[test]
+    fn index_dir_skips_corrupt_office_doc_and_continues() {
+        // A .doc whose extractor HARD-errors (bad CFB header) must not abort the whole index — the
+        // walk-free loop of Fix C once propagated this with `?`, killing the run with no stats. The
+        // good doc must still index and stats must be returned. (Malformed PDFs soft-fail, so only a
+        // hard-error extractor like office exercises this path.)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.md"), b"# T\nhello world\n").unwrap();
+        std::fs::write(dir.path().join("bad.doc"), b"this is not a real CFB .doc file").unwrap();
+        let stats = index_dir(dir.path(), false).expect("a corrupt .doc must not abort the index");
+        assert!(stats.added >= 1, "the good doc is indexed despite the corrupt one");
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("hello", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("ok.md")));
+        // The MCP freshen path must be resilient too: add another corrupt doc, freshen, don't abort.
+        std::fs::write(dir.path().join("bad2.doc"), b"garbage two").unwrap();
+        std::fs::write(dir.path().join("good2.md"), b"# U\nbravo term\n").unwrap();
+        freshen_blocking(dir.path(), std::time::Duration::from_secs(3))
+            .expect("a corrupt .doc must not abort freshen");
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("bravo", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("good2.md")));
     }
 
     #[test]
