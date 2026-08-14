@@ -8,6 +8,20 @@ use std::path::PathBuf;
 #[cfg(windows)]
 mod winsvc;
 
+/// Resolve the KB root and print it — plus any ambiguity warnings — to stderr, so the operator can
+/// SEE which `.glossa` a command actually used. The nested-corpus and deleted-`.glossa`-walks-up
+/// traps are otherwise silent (a deleted corpus `.glossa` makes `kb index` recreate the index in an
+/// ANCESTOR, splitting CLI and MCP apart). Logging goes to stderr so stdout stays machine-clean.
+fn resolve_root_logged(explicit: Option<PathBuf>) -> PathBuf {
+    let r = glossa::root::resolve_root_verbose(explicit);
+    let shown = std::path::absolute(&r.root).unwrap_or_else(|_| r.root.clone());
+    eprintln!("root: {}", shown.display());
+    for a in r.advisories() {
+        eprintln!("warning: {a}");
+    }
+    r.root
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum OutputFormat {
     /// pretty when stdout is a terminal, rg otherwise
@@ -21,6 +35,7 @@ enum OutputFormat {
 #[derive(Parser)]
 #[command(
     name = "kb",
+    version,
     about = "File-First knowledge-base search (ripgrep syntax)"
 )]
 struct Cli {
@@ -630,7 +645,7 @@ fn main() -> anyhow::Result<()> {
             no_ignore,
             format,
         } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             let pretty = match format {
                 OutputFormat::Pretty => true,
                 OutputFormat::Rg => false,
@@ -715,7 +730,7 @@ fn main() -> anyhow::Result<()> {
                 print_read(std::path::Path::new(&target), location.as_deref())?;
             } else if let Ok(n) = target.parse::<usize>() {
                 // 2. Target is a number and no file by that name exists — resolve from last search.
-                let root = glossa::root::resolve_root(None);
+                let root = resolve_root_logged(None);
                 let rec = glossa::cli_fmt::read_last_search(&root)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
                 match rec {
@@ -765,7 +780,7 @@ fn main() -> anyhow::Result<()> {
             file,
             ontology,
         } => {
-            let root = glossa::root::resolve_root(path);
+            let root = resolve_root_logged(path);
             let started = std::time::Instant::now();
             if let Some(rel) = file {
                 let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
@@ -824,7 +839,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "notebook")]
         Cmd::Prune { path, dry_run } => {
-            let root = glossa::root::resolve_root(path);
+            let root = resolve_root_logged(path);
             let orphans = glossa::index::store::orphan_notes(&root)?;
             if orphans.is_empty() {
                 println!("no orphaned notes");
@@ -878,7 +893,7 @@ fn main() -> anyhow::Result<()> {
             max_count,
             multiline,
         } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let opts = glossa::grep::GrepOpts {
@@ -904,7 +919,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Glob { pattern, path } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let docs = glossa::glob::glob_docs(&idx, &pattern)?;
@@ -940,7 +955,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             None => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let params = ServeParams {
                     path,
                     profile: glossa::mcp::Profile::parse(&profile),
@@ -976,13 +991,13 @@ fn main() -> anyhow::Result<()> {
         },
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
             GraphAction::Glossary { query, path, as_of } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
@@ -1012,7 +1027,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1058,7 +1073,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Generalize { path, merge } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let mut opts = glossa::graph::generalize::apply::Opts::from_ontology(
@@ -1079,7 +1094,7 @@ fn main() -> anyhow::Result<()> {
                 prune_incomplete,
                 prune_ungrounded,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
@@ -1105,7 +1120,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let filter = if types.is_empty() {
                     None
@@ -1134,7 +1149,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Node { node_id, path, as_of, now } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1198,7 +1213,7 @@ fn main() -> anyhow::Result<()> {
                 path,
                 max_depth,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
                 println!(
@@ -1214,7 +1229,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1333,7 +1348,7 @@ fn main() -> anyhow::Result<()> {
                 doc,
                 tables_dir,
             } => {
-                let root = glossa::root::resolve_root(path);
+                let root = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&root)?;
                 let tables = tables_dir.unwrap_or_else(|| {
                     glossa::notebook::notes_root(&root)
@@ -1379,7 +1394,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
                 OntologyAction::Init { path, template, force } => {
-                    let root = glossa::root::resolve_root(path);
+                    let root = resolve_root_logged(path);
                     match ot::write_template(&root, &template, force)? {
                         ot::Written::Created => println!("wrote '{template}' to .glossa/ontology.toml"),
                         ot::Written::Overwritten => println!("overwrote .glossa/ontology.toml with '{template}'"),
