@@ -41,33 +41,15 @@ impl AgentBackend for OpenAiBackend {
             None
         };
         let tools = tools_schema(graph.is_some());
-        let chat = |messages: &[Value]| -> anyhow::Result<Value> {
-            let body = json!({
-                "model": self.model,
-                "messages": messages,
-                "tools": tools,
-                "temperature": 0.0
-            });
-            let body_str = serde_json::to_string(&body)?;
-            let mut req = ureq::post(&url)
-                .timeout(self.timeout)
-                .set("Content-Type", "application/json");
-            if let Some(key) = &self.api_key {
-                req = req.set("Authorization", &format!("Bearer {key}"));
-            }
-            let resp = req
-                .send_string(&body_str)
-                .map_err(|e| anyhow!("endpoint request failed: {e}"))?;
-            let text = resp.into_string().context("read endpoint response")?;
-            let v: Value = serde_json::from_str(&text).context("parse endpoint json")?;
-            if let Some(err) = v.get("error") {
-                bail!("endpoint returned error: {err}");
-            }
-            let msg = v["choices"][0]["message"].clone();
-            if msg.is_null() {
-                bail!("endpoint response missing choices[0].message: {text}");
-            }
-            Ok(msg)
+        let chat = |messages: &[Value]| {
+            lmstudio_chat(
+                &url,
+                &self.model,
+                self.api_key.as_deref(),
+                &tools,
+                messages,
+                self.timeout,
+            )
         };
 
         let trace = TraceLog::to_dir(work);
@@ -79,7 +61,14 @@ impl AgentBackend for OpenAiBackend {
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace)
+            let body = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
+            // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
+            // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
+            if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
+                let snippet: String = body.chars().take(500).collect();
+                eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
+            }
+            body
         };
 
         let messages = vec![
@@ -91,8 +80,61 @@ impl AgentBackend for OpenAiBackend {
     }
 }
 
+/// One OpenAI-compatible `/v1/chat/completions` POST to an LM Studio-style endpoint. Returns the
+/// assistant `message` object (already extracted from `choices[0].message`). Samples at
+/// `temperature: 0.8` — temp 0 is not a reliable greedy mode on this reasoning model/backend
+/// (unstable outputs), so runs are stochastic and must be averaged over N. Shared by the eval
+/// backend and the graph GEPA optimizer so both drive the same server the same way.
+pub(crate) fn lmstudio_chat(
+    url: &str,
+    model: &str,
+    api_key: Option<&str>,
+    tools: &Value,
+    messages: &[Value],
+    timeout: Duration,
+) -> anyhow::Result<Value> {
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "temperature": 0.8
+    });
+    let body_str = serde_json::to_string(&body)?;
+    // Retry transient network drops: LM Studio occasionally closes a pooled keep-alive connection
+    // that ureq then reuses → "established connection was aborted" (os error 10060). A fresh request
+    // (new connection) + short backoff recovers it. Non-transport errors (HTTP status) surface at once.
+    let mut attempt = 0u32;
+    let resp = loop {
+        let mut req = ureq::post(url)
+            .timeout(timeout)
+            .set("Content-Type", "application/json");
+        if let Some(key) = api_key {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        match req.send_string(&body_str) {
+            Ok(r) => break r,
+            Err(ureq::Error::Transport(t)) if attempt < 3 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+                continue;
+            }
+            Err(e) => return Err(anyhow!("endpoint request failed: {e}")),
+        }
+    };
+    let text = resp.into_string().context("read endpoint response")?;
+    let v: Value = serde_json::from_str(&text).context("parse endpoint json")?;
+    if let Some(err) = v.get("error") {
+        bail!("endpoint returned error: {err}");
+    }
+    let msg = v["choices"][0]["message"].clone();
+    if msg.is_null() {
+        bail!("endpoint response missing choices[0].message: {text}");
+    }
+    Ok(msg)
+}
+
 /// OpenAI function-tool schema for glossa's search/read.
-fn tools_schema(graph_on: bool) -> Value {
+pub(crate) fn tools_schema(graph_on: bool) -> Value {
     let search = json!({
         "type": "function",
         "function": {
@@ -196,7 +238,7 @@ fn tools_schema(graph_on: bool) -> Value {
 /// `choices[0].message`). When it carries `tool_calls`, each is dispatched through `exec(name,
 /// args)` and the result fed back as a `role:"tool"` message, then the model is queried again —
 /// up to `max_rounds`. The first message without tool calls yields the answer.
-fn run_agent_loop<C, F>(
+pub(crate) fn run_agent_loop<C, F>(
     mut chat: C,
     mut messages: Vec<Value>,
     mut exec: F,
