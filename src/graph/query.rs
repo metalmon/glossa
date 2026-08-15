@@ -734,6 +734,45 @@ mod tests {
     }
 
     #[test]
+    fn resolution_edge_constraint_overrides_lexical_rank() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        // Real edge for Senica -> Senica District uses a relation name that is lexically FAR
+        // from the query word 'located'.
+        g.put_node(&node_fact("f:senica", "Senica")).unwrap();
+        g.put_node(&node_fact("f:distr", "Senica District")).unwrap();
+        g.put_edge(&edge("f:senica", "SITED_IN", "f:distr")).unwrap();
+        // LOCATED_NEAR is in the vocab (so it's a relation_candidates hit) and is the lexical
+        // top match for 'located' (substring), but it only connects unrelated nodes -- it is
+        // edgeless between Senica and its district.
+        g.put_node(&node_fact("f:p", "p")).unwrap();
+        g.put_node(&node_fact("f:q", "q")).unwrap();
+        g.put_edge(&edge("f:p", "LOCATED_NEAR", "f:q")).unwrap();
+
+        let q = parse_readonly_select(
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+        )
+        .unwrap();
+        let lits = locate_literals(&q);
+
+        // Sanity: LOCATED_NEAR really is the lexical top match, SITED_IN really is lower --
+        // otherwise this test wouldn't be exercising the override at all.
+        let vocab = g.edge_type_vocab().unwrap();
+        let ranked = relation_candidates("located", &vocab, vocab.len());
+        let top = &ranked[0];
+        assert_eq!(top.0, "LOCATED_NEAR", "fixture invalid: LOCATED_NEAR must be the lexical top match: {ranked:?}");
+        let sited_score = ranked.iter().find(|(r, _)| r == "SITED_IN").unwrap().1;
+        assert!(sited_score < top.1, "fixture invalid: SITED_IN must rank lower than LOCATED_NEAR: {ranked:?}");
+
+        let chosen = resolve_assignment(&g, &q, &lits);
+        let rel = chosen.iter().find(|(l, _, _)| matches!(l.kind, LitKind::Relation)).unwrap();
+        assert_eq!(
+            rel.1, "SITED_IN",
+            "edge-backed SITED_IN must win over lexically-top but edgeless LOCATED_NEAR: {chosen:?}"
+        );
+    }
+
+    #[test]
     fn locate_unwraps_a_parenthesized_operand_of_and() {
         let q = parse_readonly_select(
             "SELECT dst_label FROM edges_labeled WHERE (src_label = 'Senica') AND edge_type = 'x'",
