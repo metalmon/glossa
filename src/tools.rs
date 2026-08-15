@@ -876,19 +876,45 @@ const COMMUNITY_TOP_LIMIT: usize = 8;
 /// Resolve a tool's target node from either an explicit `node` id or a `(path, n)` chunk ref —
 /// the shared entry-point for `related` / `neighbors` / `path`. `#0` is tolerated as `#1`
 /// (models write 0 out of habit). Err holds a ready-to-return user message.
+/// Resolve a tool's target node to `(id, note)`. An exact node id is used as-is (`note = None`).
+/// Otherwise the string is treated as a name and resolved fuzzily via the same resolver `glossary`
+/// uses — small models can't reliably reproduce a hashed id, so they may pass the label/entity
+/// instead. Any such substitution returns a `note` so the caller can surface "searched X → used Y"
+/// and it is never a silent swap.
 fn resolve_node_ref(
     idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
     node: Option<&str>,
     path: Option<&str>,
     n: Option<u64>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
-        return Ok(nid.to_string());
+        let nid = nid.trim();
+        // Exact node id → use it, no note.
+        if matches!(g.get_node(nid), Ok(Some(_))) {
+            return Ok((nid.to_string(), None));
+        }
+        // Not an id we hold: treat it as a name and resolve fuzzily. Report the substitution.
+        if let Ok(hits) = g.resolve(nid) {
+            if let Some(hit) = hits.into_iter().next() {
+                let label = g
+                    .get_node(&hit)
+                    .ok()
+                    .flatten()
+                    .map(|x| x.label)
+                    .unwrap_or_default();
+                let note = format!("note: \"{nid}\" is not a node id — resolved it to {hit} ({label})");
+                return Ok((hit, Some(note)));
+            }
+        }
+        return Err(format!(
+            "no node matches \"{nid}\" as an id or a name — copy an id or entity from a glossary/search line"
+        ));
     }
     if let (Some(p), Some(nn)) = (path, n) {
         let nn = if nn == 0 { 1 } else { nn };
         return match idx.location_for_ord(p, nn) {
-            Ok(Some(_)) => Ok(crate::graph::build::section_id(p, &nn.to_string())),
+            Ok(Some(_)) => Ok((crate::graph::build::section_id(p, &nn.to_string()), None)),
             Ok(None) => Err(format!(
                 "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
             )),
@@ -896,6 +922,15 @@ fn resolve_node_ref(
         };
     }
     Err("need a node id (from glossary) or a (path, n) chunk".to_string())
+}
+
+/// Prepend a resolution `note` (from [`resolve_node_ref`]) to a tool's body, so a fuzzy id
+/// substitution is always visible to the caller.
+fn prepend_note(note: Option<String>, body: String) -> String {
+    match note {
+        Some(n) => format!("{n}\n{body}"),
+        None => body,
+    }
 }
 
 /// `as_of` (when `Some`), normalized via `temporal::normalize_point`, drops any SIMILAR/COMMUNITY
@@ -915,8 +950,8 @@ pub fn related(
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
 ) -> String {
-    let id = match resolve_node_ref(idx, node, path, n) {
-        Ok(i) => i,
+    let (id, note) = match resolve_node_ref(idx, g, node, path, n) {
+        Ok(x) => x,
         Err(m) => return m,
     };
     let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
@@ -969,11 +1004,12 @@ pub fn related(
         json!({"id": id}),
         json!({"similar": similar_count, "community": lines.len() - similar_count}),
     );
-    if lines.is_empty() {
+    let body = if lines.is_empty() {
         "(no related cases)".to_string()
     } else {
         lines.join("\n")
-    }
+    };
+    prepend_note(note, body)
 }
 
 /// One structural-neighbor line: `<EDGE_TYPE> <arrow>  <endpoint><meta><read-anchor>`.
@@ -1020,8 +1056,8 @@ pub fn neighbors(
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
 ) -> String {
-    let id = match resolve_node_ref(idx, node, path, n) {
-        Ok(i) => i,
+    let (id, note) = match resolve_node_ref(idx, g, node, path, n) {
+        Ok(x) => x,
         Err(m) => return m,
     };
     let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
@@ -1056,11 +1092,12 @@ pub fn neighbors(
         json!({"id": id, "direction": direction}),
         json!({"edges": lines.len()}),
     );
-    if lines.is_empty() {
+    let body = if lines.is_empty() {
         "(no structural edges)".to_string()
     } else {
         lines.join("\n")
-    }
+    };
+    prepend_note(note, body)
 }
 
 /// Shortest connection between two nodes (undirected reachability), rendered as a chain: the
@@ -1080,16 +1117,18 @@ pub fn path_between(
     max_depth: usize,
     trace: &TraceLog,
 ) -> String {
-    let from = match resolve_node_ref(idx, from_node, from_path, from_n) {
-        Ok(i) => i,
+    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n) {
+        Ok(x) => x,
         Err(m) => return format!("from: {m}"),
     };
-    let to = match resolve_node_ref(idx, to_node, to_path, to_n) {
-        Ok(i) => i,
+    let (to, note_to) = match resolve_node_ref(idx, g, to_node, to_path, to_n) {
+        Ok(x) => x,
         Err(m) => return format!("to: {m}"),
     };
+    let notes: Vec<String> = [note_from, note_to].into_iter().flatten().collect();
+    let note = (!notes.is_empty()).then(|| notes.join("\n"));
     let depth = max_depth.clamp(1, 12);
-    match crate::graph::traverse::path_between(g, &from, &to, depth) {
+    let body = match crate::graph::traverse::path_between(g, &from, &to, depth) {
         Ok(Some(hops)) => {
             let mut out = Vec::with_capacity(hops.len());
             for (i, h) in hops.iter().enumerate() {
@@ -1119,7 +1158,8 @@ pub fn path_between(
         }
         Ok(None) => format!("no path from {from} to {to} within depth {depth}"),
         Err(e) => format!("path error: {e}"),
-    }
+    };
+    prepend_note(note, body)
 }
 
 fn stats_example_line(
@@ -2365,9 +2405,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let dir = tempfile::tempdir().unwrap();
         let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
-        for id in ["a", "b", "c", "d"] {
+        for id in ["a", "b", "c", "d", "e"] {
             g.put_node(&node(id, "Entity", id)).unwrap();
         }
+        // "e" is left isolated (no edges) — the "no path" case needs a real but unreachable node.
         g.put_edge(&edge("a", "REFERENCES", "b")).unwrap();
         g.put_edge(&edge("b", "REFERENCES", "c")).unwrap();
         // Edge points d->c; reaching d from c means traversing it against its stored
@@ -2416,7 +2457,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             Some("a"),
             None,
             None,
-            Some("zzz"),
+            Some("e"),
             None,
             None,
             6,
@@ -2442,23 +2483,50 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 
     #[test]
     fn resolve_node_ref_prefers_explicit_node_id() {
-        // node id wins over (path,n); missing both is an error.
-        assert_eq!(
-            resolve_node_ref(
-                &crate::index::store::DocIndex::open_or_create(
-                    tempfile::tempdir().unwrap().path()
-                )
-                .unwrap(),
-                Some("sym:x"),
-                None,
-                None
-            ),
-            Ok("sym:x".to_string())
+        use crate::index::store::index_dir;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# Doc\nSome text.\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node("fact:x", "Fact", "Some fact")).unwrap();
+
+        // An explicit, existing node id resolves to itself with no note.
+        let (id, note) = resolve_node_ref(&idx, &g, Some("fact:x"), None, None).unwrap();
+        assert_eq!(id, "fact:x");
+        assert!(note.is_none());
+        // Missing both node and (path, n) is an error.
+        assert!(resolve_node_ref(&idx, &g, None, None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_node_ref_fuzzy_resolves_name_and_reports_it() {
+        use crate::index::store::index_dir;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# Doc\nSome text.\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node(
+            "fact:helio",
+            "Fact",
+            "Heliocentrism was proposed in the 3rd century BC",
+        ))
+        .unwrap();
+
+        // A weak model can't reproduce a hashed id, so it passes the name instead. It must resolve
+        // to the node AND report the substitution — never a silent swap.
+        let (rid, rnote) =
+            resolve_node_ref(&idx, &g, Some("Heliocentrism"), None, None).unwrap();
+        assert_eq!(rid, "fact:helio", "resolved the name to the node");
+        let rnote = rnote.expect("a fuzzy substitution must be reported");
+        assert!(
+            rnote.contains("Heliocentrism") && rnote.contains("fact:helio"),
+            "note names both the query and the chosen node: {rnote}"
         );
-        let idx =
-            crate::index::store::DocIndex::open_or_create(tempfile::tempdir().unwrap().path())
-                .unwrap();
-        assert!(resolve_node_ref(&idx, None, None, None).is_err());
+
+        // A genuine miss is an error, not a wrong node silently returned.
+        assert!(resolve_node_ref(&idx, &g, Some("zzz-nope-xyz"), None, None).is_err());
     }
 
     #[test]
