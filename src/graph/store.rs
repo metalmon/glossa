@@ -413,6 +413,13 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// Distinct `edge_type` values currently used in the graph — the real relation vocabulary
+    /// that fuzzy relation matching resolves against.
+    pub fn edge_type_vocab(&self) -> anyhow::Result<Vec<String>> {
+        let rows = self.run_select("SELECT DISTINCT edge_type FROM edges", 200)?;
+        Ok(rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+    }
+
     /// Column names for `sql`, in order. The caller is responsible for having gated `sql` as
     /// read-only before calling — this method does not gate.
     pub fn select_columns(&self, sql: &str) -> anyhow::Result<Vec<String>> {

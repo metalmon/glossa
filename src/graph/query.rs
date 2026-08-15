@@ -291,6 +291,93 @@ fn classify_column(col: &str) -> Option<LitKind> {
     }
 }
 
+/// Normalize a relation/entity name for fuzzy comparison: lowercase, and split on `_`/space
+/// into tokens (dropping empty tokens from runs of separators).
+fn normalize_tokens(s: &str) -> Vec<String> {
+    s.to_ascii_lowercase()
+        .split(|c: char| c == '_' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Levenshtein edit distance between two strings, counted in Unicode scalar values.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (alen, blen) = (a.len(), b.len());
+    if alen == 0 {
+        return blen;
+    }
+    if blen == 0 {
+        return alen;
+    }
+    let mut prev: Vec<usize> = (0..=blen).collect();
+    let mut cur: Vec<usize> = vec![0; blen + 1];
+    for i in 1..=alen {
+        cur[0] = i;
+        for j in 1..=blen {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[blen]
+}
+
+/// Similarity score in `[0.0, 1.0]` between `query` and a `vocab` entry: the max of
+/// exact/substring containment (1.0), token-Jaccard overlap of `_`/space-split tokens, and
+/// `1 - levenshtein(a, b) / max(len(a), len(b))`. Comparison is case-insensitive throughout.
+fn relation_similarity(query: &str, candidate: &str) -> f32 {
+    let q_norm = query.to_ascii_lowercase();
+    let c_norm = candidate.to_ascii_lowercase();
+    if q_norm == c_norm || q_norm.contains(&c_norm) || c_norm.contains(&q_norm) {
+        return 1.0;
+    }
+
+    let q_tokens = normalize_tokens(query);
+    let c_tokens = normalize_tokens(candidate);
+    let jaccard = if q_tokens.is_empty() || c_tokens.is_empty() {
+        0.0
+    } else {
+        let q_set: std::collections::HashSet<&String> = q_tokens.iter().collect();
+        let c_set: std::collections::HashSet<&String> = c_tokens.iter().collect();
+        let inter = q_set.intersection(&c_set).count();
+        let union = q_set.union(&c_set).count();
+        if union == 0 { 0.0 } else { inter as f32 / union as f32 }
+    };
+
+    let max_len = q_norm.chars().count().max(c_norm.chars().count()).max(1);
+    let edit_score = 1.0 - (levenshtein(&q_norm, &c_norm) as f32 / max_len as f32);
+
+    jaccard.max(edit_score).max(0.0)
+}
+
+/// Top-`k` real relations from `vocab` ranked by similarity to `query` (case-insensitive;
+/// exact/substring match scores 1.0, otherwise the max of token-Jaccard overlap and
+/// `1 - levenshtein/maxlen`). Used to map an invented/mis-typed `edge_type` literal onto the
+/// graph's actual relation vocabulary.
+fn relation_candidates(query: &str, vocab: &[String], k: usize) -> Vec<(String, f32)> {
+    let mut scored: Vec<(String, f32)> = vocab
+        .iter()
+        .map(|v| (v.clone(), relation_similarity(query, v)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    scored
+}
+
+/// Top-`k` node ids resolving `name` via [`GraphStore::resolve`] (already rank-ordered, best
+/// first), assigned descending scores by rank.
+fn entity_candidates(g: &GraphStore, name: &str, k: usize) -> Vec<(String, f32)> {
+    let ids = g.resolve(name).unwrap_or_default();
+    ids.into_iter()
+        .take(k)
+        .enumerate()
+        .map(|(i, id)| (id, (1.0 - i as f32 * 0.1).max(0.01)))
+        .collect()
+}
+
 /// Self-describing schema help for an empty/unclear `graph_query` call: the queryable
 /// tables/views and their columns, the graph's *actual* `edge_type` and `node_type`
 /// vocabularies (distinct values currently in use), and one example query.
@@ -436,6 +523,17 @@ mod tests {
         let lits = locate_literals(&q);
         let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
         assert_eq!(rel.value, "located in");
+    }
+
+    #[test]
+    fn relation_candidates_map_fuzzy_to_real_vocab() {
+        let vocab = vec!["LEADS_TO".to_string(), "LOCATED_IN".to_string(), "CREATED_BY".to_string()];
+        let top = relation_candidates("located in", &vocab, 2);
+        assert_eq!(top[0].0, "LOCATED_IN", "best match is the real relation: {top:?}");
+        // an invented name still lands on the closest real one, with a lower score
+        let top2 = relation_candidates("PROPOSED_BY", &vocab, 1);
+        assert_eq!(top2.len(), 1);
+        assert!(top2[0].1 < top[0].1);
     }
 
     #[test]
