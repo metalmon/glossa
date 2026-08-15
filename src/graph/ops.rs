@@ -113,10 +113,45 @@ pub fn parse_upsert_payload(v: &Value) -> (Vec<UpsertNode>, Vec<UpsertEdge>, Vec
     (nodes, edges, notes)
 }
 
-/// The label is normalised (lowercase, collapsed whitespace) and spaces replaced with "-".
+/// FNV-1a (32-bit) as 8 lowercase hex — a fixed, build-stable hash (unlike std hashers) used to
+/// keep short ids distinct.
+fn fnv1a_hex(s: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
+}
+
+/// A short, copyable, build-stable node id: `<abbrev>:<hash>` — a fixed hash of the normalized
+/// label instead of the whole label as a dash-slug. Deterministic in the normalized label (dedup
+/// relies on this: same label → same id); distinct labels get distinct hashes (the rare collision
+/// is caught by [`disambiguate_id`] at write time). The human-readable text lives in the node's
+/// `label`, shown next to the id everywhere it appears, so the id itself need not be readable.
 pub fn id_for(ont: &Ontology, node_type: &str, label: &str) -> String {
-    let slug = normalize_label(label).replace(' ', "-");
-    format!("{}:{}", ont.id_abbrev(node_type), slug)
+    format!(
+        "{}:{}",
+        ont.id_abbrev(node_type),
+        fnv1a_hex(&normalize_label(label))
+    )
+}
+
+/// Resolve an id collision: if `base` is already taken (by a node with a DIFFERENT label), append
+/// `-2`, `-3`, … until free. Guards against the rare hash collision silently overwriting a
+/// distinct fact.
+fn disambiguate_id(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let cand = format!("{base}-{n}");
+        if !taken(&cand) {
+            return cand;
+        }
+        n += 1;
+    }
 }
 
 /// Strip a mistaken type-prefix when the agent copied a graph id into the `label` field.
@@ -444,14 +479,39 @@ pub fn graph_upsert(
         }
     }
 
-    // (2) label_to_id: input (batch) nodes — type-aware map for endpoint disambiguation.
+    // (2) Assign one canonical id per distinct (normalized) label, with a collision guard: the
+    // short id embeds a hash of the full label, so distinct facts normally get distinct ids, but
+    // on the rare hash collision `disambiguate_id` appends `-2/-3` rather than letting one fact
+    // silently overwrite another. `norm_to_id` is the single source of truth; every later step
+    // (nodespec, validity, edge endpoints) reads its id from here instead of recomputing.
+    let mut norm_to_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut id_owner: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new(); // id -> the normalized label that owns it
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut label_type_to_id: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     for (nd, _) in &valid_nodes {
         let norm = normalize_label(&nd.label);
-        let id = id_for(ont, &nd.node_type, &nd.label);
+        let id = norm_to_id
+            .entry(norm.clone())
+            .or_insert_with(|| {
+                let base = id_for(ont, &nd.node_type, &nd.label);
+                let final_id = disambiguate_id(&base, |cand| {
+                    // taken iff some OTHER label already owns this id — in this batch, or as an
+                    // existing graph node whose (normalized) label differs.
+                    if let Some(owner) = id_owner.get(cand) {
+                        if owner != &norm {
+                            return true;
+                        }
+                    }
+                    matches!(g.get_node(cand), Ok(Some(n)) if normalize_label(&n.label) != norm)
+                });
+                id_owner.insert(final_id.clone(), norm.clone());
+                final_id
+            })
+            .clone();
         label_type_to_id.insert((norm.clone(), nd.node_type.clone()), id.clone());
         label_to_id.insert(norm, id);
     }
@@ -460,7 +520,7 @@ pub fn graph_upsert(
     let nodespecs: Vec<NodeSpec> = valid_nodes
         .iter()
         .map(|(nd, canonical)| {
-            let id = id_for(ont, &nd.node_type, &nd.label);
+            let id = norm_to_id[&normalize_label(&nd.label)].clone();
             // Preserve existing aliases when this upsert omits them. Re-sending a node
             // to touch its label/source (or to re-anchor a dropped edge) must NOT
             // silently wipe an Enum's values — a common small-model self-correction
@@ -498,7 +558,7 @@ pub fn graph_upsert(
         .iter()
         .map(|(nd, _)| {
             (
-                id_for(ont, &nd.node_type, &nd.label),
+                norm_to_id[&normalize_label(&nd.label)].clone(),
                 ValidityInput {
                     valid_from_norm: nd.valid_from_norm.clone(),
                     valid_from_raw: nd.valid_from_raw.clone(),
@@ -2288,10 +2348,55 @@ to = ["Enum"]
         );
         assert!(!out.rejected, "{}", out.message);
         let expected = id_for(&ont, "Symptom", "CPU hot swap");
-        assert_eq!(expected, "sym:cpu-hot-swap");
+        assert!(
+            expected.starts_with("sym:") && expected.len() <= 16,
+            "short hashed id: {expected}"
+        );
         assert!(g.get_node(&expected).unwrap().is_some());
         assert!(out.message.contains("Written:"), "{}", out.message);
         assert!(out.message.contains(&expected), "{}", out.message);
+    }
+
+    #[test]
+    fn id_for_is_short_stable_and_hashed() {
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        let long =
+            "Heliocentrism was proposed as early as the 3rd century BC by Aristarchus of Samos";
+        let id = id_for(&ont, "Symptom", long);
+        assert!(id.starts_with("sym:"), "keeps the type abbrev prefix: {id}");
+        assert!(
+            id.chars().count() <= 32,
+            "id must be short/copyable, got {} chars: {id}",
+            id.chars().count()
+        );
+        // Deterministic + dedup-stable: same normalized label -> same id.
+        assert_eq!(id, id_for(&ont, "Symptom", long), "deterministic");
+        assert_eq!(
+            id,
+            id_for(
+                &ont,
+                "Symptom",
+                "  heliocentrism WAS proposed as early as the 3rd century BC by aristarchus of samos "
+            ),
+            "normalized-label-stable (dedup relies on this)"
+        );
+        // Two different labels that share the readable prefix must still get different ids
+        // (the hash disambiguates) — otherwise short ids would silently merge distinct facts.
+        let other = "Heliocentrism was proposed by Copernicus in the 16th century instead";
+        assert_ne!(
+            id,
+            id_for(&ont, "Symptom", other),
+            "different labels -> different ids"
+        );
+    }
+
+    #[test]
+    fn disambiguate_id_appends_suffix_only_on_collision() {
+        // free base id -> unchanged
+        assert_eq!(disambiguate_id("sym:foo-ab12", |_| false), "sym:foo-ab12");
+        // base taken by a different label -> next free numeric suffix
+        let taken = |id: &str| id == "sym:foo-ab12" || id == "sym:foo-ab12-2";
+        assert_eq!(disambiguate_id("sym:foo-ab12", taken), "sym:foo-ab12-3");
     }
 
     /// Cyrillic label where the type-prefix byte length lands mid-char — must not panic.
@@ -2445,8 +2550,8 @@ strict = true
             out.message
         );
         assert!(
-            out.message.contains("sym:existing-symptom"),
-            "hint should list existing node: {}",
+            out.message.contains("Existing symptom"),
+            "hint should list the existing node by its (usable) label: {}",
             out.message
         );
     }
