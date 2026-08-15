@@ -137,18 +137,25 @@ pub(crate) enum Side {
 /// during the later rewrite pass.
 ///
 /// Addressing scheme:
+/// 0. Before matching at any step (start, or after any descent), transparently unwrap
+///    `Expr::Nested(inner)` — recurse into `inner`, repeatedly if doubly-parenthesized.
+///    Parens carry no addressing information: they consume no `path` entry, so a
+///    parenthesized literal (e.g. `(edge_type = 'x')` or `(a = 'x') AND b = 'y'`) addresses to
+///    exactly the same `path`/`side` it would without the parens.
 /// 1. Start at `root`: either `Select.selection` (`ExprRoot::Where`) or the `ON` expr of
 ///    `Select.from[table_idx].joins[join_idx]` (`ExprRoot::JoinOn`).
-/// 2. Walk `path` in order. Each [`Side`] entry says: the current expr must be
-///    `Expr::BinaryOp { left, op: And | Or, right }` — descend into `left` if the entry is
-///    `Side::Left`, into `right` if `Side::Right`. Repeat until `path` is exhausted.
-/// 3. The expr now reached must be the leaf `Expr::BinaryOp { left, op: Eq, right }` that
-///    held the literal. `side` says which of `left`/`right` is the literal operand (the other
-///    is the column operand, left untouched).
+/// 2. Walk `path` in order. Each [`Side`] entry says: the current expr (after unwrapping any
+///    `Nested`, per step 0) must be `Expr::BinaryOp { left, op: And | Or, right }` — descend
+///    into `left` if the entry is `Side::Left`, into `right` if `Side::Right`. Repeat until
+///    `path` is exhausted.
+/// 3. The expr now reached (after unwrapping any `Nested`, per step 0) must be the leaf
+///    `Expr::BinaryOp { left, op: Eq, right }` that held the literal. `side` says which of
+///    `left`/`right` is the literal operand (the other is the column operand, left untouched).
 ///
-/// To rewrite: replay steps 1–2 with `&mut Expr` (matching `Expr::BinaryOp` and taking
-/// `&mut *left`/`&mut *right` per `Side`, identical to how [`locate_literals`] reads it), then
-/// replace the operand named by `side` in the leaf `BinaryOp`.
+/// To rewrite: replay steps 0–2 with `&mut Expr` (matching `Expr::Nested`/`Expr::BinaryOp` and
+/// taking `&mut *inner`/`&mut *left`/`&mut *right` per step, identical to how
+/// [`locate_literals`] reads it via `walk_bool_tree`), then replace the operand named by
+/// `side` in the leaf `BinaryOp`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LitLoc {
     pub root: ExprRoot,
@@ -207,11 +214,17 @@ fn join_on_expr(op: &JoinOperator) -> Option<&Expr> {
     }
 }
 
-/// Recurse `expr` at `root`/`path`: descend `AND`/`OR` into both children (pushing the
-/// matching [`Side`] onto `path` for each), and at a leaf `=` comparison, record a
-/// [`Literal`] if one side is a column and the other a single-quoted string literal that
-/// classifies via [`classify_column`].
+/// Recurse `expr` at `root`/`path`: transparently unwrap `Expr::Nested` (parens carry no
+/// addressing information — a parenthesized literal addresses to the same logical position it
+/// would without the parens), descend `AND`/`OR` into both children (pushing the matching
+/// [`Side`] onto `path` for each), and at a leaf `=` comparison, record a [`Literal`] if one
+/// side is a column and the other a single-quoted string literal that classifies via
+/// [`classify_column`].
 fn walk_bool_tree(expr: &Expr, root: ExprRoot, path: &mut Vec<Side>, out: &mut Vec<Literal>) {
+    if let Expr::Nested(inner) = expr {
+        walk_bool_tree(inner, root, path, out);
+        return;
+    }
     let Expr::BinaryOp { left, op, right } = expr else {
         return;
     };
@@ -412,5 +425,29 @@ mod tests {
         // LIKE stays fuzzy already -> not collected
         let q2 = parse_readonly_select("SELECT label FROM nodes WHERE label LIKE '%Kepler%'").unwrap();
         assert!(locate_literals(&q2).is_empty());
+    }
+
+    #[test]
+    fn locate_unwraps_a_single_parenthesized_equality() {
+        let q = parse_readonly_select(
+            "SELECT dst_label FROM edges_labeled WHERE (edge_type = 'located in')",
+        )
+        .unwrap();
+        let lits = locate_literals(&q);
+        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        assert_eq!(rel.value, "located in");
+    }
+
+    #[test]
+    fn locate_unwraps_a_parenthesized_operand_of_and() {
+        let q = parse_readonly_select(
+            "SELECT dst_label FROM edges_labeled WHERE (src_label = 'Senica') AND edge_type = 'x'",
+        )
+        .unwrap();
+        let lits = locate_literals(&q);
+        let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap();
+        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        assert_eq!(ent.value, "Senica");
+        assert_eq!(rel.value, "x");
     }
 }
