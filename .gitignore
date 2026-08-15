@@ -55,3 +55,7 @@ gepa-out/gepa-long.current
 tmp/
 .claude/settings.local.json
 eval/.data/
+
+# scratch graph HTML export (kb graph dump --format html) — regenerable, may embed corpus text
+grapth.html
+*.graph.html
