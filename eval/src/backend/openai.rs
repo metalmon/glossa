@@ -229,7 +229,20 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    Value::Array(vec![glossary, neighbors, path, related, search, read])
+    let graph_query = json!({
+        "type": "function",
+        "function": {
+            "name": "graph_query",
+            "description": "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string", "description": "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema instead of running a query" }
+                }
+            }
+        }
+    });
+    Value::Array(vec![glossary, neighbors, path, related, graph_query, search, read])
 }
 
 /// Drive a tool-calling chat to a final textual answer.
@@ -430,9 +443,13 @@ mod schema_tests {
             "graph-OFF must NOT advertise graph tools"
         );
         let on = tool_names(&tools_schema(true));
-        for t in ["glossary", "related", "neighbors", "path"] {
+        for t in ["glossary", "related", "neighbors", "path", "graph_query"] {
             assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
         }
+        assert!(
+            !off.contains(&"graph_query".into()),
+            "graph-OFF must NOT advertise graph_query"
+        );
         assert!(
             on.contains(&"search".into()) && on.contains(&"read".into()),
             "flat tools remain in graph-ON"

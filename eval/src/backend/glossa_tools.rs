@@ -271,6 +271,16 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "graph_query" => {
+            // `sql` is inherently a string (mirrors the real MCP `GraphQueryArgs`); empty/absent
+            // returns the schema instead of running a query.
+            let sql = args.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            let body = match graph {
+                Some(g) => glossa::tools::graph_query(idx, g, sql, trace),
+                None => "(graph unavailable)".to_string(),
+            };
+            (body, Vec::new(), Vec::new())
+        }
         "resolve" => {
             // entity resolution — a Reader tool, so present in EVERY profile; both answer_hotpot
             // and enrich can call it. Without this branch it fell through to "unknown tool".
@@ -648,6 +658,42 @@ mod tests {
         )
         .0;
         assert_eq!(csv_string, array_form, "comma-separated string must filter identically");
+    }
+
+    /// `graph_query` dispatch: empty `sql` returns the schema (mirrors the real MCP tool's
+    /// "empty query returns the schema" contract); no graph falls back to the same
+    /// "(graph unavailable)" text every other graph tool arm returns.
+    #[test]
+    fn graph_query_dispatch_empty_sql_returns_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+
+        let with_graph = exec(
+            "graph_query",
+            &json!({"sql": ""}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(!with_graph.is_empty(), "empty sql should return the schema help text");
+        assert!(with_graph.contains("graph_query"), "got: {with_graph}");
+
+        let no_graph = exec(
+            "graph_query",
+            &json!({"sql": ""}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert_eq!(no_graph, "(graph unavailable)");
     }
 
     /// Finding 2: `path`'s `max_depth` must accept a numeric string ("9"), not just a JSON
