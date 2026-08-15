@@ -268,6 +268,13 @@ enum GraphAction {
         #[arg(long = "as-of")]
         as_of: Option<String>,
     },
+    /// Run a read-only SQL SELECT over the graph (the `graph_query` tool). Empty SQL prints the schema.
+    Query {
+        /// a SELECT over nodes/edges/node_validity/edges_labeled; empty = show schema
+        #[arg(default_value = "")]
+        sql: String,
+        path: Option<PathBuf>,
+    },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
         path: Option<PathBuf>,
@@ -1003,6 +1010,15 @@ fn main() -> anyhow::Result<()> {
                         Some(&stale),
                     )
                 );
+                Ok(())
+            }
+            GraphAction::Query { sql, path } => {
+                let path = glossa::root::resolve_root(path);
+                glossa::index::store::ensure_fresh(&path)?;
+                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let trace = glossa::trace::TraceLog::disabled();
+                println!("{}", glossa::tools::graph_query(&idx, &g, &sql, &trace));
                 Ok(())
             }
             GraphAction::Ls {
