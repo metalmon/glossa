@@ -381,6 +381,46 @@ impl GraphStore {
         Ok(got)
     }
 
+    /// Run a read-only `SELECT` and return up to `max_rows` rows, each a `Vec<String>` of column
+    /// values (NULL → empty string, numbers via `to_string`). The caller is responsible for having
+    /// gated `sql` as read-only before calling — this method does not gate. The row cap is enforced
+    /// deterministically by wrapping `sql` as a subquery, not by truncating the fetched result.
+    pub fn run_select(&self, sql: &str, max_rows: usize) -> anyhow::Result<Vec<Vec<String>>> {
+        let c = self.conn.lock().unwrap();
+        let wrapped = format!("SELECT * FROM ({sql}) LIMIT {max_rows}");
+        let mut stmt = c.prepare(&wrapped).context("prepare run_select")?;
+        let col_count = stmt.column_count();
+        let rows = stmt
+            .query_map([], |row| {
+                let mut out = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    let v: rusqlite::types::Value = row.get(i)?;
+                    out.push(match v {
+                        rusqlite::types::Value::Null => String::new(),
+                        rusqlite::types::Value::Integer(n) => n.to_string(),
+                        rusqlite::types::Value::Real(f) => f.to_string(),
+                        rusqlite::types::Value::Text(s) => s,
+                        rusqlite::types::Value::Blob(_) => "<blob>".to_string(),
+                    });
+                }
+                Ok(out)
+            })
+            .context("query run_select")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Column names for `sql`, in order. The caller is responsible for having gated `sql` as
+    /// read-only before calling — this method does not gate.
+    pub fn select_columns(&self, sql: &str) -> anyhow::Result<Vec<String>> {
+        let c = self.conn.lock().unwrap();
+        let stmt = c.prepare(sql).context("prepare select_columns")?;
+        Ok(stmt.column_names().into_iter().map(String::from).collect())
+    }
+
     pub fn delete_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
         // Cascade first: drop edges that REFERENCE nodes from this source (regardless of the edge's
@@ -1541,6 +1581,29 @@ mod tests {
             g.earliest_by_valid_from(&["fact:novalidity".to_string()])
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn run_select_returns_rows_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c"] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        let rows = g.run_select("SELECT id FROM nodes ORDER BY id", 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec!["a".to_string()]);
+        assert_eq!(
+            g.select_columns("SELECT id, label FROM nodes").unwrap(),
+            vec!["id", "label"]
         );
     }
 
