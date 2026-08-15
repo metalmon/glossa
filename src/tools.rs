@@ -757,8 +757,62 @@ pub fn glossary(
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
                         match node_ref(idx, &node) {
-                            // structural node (Section/Document): show its anchor, no chain
-                            Some(r) => format!("{base}  —  {r}{}", meta_suffix(g, &node.id, stale)),
+                            // Structural node (Section/Document): show its anchor. A common entity
+                            // whose name exactly matches a section title short-circuits `resolve` to
+                            // this stub alone (the exact-label fast path never reaches BM25), so ALSO
+                            // surface the reasoning nodes grounded (MENTIONS) to this chunk —
+                            // otherwise a lookup of e.g. "Sun" yields a bare pointer and no facts.
+                            Some(r) => {
+                                let stub =
+                                    format!("{base}  —  {r}{}", meta_suffix(g, &node.id, stale));
+                                let grounded: Vec<String> = g
+                                    .incoming(&node.id)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|e| e.edge_type == crate::graph::MENTIONS)
+                                    .filter_map(|e| g.get_node(&e.from).ok().flatten())
+                                    .filter(|n| node_ref(idx, n).is_none()) // reasoning nodes only
+                                    .take(8)
+                                    .map(|n| {
+                                        let line = format!(
+                                            "{}  [{}]  {}{}",
+                                            n.id,
+                                            n.node_type,
+                                            n.label,
+                                            read_anchor(idx, g, &n.id)
+                                        );
+                                        // Expand this fact's reasoning chain inline (the same
+                                        // rendering a direct node match gets), so the next fact in
+                                        // a multi-hop path is visible in this one call — the reader
+                                        // never has to pass a node id to neighbors/path.
+                                        let mut seen = std::collections::HashSet::new();
+                                        seen.insert(node.id.clone());
+                                        seen.insert(n.id.clone());
+                                        let mut chain = Vec::new();
+                                        chain_lines(
+                                            idx,
+                                            g,
+                                            &n.id,
+                                            spec,
+                                            0,
+                                            &mut seen,
+                                            &mut chain,
+                                            at.as_deref(),
+                                            stale,
+                                        );
+                                        if chain.is_empty() {
+                                            line
+                                        } else {
+                                            format!("{line}\n{}", chain.join("\n"))
+                                        }
+                                    })
+                                    .collect();
+                                if grounded.is_empty() {
+                                    stub
+                                } else {
+                                    format!("{stub}\n{}", grounded.join("\n"))
+                                }
+                            }
                             // reasoning node: append its spine chain (cause → resolution) inline
                             None => {
                                 // The `— read` anchor (MENTIONS grounding) is the actionable source
@@ -2971,6 +3025,84 @@ strict = true
         assert_eq!(
             glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None, None),
             "(no matches)"
+        );
+    }
+
+    #[test]
+    fn glossary_surfaces_facts_grounded_to_a_matched_section() {
+        use crate::index::store::index_dir;
+
+        // A common entity ("Sun") whose name exactly matches a section title. `resolve`'s
+        // exact-label fast path returns ONLY that Section stub (never reaching BM25), so the
+        // reasoning facts grounded to that chunk would be hidden. glossary must surface them.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# Sun\nThe Sun is a star.\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        // The Section node id "Sun" resolves to (e.g. "g.md#1") — ground a reasoning fact to it.
+        let sec_id = g.resolve("Sun").unwrap().into_iter().next().unwrap();
+        g.put_node(&node(
+            "fact:aristarchus",
+            "Fact",
+            "Heliocentrism was proposed as early as the 3rd century BC by Aristarchus",
+        ))
+        .unwrap();
+        g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id)).unwrap();
+
+        let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None);
+        assert!(
+            out.contains("3rd century BC"),
+            "fact grounded to the matched section must surface, not just the stub: {out}"
+        );
+    }
+
+    #[test]
+    fn glossary_expands_leads_to_of_section_grounded_facts() {
+        use crate::index::store::index_dir;
+
+        // A multi-hop answer lives one LEADS_TO away from an entity's own fact. When a common
+        // entity name ("Sun") matches a Section, glossary surfaces the facts grounded to it — and
+        // must ALSO expand their outgoing LEADS_TO one hop, so a weak reader sees the next fact in
+        // its FIRST glossary call, without having to feed a node id to neighbors/path (which it
+        // hallucinates). Same chain rendering the direct-node match already gets.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# Sun\nThe Sun is a star.\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        let sec_id = g.resolve("Sun").unwrap().into_iter().next().unwrap();
+        // A fact grounded to the "Sun" section ...
+        g.put_node(&node(
+            "fact:sun-center",
+            "Fact",
+            "The Sun is the star at the center of the Solar System",
+        ))
+        .unwrap();
+        g.put_edge(&edge("fact:sun-center", "MENTIONS", &sec_id)).unwrap();
+        // ... that LEADS_TO the answer fact (owned by another document).
+        g.put_node(&node(
+            "fact:origin",
+            "Fact",
+            "Heliocentrism was proposed as early as the 3rd century BC by Aristarchus",
+        ))
+        .unwrap();
+        g.put_edge(&edge("fact:sun-center", "LEADS_TO", "fact:origin")).unwrap();
+
+        // Real readers drive glossary with the ontology's spine (LEADS_TO here), not the empty
+        // default — that is the spec under which the chain must expand.
+        let spec = ChainSpec {
+            spine_rels: vec!["LEADS_TO".to_string()],
+        };
+        let out = glossary(&idx, &g, "Sun", &spec, &t, None, None);
+        assert!(
+            out.contains("3rd century BC"),
+            "glossary must expand the LEADS_TO neighbour of a section-grounded fact so the next \
+             hop is visible in the first call, no node id needed: {out}"
         );
     }
 }
