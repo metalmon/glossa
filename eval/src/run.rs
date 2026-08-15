@@ -144,7 +144,10 @@ fn eval_one(
         .chain(q.answer_aliases.iter().cloned())
         .collect();
     Row {
-        em: score::exact_match_any(&pred, &golds),
+        // Relaxed EM: token-level containment either direction, so a correct concise
+        // answer is credited against a verbose gold (MuSiQue gives "as early as the 3rd
+        // century BC" no aliases) while an over-hop to a broader entity still fails.
+        em: score::relaxed_match_any(&pred, &golds),
         f1: score::token_f1_any(&pred, &golds),
         retrieval_recall: recall,
         recall_at_5: score::recall_at_k(&titles, &q.supporting_titles, 5),

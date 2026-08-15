@@ -62,6 +62,36 @@ pub fn exact_match_any(pred: &str, golds: &[String]) -> bool {
     golds.iter().any(|g| exact_match(pred, g))
 }
 
+/// True if `needle`'s token run appears contiguously inside `haystack`.
+fn is_token_subslice(needle: &[String], haystack: &[String]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Relaxed containment match: after HotpotQA normalization, true when one side's
+/// token sequence is a contiguous run inside the other (either direction). This
+/// credits a correct concise answer against a verbose gold — e.g. `3rd century BC`
+/// vs the gold `as early as the 3rd century BC` (MuSiQue ships no aliases for it) —
+/// while still rejecting an over-hop to a broader entity (`Trnava Region` shares no
+/// run with `Senica District`). Token-level, so `yes` never matches inside `yesterday`.
+pub fn contains_match(pred: &str, gold: &str) -> bool {
+    let p: Vec<String> = normalize(pred).split_whitespace().map(str::to_string).collect();
+    let g: Vec<String> = normalize(gold).split_whitespace().map(str::to_string).collect();
+    if p.is_empty() || g.is_empty() {
+        return false;
+    }
+    is_token_subslice(&p, &g) || is_token_subslice(&g, &p)
+}
+
+/// EM against a gold set, relaxed to accept token-level containment (see
+/// [`contains_match`]). Falls back to strict [`exact_match`] via containment of
+/// equal-length sequences. Empty gold set never matches.
+pub fn relaxed_match_any(pred: &str, golds: &[String]) -> bool {
+    golds.iter().any(|g| contains_match(pred, g))
+}
+
 /// Token-F1 against a set of gold answers, taking the max over golds (best-matching form), as
 /// MuSiQue/SQuAD do. Empty set → 0.0.
 pub fn token_f1_any(pred: &str, golds: &[String]) -> f32 {
@@ -253,6 +283,40 @@ mod alias_score_tests {
         assert!(exact_match_any("Barack Obama", &golds), "matches the primary");
         assert!(!exact_match_any("Joe Biden", &golds), "matches neither");
         assert!(!exact_match_any("anything", &[]), "empty gold set never matches");
+    }
+
+    #[test]
+    fn relaxed_match_credits_containment_both_directions() {
+        // Verbose gold, correct concise pred: pred tokens are a contiguous run in gold.
+        // (MuSiQue ships no aliases for "as early as the 3rd century BC".)
+        let golds = vec!["as early as the 3rd century BC".to_string()];
+        assert!(
+            relaxed_match_any("3rd century BC", &golds),
+            "concise correct span contained in verbose gold"
+        );
+        // Reverse direction: gold contained in a wordier-but-correct pred.
+        let golds2 = vec!["Lacey Chabert".to_string()];
+        assert!(
+            relaxed_match_any("the original voice was Lacey Chabert", &golds2),
+            "gold contained in wordier pred"
+        );
+        // Over-hop to a broader entity must still fail (no shared contiguous run).
+        let golds3 = vec!["Senica District".to_string()];
+        assert!(
+            !relaxed_match_any("Trnava Region", &golds3),
+            "over-hop to a broader entity is not a containment match"
+        );
+        // Token-level, not raw substring: "yes" must not match inside "yesterday".
+        assert!(
+            !relaxed_match_any("yesterday", &["yes".to_string()]),
+            "containment is token-level, not character substring"
+        );
+        // Still honours the exact/alias path and the empty-gold guard.
+        assert!(relaxed_match_any(
+            "obama",
+            &["Barack Obama".to_string(), "Obama".to_string()]
+        ));
+        assert!(!relaxed_match_any("anything", &[]), "empty gold set never matches");
     }
 
     #[test]
