@@ -420,6 +420,35 @@ impl GraphStore {
         Ok(rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
     }
 
+    /// Whether at least one row of `edges_labeled` matches all of the given constraints
+    /// (each `None` constraint is unconstrained/matches anything). `src_like`/`dst_like` are
+    /// SQL `LIKE` patterns (e.g. `%Senica%`) matched against the joined endpoint labels;
+    /// `edge_type` is matched exactly. Used to check whether a candidate (src, relation, dst)
+    /// assignment is actually backed by a real edge, not just lexically plausible.
+    pub fn edge_exists_like(
+        &self,
+        src_like: Option<&str>,
+        edge_type: Option<&str>,
+        dst_like: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT 1 FROM edges_labeled \
+                 WHERE (?1 IS NULL OR src_label LIKE ?1) \
+                 AND (?2 IS NULL OR edge_type = ?2) \
+                 AND (?3 IS NULL OR dst_label LIKE ?3) \
+                 LIMIT 1",
+            )
+            .context("prepare edge_exists_like")?;
+        let exists = stmt
+            .query_row(rusqlite::params![src_like, edge_type, dst_like], |_| Ok(()))
+            .optional()
+            .context("query edge_exists_like")?
+            .is_some();
+        Ok(exists)
+    }
+
     /// Column names for `sql`, in order. The caller is responsible for having gated `sql` as
     /// read-only before calling — this method does not gate.
     pub fn select_columns(&self, sql: &str) -> anyhow::Result<Vec<String>> {

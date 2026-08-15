@@ -214,6 +214,180 @@ fn join_on_expr(op: &JoinOperator) -> Option<&Expr> {
     }
 }
 
+/// Fetch the `WHERE`/`ON` expr that a [`LitLoc::root`] points at.
+fn root_expr(q: &Query, root: ExprRoot) -> Option<&Expr> {
+    let SetExpr::Select(select) = &*q.body else {
+        return None;
+    };
+    match root {
+        ExprRoot::Where => select.selection.as_ref(),
+        ExprRoot::JoinOn { table_idx, join_idx } => {
+            let twj = select.from.get(table_idx)?;
+            let join = twj.joins.get(join_idx)?;
+            join_on_expr(&join.join_operator)
+        }
+    }
+}
+
+/// Unwrap `Expr::Nested` down to the first non-parenthesized expr, mirroring the step-0 rule
+/// documented on [`LitLoc`].
+fn unwrap_nested(mut e: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = e {
+        e = inner;
+    }
+    e
+}
+
+/// Walk `path` from `root_expr` (per the addressing scheme documented on [`LitLoc`]) and return
+/// the leaf `Expr::BinaryOp` reached.
+fn navigate<'a>(root_expr: &'a Expr, path: &[Side]) -> Option<&'a Expr> {
+    let mut cur = unwrap_nested(root_expr);
+    for side in path {
+        let Expr::BinaryOp { left, right, .. } = cur else {
+            return None;
+        };
+        cur = unwrap_nested(match side {
+            Side::Left => left,
+            Side::Right => right,
+        });
+    }
+    Some(cur)
+}
+
+/// The column name a located `lit` was compared against (the operand of its leaf `=` that
+/// isn't the literal itself), re-derived by replaying `lit.loc` over `q`.
+fn literal_column_name(q: &Query, lit: &Literal) -> Option<String> {
+    let root = root_expr(q, lit.loc.root)?;
+    let leaf = navigate(root, &lit.loc.path)?;
+    let Expr::BinaryOp { left, right, .. } = leaf else {
+        return None;
+    };
+    // The literal held `side`; the column is the other operand.
+    let column_expr = match lit.loc.side {
+        Side::Left => right,
+        Side::Right => left,
+    };
+    column_name(column_expr)
+}
+
+/// For each located `lit`, its chosen real graph value + score, jointly consistent with real
+/// edges where a relation literal shares a `WHERE`/`ON` group with `src_label`/`dst_label`
+/// entity literals.
+///
+/// Grouping: literals sharing the same [`ExprRoot`] (the same `WHERE` clause, or the same JOIN's
+/// `ON` clause) form one group — good enough for the single-`edges_labeled`-reference case this
+/// resolver targets; it does not attempt cross-group joint optimization.
+///
+/// Within a group that has a `Relation` literal alongside a `src_label`/`dst_label` `Entity`
+/// literal, relation candidates (ranked by [`relation_candidates`]) are filtered by
+/// [`GraphStore::edge_exists_like`] — only relations backed by a real edge between the (fuzzy,
+/// `LIKE '%text%'`) entity endpoints survive — and the best surviving (i.e. first, since
+/// candidates are already best-first) candidate is chosen; if none survive, falls back to the
+/// top lexical candidate. Entity literals always resolve to their original text (fuzzy `LIKE`
+/// matching is deferred to query rewrite). Literals outside any constrained group take their
+/// top candidate unconstrained.
+pub(crate) fn resolve_assignment(
+    g: &GraphStore,
+    q: &Query,
+    lits: &[Literal],
+) -> Vec<(Literal, String, f32)> {
+    let edge_vocab = g.edge_type_vocab().unwrap_or_default();
+
+    struct LitInfo<'a> {
+        lit: &'a Literal,
+        column: Option<String>,
+        candidates: Vec<(String, f32)>,
+    }
+    let infos: Vec<LitInfo> = lits
+        .iter()
+        .map(|lit| {
+            let column = literal_column_name(q, lit);
+            let candidates = match lit.kind {
+                LitKind::Relation => relation_candidates(&lit.value, &edge_vocab, 5),
+                // Constraint checks (and the eventual rewrite) match entities via
+                // `LIKE '%text%'` against the label view, so the candidate *is* the original
+                // text — see the module doc on resolve_assignment. `entity_candidates` is still
+                // consulted for its rank-based score (how confidently the graph resolves this
+                // text to a real node), but its node-id values are not used as the assignment.
+                LitKind::Entity => {
+                    let score =
+                        entity_candidates(g, &lit.value, 5).first().map(|(_, s)| *s).unwrap_or(1.0);
+                    vec![(lit.value.clone(), score)]
+                }
+            };
+            LitInfo { lit, column, candidates }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(infos.len());
+    let mut handled = vec![false; infos.len()];
+
+    for i in 0..infos.len() {
+        if handled[i] {
+            continue;
+        }
+        let group_idx: Vec<usize> =
+            (0..infos.len()).filter(|&j| infos[j].lit.loc.root == infos[i].lit.loc.root).collect();
+        for &j in &group_idx {
+            handled[j] = true;
+        }
+
+        let is_col = |j: usize, name: &str| {
+            matches!(infos[j].lit.kind, LitKind::Entity)
+                && infos[j].column.as_deref().map(|c| c.eq_ignore_ascii_case(name)).unwrap_or(false)
+        };
+        let rel_idx =
+            group_idx.iter().copied().find(|&j| matches!(infos[j].lit.kind, LitKind::Relation));
+        let src_idx = group_idx.iter().copied().find(|&j| is_col(j, "src_label"));
+        let dst_idx = group_idx.iter().copied().find(|&j| is_col(j, "dst_label"));
+
+        if let Some(rel_j) = rel_idx {
+            if src_idx.is_some() || dst_idx.is_some() {
+                let src_like = src_idx.map(|si| format!("%{}%", infos[si].lit.value));
+                let dst_like = dst_idx.map(|di| format!("%{}%", infos[di].lit.value));
+                let survivor = infos[rel_j].candidates.iter().find(|(rel_val, _)| {
+                    g.edge_exists_like(src_like.as_deref(), Some(rel_val), dst_like.as_deref())
+                        .unwrap_or(false)
+                });
+                let (rel_value, rel_score) = survivor.cloned().unwrap_or_else(|| {
+                    infos[rel_j]
+                        .candidates
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| (infos[rel_j].lit.value.clone(), 0.0))
+                });
+                out.push((infos[rel_j].lit.clone(), rel_value, rel_score));
+
+                for &j in &group_idx {
+                    if j == rel_j {
+                        continue;
+                    }
+                    let (val, score) = infos[j]
+                        .candidates
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| (infos[j].lit.value.clone(), 0.0));
+                    out.push((infos[j].lit.clone(), val, score));
+                }
+                continue;
+            }
+        }
+
+        // Unlinked group (no relation+entity pairing to constrain): each literal takes its own
+        // top candidate.
+        for &j in &group_idx {
+            let (val, score) = infos[j]
+                .candidates
+                .first()
+                .cloned()
+                .unwrap_or_else(|| (infos[j].lit.value.clone(), 0.0));
+            out.push((infos[j].lit.clone(), val, score));
+        }
+    }
+
+    out
+}
+
 /// Recurse `expr` at `root`/`path`: transparently unwrap `Expr::Nested` (parens carry no
 /// addressing information — a parenthesized literal addresses to the same logical position it
 /// would without the parens), descend `AND`/`OR` into both children (pushing the matching
@@ -534,6 +708,29 @@ mod tests {
         let top2 = relation_candidates("PROPOSED_BY", &vocab, 1);
         assert_eq!(top2.len(), 1);
         assert!(top2[0].1 < top[0].1);
+    }
+
+    #[test]
+    fn resolution_prefers_the_assignment_backed_by_a_real_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:senica", "Senica")).unwrap();
+        g.put_node(&node_fact("f:distr", "Senica District")).unwrap();
+        g.put_edge(&edge("f:senica", "LOCATED_IN", "f:distr")).unwrap();
+        // vocab also has a lexically-closer-but-edgeless relation
+        g.put_node(&node_fact("f:x", "x")).unwrap();
+        g.put_edge(&edge("f:x", "LOCATION_OF", "f:x")).unwrap();
+        let q = parse_readonly_select(
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+        )
+        .unwrap();
+        let lits = locate_literals(&q);
+        let chosen = resolve_assignment(&g, &q, &lits);
+        let rel = chosen.iter().find(|(l, _, _)| matches!(l.kind, LitKind::Relation)).unwrap();
+        assert_eq!(
+            rel.1, "LOCATED_IN",
+            "picks the relation that actually connects Senica, not the lexically-nearest edgeless one"
+        );
     }
 
     #[test]
