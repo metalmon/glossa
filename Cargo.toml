@@ -45,6 +45,7 @@ chardetng = "1.0"
 encoding_rs = "0.8"
 fs4 = "1.1"
 glossa-constraint = { path = "constraint", optional = true }
+sqlparser = "0.53"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

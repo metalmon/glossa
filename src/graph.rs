@@ -20,5 +20,6 @@ pub mod generalize;
 pub mod io;
 pub mod lock;
 pub mod ops;
+pub mod query;
 pub mod temporal;
 pub mod traverse;
