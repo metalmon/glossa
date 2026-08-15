@@ -30,12 +30,24 @@ pub(crate) fn parse_readonly_select(sql: &str) -> Result<Query, String> {
     Ok((**q).clone())
 }
 
-/// Recursively collect every table name referenced by `q` (via joins, set operations, and
-/// derived-table subqueries), as dotted identifier strings (e.g. `schema.table`).
+/// Recursively collect every table name referenced by `q` — via `WITH`/CTE bodies, joins
+/// (including parenthesized/nested joins), set operations, and derived-table subqueries — as
+/// dotted identifier strings (e.g. `schema.table`).
 fn referenced_tables(q: &Query) -> Vec<String> {
     let mut out = Vec::new();
-    collect_from_set_expr(&q.body, &mut out);
+    collect_from_query(q, &mut out);
     out
+}
+
+/// Walk a whole `Query`: its `WITH`/CTE clause (each CTE's own query, recursively — a CTE can
+/// shadow a whitelisted name while its body reads a non-whitelisted table) and its body.
+fn collect_from_query(q: &Query, out: &mut Vec<String>) {
+    if let Some(with) = &q.with {
+        for cte in &with.cte_tables {
+            collect_from_query(&cte.query, out);
+        }
+    }
+    collect_from_set_expr(&q.body, out);
 }
 
 fn collect_from_set_expr(expr: &SetExpr, out: &mut Vec<String>) {
@@ -48,7 +60,7 @@ fn collect_from_set_expr(expr: &SetExpr, out: &mut Vec<String>) {
                 }
             }
         }
-        SetExpr::Query(inner) => collect_from_set_expr(&inner.body, out),
+        SetExpr::Query(inner) => collect_from_query(inner, out),
         SetExpr::SetOperation { left, right, .. } => {
             collect_from_set_expr(left, out);
             collect_from_set_expr(right, out);
@@ -68,7 +80,15 @@ fn collect_from_table_factor(tf: &TableFactor, out: &mut Vec<String>) {
                 .join(".");
             out.push(dotted);
         }
-        TableFactor::Derived { subquery, .. } => collect_from_set_expr(&subquery.body, out),
+        TableFactor::Derived { subquery, .. } => collect_from_query(subquery, out),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            collect_from_table_factor(&table_with_joins.relation, out);
+            for join in &table_with_joins.joins {
+                collect_from_table_factor(&join.relation, out);
+            }
+        }
         _ => {}
     }
 }
@@ -94,6 +114,16 @@ mod tests {
             "PRAGMA table_info(nodes)",
             "SELECT 1; SELECT 2",         // multi-statement
             "SELECT * FROM secret_table", // not whitelisted
+        ] {
+            assert!(parse_readonly_select(bad).is_err(), "must reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn gate_rejects_cte_name_shadowing_and_nested_join_bypass() {
+        for bad in [
+            "WITH nodes AS (SELECT * FROM secret_table) SELECT * FROM nodes",
+            "SELECT * FROM (nodes JOIN secret_table ON 1=1)",
         ] {
             assert!(parse_readonly_select(bad).is_err(), "must reject: {bad}");
         }
