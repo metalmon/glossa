@@ -113,7 +113,13 @@ impl GraphStore {
                valid_to_raw   TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_node_validity_from ON node_validity(valid_from);
-             CREATE INDEX IF NOT EXISTS idx_node_validity_to   ON node_validity(valid_to);",
+             CREATE INDEX IF NOT EXISTS idx_node_validity_to   ON node_validity(valid_to);
+             CREATE VIEW IF NOT EXISTS edges_labeled AS
+               SELECT e.efrom AS efrom, e.eto AS eto, e.edge_type AS edge_type,
+                      nf.label AS src_label, nt.label AS dst_label
+               FROM edges e
+               JOIN nodes nf ON nf.id = e.efrom
+               JOIN nodes nt ON nt.id = e.eto;",
         )
         .context("init schema")?;
         let node_index =
@@ -1435,6 +1441,48 @@ mod tests {
         })
         .unwrap();
         assert_eq!(g.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn edges_labeled_view_joins_endpoint_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for (id, label) in [
+            ("f:a", "Senica is a town"),
+            ("f:b", "Senica District is a district"),
+        ] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: label.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        g.put_edge(&Edge {
+            from: "f:a".into(),
+            to: "f:b".into(),
+            edge_type: "LOCATED_IN".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        let c = g.conn.lock().unwrap();
+        let (sl, rel, dl): (String, String, String) = c
+            .query_row(
+                "SELECT src_label, edge_type, dst_label FROM edges_labeled WHERE edge_type='LOCATED_IN'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (sl.as_str(), rel.as_str(), dl.as_str()),
+            (
+                "Senica is a town",
+                "LOCATED_IN",
+                "Senica District is a district"
+            )
+        );
     }
 
     #[test]
