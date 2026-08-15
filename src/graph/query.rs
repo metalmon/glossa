@@ -2,6 +2,7 @@
 //! Parse -> read-only gate -> locate fuzzy literals -> constrained resolution -> rewrite ->
 //! execute -> chainable render. See docs/superpowers/specs/2026-08-15-graph-query-fuzzy-sql-design.md
 
+use crate::graph::store::GraphStore;
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor};
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
@@ -93,9 +94,94 @@ fn collect_from_table_factor(tf: &TableFactor, out: &mut Vec<String>) {
     }
 }
 
+/// Self-describing schema help for an empty/unclear `graph_query` call: the queryable
+/// tables/views and their columns, the graph's *actual* `edge_type` and `node_type`
+/// vocabularies (distinct values currently in use), and one example query.
+pub(crate) fn schema_help(g: &GraphStore) -> String {
+    let edge_types = g
+        .run_select("SELECT DISTINCT edge_type FROM edges", 50)
+        .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let node_types = g
+        .run_select("SELECT DISTINCT node_type FROM nodes", 50)
+        .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    out.push_str("graph_query: read-only SQL over the reasoning graph.\n\n");
+    out.push_str("Queryable tables/views:\n");
+    out.push_str("  nodes(id, node_type, label)\n");
+    out.push_str("  edges(efrom, edge_type, eto)\n");
+    out.push_str(
+        "  node_validity(node_id, valid_from, valid_to, valid_from_raw, valid_to_raw)\n",
+    );
+    out.push_str("  edges_labeled(src_label, edge_type, dst_label, efrom, eto)\n\n");
+
+    out.push_str("edge_type values currently in this graph:\n");
+    if edge_types.is_empty() {
+        out.push_str("  (none yet)\n");
+    } else {
+        out.push_str(&format!("  {}\n", edge_types.join(", ")));
+    }
+
+    out.push_str("\nnode_type values currently in this graph:\n");
+    if node_types.is_empty() {
+        out.push_str("  (none yet)\n");
+    } else {
+        out.push_str(&format!("  {}\n", node_types.join(", ")));
+    }
+
+    out.push_str("\nExample: SELECT label FROM nodes WHERE node_type='Fact' LIMIT 5\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::store::{Edge, Node, Provenance};
+
+    fn prov() -> Provenance {
+        Provenance {
+            source_path: "a.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "auto-structural".into(),
+            confidence: 1.0,
+            created_at: 0,
+        }
+    }
+
+    fn node_fact(id: &str, label: &str) -> Node {
+        Node {
+            id: id.into(),
+            node_type: "Fact".into(),
+            label: label.into(),
+            aliases: vec![],
+            prov: prov(),
+        }
+    }
+
+    fn edge(from: &str, edge_type: &str, to: &str) -> Edge {
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: edge_type.into(),
+            prov: prov(),
+        }
+    }
+
+    #[test]
+    fn schema_help_lists_tables_and_real_vocab() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:a", "x")).unwrap();
+        g.put_node(&node_fact("f:b", "y")).unwrap();
+        g.put_edge(&edge("f:a", "LEADS_TO", "f:b")).unwrap();
+        let out = schema_help(&g);
+        assert!(out.contains("nodes(") && out.contains("edges_labeled"));
+        assert!(out.contains("LEADS_TO"), "shows real edge_type vocab: {out}");
+        assert!(out.contains("Fact"), "shows real node_type vocab: {out}");
+    }
 
     #[test]
     fn gate_accepts_select_over_whitelisted_tables() {
