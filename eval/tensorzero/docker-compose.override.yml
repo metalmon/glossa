@@ -1,0 +1,10 @@
+# Local override: host port 3000 is taken by the thunderbolt stack, remap the gateway to 3100.
+# `!override` REPLACES the base ports list (compose merges lists by default → would keep 3000 and reconflict).
+# Also inject OPENCODE_ZEN_KEY (mimo reflector) — base compose only forwards LMSTUDIO/OPENROUTER keys.
+# (Untracked; created for the graph-GEPA overnight run.)
+services:
+  gateway:
+    ports: !override
+      - "3100:3000"
+    environment:
+      OPENCODE_ZEN_KEY: ${OPENCODE_ZEN_KEY:-}

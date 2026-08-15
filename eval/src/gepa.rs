@@ -1191,7 +1191,7 @@ fn build_reflect_instruction(ctx: &ReflectContext, cfg: &GepaConfig) -> String {
     )
 }
 
-fn output_likely_truncated(_text: &str, finish_reason: Option<&str>) -> bool {
+pub(crate) fn output_likely_truncated(_text: &str, finish_reason: Option<&str>) -> bool {
     finish_reason
         .is_some_and(|r| r.eq_ignore_ascii_case("length") || r.eq_ignore_ascii_case("max_tokens"))
 }
@@ -1803,7 +1803,7 @@ pub fn load_seed_prompt(path: &Path) -> Result<String> {
 }
 
 /// Split examples by episode_id so train/val don't leak the same question.
-fn split_by_episode<T: Clone>(
+pub(crate) fn split_by_episode<T: Clone>(
     items: &[T],
     episode_id: impl Fn(&T) -> &str,
     val_frac: f64,

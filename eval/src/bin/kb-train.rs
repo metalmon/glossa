@@ -223,6 +223,45 @@ enum Cmd {
         #[arg(long, default_value_t = 0.10)]
         w_validate: f64,
     },
+    /// GEPA-optimize the GRAPH reader system prompt for multi-hop Exact-Match (LM Studio rollouts).
+    OptimizeGraph {
+        #[arg(long)]
+        questions: PathBuf,
+        #[arg(long)]
+        work: PathBuf,
+        #[arg(long, default_value = "http://localhost:1234")]
+        endpoint: String,
+        #[arg(long, default_value = "qwen3.5-4b")]
+        model: String,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long, default_value = "http://localhost:3100")]
+        gateway: String,
+        #[arg(long, default_value = "gepa_reflect")]
+        reflect_function: String,
+        #[arg(long, default_value = "baseline")]
+        variant: String,
+        #[arg(long, default_value = "gepa-out/graph_prompt.txt")]
+        out: PathBuf,
+        #[arg(long)]
+        seed_prompt: Option<PathBuf>,
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tag: Vec<String>,
+        #[arg(long, default_value_t = 0.3)]
+        val_frac: f64,
+        #[arg(long, default_value_t = 12)]
+        budget: usize,
+        #[arg(long, default_value_t = 6)]
+        minibatch: usize,
+        #[arg(long)]
+        rng_seed: Option<u64>,
+        #[arg(long, default_value_t = 12)]
+        pareto_size: usize,
+        #[arg(long, default_value = "pareto")]
+        candidate_selection: String,
+    },
     /// Splice GEPA-optimized prompt slices into SOP.md between `{# GEPA:<TAG>_START/_END #}` anchors.
     ApplySopSlices {
         /// SOP pack directory containing SOP.md.
@@ -306,6 +345,45 @@ fn apply_sop_slices(sop_dir: &Path, slices: &Path) -> Result<()> {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::ApplySopSlices { sop_dir, slices } => apply_sop_slices(&sop_dir, &slices),
+        Cmd::OptimizeGraph {
+            questions,
+            work,
+            endpoint,
+            model,
+            api_key,
+            gateway,
+            reflect_function,
+            variant,
+            out,
+            seed_prompt,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            rng_seed,
+            pareto_size,
+            candidate_selection,
+        } => run_optimize_graph(
+            questions,
+            work,
+            endpoint,
+            model,
+            api_key,
+            gateway,
+            reflect_function,
+            variant,
+            out,
+            seed_prompt,
+            run,
+            tag,
+            val_frac,
+            budget,
+            minibatch,
+            rng_seed,
+            pareto_size,
+            candidate_selection,
+        ),
         Cmd::Enrich {
             train,
             work,
@@ -687,6 +765,90 @@ fn run_optimize(
         result.grep_acc,
         result.glob_acc,
         result.read_acc,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize_graph(
+    questions: PathBuf,
+    work: PathBuf,
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
+    gateway: String,
+    reflect_function: String,
+    variant: String,
+    out: PathBuf,
+    seed_prompt: Option<PathBuf>,
+    run: Option<String>,
+    tag: Vec<String>,
+    val_frac: f64,
+    budget: usize,
+    minibatch: usize,
+    rng_seed: Option<u64>,
+    pareto_size: usize,
+    candidate_selection: String,
+) -> Result<()> {
+    let text = std::fs::read_to_string(&questions)
+        .with_context(|| format!("read {}", questions.display()))?;
+    let qs = kb_eval::dataset::parse_questions(&text)?;
+    let seed = match seed_prompt {
+        Some(p) => kb_eval::gepa::load_seed_prompt(&p)?,
+        None => kb_eval::backend::prompt::system_prompt(true).to_string(),
+    };
+    let run_label = run.unwrap_or_else(kb_eval::gepa::default_run_tag);
+    let rng_seed = rng_seed.unwrap_or_else(|| kb_eval::gepa::hash_run_seed(&run_label));
+    let candidate_selection = candidate_selection
+        .parse::<kb_eval::gepa::CandidateSelection>()
+        .with_context(|| format!("parse candidate_selection {candidate_selection:?}"))?;
+    let mut tags = serde_json::Map::new();
+    tags.insert("run".into(), run_label.clone().into());
+    tags.insert("budget".into(), budget.to_string().into());
+    tags.insert("minibatch".into(), minibatch.to_string().into());
+    for t in &tag {
+        if let Some((k, v)) = t.split_once('=') {
+            tags.insert(k.to_string(), v.into());
+        }
+    }
+
+    let result = kb_eval::gepa_graph::run(
+        kb_eval::gepa_graph::GepaGraphConfig {
+            endpoint,
+            model,
+            api_key,
+            gateway,
+            reflect_function,
+            variant,
+            episode_id: kb_eval::tz::backdated_episode_id(30),
+            tags: Value::Object(tags),
+            val_frac,
+            budget,
+            minibatch,
+            seed_prompt: seed,
+            work,
+            seed: rng_seed,
+            pareto_size,
+            candidate_selection,
+        },
+        qs,
+    )?;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
+    println!(
+        "wrote best graph prompt -> {} (run={run_label}, episode={}, baseline_em={:.3}, best_em={:.3}, candidates={})",
+        out.display(),
+        result.episode_id,
+        result.baseline_em,
+        result.best_em,
+        result.candidates,
+    );
+    println!(
+        "NOTE: the graph reader prompt is hardcoded as the `GRAPH_SYSTEM_PROMPT` const in \
+         eval/src/backend/prompt.rs — this optimized text is NOT auto-live. Paste it into that \
+         const to deploy."
     );
     Ok(())
 }

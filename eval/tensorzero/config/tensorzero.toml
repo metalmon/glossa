@@ -122,6 +122,29 @@ api_base = "https://openrouter.ai/api/v1"
 model_name = "qwen/qwen3.6-35b-a3b"
 api_key_location = "env::OPENROUTER_API_KEY"
 
+# ── GEPA reflector = mimo-v2.5 via OpenCode Zen (user's choice; config from ~/.zeroclaw).
+# Remote & strong (1M ctx) → no VRAM contention with the local 4b rollouts. Key in .env: OPENCODE_ZEN_KEY.
+[models.gepa_mimo]
+routing = ["opencode_zen"]
+
+[models.gepa_mimo.providers.opencode_zen]
+type = "openai"
+api_base = "https://opencode.ai/zen/go/v1"
+model_name = "mimo-v2.5"
+api_key_location = "env::OPENCODE_ZEN_KEY"
+
+# ── Fallback reflector: qwen3.5-9b on the host LM Studio (local, no key). One-line switch:
+# set `model = "gepa_mutator_local"` in [functions.gepa_reflect.variants.baseline] to use it.
+# Contends on VRAM with the 4b rollouts → LM Studio JIT-swaps.
+[models.gepa_mutator_local]
+routing = ["lmstudio"]
+
+[models.gepa_mutator_local.providers.lmstudio]
+type = "openai"
+api_base = "http://host.docker.internal:1234/v1"
+model_name = "qwen/qwen3.5-9b"
+api_key_location = "env::LMSTUDIO_API_KEY"
+
 # ── GEPA search micro-task: emit search(query) for a question ──
 # `kb-train optimize` passes the evolving prod prompt via `input.system` on each /inference call.
 [functions.search]
@@ -307,16 +330,12 @@ type = "chat"
 
 [functions.gepa_reflect.variants.baseline]
 type = "chat_completion"
-model = "gepa_mutator"
+model = "gepa_mimo"
 temperature = 1.0
 top_p = 0.95
-extra_body = [
-  { pointer = "/top_k", value = 40 },
-  { pointer = "/min_p", value = 0.1 },
-  { pointer = "/repetition_penalty", value = 1.1 },
-  { pointer = "/reasoning", value = { enabled = false } },
-  { pointer = "/transforms", value = ["middle-out"] },
-  ]
+# extra_body stripped: OpenCode Zen (mimo) is plain OpenAI-compatible; the openrouter-only
+# `transforms`/`reasoning` shape and non-standard samplers could be rejected. Keep temp/top_p only.
+max_tokens = 4096
 
 # ── The agent function: answer a HotpotQA question via glossa search/read ──
 [functions.answer_hotpot]

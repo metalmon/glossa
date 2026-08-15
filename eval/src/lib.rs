@@ -12,6 +12,7 @@ pub mod export_tz;
 pub mod export_tz_constraint;
 pub mod gepa;
 pub mod gepa_constraint;
+pub mod gepa_graph;
 pub mod prep;
 pub mod run;
 pub mod score;
