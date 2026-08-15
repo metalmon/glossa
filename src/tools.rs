@@ -1516,6 +1516,14 @@ fn slice_pdf_page(doc_path: &std::path::Path, page: u64) -> anyhow::Result<Vec<u
         .map_err(|e| anyhow::anyhow!("extract page: {e}"))
 }
 
+/// Fuzzy read-only SQL query over the reasoning graph. Traces the call and delegates to
+/// `crate::graph::query::run`, which handles empty queries (returns schema), fuzzy literal
+/// resolution, and rendering.
+pub fn graph_query(idx: &DocIndex, g: &crate::graph::store::GraphStore, sql: &str, trace: &TraceLog) -> String {
+    trace.log("graph_query", json!({"sql": sql}), json!({}));
+    crate::graph::query::run(g, idx, sql)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3171,6 +3179,34 @@ strict = true
             out.contains("3rd century BC"),
             "glossary must expand the LEADS_TO neighbour of a section-grounded fact so the next \
              hop is visible in the first call, no node id needed: {out}"
+        );
+    }
+
+    #[test]
+    fn graph_query_wrapper_smoke_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+
+        // Add a couple of nodes to the graph
+        g.put_node(&node("n1", "Entity", "First")).unwrap();
+        g.put_node(&node("n2", "Entity", "Second")).unwrap();
+
+        let t = TraceLog::disabled();
+
+        // Empty call should return schema (contains "nodes(")
+        let result = graph_query(&idx, &g, "", &t);
+        assert!(
+            result.contains("nodes("),
+            "empty query should return schema: {result}"
+        );
+
+        // Real query should return something
+        let query = "SELECT id, label FROM nodes LIMIT 1";
+        let result = graph_query(&idx, &g, query, &t);
+        assert!(
+            !result.is_empty(),
+            "query should return results: {result}"
         );
     }
 }
