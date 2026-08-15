@@ -654,7 +654,7 @@ fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) 
 /// The read anchor for a reasoning node: follow its `MENTIONS` edge (the fixed evidence contract)
 /// to a Section and render the section's `(path #ord · label)`, so the agent can `read(path, ord)`
 /// for the detail behind the node. Empty string when the node mentions no indexed section.
-fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> String {
+pub(crate) fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> String {
     for e in g.outgoing(id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;

@@ -3,6 +3,7 @@
 //! execute -> chainable render. See docs/superpowers/specs/2026-08-15-graph-query-fuzzy-sql-design.md
 
 use crate::graph::store::GraphStore;
+use crate::index::store::DocIndex;
 use sqlparser::ast::{
     BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, SetExpr, Statement, TableFactor,
     Value,
@@ -710,10 +711,124 @@ pub(crate) fn schema_help(g: &GraphStore) -> String {
     out
 }
 
+/// Column names, from `select_columns`, that carry a graph node id — the trigger for rendering
+/// a `glossary`-style handle instead of the raw cell text in [`run`]'s chainable render.
+const ID_COLUMNS: &[&str] = &["id", "efrom", "eto", "node_id"];
+
+/// Run a fuzzy read-only `SELECT` end-to-end: gate (`parse_readonly_select`) -> locate fuzzy
+/// literals -> resolve them against the real graph -> rewrite to concrete SQL -> execute
+/// (`run_select`, capped at 50 rows) -> chainable render, with a transparency note prepended for
+/// every literal substitution the resolver made. Empty/whitespace `sql` returns [`schema_help`]
+/// instead of running anything; a query with no fuzzy literals runs verbatim (it's already
+/// concrete). If the best assignment yields no rows, that's still rendered (as "no rows") rather
+/// than treated as an error — the note above it explains what was substituted.
+pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
+    if sql.trim().is_empty() {
+        return schema_help(g);
+    }
+    let q = match parse_readonly_select(sql) {
+        Ok(q) => q,
+        Err(e) => return e,
+    };
+
+    let lits = locate_literals(&q);
+    let (real_sql, notes): (String, Vec<String>) = if lits.is_empty() {
+        (sql.to_string(), Vec::new())
+    } else {
+        let chosen = resolve_assignment(g, &q, &lits);
+        let real_sql = rewrite(&q, &chosen);
+        let notes = chosen
+            .iter()
+            .filter_map(|(lit, resolved, score)| substitution_note(lit, resolved, *score))
+            .collect();
+        (real_sql, notes)
+    };
+
+    let rows = match g.run_select(&real_sql, 50) {
+        Ok(rows) => rows,
+        Err(e) => return format!("query error: {e}"),
+    };
+    let cols = match g.select_columns(&real_sql) {
+        Ok(cols) => cols,
+        Err(e) => return format!("query error: {e}"),
+    };
+
+    let body = render_rows(idx, g, &cols, &rows);
+    if notes.is_empty() { body } else { format!("{}\n{body}", notes.join("\n")) }
+}
+
+/// One transparency-note line for a resolved literal, or `None` when nothing about the query's
+/// meaning actually moved (an exact relation match). Entity literals always get a note: their
+/// leaf `=` is always relaxed to a fuzzy `LIKE` by [`rewrite`], which changes matching semantics
+/// even when the displayed text doesn't change — never a silent swap.
+fn substitution_note(lit: &Literal, resolved: &str, score: f32) -> Option<String> {
+    match lit.kind {
+        LitKind::Relation => {
+            if resolved == lit.value {
+                None
+            } else {
+                Some(format!(
+                    "note: edge_type \"{}\" -> \"{}\" (sim {score:.2})",
+                    lit.value, resolved
+                ))
+            }
+        }
+        LitKind::Entity => {
+            // Mirrors the token choice `rewrite` makes for the `LIKE` pattern.
+            let token = if resolved.contains(':') { lit.value.as_str() } else { resolved };
+            Some(format!("note: \"{}\" -> LIKE \"%{token}%\"", lit.value))
+        }
+    }
+}
+
+/// Chainable render of `rows` (columns aligned to `cols`, from `select_columns`): a column whose
+/// NAME is id-bearing (`id`/`efrom`/`eto`/`node_id`, per [`ID_COLUMNS`]) renders as a
+/// `glossary`-style node handle — `id  [node_type]  label   — read <path>#n`; every other column
+/// prints as its raw cell text (aggregates/labels have nothing to ground). One line per row.
+fn render_rows(idx: &DocIndex, g: &GraphStore, cols: &[String], rows: &[Vec<String>]) -> String {
+    if rows.is_empty() {
+        return "(no rows)".to_string();
+    }
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let is_id_col = cols
+                        .get(i)
+                        .map(|c| ID_COLUMNS.iter().any(|n| c.eq_ignore_ascii_case(n)))
+                        .unwrap_or(false);
+                    if is_id_col && !val.is_empty() { render_handle(idx, g, val) } else { val.clone() }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render a node id as its `glossary`-style handle: `id  [node_type]  label   — read <path>#n`.
+/// Falls back to the bare id text when it doesn't resolve to a real node (e.g. a stray/NULL join
+/// result) — there's nothing to ground.
+fn render_handle(idx: &DocIndex, g: &GraphStore, id: &str) -> String {
+    match g.get_node(id) {
+        Ok(Some(node)) => {
+            format!(
+                "{}  [{}]  {}{}",
+                node.id,
+                node.node_type,
+                node.label,
+                crate::tools::read_anchor(idx, g, &node.id)
+            )
+        }
+        _ => id.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::store::{Edge, Node, Provenance};
+    use crate::graph::store::{Edge, Node, NodeValidity, Provenance};
 
     fn prov() -> Provenance {
         Provenance {
@@ -918,5 +1033,41 @@ mod tests {
         let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
         assert_eq!(ent.value, "Senica");
         assert_eq!(rel.value, "x");
+    }
+
+    #[test]
+    fn run_answers_when_first_via_order_by_valid_from() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# H\nx\n").unwrap();
+        crate::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for (id, label, vf) in [
+            ("f:early", "Heliocentrism was proposed as early as the 3rd century BC", "0001"),
+            ("f:late", "A predictive heliocentric system was developed later", "1543"),
+        ] {
+            g.put_node(&node_fact(id, label)).unwrap();
+            g.upsert_validity(
+                id,
+                &NodeValidity {
+                    valid_from: Some(crate::graph::temporal::normalize_from(vf).unwrap()),
+                    valid_to: None,
+                    valid_from_raw: None,
+                    valid_to_raw: None,
+                },
+            )
+            .unwrap();
+        }
+        let out = crate::graph::query::run(
+            &g,
+            &idx,
+            "SELECT n.id, n.label FROM nodes n JOIN node_validity v ON v.node_id=n.id \
+             WHERE n.node_type='Fact' ORDER BY v.valid_from ASC LIMIT 1",
+        );
+        assert!(out.contains("3rd century BC"), "deterministic earliest, not the model's guess: {out}");
+        assert!(
+            crate::graph::query::run(&g, &idx, "   ").contains("nodes("),
+            "empty -> schema"
+        );
     }
 }
