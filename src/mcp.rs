@@ -69,6 +69,7 @@ const EDITOR_TOOLS: &[&str] = &[
     "graph_update",
     "graph_generalize",
     "graph_stats",
+    "graph_query",
     "graph_doctor",
 ];
 const FULL_TOOLS: &[&str] = &["purge"];
@@ -617,6 +618,18 @@ struct GraphStatsArgs {
         description = "node id: instead of the summary, return EVERYTHING about that one node — id, type, label, aliases, and every outgoing/incoming edge"
     )]
     node: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GraphQueryArgs {
+    // `sql` is inherently a string — the loose json_util helpers exist to coerce numbers/bools
+    // an LLM client sent as strings, which doesn't apply here. `default` so a missing/absent
+    // `sql` deserializes to "" (empty → the tool returns the schema).
+    #[serde(default)]
+    #[schemars(
+        description = "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema instead of running a query"
+    )]
+    sql: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1435,6 +1448,20 @@ impl GlossaServer {
     }
 
     #[tool(
+        description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto)."
+    )]
+    async fn graph_query(
+        &self,
+        Parameters(a): Parameters<GraphQueryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::tools::graph_query(&idx, &g, &a.sql, &self.trace),
+        )]))
+    }
+
+    #[tool(
         description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
     )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
@@ -1653,6 +1680,13 @@ mod tests {
         // Native JSON types still deserialize; absent optionals stay None.
         let r2: ReadArgs = serde_json::from_str(r#"{"path":"a.pdf","n":2}"#).unwrap();
         assert_eq!((r2.n, r2.page_image), (2, None));
+
+        // `sql` is a plain required-with-default string: missing -> "", present -> the value.
+        let gq: GraphQueryArgs = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(gq.sql, "");
+        let gq2: GraphQueryArgs =
+            serde_json::from_str(r#"{"sql":"select count(*) from nodes"}"#).unwrap();
+        assert_eq!(gq2.sql, "select count(*) from nodes");
     }
 
     #[test]
@@ -2180,6 +2214,10 @@ mod tests {
             "editor exposes graph stats"
         );
         assert!(
+            editor.contains(&"graph_query".to_string()),
+            "editor exposes graph_query"
+        );
+        assert!(
             editor.contains(&"graph_doctor".to_string()),
             "editor exposes the report-only graph_doctor tool"
         );
@@ -2196,6 +2234,10 @@ mod tests {
         assert!(
             !reader.contains(&"graph_stats".to_string()),
             "reader cannot graph_stats"
+        );
+        assert!(
+            !reader.contains(&"graph_query".to_string()),
+            "reader cannot graph_query"
         );
         assert!(
             !reader.contains(&"graph_doctor".to_string()),
