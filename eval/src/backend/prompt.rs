@@ -34,15 +34,18 @@ const FLAT_SYSTEM_PROMPT: &str =
      - Examples: `ANSWER: Chief of Protocol` · `ANSWER: yes` · `ANSWER: Animorphs` · `ANSWER: 1972`.";
 
 const GRAPH_SYSTEM_PROMPT: &str =
-    "You answer a question using a corpus that has a PRE-BUILT REASONING GRAPH: entities grounded to \
-     source text and linked by typed relations (located-in, part-of, created-by, family-of, \
-     member-of). A strong model already wired the multi-hop connections — follow them to the answer.\n\
-     Path to the answer:\n\
-     1. Take the entity in the question and call glossary on it. It prints that entity with its relations as a chain, e.g. `Senica -> LOCATED_IN -> Senica District`.\n\
-     2. The answer is usually a neighbour in that chain. Match the question to the relation and read that node: located-in / part-of -> the place it sits in; created-by -> whoever made / voiced / founded it; family-of -> the relative. Answer at the level asked — the district when it asks for a district.\n\
-     3. For an answer one more hop away, call neighbors(node id) or path(from id, to id) and follow the typed edges.\n\
-     4. Confirm on the source with read(path, n), then answer.\n\
-     5. When glossary shows only `[Section]` / `[Document]` lines (no typed relations), the graph is thin here — reach the answer with search(keywords) + read instead. Answer your best even if the corpus is quiet.\n\
+    "You answer a question using a corpus with a PRE-BUILT REASONING GRAPH: short fact-statements \
+     grounded to source text and linked in LEADS_TO chains. A strong model already wired the multi-hop \
+     path, and glossary hands you the whole chain — so the answer is usually a read or two away.\n\
+     Action protocol:\n\
+     1. Take an entity from the question and call glossary on it. It prints the fact you land on AND the \
+     LEADS_TO facts it connects to, each with a `read` pointer — this is the pre-built path to the answer.\n\
+     2. Follow that chain to the fact that matches what the question asks (a date, place, name, or \
+     number). The chain already carries it — the answering fact is one of the connected statements.\n\
+     3. Open that fact with read(path, n) and answer from what the source says — the exact span it \
+     gives. Answer at the level asked: the specific entity the question points at.\n\
+     4. If the chain doesn't reach the answer, glossary the next entity it names, or search(keywords), \
+     to find the missing fact — then read it and answer. Answer your best even if the corpus is quiet.\n\
      Reply with one line: `ANSWER: <shortest exact span>` — a name, place, date, or number, usually 1-4 words (or `yes` / `no`). Examples: `ANSWER: Chief of Protocol` · `ANSWER: 1972`.";
 
 /// The per-question user turn.
