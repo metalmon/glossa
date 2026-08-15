@@ -254,6 +254,123 @@ fn navigate<'a>(root_expr: &'a Expr, path: &[Side]) -> Option<&'a Expr> {
     Some(cur)
 }
 
+/// Mutable twin of [`root_expr`] — fetch the `WHERE`/`ON` expr a [`LitLoc::root`] points at, for
+/// in-place rewriting.
+fn root_expr_mut(q: &mut Query, root: ExprRoot) -> Option<&mut Expr> {
+    let SetExpr::Select(select) = &mut *q.body else {
+        return None;
+    };
+    match root {
+        ExprRoot::Where => select.selection.as_mut(),
+        ExprRoot::JoinOn { table_idx, join_idx } => {
+            let twj = select.from.get_mut(table_idx)?;
+            let join = twj.joins.get_mut(join_idx)?;
+            join_on_expr_mut(&mut join.join_operator)
+        }
+    }
+}
+
+/// Mutable twin of [`join_on_expr`].
+fn join_on_expr_mut(op: &mut JoinOperator) -> Option<&mut Expr> {
+    let constraint = match op {
+        JoinOperator::Inner(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c) => Some(c),
+        JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        JoinOperator::CrossJoin | JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+    };
+    match constraint {
+        Some(JoinConstraint::On(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+/// Mutable twin of [`unwrap_nested`].
+fn unwrap_nested_mut(e: &mut Expr) -> &mut Expr {
+    match e {
+        Expr::Nested(inner) => unwrap_nested_mut(inner),
+        _ => e,
+    }
+}
+
+/// Mutable twin of [`navigate`] — replay the addressing scheme documented on [`LitLoc`] over a
+/// `&mut Expr` so the leaf `BinaryOp` can be rewritten in place.
+fn navigate_mut<'a>(root_expr: &'a mut Expr, path: &[Side]) -> Option<&'a mut Expr> {
+    let mut cur = unwrap_nested_mut(root_expr);
+    for side in path {
+        let Expr::BinaryOp { left, right, .. } = cur else {
+            return None;
+        };
+        cur = unwrap_nested_mut(match side {
+            Side::Left => left,
+            Side::Right => right,
+        });
+    }
+    Some(cur)
+}
+
+/// Substitute each located literal in a clone of `q` with its resolved real value and
+/// re-serialize to SQL:
+/// - [`LitKind::Relation`]: the operand is replaced verbatim with the resolved `edge_type`
+///   string (e.g. `edge_type = 'LOCATED_IN'`).
+/// - [`LitKind::Entity`]: the leaf equality is *relaxed* to a `LIKE` (`Expr::Like`, SQLite
+///   renders it as the `LIKE` keyword) against `%<token>%`, so the label view still matches on
+///   substring. `token` is the resolved value unless it looks like a node id (contains `:`) —
+///   [`resolve_assignment`] always resolves entities to their original text today, but a future
+///   caller passing a real node id here should fall back to the literal's original text, since
+///   the label view is matched by text, not id.
+///
+/// Each literal is re-found in the clone via its recorded [`LitLoc`] (mirroring
+/// [`locate_literals`]'s addressing exactly) before being mutated; since every edit replaces an
+/// operand in place rather than adding/removing tree nodes, no path is invalidated by an earlier
+/// edit and the order literals are processed in doesn't matter.
+pub(crate) fn rewrite(q: &Query, chosen: &[(Literal, String, f32)]) -> String {
+    let mut query = q.clone();
+    for (lit, resolved, _score) in chosen {
+        let Some(root) = root_expr_mut(&mut query, lit.loc.root) else {
+            continue;
+        };
+        let Some(leaf) = navigate_mut(root, &lit.loc.path) else {
+            continue;
+        };
+        let Expr::BinaryOp { left, right, .. } = leaf else {
+            continue;
+        };
+        match lit.kind {
+            LitKind::Relation => {
+                let operand = match lit.loc.side {
+                    Side::Left => left,
+                    Side::Right => right,
+                };
+                **operand = Expr::Value(Value::SingleQuotedString(resolved.clone()));
+            }
+            LitKind::Entity => {
+                // The non-literal operand (the column) survives untouched into the new `Like`.
+                let column_expr = match lit.loc.side {
+                    Side::Left => (**right).clone(),
+                    Side::Right => (**left).clone(),
+                };
+                let token = if resolved.contains(':') { lit.value.as_str() } else { resolved.as_str() };
+                *leaf = Expr::Like {
+                    negated: false,
+                    any: false,
+                    expr: Box::new(column_expr),
+                    pattern: Box::new(Expr::Value(Value::SingleQuotedString(format!("%{token}%")))),
+                    escape_char: None,
+                };
+            }
+        }
+    }
+    format!("{query}")
+}
+
 /// The column name a located `lit` was compared against (the operand of its leaf `=` that
 /// isn't the literal itself), re-derived by replaying `lit.loc` over `q`.
 fn literal_column_name(q: &Query, lit: &Literal) -> Option<String> {
@@ -770,6 +887,24 @@ mod tests {
             rel.1, "SITED_IN",
             "edge-backed SITED_IN must win over lexically-top but edgeless LOCATED_NEAR: {chosen:?}"
         );
+    }
+
+    #[test]
+    fn rewrite_substitutes_relation_and_relaxes_entity_to_like() {
+        let q = parse_readonly_select(
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+        )
+        .unwrap();
+        // Drive the test through the real addressing produced by `locate_literals`, rather than
+        // hand-building `LitLoc`, so the test proves the locate -> rewrite round-trip.
+        let lits = locate_literals(&q);
+        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap().clone();
+        let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap().clone();
+        let chosen = vec![(rel, "LOCATED_IN".to_string(), 0.8f32), (ent, "Senica".to_string(), 0.9f32)];
+
+        let sql = rewrite(&q, &chosen);
+        assert!(sql.contains("edge_type = 'LOCATED_IN'"), "sql: {sql}");
+        assert!(sql.to_lowercase().contains("src_label like '%senica%'"), "sql: {sql}");
     }
 
     #[test]
