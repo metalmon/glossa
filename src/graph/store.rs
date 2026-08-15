@@ -347,6 +347,34 @@ impl GraphStore {
         Ok(n as u64)
     }
 
+    /// Among `candidates`, the node with the earliest authored `valid_from` — a deterministic
+    /// "when-first" judgment done by the graph instead of a weak reader. `valid_from` is stored
+    /// normalized to a fixed-width ISO instant, so `ORDER BY valid_from` is chronological.
+    /// Candidates without an authored `valid_from` are ignored; `None` when none has one (or the
+    /// set is empty). The symmetric latest-of is `ORDER BY ... DESC`.
+    pub fn earliest_by_valid_from(&self, candidates: &[String]) -> anyhow::Result<Option<String>> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let c = self.conn.lock().unwrap();
+        let placeholders = std::iter::repeat("?")
+            .take(candidates.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT node_id FROM node_validity \
+             WHERE node_id IN ({placeholders}) AND valid_from IS NOT NULL \
+             ORDER BY valid_from ASC LIMIT 1"
+        );
+        let got: Option<String> = c
+            .query_row(&sql, rusqlite::params_from_iter(candidates.iter()), |r| {
+                r.get(0)
+            })
+            .optional()
+            .context("earliest_by_valid_from")?;
+        Ok(got)
+    }
+
     pub fn delete_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
         // Cascade first: drop edges that REFERENCE nodes from this source (regardless of the edge's
@@ -1407,6 +1435,65 @@ mod tests {
         })
         .unwrap();
         assert_eq!(g.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn earliest_by_valid_from_picks_the_earliest_candidate() {
+        // "When was X FIRST proposed?" is a temporal superlative — the judgment is min(valid_from),
+        // a deterministic graph op, NOT a choice left to a weak reader (which reaches for the
+        // famous later one). Two competing facts; the algorithm returns the earlier regardless of
+        // prominence.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for (id, label) in [
+            ("fact:early", "Heliocentrism was proposed as early as the 3rd century BC"),
+            ("fact:late", "A mathematically predictive heliocentric system was developed later"),
+        ] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: label.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        // valid_from normalized to fixed-width ISO → lexicographic order = chronological.
+        g.upsert_validity(
+            "fact:early",
+            &NodeValidity {
+                valid_from: Some(crate::graph::temporal::normalize_from("0001").unwrap()),
+                valid_to: None,
+                valid_from_raw: Some("3rd century BC".into()),
+                valid_to_raw: None,
+            },
+        )
+        .unwrap();
+        g.upsert_validity(
+            "fact:late",
+            &NodeValidity {
+                valid_from: Some(crate::graph::temporal::normalize_from("1543").unwrap()),
+                valid_to: None,
+                valid_from_raw: Some("16th century".into()),
+                valid_to_raw: None,
+            },
+        )
+        .unwrap();
+
+        // Order of candidates must not matter — only valid_from decides.
+        let candidates = vec!["fact:late".to_string(), "fact:early".to_string()];
+        assert_eq!(
+            g.earliest_by_valid_from(&candidates).unwrap().as_deref(),
+            Some("fact:early"),
+            "deterministic op returns the earliest, not the more prominent later fact"
+        );
+        // Nothing to decide on: no candidates, or none carries an authored valid_from.
+        assert_eq!(g.earliest_by_valid_from(&[]).unwrap(), None);
+        assert_eq!(
+            g.earliest_by_valid_from(&["fact:novalidity".to_string()])
+                .unwrap(),
+            None
+        );
     }
 
     /// The singular delete must also drop the node's `node_meta` row — stale meta
