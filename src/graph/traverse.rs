@@ -107,6 +107,44 @@ fn bridge_confidence(exact: bool, n_candidates: usize) -> f32 {
     (base / n_candidates.max(1) as f32).clamp(0.05, 1.0)
 }
 
+/// Community-agreement factors folded into bridge confidence (homonym false-positive guard): the
+/// graph's generalize pass groups reasoning nodes into topical communities, so a bridge candidate
+/// in the SAME community as the dead-end mention is more likely the same sense/entity, and one in
+/// a DIFFERENT community is more likely a namesake (wrong-sense homonym). Either side missing
+/// community data (no generalize run yet) is neutral — never penalizes a pilot-style graph.
+const BRIDGE_COMMUNITY_AGREE_BOOST: f32 = 1.25;
+const BRIDGE_COMMUNITY_DISAGREE_PENALTY: f32 = 0.5;
+
+/// Above this many same-mention candidates the base bridge signal is already ambiguous; combined
+/// with a non-exact match (see [`bridge_gate_weak`]) that ambiguity, plus a community mismatch,
+/// gates the candidate out. Kept as a separate named threshold from `bridge_confidence`'s own
+/// ambiguity denominator so the gate's "many" can be tuned independently.
+const BRIDGE_GATE_MANY_CANDIDATES: usize = 2;
+
+/// `true` when a bridge candidate's OWN match signal is already weak: not an exact normalized-label
+/// match, or drawn from a crowded (ambiguous) same-mention candidate set. Exact-match candidates
+/// with few candidates are a STRONG bridge and are never considered weak here, regardless of
+/// community — the conservative gate (§ below) only fires on weak signals.
+fn bridge_gate_weak(exact: bool, n_candidates: usize) -> bool {
+    !exact || n_candidates > BRIDGE_GATE_MANY_CANDIDATES
+}
+
+/// `true` when both sides have recorded communities and they differ. `None` on either side is
+/// never a disagreement — it's neutral (no generalize data to compare).
+fn community_disagrees(src: Option<i64>, cand: Option<i64>) -> bool {
+    matches!((src, cand), (Some(a), Some(b)) if a != b)
+}
+
+/// Multiplicative community-agreement factor: boost on agreement, penalty on disagreement, neutral
+/// (1.0) when either side has no recorded community.
+fn community_factor(src: Option<i64>, cand: Option<i64>) -> f32 {
+    match (src, cand) {
+        (Some(a), Some(b)) if a == b => BRIDGE_COMMUNITY_AGREE_BOOST,
+        (Some(a), Some(b)) if a != b => BRIDGE_COMMUNITY_DISAGREE_PENALTY,
+        _ => 1.0,
+    }
+}
+
 /// Forward-first, role-aware, corpus-bridging traversal (spec §5 + §7.5).
 ///
 /// From `from`, walk `role==Chaining` edges matching `relation` (fuzzy; `None` ⇒ all chaining
@@ -192,6 +230,7 @@ pub fn reach(
                 let term = node.label.clone();
                 let norm_term = normalize_label(&term);
                 let src_doc = node.prov.source_path.clone();
+                let src_community = g.node_community(&last)?;
                 // Per-term bridge-once (cycle guard) + salience/IDF gate (§7.5 MUST). Marking the
                 // term consumed even when it fails the gate is fine — it won't be retried.
                 if !norm_term.is_empty()
@@ -199,7 +238,7 @@ pub fn reach(
                     && g.term_is_salient(&term)?
                 {
                     // Resolve the mention → same-mention nodes in OTHER documents only.
-                    let mut others: Vec<(String, bool)> = Vec::new();
+                    let mut others: Vec<(String, bool, Option<i64>)> = Vec::new();
                     for cand in g.resolve(&term)? {
                         if cand == last {
                             continue;
@@ -209,12 +248,23 @@ pub fn reach(
                                 continue;
                             }
                             let exact = normalize_label(&cn.label) == norm_term;
-                            others.push((cand, exact));
+                            let cand_community = g.node_community(&cand)?;
+                            others.push((cand, exact, cand_community));
                         }
                     }
                     let n_other = others.len();
-                    for (cand, exact) in others {
-                        let conf = bridge_confidence(exact, n_other);
+                    for (cand, exact, cand_community) in others {
+                        // Conservative community gate (homonym FP guard): skip ONLY when the
+                        // candidate's own match signal is already weak AND its community
+                        // disagrees with the source's. A strong (exact-match, few-candidates)
+                        // bridge is never gated on community mismatch alone — legit cross-document
+                        // bridges of the same entity can legitimately land in a different community.
+                        if bridge_gate_weak(exact, n_other) && community_disagrees(src_community, cand_community) {
+                            continue;
+                        }
+                        let conf = (bridge_confidence(exact, n_other)
+                            * community_factor(src_community, cand_community))
+                        .clamp(0.05, 1.0);
                         // Verify: a candidate that IS `to` is a hit even if it's a leaf with no
                         // onward chaining edge — check `to` BEFORE the coherence prune, else a
                         // legitimate bridge-landing target is wrongly pruned (false negative).
@@ -553,6 +603,120 @@ mod tests {
         assert!(!relation_matches("CATEGORY", "ORG"));
         // Empty relation = no filter.
         assert!(relation_matches("ANYTHING", ""));
+    }
+
+    // ---- community-agreement bridge confidence (homonym FP guard) -----------------------------
+
+    use crate::graph::store::NodeMeta;
+
+    /// Set `node_meta.community` for a set of nodes in one `replace_node_meta` call (it replaces
+    /// ALL rows, so every node whose community matters for the test must be listed together).
+    fn set_communities(g: &GraphStore, rows: &[(&str, i64)]) {
+        let rows: Vec<(String, NodeMeta)> = rows
+            .iter()
+            .map(|(id, c)| ((*id).to_string(), NodeMeta { community: Some(*c), ..Default::default() }))
+            .collect();
+        g.replace_node_meta(&rows).unwrap();
+    }
+
+    #[test]
+    fn reach_bridge_confidence_boosted_for_same_community_penalized_for_different() {
+        // One dead-end term, two exact-match candidates in other docs — same match quality
+        // (exact=true, n_candidates=2) for both, so any confidence gap comes purely from the
+        // community factor. C1 shares the source's community; C2 doesn't.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        dnode(&g, "Source", "Thornbill", "docS.md");
+        dnode(&g, "C1", "Thornbill", "docC1.md");
+        dnode(&g, "Target1", "AnswerOne", "docC1.md");
+        edge(&g, "C1", "Target1", "REL");
+        dnode(&g, "C2", "Thornbill", "docC2.md");
+        dnode(&g, "Target2", "AnswerTwo", "docC2.md");
+        edge(&g, "C2", "Target2", "REL");
+        // 3 occurrences of "Thornbill" (Source + 2 candidates) need a bigger corpus than the
+        // usual 2-occurrence fixture to clear the salience df/total ratio gate.
+        fillers(&g, 40);
+        set_communities(&g, &[("Source", 100), ("C1", 100), ("C2", 200)]);
+        let ont = Ontology::default();
+
+        let res = reach(&g, &ont, "Source", Some("REL"), None, 6, 2).unwrap();
+        assert!(res.targets.contains(&"Target1".to_string()));
+        assert!(res.targets.contains(&"Target2".to_string()));
+
+        let conf_of = |target: &str| -> f32 {
+            let p = res.paths.iter().find(|p| p.last().unwrap().node == target).unwrap();
+            match &p.iter().rev().nth(1).unwrap().via {
+                Some(HopVia::Bridge { confidence, .. }) => *confidence,
+                other => panic!("expected a Bridge hop before {target}, got {other:?}"),
+            }
+        };
+        let same = conf_of("Target1");
+        let diff = conf_of("Target2");
+        assert!(
+            same > diff,
+            "same-community bridge ({same}) must score higher than different-community ({diff})"
+        );
+    }
+
+    #[test]
+    fn reach_bridge_gate_skips_weak_mismatched_community_but_keeps_exact() {
+        // Weak (fuzzy, non-exact) bridge + community disagreement → gated out entirely. A strong
+        // (exact-match) bridge with the SAME community disagreement is conservatively kept — a
+        // legit cross-document bridge of the same entity can land in a different community.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // Weak: fuzzy match only ("Zorblatt" vs "Zorblatt Prime" — no exact normalized-label hit).
+        dnode(&g, "A1", "Zorblatt", "docA1.md");
+        dnode(&g, "A2", "Zorblatt Prime", "docA2.md");
+        dnode(&g, "TargetA", "AnswerA", "docA2.md");
+        edge(&g, "A2", "TargetA", "REL");
+
+        // Strong: exact same-label match in another doc.
+        dnode(&g, "B1", "Milkwort", "docB1.md");
+        dnode(&g, "B2", "Milkwort", "docB2.md");
+        dnode(&g, "TargetB", "AnswerB", "docB2.md");
+        edge(&g, "B2", "TargetB", "REL");
+
+        fillers(&g, 25);
+        set_communities(&g, &[("A1", 1), ("A2", 2), ("B1", 3), ("B2", 4)]);
+        let ont = Ontology::default();
+
+        let weak = reach(&g, &ont, "A1", Some("REL"), None, 6, 1).unwrap();
+        assert!(
+            !weak.targets.contains(&"TargetA".to_string()),
+            "weak fuzzy bridge with community mismatch must be gated"
+        );
+
+        let strong = reach(&g, &ont, "B1", Some("REL"), None, 6, 1).unwrap();
+        assert!(
+            strong.targets.contains(&"TargetB".to_string()),
+            "exact-match bridge must never be gated on community mismatch alone"
+        );
+    }
+
+    #[test]
+    fn reach_bridge_confidence_neutral_when_no_community_recorded() {
+        // No node_meta/community written anywhere (the pilot-style, pre-generalize graph): the
+        // community factor must be exactly neutral, reproducing the pre-community confidence value.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        dnode(&g, "A_fact", "Xanthium", "docA.md");
+        dnode(&g, "B_T", "Xanthium", "docB.md");
+        dnode(&g, "Target", "TheAnswer", "docB.md");
+        edge(&g, "B_T", "Target", "REL");
+        fillers(&g, 25);
+        let ont = Ontology::default();
+
+        let res = reach(&g, &ont, "A_fact", Some("REL"), None, 6, 1).unwrap();
+        assert!(res.targets.contains(&"Target".to_string()));
+        let p = res.paths.iter().find(|p| p.last().unwrap().node == "Target").unwrap();
+        let via = &p.iter().rev().nth(1).unwrap().via;
+        let conf = match via {
+            Some(HopVia::Bridge { confidence, .. }) => *confidence,
+            other => panic!("expected a Bridge hop before Target, got {other:?}"),
+        };
+        assert_eq!(conf, bridge_confidence(true, 1), "no community data must be a no-op on confidence");
     }
 
     #[test]

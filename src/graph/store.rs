@@ -898,6 +898,14 @@ impl GraphStore {
         }
     }
 
+    /// A single node's community id from the generalization pass, or `None` if the node has no
+    /// recorded `node_meta` row (never generalized) or its `community` column is NULL. Thin
+    /// convenience wrapper over [`GraphStore::node_meta`] for callers (e.g. `reach`'s cross-document
+    /// bridge) that only need the community id, not the full derived-attribute bundle.
+    pub fn node_community(&self, id: &str) -> anyhow::Result<Option<i64>> {
+        Ok(self.node_meta(id)?.and_then(|m| m.community))
+    }
+
     /// Other reasoning nodes in the same community, sorted by PageRank (desc) then id (asc).
     pub fn community_siblings(
         &self,
