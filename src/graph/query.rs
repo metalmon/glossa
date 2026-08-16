@@ -5,9 +5,9 @@
 use crate::graph::store::GraphStore;
 use crate::index::store::DocIndex;
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
-    JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement, Subscript, TableFactor,
-    Value,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
+    FunctionArguments, GroupByExpr, HavingBound, JoinConstraint, JoinOperator, ListAggOnOverflow,
+    Query, SelectItem, SetExpr, Statement, Subscript, TableFactor, Value,
 };
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
@@ -384,7 +384,36 @@ fn collect_from_function_arguments(args: &FunctionArguments, out: &mut Vec<Strin
             for a in &list.args {
                 collect_from_function_arg(a, out);
             }
+            // Argument-list clauses (`ORDER BY`, `LIMIT`, `ON OVERFLOW`, `HAVING MIN/MAX`, ...)
+            // sit alongside the positional args but are parsed independently, and several of
+            // them carry their own `Expr` — e.g. `group_concat(id ORDER BY (SELECT ...))` or
+            // `array_agg(x LIMIT (SELECT ...))`. Walk every clause that can hold an Expr.
+            for clause in &list.clauses {
+                collect_from_function_arg_clause(clause, out);
+            }
         }
+    }
+}
+
+fn collect_from_function_arg_clause(clause: &FunctionArgumentClause, out: &mut Vec<String>) {
+    match clause {
+        FunctionArgumentClause::OrderBy(order_exprs) => {
+            for oe in order_exprs {
+                collect_from_expr(&oe.expr, out);
+            }
+        }
+        FunctionArgumentClause::Limit(e) => collect_from_expr(e, out),
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate { filler, .. }) => {
+            if let Some(f) = filler {
+                collect_from_expr(f, out);
+            }
+        }
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Error) => {}
+        FunctionArgumentClause::Having(HavingBound(_, e)) => collect_from_expr(e, out),
+        // No embedded Expr: NULLS treatment flag, a bare literal Value, and a null-clause flag.
+        FunctionArgumentClause::IgnoreOrRespectNulls(_)
+        | FunctionArgumentClause::Separator(_)
+        | FunctionArgumentClause::JsonNullClause(_) => {}
     }
 }
 
@@ -1228,6 +1257,16 @@ mod tests {
             parse_readonly_select("SELECT id FROM nodes WHERE id IN (SELECT efrom FROM edges)")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn gate_rejects_subquery_in_function_arg_order_by_clause() {
+        // `group_concat(... ORDER BY ...)` is a real SQLite aggregate-function clause; its
+        // ORDER BY expression can itself hide a subquery over a non-whitelisted table.
+        assert!(parse_readonly_select(
+            "SELECT group_concat(id ORDER BY (SELECT sql FROM sqlite_master LIMIT 1)) FROM nodes"
+        )
+        .is_err());
     }
 
     #[test]
