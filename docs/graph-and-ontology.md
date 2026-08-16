@@ -153,7 +153,7 @@ kb graph doctor ./my-corpus --prune-incomplete   # remove off-spine nodes (destr
 The **healing loop** for stale nodes:
 
 1. Run `kb graph doctor` and identify stale nodes.
-2. **Read** the source document to see what changed: `kb graph read node_id ./my-corpus` or open the citation directly.
+2. **Read** the source document to see what changed: `kb graph node node_id ./my-corpus` or open the citation directly.
 3. **Re-ground** by calling `graph_upsert` with the updated node or a refreshed `MENTIONS` edge. On upsert, glossa re-stat the source file, recompute `file_sig`, and clear the stale flag. Alternatively, retract the node if the reasoning no longer holds.
 4. Repeat until `graph doctor` reports no stale nodes.
 

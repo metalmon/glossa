@@ -47,10 +47,21 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 | Format | Library | Notes |
 |--------|---------|-------|
 | PDF | [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | Per-page text; blank pages indexed empty; page raster for vision agents; embedded image extraction; scans indexed by filename if no text |
-| Office | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
+| Office (OOXML + legacy) | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
+| OpenDocument | built-in | odt/ods/odp; `content.xml` parsed to `DocumentIR` (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker |
+| Charts | built-in | OOXML (`charts/chartN.xml` cache) and ODF (embedded local `<table:table>`, or cell-range refs resolved against the sheet) → chart **data** as a searchable GFM table, one chunk per chart |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
 
+Embedded images reach vision-capable agents on demand via `read(page_image: true)` with `--vision`: PDF pages are rasterized; zip-based Office/ODF media (`word|xl|ppt/media/`, ODF `Pictures/`) and legacy `.doc`/`.xls` raster pictures are extracted from the container.
+
 Binary files are skipped silently. Extraction is streaming (no fixed size cap).
+
+### Known extraction limitations
+
+- **Charts are extracted as data, not rendered.** glossa reads the chart's underlying series/categories/values into a text table; it does not render the chart to an image. Faithful visual rendering of an Office chart/diagram would require an external engine (LibreOffice), which glossa deliberately does not bundle (`no LibreOffice, pandoc, or separate ETL`). For a rendered-visual need, use a **PDF** source — PDF pages (including their charts) *are* rasterized for vision.
+- **Legacy binary charts are not extracted.** Charts embedded in binary `.doc`/`.xls`/`.ppt` (OLE/BIFF) are skipped — office_oxide exposes no chart parser for those, and no BIFF chart parser is built in. OOXML and ODF charts are covered.
+- **Legacy binary embedded images:** `.doc`/`.xls` raster pictures are extracted; `.ppt` embedded images are not (office_oxide returns none). Vector metafiles (EMF/WMF/PICT) are skipped (not rasterized).
+- **ODF cell-range charts** are resolved against the sheet in the same document; cross-document/cross-sheet references, multi-column category ranges, and merged-cell regions inside a referenced range are best-effort and may under-resolve. The chart is skipped (with a log warning), never crashing extraction.
 
 ## Index layer
 

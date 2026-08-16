@@ -8,6 +8,39 @@ use std::path::PathBuf;
 #[cfg(windows)]
 mod winsvc;
 
+/// Resolve the KB root and report it — plus any ambiguity warnings — so the operator can SEE which
+/// `.glossa` a command actually used. The nested-corpus and deleted-`.glossa`-walks-up traps are
+/// otherwise silent (a deleted corpus `.glossa` makes `kb index` recreate the index in an ANCESTOR,
+/// splitting CLI and MCP apart). `via_tracing` picks the channel: interactive CLI commands print
+/// plain lines to stderr; the long-lived server routes them through `tracing` so they match its
+/// other logs (and become JSON under `GLOSSA_LOG_FORMAT=json`).
+fn resolve_root_reported(explicit: Option<PathBuf>, via_tracing: bool) -> PathBuf {
+    let r = glossa::root::resolve_root_verbose(explicit);
+    let shown = std::path::absolute(&r.root).unwrap_or_else(|_| r.root.clone());
+    if via_tracing {
+        tracing::info!(root = %shown.display(), "resolved kb root");
+        for a in r.advisories() {
+            tracing::warn!("{a}");
+        }
+    } else {
+        eprintln!("root: {}", shown.display());
+        for a in r.advisories() {
+            eprintln!("warning: {a}");
+        }
+    }
+    r.root
+}
+
+/// Root resolution for interactive CLI commands — reports to stderr as plain lines.
+fn resolve_root_logged(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_root_reported(explicit, false)
+}
+
+/// Root resolution for the long-lived MCP server — reports through `tracing` (structured, JSON-able).
+fn resolve_root_traced(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_root_reported(explicit, true)
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum OutputFormat {
     /// pretty when stdout is a terminal, rg otherwise
@@ -21,6 +54,7 @@ enum OutputFormat {
 #[derive(Parser)]
 #[command(
     name = "kb",
+    version,
     about = "File-First knowledge-base search (ripgrep syntax)"
 )]
 struct Cli {
@@ -207,6 +241,18 @@ enum Cmd {
         /// Default permits loopback only — set your gateway/public host(s) for a prod deployment.
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
+        /// Optional bearer token guarding the streamable-http `/mcp` endpoint. If set (flag or
+        /// `GLOSSA_MCP_TOKEN`), every `/mcp` request must send `Authorization: Bearer <token>` or is
+        /// rejected with 401; `/health`, `/ready`, `/metrics` stay open for probes. Unset → no auth
+        /// (the loopback default). Ignored for `--transport stdio` (a local subprocess).
+        #[arg(long = "auth-token", env = "GLOSSA_MCP_TOKEN", hide_env_values = true)]
+        auth_token: Option<String>,
+        /// Idle-session timeout in seconds for the streamable-http transport: a session that makes no
+        /// request for this long is refused with 404 on its next request, so the client
+        /// re-initializes (a cheap handshake; the KB holds no per-session state). OPT-IN — `0`
+        /// (default) disables it. Set e.g. `900` (15 min) for a corporate policy.
+        #[arg(long = "session-idle-secs", env = "GLOSSA_MCP_SESSION_IDLE_SECS", default_value_t = 0)]
+        session_idle_secs: u64,
         /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
         #[arg(long = "windows-service", hide = true)]
@@ -462,6 +508,10 @@ pub(crate) struct ServeParams {
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
+    /// Optional bearer token for the streamable-http `/mcp` endpoint (None → unauthenticated).
+    pub auth_token: Option<String>,
+    /// Idle-session timeout (seconds) for streamable-http; 0 disables (opt-in).
+    pub session_idle_secs: u64,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -480,6 +530,8 @@ pub(crate) fn run_serve(
     let transport = p.transport;
     let bind = p.bind;
     let allowed_hosts = p.allowed_hosts;
+    let auth_token = p.auth_token;
+    let session_idle_secs = p.session_idle_secs;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         if handle_signals {
@@ -506,8 +558,16 @@ pub(crate) fn run_serve(
                 cancel.cancel();
             }
             McpTransport::StreamableHttp => {
-                serve_streamable_http(server, &bind, allowed_hosts, cancel, on_transport_ready)
-                    .await?;
+                serve_streamable_http(
+                    server,
+                    &bind,
+                    allowed_hosts,
+                    auth_token,
+                    session_idle_secs,
+                    cancel,
+                    on_transport_ready,
+                )
+                .await?;
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -547,6 +607,8 @@ async fn serve_streamable_http(
     server: glossa::mcp::GlossaServer,
     bind: &str,
     allowed_hosts: Vec<String>,
+    auth_token: Option<String>,
+    session_idle_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
@@ -562,12 +624,50 @@ async fn serve_streamable_http(
     let ready_srv = server.clone();
     let metrics_srv = server.clone();
     let freshen_srv = server.clone();
+    let http = server.http_metrics();
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
         config,
     );
-    let app = axum::Router::new()
+    // Guard ONLY the /mcp endpoint; /health, /ready, /metrics stay open so probes/monitoring work
+    // without a token. Unset token → no auth (the loopback default).
+    let mut mcp = axum::Router::new().nest_service("/mcp", service);
+    // Idle-session timeout (opt-in), applied INNER so bearer auth (added after, thus outer) runs
+    // first: an unauthenticated request gets 401 before we ever look at its session.
+    let idle_ms = session_idle_secs.saturating_mul(1000);
+    let activity = std::sync::Arc::new(glossa::session_idle::SessionActivity::new());
+    if idle_ms > 0 {
+        tracing::info!("MCP idle-session timeout: {session_idle_secs}s on /mcp (expired → 404, client re-inits)");
+        mcp = mcp.layer(axum::middleware::from_fn_with_state(
+            IdleState {
+                activity: activity.clone(),
+                idle_ms,
+            },
+            session_idle_layer,
+        ));
+    }
+    match auth_token {
+        Some(token) => {
+            tracing::info!("MCP auth: bearer token required on /mcp (health endpoints stay open)");
+            mcp = mcp.layer(axum::middleware::from_fn_with_state(
+                AuthState {
+                    token: std::sync::Arc::new(token),
+                    metrics: http.clone(),
+                },
+                bearer_auth_layer,
+            ));
+        }
+        None => {
+            tracing::info!(
+                "MCP auth: DISABLED (no --auth-token / GLOSSA_MCP_TOKEN) — serve on loopback or behind a TLS/auth gateway"
+            );
+        }
+    }
+    // Request metrics wrap /health, /ready and /mcp. /metrics is registered AFTER this `.layer`, so
+    // scraping it is NOT counted as a served request (axum applies a layer only to routes added
+    // before it) — the scrape must not measure itself.
+    let observed = axum::Router::new()
         // Liveness: the process is up.
         .route("/health", axum::routing::get(|| async { "ok" }))
         // Readiness: the index + graph are openable (the server can actually serve).
@@ -584,7 +684,13 @@ async fn serve_streamable_http(
                 }
             }),
         )
-        // Prometheus metrics (index/graph size, derived-layer staleness).
+        .merge(mcp)
+        .layer(axum::middleware::from_fn_with_state(
+            http.clone(),
+            http_metrics_layer,
+        ));
+    let app = observed
+        // Prometheus metrics (index/graph size, derived-layer staleness, HTTP request metrics).
         .route(
             "/metrics",
             axum::routing::get(move || {
@@ -592,7 +698,6 @@ async fn serve_streamable_http(
                 async move { s.metrics_text() }
             }),
         )
-        .nest_service("/mcp", service)
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(
@@ -602,6 +707,22 @@ async fn serve_streamable_http(
         f();
     }
     tokio::spawn(async move { freshen_srv.freshen_now().await });
+    if idle_ms > 0 {
+        // Housekeeping: periodically drop sessions abandoned past the idle window so the activity
+        // map can't grow unbounded. Stops with the server (shares `cancel`).
+        let reaper = activity.clone();
+        let rcancel = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = rcancel.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        reaper.reap(idle_ms, glossa::trace::now_ms());
+                    }
+                }
+            }
+        });
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;
@@ -609,19 +730,128 @@ async fn serve_streamable_http(
     Ok(())
 }
 
+/// State for the bearer-auth middleware: the expected token plus the metrics handle (so a rejection
+/// bumps `glossa_mcp_auth_rejected_total`).
+#[derive(Clone)]
+struct AuthState {
+    token: std::sync::Arc<String>,
+    metrics: std::sync::Arc<glossa::http_metrics::HttpMetrics>,
+}
+
+/// axum middleware: require `Authorization: Bearer <token>` on the guarded `/mcp` routes. A missing
+/// or wrong token is rejected with 401, counted, and logged (a first audit signal for failed access
+/// — the IB track wants auth events recorded). The token compare is constant-time (see `mcp_auth`).
+async fn bearer_auth_layer(
+    axum::extract::State(st): axum::extract::State<AuthState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ok = {
+        let header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        glossa::mcp_auth::bearer_ok(header, &st.token)
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        st.metrics.inc_auth_rejected();
+        let via = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        glossa::audit::security_event("auth", "bearer_reject", "denied", via, "/mcp");
+        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+    }
+}
+
+/// axum middleware: time each served request and record it into the shared HTTP metrics (total,
+/// status class, in-flight gauge, latency histogram). Applied to /health, /ready and /mcp — not to
+/// /metrics itself.
+async fn http_metrics_layer(
+    axum::extract::State(m): axum::extract::State<std::sync::Arc<glossa::http_metrics::HttpMetrics>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    m.inc_in_flight();
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    m.dec_in_flight();
+    m.record(resp.status().as_u16(), start.elapsed().as_secs_f64());
+    resp
+}
+
+/// State for the idle-session middleware: the shared activity clock and the threshold (ms).
+#[derive(Clone)]
+struct IdleState {
+    activity: std::sync::Arc<glossa::session_idle::SessionActivity>,
+    idle_ms: u64,
+}
+
+/// axum middleware: enforce the idle-session timeout on `/mcp`. A request carrying an
+/// `Mcp-Session-Id` that has been idle past the threshold is refused with 404 (the streamable-http
+/// signal for a terminated session → the client re-initializes); the expiry is audited. Requests
+/// without a session id (e.g. `initialize`) pass through untouched.
+async fn session_idle_layer(
+    axum::extract::State(st): axum::extract::State<IdleState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let session_id = req
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let Some(sid) = session_id {
+        if !st
+            .activity
+            .check_and_touch(&sid, st.idle_ms, glossa::trace::now_ms())
+        {
+            let source = req
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            glossa::audit::security_event("session", "idle_expired", "denied", source, &sid);
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                "session expired — reinitialize\n",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 fn main() -> anyhow::Result<()> {
     // Structured logs go to STDERR — stdout is the stdio JSON-RPC channel and must never carry logs.
-    // Level via RUST_LOG (default `info`). Best-effort init (a second init in tests is a no-op).
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // Our logs at info; silence noisy deps. RUST_LOG overrides.
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
-                }),
-        )
-        .with_writer(std::io::stderr)
-        .try_init();
+    // Level via RUST_LOG (default `info`). `GLOSSA_LOG_FORMAT=json` emits one JSON object per line
+    // (for a SIEM / log pipeline); anything else is the human-readable default. Best-effort init (a
+    // second init in tests is a no-op). Read from the env directly — logging is set up before Cli
+    // parsing so parse errors are still logged.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        // Our logs at info; silence noisy deps. RUST_LOG overrides.
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error"));
+    let json_logs = std::env::var("GLOSSA_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json_logs {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .json()
+            .flatten_event(true)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Search {
@@ -637,7 +867,7 @@ fn main() -> anyhow::Result<()> {
             no_ignore,
             format,
         } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             let pretty = match format {
                 OutputFormat::Pretty => true,
                 OutputFormat::Rg => false,
@@ -722,7 +952,7 @@ fn main() -> anyhow::Result<()> {
                 print_read(std::path::Path::new(&target), location.as_deref())?;
             } else if let Ok(n) = target.parse::<usize>() {
                 // 2. Target is a number and no file by that name exists — resolve from last search.
-                let root = glossa::root::resolve_root(None);
+                let root = resolve_root_logged(None);
                 let rec = glossa::cli_fmt::read_last_search(&root)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
                 match rec {
@@ -772,7 +1002,7 @@ fn main() -> anyhow::Result<()> {
             file,
             ontology,
         } => {
-            let root = glossa::root::resolve_root(path);
+            let root = resolve_root_logged(path);
             let started = std::time::Instant::now();
             if let Some(rel) = file {
                 let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
@@ -802,14 +1032,34 @@ fn main() -> anyhow::Result<()> {
                     glossa::ontology_templates::Written::Overwritten => unreachable!("force=false"),
                 }
             }
+            // Seed a default whitelist `.ignore` on a corpus that has none, so a first index doesn't
+            // slurp installers/archives/temp files as text. Never clobbers an existing ignore setup.
+            if let Some(p) = glossa::default_ignore::seed_if_absent(&root) {
+                eprintln!(
+                    "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
+                    p.display()
+                );
+            }
             let stats = glossa::index::store::index_dir(&root, force)?;
+            let skipped = if stats.errors.is_empty() {
+                String::new()
+            } else {
+                format!(", {} skipped(errors)", stats.errors.len())
+            };
             println!(
-                "indexed: {} added, {} removed, {} unchanged in {}",
+                "indexed: {} added, {} removed, {} unchanged{} in {}",
                 stats.added,
                 stats.removed,
                 stats.unchanged,
+                skipped,
                 glossa::cli_fmt::format_elapsed(started.elapsed())
             );
+            if !stats.errors.is_empty() {
+                eprintln!("errors ({}):", stats.errors.len());
+                for (p, e) in &stats.errors {
+                    eprintln!("  {p}: {e}");
+                }
+            }
             if force {
                 // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
                 // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
@@ -831,7 +1081,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "notebook")]
         Cmd::Prune { path, dry_run } => {
-            let root = glossa::root::resolve_root(path);
+            let root = resolve_root_logged(path);
             let orphans = glossa::index::store::orphan_notes(&root)?;
             if orphans.is_empty() {
                 println!("no orphaned notes");
@@ -885,7 +1135,7 @@ fn main() -> anyhow::Result<()> {
             max_count,
             multiline,
         } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let opts = glossa::grep::GrepOpts {
@@ -911,7 +1161,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Glob { pattern, path } => {
-            let path = glossa::root::resolve_root(path);
+            let path = resolve_root_logged(path);
             glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
             let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
             let docs = glossa::glob::glob_docs(&idx, &pattern)?;
@@ -935,6 +1185,8 @@ fn main() -> anyhow::Result<()> {
             transport,
             bind,
             allowed_hosts,
+            auth_token,
+            session_idle_secs,
             windows_service,
             service_name: _service_name,
         } => match action {
@@ -947,7 +1199,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             None => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_traced(path);
                 let params = ServeParams {
                     path,
                     profile: glossa::mcp::Profile::parse(&profile),
@@ -958,6 +1210,8 @@ fn main() -> anyhow::Result<()> {
                     transport,
                     bind,
                     allowed_hosts,
+                    auth_token,
+                    session_idle_secs,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
@@ -983,13 +1237,13 @@ fn main() -> anyhow::Result<()> {
         },
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
             GraphAction::Glossary { query, path, as_of } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
@@ -1028,7 +1282,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1074,7 +1328,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Generalize { path, merge } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let mut opts = glossa::graph::generalize::apply::Opts::from_ontology(
@@ -1095,7 +1349,7 @@ fn main() -> anyhow::Result<()> {
                 prune_incomplete,
                 prune_ungrounded,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
@@ -1121,7 +1375,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let filter = if types.is_empty() {
                     None
@@ -1150,7 +1404,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Node { node_id, path, as_of, now } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1214,7 +1468,7 @@ fn main() -> anyhow::Result<()> {
                 path,
                 max_depth,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
                 println!(
@@ -1230,7 +1484,7 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = glossa::root::resolve_root(path);
+                let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1349,7 +1603,7 @@ fn main() -> anyhow::Result<()> {
                 doc,
                 tables_dir,
             } => {
-                let root = glossa::root::resolve_root(path);
+                let root = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&root)?;
                 let tables = tables_dir.unwrap_or_else(|| {
                     glossa::notebook::notes_root(&root)
@@ -1395,7 +1649,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
                 OntologyAction::Init { path, template, force } => {
-                    let root = glossa::root::resolve_root(path);
+                    let root = resolve_root_logged(path);
                     match ot::write_template(&root, &template, force)? {
                         ot::Written::Created => println!("wrote '{template}' to .glossa/ontology.toml"),
                         ot::Written::Overwritten => println!("overwrote .glossa/ontology.toml with '{template}'"),

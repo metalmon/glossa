@@ -715,6 +715,9 @@ pub struct IndexStats {
     pub added: usize,
     pub removed: usize,
     pub unchanged: usize,
+    /// Files that were reached but failed to extract (corrupt/unreadable), as `(path, error)`. The
+    /// pass continues past them; the CLI prints this list at the end so they aren't lost in scroll.
+    pub errors: Vec<(String, String)>,
 }
 
 pub fn file_sig(path: &Path) -> anyhow::Result<FileSig> {
@@ -1041,8 +1044,13 @@ pub fn ensure_fresh(dir: &Path) -> anyhow::Result<IndexStats> {
             added: 0,
             removed: 0,
             unchanged: delta.next.files.len() + delta.next.notes.len(),
+            ..Default::default()
         });
     }
+    // Something changed → take the lock and index. index_dir recomputes the delta FRESH inside the
+    // lock (this pre-scan is lock-free and only decides whether to bother): reusing this delta across
+    // the lock boundary would be unsound — a concurrent indexer could land between, and our stale
+    // file set would then delete what it just added.
     match index_dir(dir, false) {
         Ok(s) => Ok(s),
         Err(e) if is_lock_busy(&e) => Ok(IndexStats::default()),
@@ -1267,9 +1275,10 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         graph.delete_auto()?;
     }
 
-    // Compute the delta once, up front: the hot-path gate uses it to skip all work when nothing
-    // changed, and the notes pass below reuses the same `notes_changed`/`notes_removed`. Under
-    // `force` the manifest was reset, so every note shows up as changed and is re-added.
+    // The delta drives everything below in a single tree walk: the hot-path gate skips all work when
+    // nothing changed, the walk-free indexing loop re-extracts just `delta.changed`, and the notes
+    // pass reuses the same `notes_changed`/`notes_removed`. Under `force`/schema-migrate the manifest
+    // was reset, so every file/note shows up as changed and is re-added.
     let mut delta = scan_delta(dir, &manifest)?;
     if !force
         && delta.changed.is_empty()
@@ -1282,6 +1291,7 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
             added: 0,
             removed: 0,
             unchanged: delta.next.files.len() + delta.next.notes.len(),
+            ..Default::default()
         });
     }
 
@@ -1294,23 +1304,35 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     // we were indexing it holds back its dir's dirsig entry (see `unsettled_dirs`).
     let mut indexed: Vec<(String, FileSig)> = Vec::new();
     eprintln!("indexing files under {}...", idx.root.display());
-    crate::walk::walk_files(&idx.root, None, true, &mut |path| {
-        let path_str = rel_key(&idx.root, path);
-        let sig = match file_sig(path) {
-            Ok(s) => s,
-            Err(_) => return Ok(()),
+    // Drive indexing off the delta we already computed — do NOT walk the tree again just to re-stat
+    // every file. `delta.next.files` is the full current file set (with signatures) that `scan_delta`
+    // produced in a single walk, so it becomes `next.files` directly; `delta.changed` is exactly the
+    // subset needing (re)extraction (under `force`/schema-migrate the manifest was reset, so every
+    // file is "changed" and re-extracted — same as before). This removes one of the redundant full
+    // walks per `kb index`/`ensure_fresh` pass (the "reindex is slower than early versions" report).
+    next.files = std::mem::take(&mut delta.next.files);
+    for path_str in &delta.changed {
+        let Some(&sig) = next.files.get(path_str) else {
+            continue;
         };
-        next.files.insert(path_str.clone(), sig);
-        if !force && !manifest.changed(&path_str, sig) {
-            stats.unchanged += 1;
-            return Ok(());
-        }
         eprintln!("  + {path_str}");
-        index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?;
+        let abs = idx.root.join(path_str);
+        // A single unreadable/corrupt file (e.g. a .doc with a bad CFB header) must NOT abort the
+        // whole index — log and skip it, exactly as the old walk_files-driven loop did (walk_files
+        // caught the visit closure's error and printed "skip …"). The file stays recorded in
+        // next.files, so a later pass treats it as unchanged and doesn't retry it every time.
+        if let Err(e) = index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links) {
+            eprintln!("skip {}: {e}", abs.display());
+            stats.errors.push((path_str.clone(), e.to_string()));
+            continue;
+        }
         indexed.push((path_str.clone(), sig));
         stats.added += 1;
-        Ok(())
-    })?;
+    }
+    stats.unchanged = next
+        .files
+        .len()
+        .saturating_sub(stats.added + stats.errors.len());
 
     for old_path in manifest.files.keys() {
         if !next.files.contains_key(old_path) {
@@ -1432,6 +1454,20 @@ fn parent_dir_key(rel_file: &str) -> String {
     }
 }
 
+/// Wall-clock seconds since the epoch, for freshness windows. On a clock error it returns 0, which
+/// (via the `now >= mtime` guard at the call site) means "hold nothing" — the safe default.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A file (re)indexed within this many seconds of a freshen is treated as possibly still mid-copy,
+/// so its directory is held unsettled for one more pass (see the call in `reindex_dirs_locked`). Old
+/// corpus files sit far outside the window, so a normal freshen still settles immediately.
+const FRESH_WINDOW_SECS: u64 = 2;
+
 /// Given files just indexed under `root` with the signature we recorded for each, re-stat every one
 /// and return the set of `c:`-prefixed parent DIR KEYS (as produced by `dir_mtime_map`) whose
 /// content is NOT settled: the file's current on-disk signature no longer matches what we indexed
@@ -1529,12 +1565,22 @@ pub fn reindex_dirs_locked(
                 Err(_) => continue,
             };
             seen.insert(rel.clone());
-            if manifest.files.get(&rel) != Some(&sig)
-                && index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links)?.is_some()
-            {
-                manifest.files.insert(rel.clone(), sig);
-                indexed.push((rel.clone(), sig));
-                stats.added += 1;
+            if manifest.files.get(&rel) != Some(&sig) {
+                // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
+                // resilience of the `kb index` walk. On error the file is left unrecorded so a later
+                // freshen can retry it once it changes.
+                match index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links) {
+                    Ok(Some(_)) => {
+                        manifest.files.insert(rel.clone(), sig);
+                        indexed.push((rel.clone(), sig));
+                        stats.added += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("skip {}: {e}", path.display());
+                        stats.errors.push((rel.clone(), e.to_string()));
+                    }
+                }
             }
         }
     }
@@ -1620,7 +1666,19 @@ pub fn reindex_dirs_locked(
     // Advance dirsig, but hold back any dir whose file changed under us (still being written): the
     // lock is held, so the on-disk dirsig is still the value we diffed against (`stored`).
     let stored = read_dirsig(dir).unwrap_or_default();
-    let unsettled = unsettled_dirs(&idx.root, &indexed);
+    let mut unsettled = unsettled_dirs(&idx.root, &indexed);
+    // Also hold back a dir whose file we just indexed was written within the last few seconds: it
+    // may still be mid-copy. A finalize write landing AFTER this pass does NOT re-bump the dir mtime,
+    // so without this the dir-mtime gate would never re-open and the finalized content would stay
+    // invisible to search/grep (regression: `freshen_gate_misses_content_finalized_after_a_settled_
+    // index`). This is the freshen (MCP) path only — the CLI `scan_delta` path already re-stats every
+    // file. The hold self-clears once the file ages past the window, so steady state stays fast.
+    let now = now_secs();
+    for (rel, sig) in &indexed {
+        if now >= sig.mtime_secs && now - sig.mtime_secs < FRESH_WINDOW_SECS {
+            unsettled.insert(parent_dir_key(rel));
+        }
+    }
     write_dirsig(dir, &settled_dirsig(cur_map, &stored, &unsettled));
     Ok(stats)
 }
@@ -1783,6 +1841,39 @@ mod incremental_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let hits = idx.search("hello", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("ok.md")));
+    }
+
+    #[test]
+    fn index_dir_skips_corrupt_office_doc_and_continues() {
+        // A .doc whose extractor HARD-errors (bad CFB header) must not abort the whole index — the
+        // walk-free loop of Fix C once propagated this with `?`, killing the run with no stats. The
+        // good doc must still index and stats must be returned. (Malformed PDFs soft-fail, so only a
+        // hard-error extractor like office exercises this path.)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.md"), b"# T\nhello world\n").unwrap();
+        std::fs::write(dir.path().join("bad.doc"), b"this is not a real CFB .doc file").unwrap();
+        let stats = index_dir(dir.path(), false).expect("a corrupt .doc must not abort the index");
+        assert!(stats.added >= 1, "the good doc is indexed despite the corrupt one");
+        // The failure is collected (not lost): reported to the CLI as an end-of-run error summary.
+        assert_eq!(stats.errors.len(), 1, "the corrupt .doc is recorded as an error");
+        assert!(stats.errors[0].0.contains("bad.doc"), "error names the offending file");
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("hello", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("ok.md")));
+        // The MCP freshen path must be resilient too: add another corrupt doc, freshen, don't abort.
+        std::fs::write(dir.path().join("bad2.doc"), b"garbage two").unwrap();
+        std::fs::write(dir.path().join("good2.md"), b"# U\nbravo term\n").unwrap();
+        freshen_blocking(dir.path(), std::time::Duration::from_secs(3))
+            .expect("a corrupt .doc must not abort freshen");
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(idx
+            .search("bravo", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("good2.md")));
     }
 
     #[test]
@@ -3333,6 +3424,42 @@ mod tests {
             .any(|h| h.path.ends_with("b.md")));
     }
 
+    // Regression: a file copied into the corpus can be seen by a freshen mid-copy — its PARTIAL
+    // content indexed and its directory settled. When the copy finishes, the rest lands as an
+    // in-place write, which does NOT re-bump the parent dir's mtime, so the `dir_mtime_map == dirsig`
+    // gate would stay shut and the finalized content never reindex. Fixed by holding a dir unsettled
+    // for one more pass when a file we just indexed is younger than FRESH_WINDOW_SECS (see
+    // reindex_dirs_locked), forcing the next freshen to re-stat it. (877a9d6's re-stat only caught a
+    // change DURING the pass, not one landing AFTER it.) The CLI `scan_delta` path re-stats every
+    // file and never had this gap.
+    #[test]
+    fn freshen_gate_misses_content_finalized_after_a_settled_index() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nhello\n").unwrap();
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+
+        // Mid-copy: a freshen sees b.md with only PARTIAL content, indexes it, and settles the dir.
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(dir.path().join("b.md"), b"partialonly").unwrap();
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+
+        // The copy completes: b.md's real content lands (in-place content write — no dir-mtime bump).
+        std::fs::write(dir.path().join("b.md"), b"# B\nworldfinished\n").unwrap();
+
+        // A freshen must still pick up the finalized content.
+        freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            idx.search("worldfinished", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path.ends_with("b.md")),
+            "content finalized after the dir was settled (mid-copy) must still be indexed — the \
+             dir-mtime gate misses it because a content write does not re-bump the dir mtime"
+        );
+    }
+
     #[test]
     fn freshen_blocking_scoped_picks_up_a_new_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -3348,7 +3475,10 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.path.ends_with("b.md")));
-        // dirsig now matches the current tree → a second freshen is a no-op.
+        // b.md was just written, so the pass that indexed it holds its dir unsettled for one more
+        // freshen (mid-copy guard). A confirming freshen — which re-stats b.md, finds it stable, and
+        // reindexes nothing — settles the dir, and dirsig then matches the current tree.
+        freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
         assert_eq!(
             read_dirsig(dir.path()),
             Some(dir_mtime_map(dir.path()).unwrap())

@@ -5,7 +5,8 @@ use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, ProtocolVersion, ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock as Content, ProtocolVersion, ResourceContents, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
@@ -50,6 +51,9 @@ pub struct GlossaServer {
     no_image: bool,
     /// In-process cache of `manifest.json`, invalidated by the file's mtime.
     manifest_cache: Arc<Mutex<ManifestCache>>,
+    /// HTTP request metrics (streamable-http): shared with the axum middleware, rendered by
+    /// `metrics_text`. Inert under stdio (no middleware records into it).
+    http: Arc<crate::http_metrics::HttpMetrics>,
 }
 
 #[derive(Default)]
@@ -162,7 +166,14 @@ impl GlossaServer {
             indexing: Arc::new(AtomicUsize::new(0)),
             no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
+            http: Arc::new(crate::http_metrics::HttpMetrics::default()),
         }
+    }
+
+    /// Shared HTTP metrics handle — the streamable-http middleware records requests into it and
+    /// `metrics_text` renders it.
+    pub fn http_metrics(&self) -> Arc<crate::http_metrics::HttpMetrics> {
+        self.http.clone()
     }
 
     /// Run `f` against the in-process manifest cache, reloading it when `manifest.json`'s mtime advanced
@@ -348,7 +359,8 @@ impl GlossaServer {
              # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
              # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n\
              # HELP glossa_indexing A freshen (freshen_now) is in progress (1) or idle (0)\n\
-             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n"
+             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n{http}",
+            http = self.http.render(),
         )
     }
 
@@ -1271,6 +1283,7 @@ impl GlossaServer {
         &self,
         Parameters(args): Parameters<GraphBuildArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_build");
         #[cfg(feature = "constraint")]
         {
             let idx =
@@ -1299,6 +1312,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphUpsertArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_upsert");
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -1328,6 +1342,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphDeleteArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_delete");
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
@@ -1514,6 +1529,7 @@ impl GlossaServer {
         description = "Create, fully replace, or (with append=true) extend a notebook note bound to an indexed document. Notes are free-form: pick any extension (e.g. `.md`) that fits the content. Without append, an existing file is OVERWRITTEN; pass append=true to add to it. The `.csp` extension is a special validated limit-table format (tab-separated rows, first line = column headers) used only by the constraint-graph workflow — don't use it for ordinary notes. Use ls/read/del with paths from ls afterward."
     )]
     async fn note(&self, Parameters(a): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "note");
         #[cfg(feature = "notebook")]
         {
             let idx =
@@ -1569,6 +1585,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<NotebookPathArgs>,
     ) -> Result<CallToolResult, McpError> {
+        crate::audit::security_event("write", "tool_invoke", "invoked", "-", "del");
         #[cfg(feature = "notebook")]
         {
             let idx =

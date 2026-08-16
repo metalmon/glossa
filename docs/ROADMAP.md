@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-08-06**. Version **0.3.0** (tag `v0.3.0`).
+Status as of **2026-08-15**. Version **0.3.3** (unreleased; last tag `v0.3.2`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -8,13 +8,17 @@ For the reasoning graph’s inference-method direction (abduction / deduction / 
 
 Legend used below: **Shipped** = in a release today; **Partial** = exists but incomplete vs the goal; **Open** = not built.
 
-> **New in 0.3.0** (tagged locally, not yet pushed to origin): baked ontology presets + `kb ontology` CLI, mandatory grounding (`requires_grounding`), valid-time Phase 1, graph doctor (ungrounded/stale/incomplete), the offline HTML graph explorer, and `get_source_file` (docx→pdf). Marked **Shipped** below.
+> **New in 0.3.2:** first-class **OpenDocument** extraction (odt/ods/odp), **chart-data extraction** (OOXML + ODF charts → searchable GFM tables, incl. ODF cell-range resolution), and **embedded-image delivery to vision** (ODF `Pictures/`, legacy `.doc`/`.xls` raster). Marked **Shipped** below.
+>
+> **New in 0.3.0:** baked ontology presets + `kb ontology` CLI, mandatory grounding (`requires_grounding`), valid-time Phase 1, graph doctor (ungrounded/stale/incomplete), the offline HTML graph explorer, and `get_source_file` (docx→pdf).
 
 ---
 
 ## Shipped
 
-- **Extraction:** md (heading-scoped), Office (office_oxide), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors; HTML `<img>` tag extraction (v0.2.5).
+- **Extraction:** md (heading-scoped), Office (office_oxide), **OpenDocument odt/ods/odp** (own `content.xml`→IR parser, reusing the office chunker), PDF (pdf_oxide, per-page `p.N`), images (filename label), text/json/yaml/xml/html/csv/source via streaming; gitignore-aware walk; per-file skip on errors; HTML `<img>` tag extraction (v0.2.5).
+- **Chart data (0.3.2):** OOXML (`charts/chartN.xml` cache) and ODF (embedded local table, or cell-range refs resolved against the sheet) → chart data as a searchable GFM table, one chunk per chart.
+- **Embedded images to vision (0.3.2):** on-demand via `read(page_image)` with `--vision` — zip-based Office/ODF media (`word|xl|ppt/media/`, ODF `Pictures/`) and legacy `.doc`/`.xls` raster pictures, guarded against malformed input.
 - **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
@@ -70,6 +74,9 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Structured JSON chunks | **Open** | `.json` indexed as plain text windows |
 | Heading-aware HTML | **Open** | Tag strip + line windower only |
 | Row-level CSV | **Open** | 100 rows/chunk today |
+| OpenDocument odt/ods/odp | **Shipped** (0.3.2) | Own `content.xml`→IR parser (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker; embedded images via `Pictures/` |
+| Chart data (Office/ODF) | **Shipped** (0.3.2) | OOXML `charts/chartN.xml` cache; ODF embedded local table or cell-range refs resolved against the sheet → one GFM chunk per chart. Legacy `.doc/.xls/.ppt` (BIFF) charts and visual chart rendering are out of scope (see `architecture.md`) |
+| Engineering drawings / CAD | **Open** | Direction in [cad-drawing-reading-design.md](cad-drawing-reading-design.md): 3 layers (text metadata / image / structural CAD model), native Rust render (DXF→`tiny-skia`, STEP→`truck`), delivered as an **MCP Apps** interactive artifact behind an opt-in `cargo` feature (render client-side, server stays lean) |
 | rtf, epub, eml/msg | **Open** | No extractors |
 
 ### Graph

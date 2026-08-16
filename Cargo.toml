@@ -1,6 +1,6 @@
 [package]
 name = "glossa"
-version = "0.3.1"
+version = "0.3.3"
 edition = "2021"
 
 [lib]
@@ -31,7 +31,7 @@ toml = "1.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 postcard = { version = "1", features = ["alloc"] }
 lingua = { version = "1.8", default-features = false, features = ["russian", "english"], optional = true }
-rmcp = { version = "1.8", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 schemars = "1.0"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -39,12 +39,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net
 axum = "0.8"
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log", "json"] }
 tokio-util = "0.7"
 chardetng = "1.0"
 encoding_rs = "0.8"
 fs4 = "1.1"
 glossa-constraint = { path = "constraint", optional = true }
+quick-xml = "0.41"
 sqlparser = "0.53"
 
 [target.'cfg(windows)'.dependencies]

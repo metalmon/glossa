@@ -115,8 +115,17 @@ pub fn expand_table(table: &Table) -> Table {
             debug_assert_eq!(pr, r);
             debug_assert_eq!(pc, col);
 
+            // Clamp the vertical span to the rows actually available. A
+            // malformed/adversarial `row_span` (or a well-formed one whose
+            // covered continuation rows got dropped elsewhere, e.g. ODF's
+            // trailing-empty-row clamp) can otherwise point past the last row
+            // and panic on `grid[r + dr]` (index out of bounds). Horizontal
+            // col_span is safe because `max_cols` grows to fit it; vertical
+            // is not, since `n_rows` is fixed by `table.rows.len()`. In-range
+            // spans (the overwhelming common case) are completely unaffected.
+            let clamped_row_span = row_span.min(n_rows - r);
             let densified = densified_cell(cell);
-            for dr in 0..row_span {
+            for dr in 0..clamped_row_span {
                 for dc in 0..col_span {
                     grid[r + dr][col + dc] = Some(densified.clone());
                 }
@@ -412,6 +421,33 @@ mod tests {
         assert_eq!(cell_plain(&expanded.rows[1].cells[0]), "X");
         assert_eq!(cell_plain(&expanded.rows[0].cells[1]), "Y");
         assert_eq!(cell_plain(&expanded.rows[1].cells[1]), "Z");
+    }
+
+    #[test]
+    fn expand_table_clamps_row_span_exceeding_available_rows() {
+        // Regression (CRITICAL panic): a malformed/adversarial row_span
+        // pointing past the table's last row must be clamped, not panic
+        // `grid[r + dr]` with an out-of-bounds index. This can happen from a
+        // parser bug/malformed file (row_span=2 on a 1-row table) or from a
+        // well-formed source whose covered continuation rows got dropped
+        // elsewhere (e.g. ODF's trailing-empty-row clamp) before reaching
+        // expand_table.
+        let table = Table {
+            rows: vec![TableRow {
+                cells: vec![TableCell {
+                    content: text_cell("only").content,
+                    col_span: 1,
+                    row_span: 2, // exceeds n_rows = 1
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let expanded = expand_table(&table); // must not panic
+        assert_eq!(expanded.rows.len(), 1, "grid must stay 1 row (n_rows), not grow to row_span");
+        assert_eq!(expanded.rows[0].cells.len(), 1);
+        assert_eq!(cell_plain(&expanded.rows[0].cells[0]), "only");
     }
 
     #[test]
