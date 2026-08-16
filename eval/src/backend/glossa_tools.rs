@@ -7,21 +7,38 @@ use std::sync::OnceLock;
 /// Stable node identifiers surfaced by a graph tool's rendered body, for the unproductive-streak
 /// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
 /// (glossary's main hits AND its chain hops, related, neighbors, reach, and graph_query's
-/// id-column handles) funnels a grounded node through the same one anchor —
-/// `tools::read_anchor`'s `— read <path>  #<ord> · <label>` — so scanning for that one literal
-/// covers all five tools uniformly, with no per-tool body parsing. It's also unambiguous: a
-/// glossary chain-hop line prints only `edge_type  [node_type]  label` (no bare node id at all,
-/// see `tools::chain_lines`), so a generic `<token>  [Type]` scan would misfire and treat the
-/// EDGE TYPE as if it were a stable node id — collapsing distinct endpoints reached via the same
-/// relation into one false "already seen". The read anchor has no such collision: "read " only
-/// ever precedes a path. The id is `path#ord` — the same shape a `read` call's own id would take.
-/// An ungrounded node (no MENTIONS edge, so no anchor at all) contributes nothing from that line;
-/// that's fine, the streak only needs SOME calls in a burst to register progress, not every line.
+/// id-column handles) funnels a grounded node through `tools::node_ref`'s anchor in ONE of two
+/// forms, both built from the SAME `<path>  #<ord>` token (`tools.rs:532`):
+///   - **entity/reasoning node**: `tools::read_anchor` wraps it as `— read <path>  #<ord> · <label>`
+///     (only emitted when the node has an outgoing MENTIONS edge to a section).
+///   - **structural node (Section/Document)**: `tools::endpoint_ref`/`node_ref` print the anchor
+///     BARE, with no "read" word at all — `<path>  #<ord> · <label>` for a Section (glossary's
+///     exact-title stub at `tools.rs:765`, `edge_line`/neighbors at `tools.rs:1018`,
+///     `render_reach_chain` at `tools.rs:1190`), or `<path>  (document)` — no ord — for a Document.
+/// The first fix here only matched the "— read" form, so a totally normal move — `neighbors` on a
+/// Document returning its child Sections, or several glossary/reach calls landing on different
+/// Section/Document nodes — surfaced ZERO ids per call and falsely tripped the streak on a reader
+/// making real (structural) progress. The regex below matches `<path>  #<ord>` (or the Document's
+/// `<path>  (document)`) regardless of whether "— read " precedes it, so both forms count.
+/// It's still unambiguous against a glossary chain-hop line (`edge_type  [node_type]  label`, no
+/// bare id at all — see `tools::chain_lines`): that line has no `#<ord>` or `(document)` token, so
+/// it never matches — a generic `<token>  [Type]` scan would have misread the EDGE TYPE as a
+/// stable node id instead, collapsing distinct endpoints reached via the same relation into one
+/// false "already seen".
+/// The id is `path#ord` (Section) or bare `path` (Document) — the same shape a `read` call's own
+/// id takes for the no-`n` case. An ungrounded, non-structural node (no MENTIONS edge, so no
+/// anchor at all) contributes nothing from that line; that's fine, the streak only needs SOME
+/// calls in a burst to register progress, not every line.
 fn extract_node_ids(body: &str) -> Vec<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"—\s*read\s+(\S+)\s+#(\d+)").expect("valid regex"));
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(\S+)\s{2,}(?:#(\d+)|\(document\))").expect("valid regex")
+    });
     re.captures_iter(body)
-        .map(|c| format!("{}#{}", &c[1], &c[2]))
+        .map(|c| match c.get(2) {
+            Some(ord) => format!("{}#{}", &c[1], ord.as_str()),
+            None => c[1].to_string(),
+        })
         .collect()
 }
 
@@ -468,6 +485,37 @@ mod tests {
         assert_eq!(repeated_term("read", &json!({"path":"x.md","n":1})), None);
         assert_eq!(repeated_term("graph_query", &json!({"sql":"SELECT 1"})), None);
         assert_eq!(repeated_term("glossary", &json!({"name":"   "})), None);
+    }
+
+    /// Regression guard for fix round 2: the entity-node "— read" anchor and the BARE structural
+    /// (Section/Document) anchor must both be captured — the first version of this regex only
+    /// matched the "— read" form, so a Section/Document endpoint (rendered by `endpoint_ref`/
+    /// `node_ref` with no "read" word at all) surfaced zero ids.
+    #[test]
+    fn extract_node_ids_matches_entity_anchor_and_bare_structural_forms() {
+        // Entity/reasoning node: `tools::read_anchor`'s "— read <path>  #<ord> · <label>".
+        let entity_line = "n1  [Entity]  Some Fact   — read doc.md  #3 · SecTitle";
+        assert_eq!(extract_node_ids(entity_line), vec!["doc.md#3".to_string()]);
+
+        // Bare structural Section endpoint (edge_line / render_reach_chain / glossary's
+        // exact-title stub) — no "read" word, just the raw `node_ref` anchor.
+        let section_line = "CONTAINS       ->  doc.md  #2 · SecB";
+        assert_eq!(extract_node_ids(section_line), vec!["doc.md#2".to_string()]);
+
+        // Bare structural Document endpoint — no ord at all.
+        let doc_line = "doc.md  (document)";
+        assert_eq!(extract_node_ids(doc_line), vec!["doc.md".to_string()]);
+
+        // A line with neither anchor form contributes nothing.
+        assert!(extract_node_ids("REFERENCES      ->  fact-9  [Entity]  no anchor here").is_empty());
+
+        // Multiple anchors on one body (e.g. several neighbors lines) all extract.
+        let multi = format!("{section_line}\n{entity_line}\n{doc_line}");
+        let mut ids = extract_node_ids(&multi);
+        ids.sort();
+        let mut want = vec!["doc.md".to_string(), "doc.md#2".to_string(), "doc.md#3".to_string()];
+        want.sort();
+        assert_eq!(ids, want);
     }
 
     #[test]

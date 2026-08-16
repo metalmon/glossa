@@ -833,6 +833,164 @@ mod tests {
         let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
+
+    // --- structural (Section/Document) node ids: regression guard for fix round 2 ----------------
+    //
+    // `extract_node_ids`'s first version only matched the entity-node "— read <path> #<ord>" form.
+    // Section/Document endpoints render the SAME `<path>  #<ord>` anchor but BARE — no "read" word
+    // (`tools::endpoint_ref`/`node_ref`) — so a reader stepping between Sections (e.g. `neighbors`
+    // on a Document, or glossary/reach landing on distinct Sections) surfaced zero ids per call and
+    // got falsely steered off a genuinely productive path. `build_section_hub_fixture` connects
+    // `hub` DIRECTLY to Section nodes (skipping the MENTIONS-grounded entity layer the fixture above
+    // uses), so `neighbors` renders exactly the bare structural form under test.
+
+    /// Like `build_hub_fixture`, but `hub`'s edges point straight at the doc's real Section nodes —
+    /// no intermediate MENTIONS-grounded entity. A `neighbors(hub, edge_types=[REL_i])` call then
+    /// renders the endpoint via the BARE structural anchor (`tools::node_ref`'s Section arm), with
+    /// no "— read" prefix — the exact form the first `extract_node_ids` missed.
+    fn build_section_hub_fixture(n: usize) -> (tempfile::TempDir, DocIndex, GraphStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut md = String::from("# Root\nintro\n");
+        for i in 0..n {
+            md.push_str(&format!("\n## Sec{i}\nbody {i}\n"));
+        }
+        std::fs::write(dir.path().join("doc.md"), md).unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        let sec_ids: Vec<String> = g
+            .outgoing("doc.md")
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == "CONTAINS")
+            .map(|e| e.to)
+            .collect();
+        assert!(
+            sec_ids.len() >= n,
+            "expected >= {n} indexed sections, got {}: {sec_ids:?}",
+            sec_ids.len()
+        );
+
+        g.put_node(&Node {
+            id: "hub".into(),
+            node_type: "Entity".into(),
+            label: "hub".into(),
+            aliases: Vec::new(),
+            prov: fixture_prov(),
+        })
+        .unwrap();
+        for (i, sec_id) in sec_ids.iter().take(n).enumerate() {
+            // Distinct edge type per section, direct hub -> Section (no entity/MENTIONS layer) —
+            // so the rendered endpoint is a BARE structural anchor, not a "— read" one.
+            g.put_edge(&Edge {
+                from: "hub".into(),
+                to: sec_id.clone(),
+                edge_type: format!("REL_{i}"),
+                prov: fixture_prov(),
+            })
+            .unwrap();
+        }
+        (dir, idx, g)
+    }
+
+    #[test]
+    fn loop_real_structural_navigation_to_distinct_sections_never_falsely_steers() {
+        // K+1 REAL `neighbors` calls, each stepping to a DIFFERENT Section endpoint rendered with
+        // the BARE structural anchor (no "— read" prefix). Before fix round 2, these surfaced zero
+        // ids, so this exact case — a reader walking distinct sections of a document — would
+        // misfire the steer at call K+1 despite reaching genuinely new ground every time.
+        let n = UNPRODUCTIVE_STREAK_K + 1;
+        let (dir, idx, g) = build_section_hub_fixture(n);
+        let spec = glossa::tools::ChainSpec::default();
+        let trace = TraceLog::disabled();
+        let exec = |name: &str, args: &Value| {
+            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+        };
+
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if let Some(last_tool) = msgs.iter().rev().find(|m| m["role"] == "tool") {
+                let c = last_tool["content"].as_str().unwrap_or("");
+                assert!(
+                    !c.to_lowercase().contains("no new information"),
+                    "round {}: steer must not fire while reaching NEW structural (Section) nodes, \
+                     got: {c:?}",
+                    *r
+                );
+            }
+            if *r > n {
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let i = *r - 1;
+            Ok(json!({
+                "role": "assistant", "content": "walking the document's sections",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": {
+                        "name": "neighbors",
+                        "arguments": json!({"node": "hub", "edge_types": [format!("REL_{i}")]}).to_string()
+                    }
+                }]
+            }))
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
+
+    #[test]
+    fn loop_real_structural_navigation_stuck_on_one_section_does_trigger_streak() {
+        // Symmetric check: varied `neighbors` calls that all resolve to the SAME single Section
+        // endpoint must still trip the streak by the (K+1)th call — proves the relaxed regex isn't
+        // so permissive it stops detecting genuine repetition on structural nodes too.
+        let (dir, idx, g) = build_section_hub_fixture(1);
+        let spec = glossa::tools::ChainSpec::default();
+        let trace = TraceLog::disabled();
+        let exec = |name: &str, args: &Value| {
+            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+        };
+
+        let variants = [
+            json!({"node": "hub"}),
+            json!({"node": "hub", "direction": "out"}),
+            json!({"node": "hub", "edge_types": ["REL_0"]}),
+            json!({"node": "hub", "edge_types": ["REL_0"], "direction": "out"}),
+        ];
+        assert!(
+            variants.len() >= UNPRODUCTIVE_STREAK_K + 1,
+            "need at least K+1 distinct variants"
+        );
+
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == UNPRODUCTIVE_STREAK_K + 2 {
+                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
+                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
+                let lc = c.to_lowercase();
+                assert!(
+                    lc.contains("no new information") && lc.contains("change approach"),
+                    "round {}: expected the unproductive-streak steer on a re-surfaced structural \
+                     node, got: {c:?}",
+                    *r
+                );
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let args = variants[(*r - 1) % variants.len()].clone();
+            Ok(json!({
+                "role": "assistant", "content": "re-probing",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": { "name": "neighbors", "arguments": args.to_string() }
+                }]
+            }))
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
 }
 
 #[cfg(test)]
