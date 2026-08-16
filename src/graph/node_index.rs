@@ -166,11 +166,16 @@ impl NodeIndex {
     /// How many indexed nodes contain `term` (its document frequency) — the raw signal behind
     /// [`Self::is_salient`]. `term` is run through the same analyzer as `search`/index time, so
     /// morphology and language detection stay consistent; a term that tokenizes to nothing (empty
-    /// or punctuation-only) has df 0. If `term` tokenizes to MULTIPLE sub-tokens (e.g. a two-word
-    /// mention), this counts nodes matching ANY sub-token (an OR, via `Searcher::doc_freq` summed
-    /// per single-token case, or a boolean-OR count query otherwise) — a conservative overcount
-    /// that only makes a borderline term look LESS salient, never more, so a caller gating on
-    /// rarity never bridges on a false positive because of this widening.
+    /// or punctuation-only) has df 0. If `term` tokenizes to MULTIPLE sub-tokens — the common case,
+    /// since the bridge caller's "term" is usually a multi-word node LABEL (e.g. "Meridian Falls
+    /// District") — this counts nodes containing ALL sub-tokens (AND / co-occurrence), NOT nodes
+    /// matching any single one. An OR would let one common word in the phrase ("District") swamp
+    /// the count with unrelated nodes and push a genuinely distinctive multi-word mention over the
+    /// salience ratio/cap, suppressing legitimate bridging — the opposite of what this gate is for.
+    /// AND is an approximation (it ignores word order/adjacency; a `PhraseQuery` would be tighter)
+    /// but is a correct upper bound on "nodes that could plausibly be about this phrase" and is
+    /// cheap to reason about; a future revision can tighten it to a `PhraseQuery` if this proves
+    /// too loose in practice.
     pub fn doc_freq(&self, term: &str) -> usize {
         let terms = self.tokenize(term);
         if terms.is_empty() {
@@ -188,7 +193,7 @@ impl NodeIndex {
                     Term::from_field_text(self.text, t),
                     IndexRecordOption::Basic,
                 ));
-                (Occur::Should, q)
+                (Occur::Must, q)
             })
             .collect();
         let bq = BooleanQuery::new(clauses);
@@ -261,6 +266,37 @@ mod tests {
         assert!(
             !idx.is_salient("council", ratio),
             "a term in all 10/10 nodes is ordinary vocabulary, not a bridge-worthy mention"
+        );
+    }
+
+    #[test]
+    fn is_salient_multiword_phrase_not_swamped_by_common_subtoken() {
+        // A distinctive multi-word LABEL ("Meridian Falls District") — exactly what `reach` bridges
+        // on — contains a common sub-token ("District") that, alone, appears in many unrelated
+        // nodes. df for the whole phrase must count nodes that mention the WHOLE phrase (word
+        // co-occurrence), NOT any single sub-token — otherwise the common sub-token swamps the
+        // count and a real distinctive mention gets misreported as non-salient.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = NodeIndex::open_or_create(dir.path()).unwrap();
+        let mut docs: Vec<(String, Vec<String>)> = vec![
+            ("n:1".into(), vec!["Meridian Falls District office".into()]),
+            ("n:2".into(), vec!["Meridian Falls District courthouse".into()]),
+        ];
+        for i in 3..=20 {
+            docs.push((format!("n:{i}"), vec!["The District held a meeting".into()]));
+        }
+        idx.rebuild(&docs).unwrap();
+
+        // OR-over-subtokens would count all 20 nodes (every node contains "District"); the correct
+        // whole-phrase (AND) count is the 2 nodes that mention all three words together.
+        assert_eq!(
+            idx.doc_freq("Meridian Falls District"),
+            2,
+            "df must reflect whole-phrase co-occurrence, not the common sub-token's df"
+        );
+        assert!(
+            idx.is_salient("Meridian Falls District", 0.15),
+            "a distinctive multi-word phrase confined to 2/20 nodes must read as salient"
         );
     }
 
