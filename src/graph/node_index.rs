@@ -7,12 +7,25 @@
 use crate::index::multilang::{default_detector, multilang_analyzer};
 use anyhow::Context;
 use std::path::Path;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
 };
 use tantivy::{Index, IndexReader, TantivyDocument, TantivyError, Term};
+
+/// Default `df / total_nodes` ceiling for [`NodeIndex::is_salient`] — a term present in more than
+/// this fraction of nodes reads as ordinary vocabulary ("member", "district"), not a discriminating
+/// proper-noun-like mention worth trusting for a cross-document bridge. `GraphStore::term_is_salient`
+/// uses this as its default.
+pub const DEFAULT_SALIENCE_MAX_DF_RATIO: f64 = 0.1;
+
+/// Absolute df ceiling for [`NodeIndex::is_salient`], on top of the ratio. A discriminating
+/// proper-noun-like mention should resolve into a small handful of nodes; guards large corpora
+/// where the ratio alone would still pass a term through with a big raw df (0.1 * 10,000 nodes =
+/// 1,000 nodes is not "rare" by any reasonable reading). A term appearing in more nodes than this
+/// is never treated as salient, no matter how small the ratio comes out.
+pub const SALIENCE_MAX_ABS_DF: usize = 25;
 
 pub struct NodeIndex {
     index: Index,
@@ -104,16 +117,7 @@ impl NodeIndex {
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         // Tokenize the query with the index's own analyzer so query terms match indexed terms
         // (same morphology + language detection as index time).
-        let mut terms: Vec<String> = Vec::new();
-        if let Some(mut analyzer) = self.index.tokenizers().get("multilang") {
-            let mut stream = analyzer.token_stream(query);
-            while stream.advance() {
-                let t = stream.token().text.clone();
-                if !terms.contains(&t) {
-                    terms.push(t);
-                }
-            }
-        }
+        let terms = self.tokenize(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -140,5 +144,160 @@ impl NodeIndex {
             }
         }
         Ok(ids)
+    }
+
+    /// Tokenize `text` with the index's own analyzer (same morphology + language detection as
+    /// index time), deduplicated, order preserved. Shared by `search` and `doc_freq` so a term
+    /// always maps to the same indexed form.
+    fn tokenize(&self, text: &str) -> Vec<String> {
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(mut analyzer) = self.index.tokenizers().get("multilang") {
+            let mut stream = analyzer.token_stream(text);
+            while stream.advance() {
+                let t = stream.token().text.clone();
+                if !terms.contains(&t) {
+                    terms.push(t);
+                }
+            }
+        }
+        terms
+    }
+
+    /// How many indexed nodes contain `term` (its document frequency) — the raw signal behind
+    /// [`Self::is_salient`]. `term` is run through the same analyzer as `search`/index time, so
+    /// morphology and language detection stay consistent; a term that tokenizes to nothing (empty
+    /// or punctuation-only) has df 0. If `term` tokenizes to MULTIPLE sub-tokens (e.g. a two-word
+    /// mention), this counts nodes matching ANY sub-token (an OR, via `Searcher::doc_freq` summed
+    /// per single-token case, or a boolean-OR count query otherwise) — a conservative overcount
+    /// that only makes a borderline term look LESS salient, never more, so a caller gating on
+    /// rarity never bridges on a false positive because of this widening.
+    pub fn doc_freq(&self, term: &str) -> usize {
+        let terms = self.tokenize(term);
+        if terms.is_empty() {
+            return 0;
+        }
+        let searcher = self.reader.searcher();
+        if terms.len() == 1 {
+            let t = Term::from_field_text(self.text, &terms[0]);
+            return searcher.doc_freq(&t).unwrap_or(0) as usize;
+        }
+        let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+            .iter()
+            .map(|t| {
+                let q: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(self.text, t),
+                    IndexRecordOption::Basic,
+                ));
+                (Occur::Should, q)
+            })
+            .collect();
+        let bq = BooleanQuery::new(clauses);
+        searcher.search(&bq, &Count).unwrap_or(0)
+    }
+
+    /// True when `term` is DISCRIMINATING enough to trust for a cross-document bridge: it occurs
+    /// in a small slice of the corpus (`df / total_nodes < max_df_ratio`), at least once, and under
+    /// the absolute cap ([`SALIENCE_MAX_ABS_DF`]) regardless of how the ratio comes out. False for
+    /// an empty index (nothing is discriminating against zero context) and for a term that doesn't
+    /// tokenize to anything indexable.
+    pub fn is_salient(&self, term: &str, max_df_ratio: f64) -> bool {
+        let total = self.num_docs();
+        if total == 0 {
+            return false;
+        }
+        let df = self.doc_freq(term);
+        if df == 0 || df > SALIENCE_MAX_ABS_DF {
+            return false;
+        }
+        (df as f64) / (total as f64) < max_df_ratio
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic fixture: an invented rare, proper-noun-like mention ("Zephyrine") appears in 2 of
+    /// 10 nodes; an ordinary word ("council") appears in all 10 — the shape a real cross-document
+    /// bridge gate must tell apart (bridge on the former, refuse the latter).
+    fn rare_vs_common_fixture(dir: &Path) -> NodeIndex {
+        let idx = NodeIndex::open_or_create(dir).unwrap();
+        let mut docs: Vec<(String, Vec<String>)> = vec![
+            ("n:1".into(), vec!["Zephyrine convened the council".into()]),
+            ("n:2".into(), vec!["Zephyrine addressed the council".into()]),
+        ];
+        for i in 3..=10 {
+            docs.push((format!("n:{i}"), vec!["The council met again".into()]));
+        }
+        idx.rebuild(&docs).unwrap();
+        idx
+    }
+
+    #[test]
+    fn rare_term_has_lower_df_than_common_term() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = rare_vs_common_fixture(dir.path());
+
+        let rare_df = idx.doc_freq("Zephyrine");
+        let common_df = idx.doc_freq("council");
+        assert!(
+            rare_df < common_df,
+            "rare df ({rare_df}) must be lower than common df ({common_df})"
+        );
+        assert_eq!(rare_df, 2, "Zephyrine appears in exactly 2 of 10 nodes");
+        assert_eq!(common_df, 10, "council appears in all 10 nodes");
+    }
+
+    #[test]
+    fn is_salient_gates_rare_in_common_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = rare_vs_common_fixture(dir.path());
+
+        let ratio = 0.3;
+        assert!(
+            idx.is_salient("Zephyrine", ratio),
+            "a term in 2/10 nodes is discriminating at a 0.3 ratio"
+        );
+        assert!(
+            !idx.is_salient("council", ratio),
+            "a term in all 10/10 nodes is ordinary vocabulary, not a bridge-worthy mention"
+        );
+    }
+
+    #[test]
+    fn is_salient_false_for_unknown_or_unindexable_term() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = rare_vs_common_fixture(dir.path());
+
+        assert_eq!(idx.doc_freq("Nonexistentia"), 0);
+        assert!(!idx.is_salient("Nonexistentia", 0.9));
+        // Punctuation-only query tokenizes to nothing.
+        assert_eq!(idx.doc_freq("   "), 0);
+        assert!(!idx.is_salient("   ", 0.9));
+    }
+
+    #[test]
+    fn is_salient_respects_absolute_cap_even_under_ratio() {
+        // A term present in most nodes of a LARGE graph can still clear a loose ratio while
+        // clearly not being a rare, discriminating mention — the absolute cap must catch it.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = NodeIndex::open_or_create(dir.path()).unwrap();
+        let total = (SALIENCE_MAX_ABS_DF + 20) * 10; // df/total stays well under any loose ratio
+        let common_df = SALIENCE_MAX_ABS_DF + 5; // over the absolute cap
+        let mut docs: Vec<(String, Vec<String>)> = Vec::with_capacity(total);
+        for i in 0..common_df {
+            docs.push((format!("n:common:{i}"), vec!["Ubiquitine marker".into()]));
+        }
+        for i in 0..(total - common_df) {
+            docs.push((format!("n:other:{i}"), vec!["Unrelated filler content".into()]));
+        }
+        idx.rebuild(&docs).unwrap();
+
+        let ratio = 0.9; // deliberately loose — only the absolute cap should block this
+        assert!(
+            (idx.doc_freq("Ubiquitine") as f64) / (idx.num_docs() as f64) < ratio,
+            "fixture must clear the ratio on its own so only the absolute cap is under test"
+        );
+        assert!(!idx.is_salient("Ubiquitine", ratio));
     }
 }

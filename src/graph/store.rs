@@ -1256,21 +1256,40 @@ impl GraphStore {
         }
         // Fuzzy fallback: BM25 over the node index. The agent asks in long natural phrases while
         // labels are short, so a strict `query ⊆ label` almost always misses; BM25 ranks nodes by
-        // shared (morphology-stemmed) terms and rarity, best first. The index is DERIVED — if it
-        // has drifted from the node table (e.g. enrichment added nodes, or it was never built),
-        // rebuild it from the labels+aliases here. Done under the connection lock, so concurrent
-        // resolves can't race the rebuild.
+        // shared (morphology-stemmed) terms and rarity, best first.
+        self.ensure_node_index_fresh(&c)?;
+        self.node_index.search(name, 10)
+    }
+
+    /// True when `term` is a discriminating (rare, proper-noun-like) mention in the node index —
+    /// the corpus-bridge false-positive gate (spec §7.5): a cross-document bridge should fire on a
+    /// term like a specific name, never on ordinary vocabulary ("member", "district") that happens
+    /// to recur everywhere. Ensures the node index is fresh first (same drift check as `resolve`),
+    /// so a caller never gates on a stale df. Uses [`node_index::DEFAULT_SALIENCE_MAX_DF_RATIO`] —
+    /// callers needing a different ratio should go through `NodeIndex::is_salient` directly.
+    pub fn term_is_salient(&self, term: &str) -> anyhow::Result<bool> {
+        let c = self.conn.lock().unwrap();
+        self.ensure_node_index_fresh(&c)?;
+        Ok(self
+            .node_index
+            .is_salient(term, crate::graph::node_index::DEFAULT_SALIENCE_MAX_DF_RATIO))
+    }
+
+    /// Rebuild the node index from the node table when it has drifted (count OR content signature
+    /// changed) — the index is DERIVED, so any add/remove/in-place edit since the last rebuild must
+    /// be picked up before a caller reads search results or df/salience off it. Count alone misses
+    /// in-place content edits (an added alias, a bulk `\`->`/` id/path migration) — they change what
+    /// a node reads as without changing how many there are — so this also compares a cheap content
+    /// signature over (id, label, aliases), derived straight from SQLite so even a raw out-of-band
+    /// UPDATE self-heals on the next call. Done under the connection lock, so concurrent callers
+    /// can't race the rebuild.
+    fn ensure_node_index_fresh(&self, c: &rusqlite::Connection) -> anyhow::Result<()> {
         let count: i64 = c
             .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
             .context("count nodes")?;
-        // Rebuild when the index has drifted from the node table. Count alone misses in-place
-        // content edits (an added alias, a bulk `\`->`/` id/path migration) — they change what a
-        // node reads as without changing how many there are — so also compare a cheap content
-        // signature over (id, label, aliases). The sig is derived straight from SQLite, so even a
-        // raw out-of-band UPDATE self-heals on the next resolve.
-        let sig = Self::node_content_sig(&c)?;
+        let sig = Self::node_content_sig(c)?;
         if self.node_index.num_docs() as i64 != count || self.node_index.built_sig() != Some(sig) {
-            let docs: Vec<(String, Vec<String>)> = Self::all_nodes_c(&c)?
+            let docs: Vec<(String, Vec<String>)> = Self::all_nodes_c(c)?
                 .into_iter()
                 .map(|n| {
                     let mut texts = Vec::with_capacity(1 + n.aliases.len());
@@ -1282,7 +1301,7 @@ impl GraphStore {
             self.node_index.rebuild(&docs)?;
             self.node_index.set_built_sig(sig)?;
         }
-        self.node_index.search(name, 10)
+        Ok(())
     }
 
     /// A cheap content fingerprint of the node table — a hash of every `(id, label, aliases)` in
@@ -1484,6 +1503,37 @@ strict = true
             hits,
             vec!["sym:loss".to_string()],
             "long query finds the node via BM25: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn term_is_salient_gates_rare_mentions_over_common_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let mk = |id: &str, label: &str| Node {
+            id: id.into(),
+            node_type: "Organization".into(),
+            label: label.into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        // Synthetic fixture: an invented rare mention ("Voltrixa") in 1 of 12 nodes (well under the
+        // default 0.1 df/N ratio); "council" in all 12. The convenience method must gate exactly
+        // like `NodeIndex::is_salient` does.
+        let mut nodes = vec![mk("n:1", "Voltrixa addressed the council")];
+        for i in 2..=12 {
+            nodes.push(mk(&format!("n:{i}"), "The council convened again"));
+        }
+        g.upsert(&ont, &nodes, &[]).unwrap();
+
+        assert!(
+            g.term_is_salient("Voltrixa").unwrap(),
+            "a term in 1/12 nodes is a discriminating mention"
+        );
+        assert!(
+            !g.term_is_salient("council").unwrap(),
+            "a term in 12/12 nodes is ordinary vocabulary, not bridge-worthy"
         );
     }
 
