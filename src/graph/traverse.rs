@@ -40,15 +40,6 @@ pub struct ReachResult {
     pub targets: Vec<String>,
 }
 
-/// Legacy hop shape kept for the `path_between` shim's public contract — `tools.rs`/mcp still
-/// consume `via: Option<(edge_type, forward)>`. Superseded by [`Hop`]+[`HopVia`]; a later task
-/// migrates those callers to `reach` and removes this shim. See [[graph-cross-doc-bridge]].
-#[derive(Debug, Clone, PartialEq)]
-pub struct LegacyHop {
-    pub node: String,
-    pub via: Option<(String, bool)>,
-}
-
 /// Split a relation/edge-type name into lowercased alphanumeric tokens (on `_`, spaces, and other
 /// non-alphanumeric separators): `LOCATED_IN` → `["located", "in"]`.
 fn tokens(s: &str) -> Vec<String> {
@@ -73,24 +64,21 @@ fn relation_matches(edge_type: &str, relation: &str) -> bool {
     ta.iter().any(|t| t == &b) || tb.iter().any(|t| t == &a) || ta.iter().any(|t| tb.contains(t))
 }
 
-/// In-graph reasoning hops out of `node`. When `walk_all` is false (the reasoning `reach` walk),
-/// grounding edges (e.g. `MENTIONS`) are never walked — they'd flood — so only `role==Chaining`
-/// edges advance the chain (see [`Ontology::relation_role`], which maps the built-in CORE_EDGES to
-/// Grounding). When `walk_all` is true (the legacy `path_between` parity path) the role filter is
-/// bypassed and EVERY edge is walked, preserving the old undirected all-edges BFS (spec §5 pt1).
-/// When `relation` is `None` we walk UNDIRECTED (outgoing forward + incoming backward); when a
-/// relation is named we walk it FORWARD only and require a token/whole-name match (spec §5,
-/// forward-first). Returns `(next_node, edge_type, forward)`.
+/// In-graph reasoning hops out of `node`. Grounding edges (e.g. `MENTIONS`) are never walked —
+/// they'd flood — so only `role==Chaining` edges advance the chain (see [`Ontology::relation_role`],
+/// which maps the built-in CORE_EDGES to Grounding). When `relation` is `None` we walk UNDIRECTED
+/// (outgoing forward + incoming backward); when a relation is named we walk it FORWARD only and
+/// require a token/whole-name match (spec §5, forward-first). Returns `(next_node, edge_type,
+/// forward)`.
 fn chaining_steps(
     g: &GraphStore,
     ont: &Ontology,
     node: &str,
     relation: Option<&str>,
-    walk_all: bool,
 ) -> anyhow::Result<Vec<(String, String, bool)>> {
     let mut steps: Vec<(String, String, bool)> = Vec::new();
     for e in g.outgoing(node)? {
-        if !walk_all && ont.relation_role(&e.edge_type) == RelationRole::Grounding {
+        if ont.relation_role(&e.edge_type) == RelationRole::Grounding {
             continue;
         }
         if let Some(rel) = relation {
@@ -102,7 +90,7 @@ fn chaining_steps(
     }
     if relation.is_none() {
         for e in g.incoming(node)? {
-            if !walk_all && ont.relation_role(&e.edge_type) == RelationRole::Grounding {
+            if ont.relation_role(&e.edge_type) == RelationRole::Grounding {
                 continue;
             }
             steps.push((e.from, e.edge_type, false));
@@ -140,23 +128,6 @@ pub fn reach(
     max_depth: usize,
     bridge_budget: usize,
 ) -> anyhow::Result<ReachResult> {
-    reach_impl(g, ont, from, relation, to, max_depth, bridge_budget, false)
-}
-
-/// Shared engine for [`reach`] (the role-filtered forward reasoning walk, `walk_all=false`) and the
-/// legacy [`path_between`] parity path (`walk_all=true`, which bypasses the role filter so the old
-/// undirected all-edges BFS — including CORE_EDGES like CONTAINS/NEXT — is preserved exactly).
-#[allow(clippy::too_many_arguments)]
-fn reach_impl(
-    g: &GraphStore,
-    ont: &Ontology,
-    from: &str,
-    relation: Option<&str>,
-    to: Option<&str>,
-    max_depth: usize,
-    bridge_budget: usize,
-    walk_all: bool,
-) -> anyhow::Result<ReachResult> {
     // Trivial: from IS the target.
     if to == Some(from) {
         let p = vec![Hop { node: from.to_string(), via: None }];
@@ -179,13 +150,13 @@ fn reach_impl(
     let mut targets_seen: HashSet<String> = HashSet::new();
 
     while let Some(item) = q.pop_front() {
-        // path.len()-1 == edges walked so far; mirror legacy `path_between`'s depth guard exactly.
+        // path.len()-1 == edges walked so far.
         if item.path.len() > max_depth {
             continue;
         }
         let last = item.path.last().unwrap().node.clone();
 
-        let steps = chaining_steps(g, ont, &last, relation, walk_all)?;
+        let steps = chaining_steps(g, ont, &last, relation)?;
         let dead_end = steps.is_empty();
 
         for (next, et, fwd) in steps {
@@ -257,7 +228,7 @@ fn reach_impl(
                         }
                         // Relation-coherence prune (§7.5 MUST): keep the bridged branch alive only
                         // if the landing document's chain continues along the requested relation.
-                        if chaining_steps(g, ont, &cand, relation, walk_all)?.is_empty() {
+                        if chaining_steps(g, ont, &cand, relation)?.is_empty() {
                             continue;
                         }
                         if visited.insert(cand.clone()) {
@@ -275,36 +246,6 @@ fn reach_impl(
     }
 
     Ok(ReachResult { paths, targets })
-}
-
-/// Undirected shortest path from `from` to `to`, recording each edge's real direction. **Parity
-/// shim** over [`reach`] (`relation=None`, `to=Some`, `bridge_budget=0`) — a strict subset that
-/// reproduces the pre-bridge behavior exactly, so existing callers keep compiling. A later task
-/// migrates them to `reach` and removes this. Returns the hop chain (including `from` with
-/// `via=None`), or `None` if `to` is unreachable within `max_depth` edges.
-pub fn path_between(
-    g: &GraphStore,
-    from: &str,
-    to: &str,
-    max_depth: usize,
-) -> anyhow::Result<Option<Vec<LegacyHop>>> {
-    let ont = Ontology::default();
-    // walk_all=true: bypass the role filter so the structural backbone (CONTAINS/NEXT/…) is walked,
-    // reproducing the old undirected all-edges BFS exactly.
-    let res = reach_impl(g, &ont, from, None, Some(to), max_depth, 0, true)?;
-    Ok(res.paths.into_iter().next().map(|hops| {
-        hops.into_iter()
-            .map(|h| LegacyHop {
-                node: h.node,
-                via: match h.via {
-                    None => None,
-                    Some(HopVia::Edge { edge_type, forward }) => Some((edge_type, forward)),
-                    // bridge_budget=0 ⇒ a bridge hop can never appear on a legacy path.
-                    Some(HopVia::Bridge { term, .. }) => Some((term, true)),
-                },
-            })
-            .collect()
-    }))
 }
 
 pub fn neighbors(
@@ -442,7 +383,9 @@ mod tests {
     }
 
     #[test]
-    fn path_between_is_undirected_and_records_direction() {
+    fn reach_is_undirected_and_records_direction_when_relation_omitted() {
+        // `reach(relation=None, to=Some, bridge_budget=0)` is the old `path_between` behavior: an
+        // undirected BFS over chaining edges that records each hop's real direction.
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for id in ["a", "b", "c"] {
@@ -451,26 +394,27 @@ mod tests {
         // Only forward edges a->b->c exist.
         edge(&g, "a", "b", "REL");
         edge(&g, "b", "c", "REL");
+        let ont = Ontology::default();
 
         // Forward reachable, hops carry forward=true.
-        let fwd = path_between(&g, "a", "c", 5).unwrap().unwrap();
+        let fwd = reach(&g, &ont, "a", None, Some("c"), 5, 0).unwrap().paths[0].clone();
         let nodes: Vec<&str> = fwd.iter().map(|h| h.node.as_str()).collect();
         assert_eq!(nodes, vec!["a", "b", "c"]);
         assert_eq!(fwd[0].via, None);
-        assert_eq!(fwd[1].via, Some(("REL".to_string(), true)));
-        assert_eq!(fwd[2].via, Some(("REL".to_string(), true)));
+        assert_eq!(fwd[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
+        assert_eq!(fwd[2].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
 
         // Reverse direction is found too (undirected), with forward=false.
-        let rev = path_between(&g, "c", "a", 5).unwrap().unwrap();
+        let rev = reach(&g, &ont, "c", None, Some("a"), 5, 0).unwrap().paths[0].clone();
         let rnodes: Vec<&str> = rev.iter().map(|h| h.node.as_str()).collect();
         assert_eq!(rnodes, vec!["c", "b", "a"]);
-        assert_eq!(rev[1].via, Some(("REL".to_string(), false)));
+        assert_eq!(rev[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: false }));
 
         // Unreachable within depth.
         node(&g, "z");
-        assert_eq!(path_between(&g, "a", "z", 5).unwrap(), None);
+        assert!(reach(&g, &ont, "a", None, Some("z"), 5, 0).unwrap().paths.is_empty());
         // Same node.
-        let same = path_between(&g, "a", "a", 5).unwrap().unwrap();
+        let same = reach(&g, &ont, "a", None, Some("a"), 5, 0).unwrap().paths[0].clone();
         assert_eq!(same.len(), 1);
         assert_eq!(same[0].node, "a");
     }
@@ -501,7 +445,8 @@ mod tests {
 
     #[test]
     fn reach_legacy_parity_no_bridge() {
-        // relation=None, to=Some, bridge_budget=0 reproduces the pre-bridge path_between exactly.
+        // relation=None, to=Some, bridge_budget=0 reproduces the pre-bridge `path` tool exactly —
+        // the old undirected-connectivity behavior is a strict subset of `reach` (spec §6).
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for id in ["a", "b", "c"] {
@@ -519,12 +464,6 @@ mod tests {
         assert_eq!(hops[0].via, None);
         assert_eq!(hops[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
         assert_eq!(hops[2].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
-
-        // The shim maps that same result back to the old LegacyHop shape callers still consume.
-        let legacy = path_between(&g, "a", "c", 5).unwrap().unwrap();
-        let lnodes: Vec<&str> = legacy.iter().map(|h| h.node.as_str()).collect();
-        assert_eq!(lnodes, vec!["a", "b", "c"]);
-        assert_eq!(legacy[1].via, Some(("REL".to_string(), true)));
     }
 
     #[test]
@@ -631,10 +570,11 @@ mod tests {
     }
 
     #[test]
-    fn path_between_walks_core_structural_edges() {
-        // The legacy `path` tool must still traverse the structural backbone: CONTAINS (doc→section)
-        // and NEXT (chunk sequence) are CORE_EDGES → Grounding role, but the parity path bypasses the
-        // role filter (walk_all). Only a CORE_EDGE chain connects a→d here — no chaining edge.
+    fn reach_does_not_walk_core_structural_edges() {
+        // CONTAINS (doc→section) and NEXT (chunk sequence) are CORE_EDGES → Grounding role.
+        // `reach` is role-filtered, so a chain that only connects through structural/grounding
+        // edges (no chaining edge at all) must NOT be found — never flood the reasoning walk with
+        // the structural backbone.
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for id in ["a", "b", "c", "d"] {
@@ -643,13 +583,6 @@ mod tests {
         edge(&g, "a", "b", "CONTAINS");
         edge(&g, "b", "c", "NEXT");
         edge(&g, "c", "d", "MENTIONS");
-        let found = path_between(&g, "a", "d", 5).unwrap().unwrap();
-        let nodes: Vec<&str> = found.iter().map(|h| h.node.as_str()).collect();
-        assert_eq!(nodes, vec!["a", "b", "c", "d"]);
-        assert_eq!(found[1].via, Some(("CONTAINS".to_string(), true)));
-        assert_eq!(found[2].via, Some(("NEXT".to_string(), true)));
-
-        // But the role-filtered reasoning walk must NOT walk these grounding edges.
         let ont = Ontology::default();
         let reasoning = reach(&g, &ont, "a", None, Some("d"), 5, 0).unwrap();
         assert!(reasoning.targets.is_empty());

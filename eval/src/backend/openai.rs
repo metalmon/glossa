@@ -212,18 +212,19 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    let path = json!({
+    let reach = json!({
         "type": "function",
         "function": {
-            "name": "path",
-            "description": "Shortest connection between two graph nodes — the reasoning chain linking `from` to `to`. Ideal when you know both endpoints of a multi-hop question: name both ids and read the chain.",
+            "name": "reach",
+            "description": "The reasoning-chain tool — one call, two uses. ANSWER a relational multi-hop: give `from` and `relation`, omit `to`, and it discovers every node `from` reaches along that relation, crossing document boundaries on shared mentions when the in-graph chain dead-ends — use this instead of inferring the answer from prose. VERIFY a candidate you already formed: add `to` and it returns the grounded connecting chain, or nothing if the candidate doesn't actually connect. `relation` is fuzzy-matched to the graph's real edge types (omit for any connection at all). Subsumes a plain 'are these two connected' lookup: give both `from` and `to`, omit `relation`.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string", "description": "start: graph node id from a `glossary` line (e.g. `person:clancy-brown`)" },
-                    "to": { "type": "string", "description": "end: graph node id from a `glossary` line" }
+                    "relation": { "type": "string", "description": "relation to follow, fuzzy-matched to the graph's real edge types (e.g. \"located\"); omit for any connection" },
+                    "to": { "type": "string", "description": "end: graph node id from a `glossary` line — VERIFY mode; omit for DISCOVERY (find what `from` reaches)" }
                 },
-                "required": ["from", "to"]
+                "required": ["from"]
             }
         }
     });
@@ -254,7 +255,7 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    Value::Array(vec![glossary, neighbors, path, related, graph_query, search, read])
+    Value::Array(vec![glossary, neighbors, reach, related, graph_query, search, read])
 }
 
 /// Drive a tool-calling chat to a final textual answer.
@@ -530,12 +531,20 @@ mod schema_tests {
             "graph-OFF must NOT advertise graph tools"
         );
         let on = tool_names(&tools_schema(true));
-        for t in ["glossary", "related", "neighbors", "path", "graph_query"] {
+        for t in ["glossary", "related", "neighbors", "reach", "graph_query"] {
             assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
         }
         assert!(
+            !on.contains(&"path".into()),
+            "reach replaces path — graph-ON must NOT advertise the removed path tool"
+        );
+        assert!(
             !off.contains(&"graph_query".into()),
             "graph-OFF must NOT advertise graph_query"
+        );
+        assert!(
+            !off.contains(&"reach".into()),
+            "graph-OFF must NOT advertise reach"
         );
         assert!(
             on.contains(&"search".into()) && on.contains(&"read".into()),

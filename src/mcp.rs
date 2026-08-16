@@ -81,7 +81,7 @@ const GRAPH_TOOLS: &[&str] = &[
     "glossary",
     "related",
     "neighbors",
-    "path",
+    "reach",
     "graph_upsert",
     "graph_delete",
     "graph_update",
@@ -580,7 +580,7 @@ struct GlossaryArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct PathArgs {
+struct ReachArgs {
     #[serde(default)]
     #[schemars(description = "start: graph node id (or use from_path+from_n)")]
     from: Option<String>,
@@ -593,8 +593,18 @@ struct PathArgs {
     )]
     #[schemars(description = "start: chunk number (use with from_path)")]
     from_n: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
+    #[schemars(
+        description = "relation to follow, fuzzy-matched to the ontology's real edge types (e.g. \"located\" matches LOCATED_IN); omit for ALL chaining relations (undirected — 'is this connected at all')"
+    )]
+    relation: Option<String>,
     #[serde(default)]
-    #[schemars(description = "end: graph node id (or use to_path+to_n)")]
+    #[schemars(
+        description = "end: graph node id to VERIFY a connection to (or use to_path+to_n); omit for DISCOVERY — find every node `from` reaches along `relation`"
+    )]
     to: Option<String>,
     #[serde(default)]
     #[schemars(description = "end: document path (use with to_n instead of to)")]
@@ -605,6 +615,14 @@ struct PathArgs {
     )]
     #[schemars(description = "end: chunk number (use with to_path)")]
     to_n: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(
+        description = "cross-document bridge: when an in-graph chain dead-ends, resolve its mention to same-named nodes in OTHER documents and continue there (default true). false = graph-only, in-document connectivity — this reproduces the old `path` tool exactly when combined with to+no relation."
+    )]
+    bridge: Option<bool>,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
@@ -1088,7 +1106,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect use `path`. Empty => no such edges."
+        description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
     )]
     async fn neighbors(
         &self,
@@ -1116,26 +1134,30 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Show HOW two nodes are connected: the shortest chain of actual edges between them, ignoring edge direction for reachability but printing each edge's real direction (--REL--> / <--REL--) with a `read path #n` anchor per hop, so you can trace and verify the connection (e.g. a reference chain). Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12). Empty => not connected within that depth. For a node's own direct edges use `neighbors`."
+        description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read path #n` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump. Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
     )]
-    async fn path(
+    async fn reach(
         &self,
-        Parameters(a): Parameters<PathArgs>,
+        Parameters(a): Parameters<ReachArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
+        let ont = Ontology::load_or_default(&self.root);
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::path_between(
+            crate::tools::reach(
                 &idx,
                 &g,
+                &ont,
                 a.from.as_deref(),
                 a.from_path.as_deref(),
                 a.from_n,
+                a.relation.as_deref(),
                 a.to.as_deref(),
                 a.to_path.as_deref(),
                 a.to_n,
                 a.max_depth.unwrap_or(6),
+                a.bridge.unwrap_or(true),
                 &self.trace,
             ),
         )]))
@@ -1686,13 +1708,21 @@ mod tests {
             serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
         assert_eq!(re.as_of, Some("2022".to_string()));
 
-        let pa: PathArgs = serde_json::from_str(
-            r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9"}"#,
+        let ra: ReachArgs = serde_json::from_str(
+            r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9","relation":"located","bridge":"false"}"#,
         )
         .unwrap();
-        assert_eq!(pa.from_n, Some(1));
-        assert_eq!(pa.to_n, Some(2));
-        assert_eq!(pa.max_depth, Some(9));
+        assert_eq!(ra.from_n, Some(1));
+        assert_eq!(ra.to_n, Some(2));
+        assert_eq!(ra.max_depth, Some(9));
+        assert_eq!(ra.relation, Some("located".to_string()));
+        assert_eq!(ra.bridge, Some(false));
+
+        // relation also accepts a bare JSON number (mirrors as_of above); bridge accepts a bare bool.
+        let ra2: ReachArgs =
+            serde_json::from_str(r#"{"from":"sym:a","relation":2022,"bridge":true}"#).unwrap();
+        assert_eq!(ra2.relation, Some("2022".to_string()));
+        assert_eq!(ra2.bridge, Some(true));
 
         // Native JSON types still deserialize; absent optionals stay None.
         let r2: ReadArgs = serde_json::from_str(r#"{"path":"a.pdf","n":2}"#).unwrap();
@@ -2348,6 +2378,25 @@ mod tests {
             format!("{out:?}").contains("a.md"),
             "single-file index made the edit searchable"
         );
+    }
+
+    #[test]
+    fn path_tool_is_gone_reach_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            false,
+            false,
+        );
+        let names: Vec<String> = srv
+            .tool_specs()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(names.contains(&"reach".to_string()), "reach tool present");
+        assert!(!names.contains(&"path".to_string()), "path tool removed");
     }
 
     #[test]

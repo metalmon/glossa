@@ -1100,68 +1100,6 @@ pub fn neighbors(
     prepend_note(note, body)
 }
 
-/// Shortest connection between two nodes (undirected reachability), rendered as a chain: the
-/// `from` node, then one indented line per hop with the edge's real direction
-/// (`--REL-->` / `<--REL--`) and a `read` anchor so the agent can open each hop's evidence.
-/// `max_depth` is clamped to `[1, 12]` so an undirected BFS can't be told to scan the whole graph.
-#[allow(clippy::too_many_arguments)]
-pub fn path_between(
-    idx: &DocIndex,
-    g: &crate::graph::store::GraphStore,
-    from_node: Option<&str>,
-    from_path: Option<&str>,
-    from_n: Option<u64>,
-    to_node: Option<&str>,
-    to_path: Option<&str>,
-    to_n: Option<u64>,
-    max_depth: usize,
-    trace: &TraceLog,
-) -> String {
-    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n) {
-        Ok(x) => x,
-        Err(m) => return format!("from: {m}"),
-    };
-    let (to, note_to) = match resolve_node_ref(idx, g, to_node, to_path, to_n) {
-        Ok(x) => x,
-        Err(m) => return format!("to: {m}"),
-    };
-    let notes: Vec<String> = [note_from, note_to].into_iter().flatten().collect();
-    let note = (!notes.is_empty()).then(|| notes.join("\n"));
-    let depth = max_depth.clamp(1, 12);
-    let body = match crate::graph::traverse::path_between(g, &from, &to, depth) {
-        Ok(Some(hops)) => {
-            let mut out = Vec::with_capacity(hops.len());
-            for (i, h) in hops.iter().enumerate() {
-                if i == 0 {
-                    out.push(format!(
-                        "{}{}",
-                        endpoint_ref(idx, g, &h.node),
-                        read_anchor(idx, g, &h.node)
-                    ));
-                } else {
-                    let (et, fwd) = h.via.as_ref().expect("non-first hop has via");
-                    let arrow = if *fwd {
-                        format!("--{et}-->")
-                    } else {
-                        format!("<--{et}--")
-                    };
-                    out.push(format!(
-                        "  {}  {}{}",
-                        arrow,
-                        endpoint_ref(idx, g, &h.node),
-                        read_anchor(idx, g, &h.node)
-                    ));
-                }
-            }
-            trace.log("path", json!({"from": from, "to": to}), json!({"hops": hops.len()}));
-            out.join("\n")
-        }
-        Ok(None) => format!("no path from {from} to {to} within depth {depth}"),
-        Err(e) => format!("path error: {e}"),
-    };
-    prepend_note(note, body)
-}
-
 /// Default bridge budget when `bridge=true`: one cross-document hop covers almost all real
 /// multi-hops; a bigger budget compounds fuzzy-match error, so it is not exposed as a caller knob
 /// here — `bridge_budget >= 2` stays an explicit `traverse::reach` call, not the reader surface
@@ -1178,11 +1116,11 @@ const DEFAULT_REACH_BRIDGE_BUDGET: usize = 1;
 /// `relation` fuzzy-matches an ontology edge type (`None` ⇒ all `chaining`-role relations,
 /// undirected). `bridge` toggles the cross-document bridge: `false` ⇒ bridge_budget 0 (graph-only,
 /// role-filtered, forward-first — no silent doc-crossing); `true` ⇒
-/// [`DEFAULT_REACH_BRIDGE_BUDGET`]. `max_depth` is clamped to `[1, 12]`, same as `path_between`.
+/// [`DEFAULT_REACH_BRIDGE_BUDGET`]. `max_depth` is clamped to `[1, 12]`.
 ///
 /// Render (spec §6/§7.5 transparency MUST): every discovered/verified path is a hop chain — the
 /// `from` node's glossary-style handle, then one indented line per hop. An in-graph edge hop
-/// renders with an arrow (`--REL-->` / `<--REL--`, same convention as `path_between`); a
+/// renders with an arrow (`--REL-->` / `<--REL--`, the old `path` tool's convention); a
 /// cross-document **bridge hop** renders as `↝ bridged on "<term>" (conf 0.NN)` so the reader
 /// always sees WHERE and on what mention the reasoning crossed a document — never a silent jump.
 /// Discovery with nothing found, or verify with no grounded path, returns a plain-English message
@@ -2557,10 +2495,13 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     }
 
     #[test]
-    fn path_tool_renders_chain_with_arrows_and_no_path_message() {
+    fn reach_tool_renders_chain_with_arrows_and_no_path_message() {
+        // `reach(relation=None, bridge=false)` reproduces the old `path` tool's rendering exactly
+        // (spec §6: `path` is a strict subset of `reach`).
         let dir = tempfile::tempdir().unwrap();
         let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
+        let ont = crate::graph::ontology::Ontology::default();
         for id in ["a", "b", "c", "d", "e"] {
             g.put_node(&node(id, "Entity", id)).unwrap();
         }
@@ -2571,16 +2512,19 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         // direction, so this hop must render as a reverse arrow (`<--...--`).
         g.put_edge(&edge("d", "CONSTRAINED_BY", "c")).unwrap();
 
-        let out = path_between(
+        let out = reach(
             &idx,
             &g,
+            &ont,
             Some("a"),
+            None,
             None,
             None,
             Some("c"),
             None,
             None,
             6,
+            false,
             &TraceLog::disabled(),
         );
         assert!(out.contains("--REFERENCES-->"), "got: {out}");
@@ -2590,16 +2534,19 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "got: {out}"
         );
 
-        let reverse = path_between(
+        let reverse = reach(
             &idx,
             &g,
+            &ont,
             Some("a"),
+            None,
             None,
             None,
             Some("d"),
             None,
             None,
             6,
+            false,
             &TraceLog::disabled(),
         );
         assert!(
@@ -2607,31 +2554,37 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "expected a reverse-direction hop: {reverse}"
         );
 
-        let none = path_between(
+        let none = reach(
             &idx,
             &g,
+            &ont,
             Some("a"),
+            None,
             None,
             None,
             Some("e"),
             None,
             None,
             6,
+            false,
             &TraceLog::disabled(),
         );
-        assert!(none.starts_with("no path"), "got: {none}");
+        assert!(none.starts_with("no grounded path"), "got: {none}");
 
         // max_depth is clamped to [1,12]; 999 must not panic and still finds it.
-        let clamped = path_between(
+        let clamped = reach(
             &idx,
             &g,
+            &ont,
             Some("a"),
+            None,
             None,
             None,
             Some("c"),
             None,
             None,
             999,
+            false,
             &TraceLog::disabled(),
         );
         assert!(clamped.contains("--REFERENCES-->"));

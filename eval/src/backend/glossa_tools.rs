@@ -216,7 +216,7 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
-        "path" => {
+        "reach" => {
             let from = args
                 .get("from")
                 .and_then(|v| v.as_str())
@@ -226,6 +226,10 @@ pub fn exec(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
             let from_n = args.get("from_n").and_then(parse_n);
+            let relation = args
+                .get("relation")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
             let to = args
                 .get("to")
                 .and_then(|v| v.as_str())
@@ -241,10 +245,15 @@ pub fn exec(
                 .and_then(parse_n)
                 .map(|n| n as usize)
                 .unwrap_or(6);
+            let bridge = args.get("bridge").and_then(|v| v.as_bool()).unwrap_or(true);
             let body = match graph {
-                Some(g) => glossa::tools::path_between(
-                    idx, g, from, from_path, from_n, to, to_path, to_n, max_depth, trace,
-                ),
+                Some(g) => {
+                    let ont = glossa::graph::ontology::Ontology::load_or_default(root);
+                    glossa::tools::reach(
+                        idx, g, &ont, from, from_path, from_n, relation, to, to_path, to_n,
+                        max_depth, bridge, trace,
+                    )
+                }
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -816,11 +825,11 @@ mod tests {
         assert_eq!(no_graph, "(graph unavailable)");
     }
 
-    /// Finding 2: `path`'s `max_depth` must accept a numeric string ("9"), not just a JSON
+    /// Finding 2: `reach`'s `max_depth` must accept a numeric string ("9"), not just a JSON
     /// integer. Build a chain longer than the default depth (6) so the test only passes when the
     /// string is actually parsed rather than silently falling back to the default.
     #[test]
-    fn path_max_depth_accepts_numeric_string() {
+    fn reach_max_depth_accepts_numeric_string() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
@@ -835,7 +844,7 @@ mod tests {
 
         // Default max_depth (6) is too shallow for a 7-hop chain.
         let default_depth = exec(
-            "path",
+            "reach",
             &json!({"from": "n0", "to": "n7"}),
             dir.path(),
             &idx,
@@ -845,13 +854,13 @@ mod tests {
         )
         .0;
         assert!(
-            default_depth.starts_with("no path"),
+            default_depth.starts_with("no grounded path"),
             "expected default depth to be too shallow: {default_depth}"
         );
 
         // A numeric-string max_depth must be parsed (not dropped to the default 6).
         let string_depth = exec(
-            "path",
+            "reach",
             &json!({"from": "n0", "to": "n7", "max_depth": "10"}),
             dir.path(),
             &idx,
@@ -864,5 +873,43 @@ mod tests {
             string_depth.contains("--REFERENCES-->"),
             "numeric-string max_depth must extend the search: {string_depth}"
         );
+    }
+
+    /// `tools_schema(true)`/`exec` parity guard (mirrors [[mcp-tool-add-rename-eval-sites]]):
+    /// `reach` must dispatch to a real result, and the removed `path` name must fall through to
+    /// "unknown tool" rather than silently misrouting.
+    #[test]
+    fn reach_dispatches_and_path_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        g.put_node(&gnode("n0")).unwrap();
+        g.put_node(&gnode("n1")).unwrap();
+        g.put_edge(&gedge("n0", "REFERENCES", "n1")).unwrap();
+        let trace = TraceLog::disabled();
+
+        let reach_out = exec(
+            "reach",
+            &json!({"from": "n0", "to": "n1"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(reach_out.contains("--REFERENCES-->"), "got: {reach_out}");
+
+        let path_out = exec(
+            "path",
+            &json!({"from": "n0", "to": "n1"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(path_out.starts_with("unknown tool"), "got: {path_out}");
     }
 }

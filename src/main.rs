@@ -388,11 +388,26 @@ enum GraphAction {
         #[arg(long)]
         now: Option<String>,
     },
-    /// Show a path between two node ids (bounded).
-    Path {
+    /// Cross-document reasoning bridge (the `reach` tool). Omit `--to` for DISCOVERY: walk
+    /// `--relation` forward from `--from`, crossing document boundaries on shared mentions (the
+    /// bridge, on by default), and print every node reached. Pass `--to` for VERIFY: does a
+    /// grounded path from `--from` to that node exist? Replaces the old `path` command —
+    /// `--to` + `--no-bridge` with no `--relation` reproduces a plain shortest-path lookup.
+    Reach {
+        /// start: node id (e.g. from `glossary`)
+        #[arg(long)]
         from: String,
-        to: String,
+        /// relation to follow, fuzzy-matched to the ontology's real edge types; omit = all
+        /// chaining relations (undirected)
+        #[arg(short = 'r', long)]
+        relation: Option<String>,
+        /// end: node id to verify a connection to; omit for discovery
+        #[arg(long)]
+        to: Option<String>,
         path: Option<PathBuf>,
+        /// Disable the cross-document bridge (graph-only, in-document connectivity only).
+        #[arg(long = "no-bridge")]
+        no_bridge: bool,
         #[arg(short = 'd', long, default_value_t = 6)]
         max_depth: usize,
     },
@@ -1462,18 +1477,37 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Path {
+            GraphAction::Reach {
                 from,
+                relation,
                 to,
                 path,
+                no_bridge,
                 max_depth,
             } => {
-                let path = resolve_root_logged(path);
+                let path = glossa::root::resolve_root(path);
+                glossa::index::store::ensure_fresh(&path)?;
+                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
-                let found = glossa::graph::traverse::path(&g, &from, &to, max_depth)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+                let trace = glossa::trace::TraceLog::disabled();
                 println!(
                     "{}",
-                    glossa::cli_fmt::render_path(found.as_ref(), &from, &to, max_depth)
+                    glossa::tools::reach(
+                        &idx,
+                        &g,
+                        &ont,
+                        Some(&from),
+                        None,
+                        None,
+                        relation.as_deref(),
+                        to.as_deref(),
+                        None,
+                        None,
+                        max_depth,
+                        !no_bridge,
+                        &trace,
+                    )
                 );
                 Ok(())
             }
