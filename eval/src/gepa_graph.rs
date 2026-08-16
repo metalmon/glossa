@@ -164,7 +164,12 @@ fn rollout_one(
         json!({ "role": "system", "content": prompt }),
         json!({ "role": "user", "content": crate::backend::prompt::user_prompt(q) }),
     ];
-    let raw = match crate::backend::openai::run_agent_loop(chat, messages, exec, MAX_ROUNDS) {
+    let nba = |name: &str, args: &Value| {
+        crate::backend::glossa_tools::next_best_action(
+            name, args, &cfg.work, idx, graph, spec, &trace,
+        )
+    };
+    let raw = match crate::backend::openai::run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("graph rollout failed for q {}: {e:#}", q.id);

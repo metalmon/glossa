@@ -75,7 +75,14 @@ impl AgentBackend for OpenAiBackend {
             json!({ "role": "system", "content": prompt::system_prompt(graph.is_some()) }),
             json!({ "role": "user", "content": prompt::user_prompt(q) }),
         ];
-        let raw = run_agent_loop(chat, messages, exec, MAX_ROUNDS)?;
+        // Next-best-action on a stuck (repeated) call: fan the fixated query across the
+        // complementary tools instead of re-running the dead one.
+        let nba = |name: &str, args: &Value| {
+            crate::backend::glossa_tools::next_best_action(
+                name, args, work, &idx, graph.as_ref(), &spec, &trace,
+            )
+        };
+        let raw = run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS)?;
         Ok(prompt::parse_answer(&raw))
     }
 }
@@ -100,6 +107,11 @@ pub(crate) fn lmstudio_chat(
         "temperature": 0.8
     });
     let body_str = serde_json::to_string(&body)?;
+    // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
+    // with descriptions) sent to the endpoint, to prove what the model actually receives.
+    if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
+        let _ = std::fs::write(&p, &body_str);
+    }
     // Retry transient network drops: LM Studio occasionally closes a pooled keep-alive connection
     // that ureq then reuses → "established connection was aborted" (os error 10060). A fresh request
     // (new connection) + short backoff recovers it. Non-transport errors (HTTP status) surface at once.
@@ -233,11 +245,11 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "graph_query",
-            "description": "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto).",
+            "description": "Read-only SQL SELECT over the reasoning graph. Reach for it when the answer is a SPECIFIC related entity, a ranking, or an extreme ('which place/which year', 'the earliest/largest/first'): let the query carry the judgment instead of inferring from prose. Match the source entity and the relation, order or filter, take the target — it hands back the exact related entity AT THE EDGE'S LEVEL, the immediate one the question points at, not a broader parent. A fuzzy relation name is fine — `edge_type LIKE '%…%'` — the engine resolves it to the graph's real relation names. Main view for traversal (a join is one hop): edges_labeled(src_label, edge_type, dst_label, efrom, eto). Call it once with an EMPTY query first to see the schema and this graph's real edge_type/node_type vocabulary. Also: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sql": { "type": "string", "description": "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema instead of running a query" }
+                    "sql": { "type": "string", "description": "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema with the real edge_type/node_type vocabulary instead of running a query" }
                 }
             }
         }
@@ -251,16 +263,22 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
 /// `choices[0].message`). When it carries `tool_calls`, each is dispatched through `exec(name,
 /// args)` and the result fed back as a `role:"tool"` message, then the model is queried again —
 /// up to `max_rounds`. The first message without tool calls yields the answer.
-pub(crate) fn run_agent_loop<C, F>(
+pub(crate) fn run_agent_loop<C, F, N>(
     mut chat: C,
     mut messages: Vec<Value>,
     mut exec: F,
+    mut on_repeat: N,
     max_rounds: usize,
 ) -> anyhow::Result<String>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
     F: FnMut(&str, &Value) -> String,
+    N: FnMut(&str, &Value) -> String,
 {
+    // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
+    // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
+    // the next-best-action. Default callers pass `repeat_nudge`; the reader path passes a fan-out.
+    let mut last_key: Option<String> = None;
     for _ in 0..max_rounds {
         let msg = chat(&messages)?;
         let calls: Vec<Value> = msg
@@ -279,7 +297,14 @@ where
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let args = parse_tool_args(call);
-            let result = exec(name, &args);
+            let key = format!("{name}\u{1}{}", serde_json::to_string(&args).unwrap_or_default());
+            let result = if last_key.as_deref() == Some(key.as_str()) {
+                on_repeat(name, &args)
+            } else {
+                let r = exec(name, &args);
+                last_key = Some(key);
+                r
+            };
             messages.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
         }
     }
@@ -329,6 +354,11 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// Default `on_repeat` for tests that don't exercise NBA: a static nudge.
+    fn nudge(name: &str, _args: &Value) -> String {
+        format!("(dup {name}) you already called this — try a different tool or change the query")
+    }
+
     #[test]
     fn parse_tool_args_handles_string_and_object() {
         let s = json!({ "function": { "arguments": "{\"query\":\"abc\"}" } });
@@ -343,7 +373,7 @@ mod tests {
     fn loop_returns_direct_answer_when_no_tool_calls() {
         let chat = |_: &[Value]| Ok(json!({ "role": "assistant", "content": "ANSWER: Bob" }));
         let exec = |_: &str, _: &Value| String::new();
-        let out = run_agent_loop(chat, vec![], exec, 4).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
 
@@ -381,12 +411,69 @@ mod tests {
             "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string()
         };
         let out =
-            run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, 4).unwrap();
+            run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, nudge, 4).unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
         assert_eq!(
             seen.borrow().as_slice(),
             &[("search".to_string(), "corliss".to_string())]
         );
+    }
+
+    #[test]
+    fn loop_dedupes_consecutive_identical_tool_calls() {
+        // The model thrashes: same tool, same args, every round. The loop must execute it once,
+        // then feed back a nudge (not another live result) so the model is pushed to switch.
+        let execs = RefCell::new(0usize);
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            // Round 1 executes; round 2's identical call is deduped and its nudge lands in the
+            // transcript for round 3's chat onward (round 2 still sees round 1's live result).
+            if *r >= 3 {
+                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
+                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
+                let lc = c.to_lowercase();
+                assert!(
+                    lc.contains("different tool") || lc.contains("already"),
+                    "round {} expected a dedup nudge, got: {c:?}",
+                    *r
+                );
+            }
+            Ok(json!({
+                "role": "assistant", "content": "looping",
+                "tool_calls": [{ "id": "c", "function": { "name": "glossary", "arguments": "{\"name\":\"X\"}" } }]
+            }))
+        };
+        let exec = |_: &str, _: &Value| {
+            *execs.borrow_mut() += 1;
+            "hit".to_string()
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, 5).unwrap();
+        assert_eq!(out, "looping");
+        assert_eq!(*execs.borrow(), 1, "identical consecutive calls must execute only once");
+    }
+
+    #[test]
+    fn loop_reexecutes_when_args_differ() {
+        // A different tool OR different args is NOT a dedup — it must run.
+        let execs = RefCell::new(0usize);
+        let round = RefCell::new(0usize);
+        let chat = |_: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            let name = if *r % 2 == 1 { "A" } else { "B" };
+            Ok(json!({
+                "role": "assistant", "content": "alternating",
+                "tool_calls": [{ "id": "c", "function": { "name": name, "arguments": "{\"name\":\"X\"}" } }]
+            }))
+        };
+        let exec = |_: &str, _: &Value| {
+            *execs.borrow_mut() += 1;
+            "hit".to_string()
+        };
+        let _ = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
+        assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
     }
 
     #[test]
@@ -401,7 +488,7 @@ mod tests {
             }))
         };
         let exec = |_: &str, _: &Value| "hit".to_string();
-        let out = run_agent_loop(chat, vec![], exec, 3).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
         assert_eq!(out, "giving up");
         assert_eq!(*calls.borrow(), 4); // 3 rounds + 1 final
     }
