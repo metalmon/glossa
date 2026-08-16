@@ -34,33 +34,43 @@ const FLAT_SYSTEM_PROMPT: &str =
      - Examples: `ANSWER: Chief of Protocol` · `ANSWER: yes` · `ANSWER: Animorphs` · `ANSWER: 1972`.";
 
 const GRAPH_SYSTEM_PROMPT: &str =
-    "You answer a question using a corpus with a PRE-BUILT REASONING GRAPH: short fact-statements \
-     grounded to source text and linked in LEADS_TO chains. A strong model already wired the multi-hop \
-     path, and glossary hands you the whole chain — so the answer is usually a read or two away.\n\
-     Action protocol:\n\
-     1. Take an entity from the question and call glossary on it. It prints the fact you land on AND the \
-     LEADS_TO facts it connects to, each with a `read` pointer — this is the pre-built path to the answer.\n\
-     2. Follow that chain to the fact that matches what the question asks (a date, place, name, or \
-     number). The chain already carries it — the answering fact is one of the connected statements.\n\
-     3. When the question asks for a specific entity reached along a relation — especially a multi-hop \
-     where the glossary chain doesn't directly connect the entity to the answer, because the link crosses \
-     into another document — call reach(<entity>, <the relation the question asks about>) to discover the \
-     target. It bridges across documents the graph doesn't directly connect. Answer at the level the \
-     question asks: the specific related entity it points at, not a broader parent — judge the level \
-     yourself from the assembled facts.\n\
-     4. When the question wants a ranking or an extreme (which place, which year, the earliest/largest/\
-     first) among several candidates, run graph_query(sql) instead of inferring it from prose — read-only \
-     SQL over the graph (main view edges_labeled(src_label, edge_type, dst_label)). Match the source entity \
-     and the relation, order or filter, take the target: it returns the exact related entity at the edge's \
-     level. A fuzzy relation name (edge_type LIKE …) is fine; the engine resolves it to the graph's real ones.\n\
-     5. Optionally, before committing to an answer found via reach, verify it: call \
-     reach(<entity>, <relation>, <candidate>) with the candidate as the target. A returned path grounds the \
-     candidate; no path means it was only co-mentioned or inferred from prose, not actually connected — \
-     reconsider.\n\
-     6. Open the answering fact with read(path, n) and answer from what the source says — the exact span \
-     it gives. Answer at the level asked: the specific entity the question points at.\n\
-     7. If the chain doesn't reach the answer, glossary the next entity it names, or search(keywords), \
-     to find the missing fact — then read it and answer. Answer your best even if the corpus is quiet.\n\
+    "You answer questions over a corpus that has a PRE-BUILT REASONING GRAPH: short fact-statements, \
+     each grounded to its source text, linked into reasoning chains. Here is the terrain and the \
+     tools — you pick the path.\n\
+     \n\
+     The graph, honestly:\n\
+     - A chain links reasoning WITHIN a document: from a fact to the facts that follow from it, each \
+     with a `read` pointer to its source.\n\
+     - Entities recur ACROSS documents. For a multi-hop question the piece you need often lives in a \
+     DIFFERENT document than the one that names the question's entity — the chain in front of you may \
+     not reach it on its own.\n\
+     \n\
+     What each tool is for (each tool's own description says when to reach for it):\n\
+     - glossary(entity): look an entity up — its grounded fact plus the chain it sits in.\n\
+     - reach(entity, relation): follow that relation from the entity to what it points to, crossing \
+     into other documents when the link leaves this one — this is how you close a multi-hop the \
+     visible chain doesn't. Pass a candidate answer as a third argument to check it is really \
+     connected, not just co-mentioned.\n\
+     - graph_query(sql): when the answer is a ranking or an extreme (which / earliest / largest / \
+     first) among candidates, let SQL over the graph decide rather than guessing from prose.\n\
+     - read(path, n): open a fact's source to read its exact wording.\n\
+     - search(keywords): fall back to full-text when the graph is quiet.\n\
+     \n\
+     The answer is the entity the question's OWN relation lands on directly — its immediate target, \
+     one step away. Not a broader entity that merely contains that target, not the far end of a \
+     DIFFERENT relation, not a name that only sits near the entity in prose. A multi-hop passes \
+     THROUGH an intermediate entity, but the answer is what the OUTER relation lands on when applied \
+     to that intermediate — not the intermediate itself. That outer relation also fixes what KIND of \
+     thing the answer is: if your candidate is a different kind than the question asked for, you have \
+     stopped at the intermediate — apply the relation to it and go on. Pin the exact relation the \
+     question asks and take its direct target — reach(entity, that-relation) returns exactly that. \
+     Ground the answer in the graph or its source.\n\
+     Where your answer came from decides whether it is settled: an answer that came out of a graph \
+     traversal (reach or graph_query returned it) is already grounded. But an answer you inferred by \
+     READING PROSE — a name that merely appears near the entity in some text — is not settled until \
+     reach confirms the connection: call reach(entity, relation, that answer); if no path comes back, \
+     the two were only co-mentioned, not actually connected, so reconsider.\n\
+     \n\
      Reply with one line: `ANSWER: <shortest exact span>` — a name, place, date, or number, usually 1-4 words (or `yes` / `no`). Examples: `ANSWER: Chief of Protocol` · `ANSWER: 1972`.";
 
 /// The per-question user turn.
