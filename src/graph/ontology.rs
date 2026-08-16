@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 
 const CORE_NODES: &[&str] = crate::graph::STRUCTURAL_NODES;
 const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
+/// Derived SOFT edges the `generalize` pass writes (dense/noisy similarity links). Like CORE_EDGES
+/// they are never a reasoning hop — forced to `Grounding` so `traverse::reach` skips them (the
+/// viewer already excludes them from traversal). Undeclared soft edges must not flood the walk.
+const SOFT_EDGES: &[&str] = &["SIMILAR"];
 
 /// What a relation does for the reasoning traverse, declared as ontology DATA (never hardcoded
 /// per edge_type in engine code — see [[graph-cross-doc-bridge]]): `Chaining` relations advance
@@ -570,7 +574,7 @@ impl Ontology {
         // would walk `MENTIONS` as a chain hop and flood over grounding edges. Treat any undeclared
         // CORE_EDGE as Grounding so the traverse layer skips it as a reasoning hop. An explicit
         // declaration (checked above) still wins. See [[graph-cross-doc-bridge]].
-        if CORE_EDGES.contains(&edge_type) {
+        if CORE_EDGES.contains(&edge_type) || SOFT_EDGES.contains(&edge_type) {
             return RelationRole::Grounding;
         }
         let norm = edge_type.trim().to_lowercase();
@@ -582,7 +586,7 @@ impl Ontology {
         {
             return role;
         }
-        if CORE_EDGES.iter().any(|c| c.to_lowercase() == norm) {
+        if CORE_EDGES.iter().chain(SOFT_EDGES).any(|c| c.to_lowercase() == norm) {
             return RelationRole::Grounding;
         }
         RelationRole::default()
@@ -957,6 +961,17 @@ role = "chaining"
         assert!(matches!(o.relation_role(" mentions "), RelationRole::Grounding));
         // A real declared chaining relation is unaffected.
         assert!(matches!(o.relation_role("LEADS_TO"), RelationRole::Chaining));
+    }
+
+    #[test]
+    fn relation_role_similar_derived_edge_is_grounding() {
+        // `generalize` writes soft-similarity SIMILAR edges (dense/noisy, link-prediction). They are
+        // not a reasoning relation — `traverse::reach` must NOT walk them as chain hops (else the
+        // salience/coherence FP-control is undermined by similarity noise). The viewer already
+        // excludes SIMILAR from traversal; the reasoning layer must too. Undeclared → Grounding.
+        let o = Ontology::default();
+        assert!(matches!(o.relation_role("SIMILAR"), RelationRole::Grounding));
+        assert!(matches!(o.relation_role(" similar "), RelationRole::Grounding));
     }
 
     #[test]
