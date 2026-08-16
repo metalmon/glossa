@@ -49,30 +49,48 @@ pub struct LegacyHop {
     pub via: Option<(String, bool)>,
 }
 
-/// Fuzzy relation-name match against an edge type: case/whitespace-insensitive, substring either
-/// way (mirrors how a small model may pass a slightly different spelling of a relation). An empty
-/// relation matches everything (treated as "no filter").
+/// Split a relation/edge-type name into lowercased alphanumeric tokens (on `_`, spaces, and other
+/// non-alphanumeric separators): `LOCATED_IN` → `["located", "in"]`.
+fn tokens(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+/// Fuzzy relation-name match against an edge type: case-insensitive, whole-name equality OR a
+/// whole-token match (`located` ↔ `LOCATED_IN`). Deliberately NOT raw substring — that let
+/// `REL` match `UNRELATED`/`CORRELATES`, which both over-walked edges and let a spurious bridge
+/// pass the relation-coherence gate. An empty relation matches everything ("no filter").
 fn relation_matches(edge_type: &str, relation: &str) -> bool {
     let a = edge_type.trim().to_lowercase();
     let b = relation.trim().to_lowercase();
-    b.is_empty() || a == b || a.contains(&b) || b.contains(&a)
+    if b.is_empty() || a == b {
+        return true;
+    }
+    let (ta, tb) = (tokens(edge_type), tokens(relation));
+    // A whole token of one name equals the whole other name, or the two share a whole token.
+    ta.iter().any(|t| t == &b) || tb.iter().any(|t| t == &a) || ta.iter().any(|t| tb.contains(t))
 }
 
-/// In-graph reasoning hops out of `node`. Grounding edges (e.g. `MENTIONS`) are never walked —
-/// they'd flood — so only `role==Chaining` edges advance the chain (see [`Ontology::relation_role`],
-/// which maps the built-in CORE_EDGES to Grounding). When `relation` is `None` we walk UNDIRECTED
-/// (outgoing forward + incoming backward) to preserve legacy `path_between` connectivity; when a
-/// relation is named we walk it FORWARD only and require a fuzzy edge-type match (spec §5,
+/// In-graph reasoning hops out of `node`. When `walk_all` is false (the reasoning `reach` walk),
+/// grounding edges (e.g. `MENTIONS`) are never walked — they'd flood — so only `role==Chaining`
+/// edges advance the chain (see [`Ontology::relation_role`], which maps the built-in CORE_EDGES to
+/// Grounding). When `walk_all` is true (the legacy `path_between` parity path) the role filter is
+/// bypassed and EVERY edge is walked, preserving the old undirected all-edges BFS (spec §5 pt1).
+/// When `relation` is `None` we walk UNDIRECTED (outgoing forward + incoming backward); when a
+/// relation is named we walk it FORWARD only and require a token/whole-name match (spec §5,
 /// forward-first). Returns `(next_node, edge_type, forward)`.
 fn chaining_steps(
     g: &GraphStore,
     ont: &Ontology,
     node: &str,
     relation: Option<&str>,
+    walk_all: bool,
 ) -> anyhow::Result<Vec<(String, String, bool)>> {
     let mut steps: Vec<(String, String, bool)> = Vec::new();
     for e in g.outgoing(node)? {
-        if ont.relation_role(&e.edge_type) == RelationRole::Grounding {
+        if !walk_all && ont.relation_role(&e.edge_type) == RelationRole::Grounding {
             continue;
         }
         if let Some(rel) = relation {
@@ -84,7 +102,7 @@ fn chaining_steps(
     }
     if relation.is_none() {
         for e in g.incoming(node)? {
-            if ont.relation_role(&e.edge_type) == RelationRole::Grounding {
+            if !walk_all && ont.relation_role(&e.edge_type) == RelationRole::Grounding {
                 continue;
             }
             steps.push((e.from, e.edge_type, false));
@@ -122,6 +140,23 @@ pub fn reach(
     max_depth: usize,
     bridge_budget: usize,
 ) -> anyhow::Result<ReachResult> {
+    reach_impl(g, ont, from, relation, to, max_depth, bridge_budget, false)
+}
+
+/// Shared engine for [`reach`] (the role-filtered forward reasoning walk, `walk_all=false`) and the
+/// legacy [`path_between`] parity path (`walk_all=true`, which bypasses the role filter so the old
+/// undirected all-edges BFS — including CORE_EDGES like CONTAINS/NEXT — is preserved exactly).
+#[allow(clippy::too_many_arguments)]
+fn reach_impl(
+    g: &GraphStore,
+    ont: &Ontology,
+    from: &str,
+    relation: Option<&str>,
+    to: Option<&str>,
+    max_depth: usize,
+    bridge_budget: usize,
+    walk_all: bool,
+) -> anyhow::Result<ReachResult> {
     // Trivial: from IS the target.
     if to == Some(from) {
         let p = vec![Hop { node: from.to_string(), via: None }];
@@ -150,7 +185,7 @@ pub fn reach(
         }
         let last = item.path.last().unwrap().node.clone();
 
-        let steps = chaining_steps(g, ont, &last, relation)?;
+        let steps = chaining_steps(g, ont, &last, relation, walk_all)?;
         let dead_end = steps.is_empty();
 
         for (next, et, fwd) in steps {
@@ -208,12 +243,10 @@ pub fn reach(
                     }
                     let n_other = others.len();
                     for (cand, exact) in others {
-                        // Relation-coherence prune (§7.5 MUST): keep the bridged branch alive only
-                        // if the landing document's chain continues along the requested relation.
-                        if chaining_steps(g, ont, &cand, relation)?.is_empty() {
-                            continue;
-                        }
                         let conf = bridge_confidence(exact, n_other);
+                        // Verify: a candidate that IS `to` is a hit even if it's a leaf with no
+                        // onward chaining edge — check `to` BEFORE the coherence prune, else a
+                        // legitimate bridge-landing target is wrongly pruned (false negative).
                         if to == Some(cand.as_str()) {
                             let mut p = item.path.clone();
                             p.push(Hop {
@@ -221,6 +254,11 @@ pub fn reach(
                                 via: Some(HopVia::Bridge { term: term.clone(), confidence: conf }),
                             });
                             return Ok(ReachResult { paths: vec![p], targets: vec![cand] });
+                        }
+                        // Relation-coherence prune (§7.5 MUST): keep the bridged branch alive only
+                        // if the landing document's chain continues along the requested relation.
+                        if chaining_steps(g, ont, &cand, relation, walk_all)?.is_empty() {
+                            continue;
                         }
                         if visited.insert(cand.clone()) {
                             let mut p = item.path.clone();
@@ -251,7 +289,9 @@ pub fn path_between(
     max_depth: usize,
 ) -> anyhow::Result<Option<Vec<LegacyHop>>> {
     let ont = Ontology::default();
-    let res = reach(g, &ont, from, None, Some(to), max_depth, 0)?;
+    // walk_all=true: bypass the role filter so the structural backbone (CONTAINS/NEXT/…) is walked,
+    // reproducing the old undirected all-edges BFS exactly.
+    let res = reach_impl(g, &ont, from, None, Some(to), max_depth, 0, true)?;
     Ok(res.paths.into_iter().next().map(|hops| {
         hops.into_iter()
             .map(|h| LegacyHop {
@@ -588,5 +628,62 @@ mod tests {
         // B=2: the path exists and is found — proving only the budget blocked it above.
         let two = reach(&g, &ont, "A", Some("REL"), None, 8, 2).unwrap();
         assert!(two.targets.contains(&"Target".to_string()));
+    }
+
+    #[test]
+    fn path_between_walks_core_structural_edges() {
+        // The legacy `path` tool must still traverse the structural backbone: CONTAINS (doc→section)
+        // and NEXT (chunk sequence) are CORE_EDGES → Grounding role, but the parity path bypasses the
+        // role filter (walk_all). Only a CORE_EDGE chain connects a→d here — no chaining edge.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for id in ["a", "b", "c", "d"] {
+            node(&g, id);
+        }
+        edge(&g, "a", "b", "CONTAINS");
+        edge(&g, "b", "c", "NEXT");
+        edge(&g, "c", "d", "MENTIONS");
+        let found = path_between(&g, "a", "d", 5).unwrap().unwrap();
+        let nodes: Vec<&str> = found.iter().map(|h| h.node.as_str()).collect();
+        assert_eq!(nodes, vec!["a", "b", "c", "d"]);
+        assert_eq!(found[1].via, Some(("CONTAINS".to_string(), true)));
+        assert_eq!(found[2].via, Some(("NEXT".to_string(), true)));
+
+        // But the role-filtered reasoning walk must NOT walk these grounding edges.
+        let ont = Ontology::default();
+        let reasoning = reach(&g, &ont, "a", None, Some("d"), 5, 0).unwrap();
+        assert!(reasoning.targets.is_empty());
+    }
+
+    #[test]
+    fn relation_matches_is_token_exact_not_substring() {
+        // Whole-name equality.
+        assert!(relation_matches("LOCATED_IN", "LOCATED_IN"));
+        // Whole-token match (case-insensitive).
+        assert!(relation_matches("LOCATED_IN", "located"));
+        assert!(relation_matches("REPORTS_TO", "reports"));
+        // Substring must NOT match (the old bug): REL ⊄ UNRELATED/CORRELATES; ORG ⊄ CATEGORY.
+        assert!(!relation_matches("UNRELATED", "REL"));
+        assert!(!relation_matches("CORRELATES", "REL"));
+        assert!(!relation_matches("CATEGORY", "ORG"));
+        // Empty relation = no filter.
+        assert!(relation_matches("ANYTHING", ""));
+    }
+
+    #[test]
+    fn reach_verify_accepts_leaf_bridge_landing() {
+        // Verify mode: `to` IS the bridged node, a leaf with no onward chaining edge. It must be
+        // returned (the coherence prune must not fire before the `to` check).
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        dnode(&g, "A_fact", "Xanthium", "docA.md");
+        dnode(&g, "B_leaf", "Xanthium", "docB.md"); // no onward edge
+        fillers(&g, 25);
+        let ont = Ontology::default();
+        let res = reach(&g, &ont, "A_fact", Some("REL"), Some("B_leaf"), 6, 1).unwrap();
+        assert_eq!(res.targets, vec!["B_leaf".to_string()]);
+        let hops = &res.paths[0];
+        assert_eq!(hops.last().unwrap().node, "B_leaf");
+        assert!(matches!(hops.last().unwrap().via, Some(HopVia::Bridge { .. })));
     }
 }
