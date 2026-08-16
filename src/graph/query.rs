@@ -5,7 +5,8 @@
 use crate::graph::store::GraphStore;
 use crate::index::store::DocIndex;
 use sqlparser::ast::{
-    BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, SetExpr, Statement, TableFactor,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
+    JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement, Subscript, TableFactor,
     Value,
 };
 use sqlparser::dialect::SQLiteDialect;
@@ -64,6 +65,39 @@ fn collect_from_set_expr(expr: &SetExpr, out: &mut Vec<String>) {
                     collect_from_table_factor(&join.relation, out);
                 }
             }
+            // Expression-level subqueries (projection / WHERE / HAVING / GROUP BY / ...) can
+            // read tables that never appear in the FROM clause — walk every expression
+            // position so a subquery can't smuggle a non-whitelisted table past the gate,
+            // e.g. `SELECT (SELECT sql FROM sqlite_master) FROM nodes` or
+            // `SELECT id FROM nodes WHERE label IN (SELECT community FROM node_meta)`.
+            for item in &select.projection {
+                match item {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                        collect_from_expr(e, out)
+                    }
+                    SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(..) => {}
+                }
+            }
+            if let Some(e) = &select.selection {
+                collect_from_expr(e, out);
+            }
+            if let Some(e) = &select.prewhere {
+                collect_from_expr(e, out);
+            }
+            if let Some(e) = &select.having {
+                collect_from_expr(e, out);
+            }
+            if let Some(e) = &select.qualify {
+                collect_from_expr(e, out);
+            }
+            match &select.group_by {
+                GroupByExpr::All(_) => {}
+                GroupByExpr::Expressions(exprs, _) => {
+                    for e in exprs {
+                        collect_from_expr(e, out);
+                    }
+                }
+            }
         }
         SetExpr::Query(inner) => collect_from_query(inner, out),
         SetExpr::SetOperation { left, right, .. } => {
@@ -94,7 +128,281 @@ fn collect_from_table_factor(tf: &TableFactor, out: &mut Vec<String>) {
                 collect_from_table_factor(&join.relation, out);
             }
         }
+        // Defense in depth: these factors WRAP an inner table (`PIVOT(...)`, `UNPIVOT(...)`,
+        // `MATCH_RECOGNIZE(...)`) — fail closed by recursing into what they wrap instead of
+        // silently letting a wrapped non-whitelisted table pass unchecked.
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => collect_from_table_factor(table, out),
+        // Function/TableFunction/UNNEST/JsonTable/OpenJsonTable etc. carry no base-table read.
         _ => {}
+    }
+}
+
+/// Recursively walk an expression tree for embedded subqueries (`Expr::Subquery`,
+/// `Expr::InSubquery`, `Expr::Exists`, and bare-subquery function arguments) so their FROM
+/// tables — and any of their own nested subqueries/CTEs — get whitelist-checked exactly like a
+/// FROM-clause derived table. Descends through every expression shape that can nest another
+/// `Expr` (binary/unary ops, function calls, CASE, casts, arrays, tuples, ...) so a subquery
+/// can't hide a few levels deep and slip past the gate.
+fn collect_from_expr(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => collect_from_query(q, out),
+        Expr::InSubquery {
+            expr: e, subquery, ..
+        } => {
+            collect_from_expr(e, out);
+            collect_from_query(subquery, out);
+        }
+        Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e)
+        | Expr::Nested(e)
+        | Expr::OuterJoin(e)
+        | Expr::Prior(e)
+        | Expr::UnaryOp { expr: e, .. }
+        | Expr::CompositeAccess { expr: e, .. }
+        | Expr::JsonAccess { value: e, .. }
+        | Expr::Collate { expr: e, .. }
+        | Expr::Named { expr: e, .. }
+        | Expr::Cast { expr: e, .. }
+        | Expr::Extract { expr: e, .. }
+        | Expr::Ceil { expr: e, .. }
+        | Expr::Floor { expr: e, .. } => collect_from_expr(e, out),
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            collect_from_expr(a, out);
+            collect_from_expr(b, out);
+        }
+        Expr::InList { expr: e, list, .. } => {
+            collect_from_expr(e, out);
+            for it in list {
+                collect_from_expr(it, out);
+            }
+        }
+        Expr::InUnnest {
+            expr: e, array_expr, ..
+        } => {
+            collect_from_expr(e, out);
+            collect_from_expr(array_expr, out);
+        }
+        Expr::Between {
+            expr: e, low, high, ..
+        } => {
+            collect_from_expr(e, out);
+            collect_from_expr(low, out);
+            collect_from_expr(high, out);
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. } => {
+            collect_from_expr(left, out);
+            collect_from_expr(right, out);
+        }
+        Expr::Like { expr: e, pattern, .. }
+        | Expr::ILike { expr: e, pattern, .. }
+        | Expr::SimilarTo { expr: e, pattern, .. }
+        | Expr::RLike { expr: e, pattern, .. } => {
+            collect_from_expr(e, out);
+            collect_from_expr(pattern, out);
+        }
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            collect_from_expr(timestamp, out);
+            collect_from_expr(time_zone, out);
+        }
+        Expr::Convert { expr: e, styles, .. } => {
+            collect_from_expr(e, out);
+            for s in styles {
+                collect_from_expr(s, out);
+            }
+        }
+        Expr::Position { expr: e, r#in } => {
+            collect_from_expr(e, out);
+            collect_from_expr(r#in, out);
+        }
+        Expr::Substring {
+            expr: e,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            collect_from_expr(e, out);
+            if let Some(f) = substring_from {
+                collect_from_expr(f, out);
+            }
+            if let Some(f) = substring_for {
+                collect_from_expr(f, out);
+            }
+        }
+        Expr::Trim {
+            expr: e,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            collect_from_expr(e, out);
+            if let Some(w) = trim_what {
+                collect_from_expr(w, out);
+            }
+            if let Some(cs) = trim_characters {
+                for c in cs {
+                    collect_from_expr(c, out);
+                }
+            }
+        }
+        Expr::Overlay {
+            expr: e,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            collect_from_expr(e, out);
+            collect_from_expr(overlay_what, out);
+            collect_from_expr(overlay_from, out);
+            if let Some(f) = overlay_for {
+                collect_from_expr(f, out);
+            }
+        }
+        Expr::MapAccess { column, keys } => {
+            collect_from_expr(column, out);
+            for k in keys {
+                collect_from_expr(&k.key, out);
+            }
+        }
+        Expr::Function(func) => collect_from_function(func, out),
+        Expr::Method(m) => {
+            collect_from_expr(&m.expr, out);
+            for f in &m.method_chain {
+                collect_from_function(f, out);
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(o) = operand {
+                collect_from_expr(o, out);
+            }
+            for c in conditions {
+                collect_from_expr(c, out);
+            }
+            for r in results {
+                collect_from_expr(r, out);
+            }
+            if let Some(e) = else_result {
+                collect_from_expr(e, out);
+            }
+        }
+        Expr::GroupingSets(vv) | Expr::Cube(vv) | Expr::Rollup(vv) => {
+            for v in vv {
+                for e in v {
+                    collect_from_expr(e, out);
+                }
+            }
+        }
+        Expr::Tuple(v) | Expr::Struct { values: v, .. } => {
+            for e in v {
+                collect_from_expr(e, out);
+            }
+        }
+        Expr::Dictionary(fields) => {
+            for f in fields {
+                collect_from_expr(&f.value, out);
+            }
+        }
+        Expr::Map(m) => {
+            for entry in &m.entries {
+                collect_from_expr(&entry.key, out);
+                collect_from_expr(&entry.value, out);
+            }
+        }
+        Expr::Subscript { expr: e, subscript } => {
+            collect_from_expr(e, out);
+            match &**subscript {
+                Subscript::Index { index } => collect_from_expr(index, out),
+                Subscript::Slice {
+                    lower_bound,
+                    upper_bound,
+                    stride,
+                } => {
+                    if let Some(e) = lower_bound {
+                        collect_from_expr(e, out);
+                    }
+                    if let Some(e) = upper_bound {
+                        collect_from_expr(e, out);
+                    }
+                    if let Some(e) = stride {
+                        collect_from_expr(e, out);
+                    }
+                }
+            }
+        }
+        Expr::Array(arr) => {
+            for e in &arr.elem {
+                collect_from_expr(e, out);
+            }
+        }
+        Expr::Interval(iv) => collect_from_expr(&iv.value, out),
+        Expr::Lambda(l) => collect_from_expr(&l.body, out),
+        // Leaves that cannot embed another expression or query.
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::IntroducedString { .. }
+        | Expr::TypedString { .. }
+        | Expr::MatchAgainst { .. }
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..) => {}
+    }
+}
+
+fn collect_from_function(func: &Function, out: &mut Vec<String>) {
+    collect_from_function_arguments(&func.parameters, out);
+    collect_from_function_arguments(&func.args, out);
+    if let Some(f) = &func.filter {
+        collect_from_expr(f, out);
+    }
+    for ob in &func.within_group {
+        collect_from_expr(&ob.expr, out);
+    }
+}
+
+fn collect_from_function_arguments(args: &FunctionArguments, out: &mut Vec<String>) {
+    match args {
+        FunctionArguments::None => {}
+        FunctionArguments::Subquery(q) => collect_from_query(q, out),
+        FunctionArguments::List(list) => {
+            for a in &list.args {
+                collect_from_function_arg(a, out);
+            }
+        }
+    }
+}
+
+fn collect_from_function_arg(a: &FunctionArg, out: &mut Vec<String>) {
+    match a {
+        FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+            collect_from_function_arg_expr(arg, out)
+        }
+        FunctionArg::ExprNamed { name, arg, .. } => {
+            collect_from_expr(name, out);
+            collect_from_function_arg_expr(arg, out);
+        }
+    }
+}
+
+fn collect_from_function_arg_expr(a: &FunctionArgExpr, out: &mut Vec<String>) {
+    if let FunctionArgExpr::Expr(e) = a {
+        collect_from_expr(e, out);
     }
 }
 
@@ -903,6 +1211,23 @@ mod tests {
         ] {
             assert!(parse_readonly_select(bad).is_err(), "must reject: {bad}");
         }
+    }
+
+    #[test]
+    fn gate_rejects_expression_level_subquery_bypass() {
+        for bad in [
+            // Subquery in the projection reads a non-whitelisted table.
+            "SELECT (SELECT sql FROM sqlite_master LIMIT 1) FROM nodes",
+            // InSubquery in WHERE reads a non-whitelisted table.
+            "SELECT id FROM nodes WHERE label IN (SELECT community FROM node_meta)",
+        ] {
+            assert!(parse_readonly_select(bad).is_err(), "must reject: {bad}");
+        }
+        // Positive control: a subquery over a WHITELISTED table must still be allowed.
+        assert!(
+            parse_readonly_select("SELECT id FROM nodes WHERE id IN (SELECT efrom FROM edges)")
+                .is_ok()
+        );
     }
 
     #[test]
