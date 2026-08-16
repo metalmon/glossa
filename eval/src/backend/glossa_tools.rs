@@ -316,6 +316,19 @@ pub fn repeat_nudge(name: &str, _args: &Value) -> String {
     )
 }
 
+/// Steer fed back when the reader has strung together `UNPRODUCTIVE_STREAK_K` calls that each
+/// surfaced nothing NEW — even though the calls themselves varied (different tool, different
+/// args). This is the over-search-spiral case `repeat_nudge`/`next_best_action` don't catch:
+/// there's no identical repeat to dedup, just many different probes landing on the same already-seen
+/// ground, headed for the round cap and a garbage final answer. Fires once per streak (the caller
+/// resets its counter after using this), not on every call past the threshold.
+pub fn unproductive_steer(_name: &str) -> String {
+    "(no new information) Your last few calls surfaced nothing new — more searching the same way \
+     won't help. Commit your best SPECIFIC answer from what you've already found, or change \
+     approach fundamentally (a different entity or relation) — do not just rephrase the same query."
+        .to_string()
+}
+
 /// Next-best-action on a stuck (repeated) call: the model re-issued `name(args)`, so re-running is a
 /// dead end. Take the text it fixated on and fan it across the COMPLEMENTARY tools (the ones it did
 /// NOT just call), returning their non-empty results fused — concrete alternatives instead of the

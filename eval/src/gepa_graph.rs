@@ -150,15 +150,26 @@ fn rollout_one(
             Duration::from_secs(240),
         )
     };
-    let exec = |name: &str, args: &Value| -> String {
-        let body =
-            crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace).0;
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
+        let (body, ids, _images) =
+            crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace);
+        // Mirror openai::execute_tool: `read`'s surfaced id is its `path` arg (glossa_tools::exec
+        // returns no ids for read itself).
+        let ids = if name == "read" {
+            args.get("path")
+                .and_then(|v| v.as_str())
+                .filter(|p| !p.is_empty())
+                .map(|p| vec![p.to_string()])
+                .unwrap_or_default()
+        } else {
+            ids
+        };
         steps.borrow_mut().push(ToolStep {
             name: name.to_string(),
             args: args.clone(),
             result: truncate_chars(&body, STEP_RESULT_CHARS),
         });
-        body
+        (body, ids)
     };
     let messages = vec![
         json!({ "role": "system", "content": prompt }),

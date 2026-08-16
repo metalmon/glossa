@@ -3,6 +3,7 @@ use crate::dataset::Question;
 use anyhow::{anyhow, bail, Context};
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -61,14 +62,14 @@ impl AgentBackend for OpenAiBackend {
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );
         let exec = |name: &str, args: &Value| {
-            let body = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
+            let (body, ids) = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
                 let snippet: String = body.chars().take(500).collect();
                 eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
             }
-            body
+            (body, ids)
         };
 
         let messages = vec![
@@ -258,12 +259,30 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
     Value::Array(vec![glossary, neighbors, reach, related, graph_query, search, read])
 }
 
+/// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
+/// each surface zero new identifiers trips the steer. Named so the TDD tests and the loop agree on
+/// one number instead of a magic literal in two places.
+const UNPRODUCTIVE_STREAK_K: usize = 3;
+
 /// Drive a tool-calling chat to a final textual answer.
 ///
 /// `chat(messages)` returns the assistant `message` object (already extracted from
 /// `choices[0].message`). When it carries `tool_calls`, each is dispatched through `exec(name,
 /// args)` and the result fed back as a `role:"tool"` message, then the model is queried again —
 /// up to `max_rounds`. The first message without tool calls yields the answer.
+///
+/// Two independent stuck detectors sit on top of `exec`:
+/// - **Identical-repeat dedup**: the previous (tool, args) actually executed. When the model
+///   re-issues the SAME call, it isn't re-run (identical result) — `on_repeat` (the next-best-action)
+///   fires instead. This takes priority and doesn't touch the streak below (a dedup hit didn't
+///   execute, so it can't be "unproductive").
+/// - **Unproductive streak**: the model issues many DIFFERENT calls (varied tool/args — so they all
+///   really execute) that each surface no NEW identifier — a search-flood that never progresses.
+///   `exec` returns `(body, ids)`; `ids` are what a session-aware MCP server would track per call
+///   (search hit locations, a read's path, …). Any id not already in `seen` resets the streak;
+///   otherwise it grows. At `UNPRODUCTIVE_STREAK_K` the fed-back tool content becomes the steer
+///   (`glossa_tools::unproductive_steer`) instead of the (already-seen) body, and the counter resets
+///   so it fires once per streak, not on every call past the threshold.
 pub(crate) fn run_agent_loop<C, F, N>(
     mut chat: C,
     mut messages: Vec<Value>,
@@ -273,13 +292,16 @@ pub(crate) fn run_agent_loop<C, F, N>(
 ) -> anyhow::Result<String>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
-    F: FnMut(&str, &Value) -> String,
+    F: FnMut(&str, &Value) -> (String, Vec<String>),
     N: FnMut(&str, &Value) -> String,
 {
     // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
     // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
     // the next-best-action. Default callers pass `repeat_nudge`; the reader path passes a fan-out.
     let mut last_key: Option<String> = None;
+    // Novelty tracking for the unproductive-streak detector (see the doc comment above).
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unproductive: usize = 0;
     for _ in 0..max_rounds {
         let msg = chat(&messages)?;
         let calls: Vec<Value> = msg
@@ -302,9 +324,21 @@ where
             let result = if last_key.as_deref() == Some(key.as_str()) {
                 on_repeat(name, &args)
             } else {
-                let r = exec(name, &args);
+                let (body, ids) = exec(name, &args);
                 last_key = Some(key);
-                r
+                let has_new = ids.into_iter().fold(false, |acc, i| seen.insert(i) || acc);
+                if has_new {
+                    unproductive = 0;
+                    body
+                } else {
+                    unproductive += 1;
+                    if unproductive >= UNPRODUCTIVE_STREAK_K {
+                        unproductive = 0;
+                        crate::backend::glossa_tools::unproductive_steer(name)
+                    } else {
+                        body
+                    }
+                }
             };
             messages.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
         }
@@ -338,6 +372,12 @@ fn parse_tool_args(call: &Value) -> Value {
 
 /// Execute one glossa tool in-process against the corpus in `work`, logging it to the trace
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
+///
+/// Returns `(body, ids)` — `ids` are the identifiers this call surfaced (what a session-aware MCP
+/// server would track for novelty): `search`'s hit locations (from `glossa_tools::exec`'s second
+/// return value), and for `read`, the `path` argument (that call's second value is empty, so the
+/// requested path stands in as the surfaced id). `run_agent_loop` uses these to detect an
+/// unproductive streak — many varied calls that surface nothing new.
 fn execute_tool(
     name: &str,
     args: &Value,
@@ -346,8 +386,28 @@ fn execute_tool(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
-) -> String {
-    crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace).0
+) -> (String, Vec<String>) {
+    let (body, ids, _images) =
+        crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
+    let ids = if name == "read" {
+        // Mirror glossa_tools::exec's own raw_arguments fallback so a stringified args object
+        // still yields the path.
+        let parsed;
+        let a = if let Some(s) = args.as_str() {
+            parsed = serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}));
+            &parsed
+        } else {
+            args
+        };
+        a.get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.is_empty())
+            .map(|p| vec![p.to_string()])
+            .unwrap_or_default()
+    } else {
+        ids
+    };
+    (body, ids)
 }
 
 #[cfg(test)]
@@ -373,7 +433,7 @@ mod tests {
     #[test]
     fn loop_returns_direct_answer_when_no_tool_calls() {
         let chat = |_: &[Value]| Ok(json!({ "role": "assistant", "content": "ANSWER: Bob" }));
-        let exec = |_: &str, _: &Value| String::new();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
         let out = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
@@ -409,7 +469,10 @@ mod tests {
                 name.to_string(),
                 args["query"].as_str().unwrap_or("").to_string(),
             ));
-            "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string()
+            (
+                "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string(),
+                vec!["Meet_Corliss_Archer.md:p.1".to_string()],
+            )
         };
         let out =
             run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, nudge, 4).unwrap();
@@ -448,7 +511,7 @@ mod tests {
         };
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
-            "hit".to_string()
+            ("hit".to_string(), vec!["hit-id".to_string()])
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, 5).unwrap();
         assert_eq!(out, "looping");
@@ -469,9 +532,10 @@ mod tests {
                 "tool_calls": [{ "id": "c", "function": { "name": name, "arguments": "{\"name\":\"X\"}" } }]
             }))
         };
+        // Novelty tracking isn't under test here; empty ids keep it a no-op for the streak detector.
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
-            "hit".to_string()
+            ("hit".to_string(), Vec::new())
         };
         let _ = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
         assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
@@ -488,10 +552,92 @@ mod tests {
                 "tool_calls": [{ "id": "c", "function": { "name": "search", "arguments": "{\"query\":\"x\"}" } }]
             }))
         };
-        let exec = |_: &str, _: &Value| "hit".to_string();
+        let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
         let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
         assert_eq!(out, "giving up");
         assert_eq!(*calls.borrow(), 4); // 3 rounds + 1 final
+    }
+
+    #[test]
+    fn loop_unproductive_streak_feeds_steer_after_k_plus_one_calls() {
+        // K+1 tool calls with VARIED args (so none of them dedup — each really executes), but exec
+        // keeps surfacing the SAME already-seen id: an over-search spiral (many different probes,
+        // nothing new). By the (K+1)th call, the fed-back tool content must be the steer.
+        let round = RefCell::new(0usize);
+        let execs = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == UNPRODUCTIVE_STREAK_K + 2 {
+                // By now K+1 tool calls have executed; the most recent tool result must be the steer.
+                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
+                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
+                let lc = c.to_lowercase();
+                assert!(
+                    lc.contains("no new information") && lc.contains("change approach"),
+                    "round {} expected the unproductive-streak steer, got: {c:?}",
+                    *r
+                );
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let query = format!("query-{}", *r); // distinct args every round -> never dedups
+            Ok(json!({
+                "role": "assistant", "content": "searching",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": { "name": "search", "arguments": json!({"query": query}).to_string() }
+                }]
+            }))
+        };
+        let exec = |_: &str, _: &Value| {
+            *execs.borrow_mut() += 1;
+            // Always the same id, regardless of the (varied) query -> never novel after the first.
+            ("same old snippet".to_string(), vec!["doc.md:p.1".to_string()])
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
+        assert_eq!(out, "ANSWER: done");
+        assert_eq!(
+            *execs.borrow(),
+            UNPRODUCTIVE_STREAK_K + 1,
+            "each varied call must actually execute (not deduped)"
+        );
+    }
+
+    #[test]
+    fn loop_unproductive_streak_never_fires_when_calls_are_productive() {
+        // Every call surfaces a brand-new id, so the streak resets each time — the steer must never
+        // fire even past K calls.
+        let round = RefCell::new(0usize);
+        let rounds_to_run = UNPRODUCTIVE_STREAK_K + 4;
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if let Some(last_tool) = msgs.iter().rev().find(|m| m["role"] == "tool") {
+                let c = last_tool["content"].as_str().unwrap_or("");
+                assert!(
+                    !c.to_lowercase().contains("no new information"),
+                    "steer must not fire on productive calls, got: {c:?}"
+                );
+            }
+            if *r > rounds_to_run {
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            Ok(json!({
+                "role": "assistant", "content": "searching",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": { "name": "search", "arguments": json!({"query": format!("q{}", *r)}).to_string() }
+                }]
+            }))
+        };
+        let counter = RefCell::new(0usize);
+        let exec = |_: &str, _: &Value| {
+            let mut c = counter.borrow_mut();
+            *c += 1;
+            (format!("hit {}", *c), vec![format!("doc-{}.md", *c)]) // new id every call
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2).unwrap();
+        assert_eq!(out, "ANSWER: done");
     }
 }
 
