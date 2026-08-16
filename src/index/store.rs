@@ -2764,20 +2764,20 @@ mod search_tests {
         // Real filename is spaced (a PDF), but the corpus is full of underscore-named siblings,
         // so the model copies the path back with every space turned into an underscore.
         idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Руководство по настройке ПЛК_v_1.pdf"),
+            doc_path: PathBuf::from("Setup guide ACME PLC_v_1.pdf"),
             location: "p.1".into(),
             file_type: "pdf".into(),
             text: "x".into(),
         }])
         .unwrap();
         assert_eq!(
-            idx.canonical_document_path("Руководство_по_настройке_ПЛК_v_1.pdf")
+            idx.canonical_document_path("Setup_guide_ACME_PLC_v_1.pdf")
                 .as_deref(),
-            Some("Руководство по настройке ПЛК_v_1.pdf")
+            Some("Setup guide ACME PLC_v_1.pdf")
         );
         // The fold does not turn a genuinely different name into a false match.
         assert!(idx
-            .canonical_document_path("Совсем_другой_документ.pdf")
+            .canonical_document_path("Completely_different_document.pdf")
             .is_none());
     }
 

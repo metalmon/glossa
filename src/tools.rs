@@ -2724,9 +2724,9 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         // The real (spaced) PDF, plus underscore-named siblings that mislead the model into
         // regularizing the spaced name and — separately — mistyping one word's ending.
         for p in [
-            "Обновлённые руководства/Руководство по настройке и программированию АБАК ПЛК_v_1_12.pdf",
-            "v_3.0/1_1_naznachenie.htm",
-            "v_3.0/2_2_vneshnij_vid.htm",
+            "Updated manuals/Guide for setup and programming ACME PLC_v_1_12.pdf",
+            "v_3.0/1_1_overview.htm",
+            "v_3.0/2_2_appearance.htm",
         ] {
             i.write_chunks(&[Chunk {
                 doc_path: PathBuf::from(p),
@@ -2736,15 +2736,15 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             }])
             .unwrap();
         }
-        // Model swapped spaces for underscores AND mistyped программированию → программирования;
+        // Model swapped spaces for underscores AND mistyped programming → programing;
         // the literal `*base*` glob finds nothing, so the token-overlap fallback must still name
         // the real file (7 of 8 tokens overlap).
         let hint = document_path_hints(
             &i,
-            "Обновлённые руководства/Руководство_по_настройке_и_программирования_АБАК_ПЛК_v_1_12.pdf",
+            "Updated manuals/Guide_for_setup_and_programing_ACME_PLC_v_1_12.pdf",
         );
         assert!(
-            hint.contains("Руководство по настройке и программированию АБАК ПЛК_v_1_12.pdf"),
+            hint.contains("Guide for setup and programming ACME PLC_v_1_12.pdf"),
             "token-overlap hint should surface the real spaced file: {hint}"
         );
         // A basename that shares no real tokens with any indexed doc yields no suggestion.
