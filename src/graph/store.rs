@@ -1,11 +1,57 @@
 use crate::graph::ontology::Ontology;
 use crate::index::manifest::FileSig;
 use anyhow::Context;
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Tables/views a `graph_query` SELECT may read. `run_select`/`select_columns` install
+/// [`query_authorizer`] on the connection for the query, so SQLite denies any read of a table
+/// outside this set — at prepare time, for every table access regardless of where it hides in the
+/// statement (function args, window `OVER`, nested subqueries, CTE bodies). This is the
+/// engine-level backstop the query module's syntactic table-walk cannot fully match.
+const QUERY_TABLE_WHITELIST: &[&str] = &["nodes", "edges", "node_validity", "edges_labeled"];
+
+/// Deny any read of a non-whitelisted table; allow everything else. Writes and DDL are already
+/// blocked structurally upstream (only a single SELECT reaches execution), and the transient
+/// objects SQLite builds for sorting/grouping must stay allowed — so this gates exactly one thing:
+/// the table a `Read` touches.
+fn query_authorizer(ctx: AuthContext<'_>) -> Authorization {
+    match ctx.action {
+        AuthAction::Read { table_name, .. }
+            if !QUERY_TABLE_WHITELIST
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(table_name)) =>
+        {
+            Authorization::Deny
+        }
+        // Allow everything else. Write/DDL action codes only reach here inertly: both call sites
+        // execute the SQL as a subquery (`SELECT * FROM (…)`) or prepare-and-read-columns only, so
+        // SQLite rejects non-SELECT at prepare and no write ever runs. If a future call site
+        // executes unwrapped SQL, this arm must gate writes too.
+        _ => Authorization::Allow,
+    }
+}
+
+/// Installs [`query_authorizer`] on a connection and clears it on drop, so the read-only gate is
+/// scoped to one query call — the shared connection's other operations (writes, glossary) keep
+/// full access.
+struct QueryAuthzGuard<'c>(&'c Connection);
+impl<'c> QueryAuthzGuard<'c> {
+    fn install(c: &'c Connection) -> anyhow::Result<Self> {
+        c.authorizer(Some(query_authorizer))
+            .context("install query authorizer")?;
+        Ok(Self(c))
+    }
+}
+impl Drop for QueryAuthzGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Provenance {
@@ -387,6 +433,7 @@ impl GraphStore {
     /// deterministically by wrapping `sql` as a subquery, not by truncating the fetched result.
     pub fn run_select(&self, sql: &str, max_rows: usize) -> anyhow::Result<Vec<Vec<String>>> {
         let c = self.conn.lock().unwrap();
+        let _authz = QueryAuthzGuard::install(&c)?;
         let wrapped = format!("SELECT * FROM ({sql}) LIMIT {max_rows}");
         let mut stmt = c.prepare(&wrapped).context("prepare run_select")?;
         let col_count = stmt.column_count();
@@ -453,6 +500,7 @@ impl GraphStore {
     /// read-only before calling — this method does not gate.
     pub fn select_columns(&self, sql: &str) -> anyhow::Result<Vec<String>> {
         let c = self.conn.lock().unwrap();
+        let _authz = QueryAuthzGuard::install(&c)?;
         let stmt = c.prepare(sql).context("prepare select_columns")?;
         Ok(stmt.column_names().into_iter().map(String::from).collect())
     }
@@ -1641,6 +1689,57 @@ mod tests {
             g.select_columns("SELECT id, label FROM nodes").unwrap(),
             vec!["id", "label"]
         );
+    }
+
+    #[test]
+    fn run_select_authorizer_denies_non_whitelisted_table_reads() {
+        // Engine-level backstop for graph_query: SQLite authorizes every table read at prepare
+        // time, so a read of a non-whitelisted table is denied no matter where in the AST it
+        // hides — closing the whack-a-mole that a syntactic table-walk cannot.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&Node {
+            id: "f:a".into(),
+            node_type: "Fact".into(),
+            label: "a".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+
+        // Whitelisted reads work — including an ORDER BY that needs a transient sort, and the
+        // edges_labeled view (which internally reads nodes+edges) — no false denials.
+        assert!(g.run_select("SELECT id FROM nodes ORDER BY label", 5).is_ok());
+        assert!(g.select_columns("SELECT id FROM nodes").is_ok());
+        assert!(g.run_select("SELECT src_label FROM edges_labeled", 5).is_ok());
+
+        // A direct read of a non-whitelisted table is denied.
+        assert!(g.run_select("SELECT name FROM sqlite_master", 5).is_err());
+        // ...and so are the reads a syntactic table-walk misses: a subquery inside a window
+        // OVER clause, and a CTE that shadows a whitelisted name.
+        assert!(g
+            .run_select(
+                "SELECT id, row_number() OVER (PARTITION BY (SELECT sql FROM sqlite_master LIMIT 1)) FROM nodes",
+                5
+            )
+            .is_err());
+        assert!(g
+            .run_select(
+                "WITH nodes AS (SELECT name FROM sqlite_master) SELECT name FROM nodes",
+                5
+            )
+            .is_err());
+
+        // The authorizer is scoped to the query call: a normal write on the shared connection
+        // still works afterward (the hook was cleared).
+        g.put_edge(&Edge {
+            from: "f:a".into(),
+            to: "f:a".into(),
+            edge_type: "SELF".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        assert_eq!(g.edge_count().unwrap(), 1);
     }
 
     /// The singular delete must also drop the node's `node_meta` row — stale meta
