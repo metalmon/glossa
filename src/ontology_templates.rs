@@ -316,6 +316,56 @@ mod tests {
         assert_eq!(TEMPLATES.len(), 26, "expected 26 presets");
     }
 
+    /// Guard against a forgotten `role` annotation on a preset relation. `Ontology::parse`
+    /// can't tell "explicitly set to chaining" from "defaulted to chaining" (serde discards
+    /// that once parsed), so this checks the raw TOML text directly: every `[relations.*]`
+    /// block must contain a `role = "..."` line before the next `[...]` section header (or
+    /// EOF). Catches exactly the failure mode task-2 cares about — a relation block added or
+    /// left un-annotated during the 26-preset sweep.
+    #[test]
+    fn every_preset_relation_has_an_explicit_role() {
+        for name in names() {
+            let toml = raw(name).expect("name came from names()");
+            let mut in_relation: Option<&str> = None;
+            let mut saw_role = false;
+            for raw_line in toml.lines() {
+                let line = raw_line.trim();
+                if let Some(rest) = line.strip_prefix('[') {
+                    // Entering a new `[section]` header — close out the previous one first.
+                    if let Some(rel) = in_relation {
+                        assert!(
+                            saw_role,
+                            "{name}: relations.{rel} has no explicit `role = \"...\"` line"
+                        );
+                    }
+                    if let Some(rel) = rest.strip_prefix("relations.").and_then(|s| s.strip_suffix(']')) {
+                        in_relation = Some(rel);
+                        saw_role = false;
+                    } else {
+                        in_relation = None;
+                    }
+                    continue;
+                }
+                if in_relation.is_some() && line.starts_with("role") {
+                    let after = line["role".len()..].trim_start();
+                    if let Some(rest) = after.strip_prefix('=') {
+                        let v = rest.trim();
+                        if v.starts_with('"') {
+                            saw_role = true;
+                        }
+                    }
+                }
+            }
+            // EOF while still inside the last relation block of the file.
+            if let Some(rel) = in_relation {
+                assert!(
+                    saw_role,
+                    "{name}: relations.{rel} has no explicit `role = \"...\"` line"
+                );
+            }
+        }
+    }
+
     #[test]
     fn grounding_coverage_marks_extracted_exempts_synthesized() {
         use crate::graph::ontology::Ontology;

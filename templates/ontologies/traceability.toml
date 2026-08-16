@@ -19,9 +19,11 @@ requires_grounding = true
 [relations.SATISFIED_BY]
 from = ["Requirement"]
 to = ["Design"]
+role = "chaining"
 [relations.VERIFIED_BY]
 from = ["Design"]
 to = ["Test"]
+role = "chaining"
 
 [validation]
 strict = true

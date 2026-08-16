@@ -27,18 +27,23 @@ props = []
 [relations.PROCESSED_FOR]
 from = ["DataAsset"]
 to = ["Purpose"]
+role = "chaining"
 [relations.HAS_LEGAL_BASIS]
 from = ["DataAsset"]
 to = ["LegalBasis"]
+role = "chaining"
 [relations.PROCESSED_BY]
 from = ["DataAsset"]
 to = ["Processor"]
+role = "chaining"
 [relations.CONSTRAINED_BY]
 from = ["DataAsset"]
 to = ["Range", "Required"]
+role = "attribute"
 [relations.HAS_MAX]
 from = ["Range"]
 to = ["Literal"]
+role = "attribute"
 
 [validation]
 strict = true

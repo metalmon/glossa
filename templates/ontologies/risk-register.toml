@@ -19,9 +19,11 @@ requires_grounding = true
 [relations.CAUSED_BY]
 from = ["Risk"]
 to = ["Cause"]
+role = "chaining"
 [relations.MITIGATED_BY]
 from = ["Cause"]
 to = ["Control"]
+role = "chaining"
 
 [validation]
 strict = true

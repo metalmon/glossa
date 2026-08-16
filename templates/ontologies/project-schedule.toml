@@ -16,12 +16,15 @@ requires_grounding = true
 [relations.HAS_TASK]
 from = ["Milestone"]
 to = ["Task"]
+role = "chaining"
 [relations.DEPENDS_ON]
 from = ["Task"]
 to = ["Task"]
+role = "chaining"
 [relations.BLOCKS]
 from = ["Task"]
 to = ["Task"]
+role = "chaining"
 
 [validation]
 strict = true

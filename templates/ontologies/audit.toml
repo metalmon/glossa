@@ -16,6 +16,7 @@ props = []
 [relations.MITIGATES]
 from = ["Control"]
 to = ["Risk"]
+role = "chaining"
 
 [validation]
 strict = true

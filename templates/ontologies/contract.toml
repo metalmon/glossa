@@ -21,12 +21,15 @@ props = []
 [relations.IMPOSES]
 from = ["Clause"]
 to = ["Obligation"]
+role = "chaining"
 [relations.DEVIATES_FROM]
 from = ["Clause"]
 to = ["PlaybookPosition"]
+role = "chaining"
 [relations.SUPERSEDES]
 from = ["Obligation"]
 to = ["Obligation"]
+role = "chaining"
 
 [validation]
 strict = true

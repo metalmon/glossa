@@ -4,6 +4,21 @@ use std::collections::BTreeMap;
 const CORE_NODES: &[&str] = crate::graph::STRUCTURAL_NODES;
 const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
 
+/// What a relation does for the reasoning traverse, declared as ontology DATA (never hardcoded
+/// per edge_type in engine code — see [[graph-cross-doc-bridge]]): `Chaining` relations advance
+/// the reasoning chain (the traverse layer walks these); `Grounding` relations tie a reasoning
+/// node to its source evidence (e.g. `MENTIONS`) and are NOT walked as chain hops; `Attribute`
+/// relations are purely descriptive. Absent/unrecognized role reads as `Chaining` — fail-open,
+/// so a legacy ontology without roles still traverses exactly like before this field existed.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RelationRole {
+    #[default]
+    Chaining,
+    Grounding,
+    Attribute,
+}
+
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct RawRelation {
     #[serde(default)]
@@ -14,6 +29,10 @@ pub struct RawRelation {
     /// it — surfaced by `get_ontology` so the model builds the right shape.
     #[serde(default)]
     pub description: Option<String>,
+    /// See [`RelationRole`]. Absent (legacy ontology, or a relation the author hasn't
+    /// annotated yet) deserializes to `Chaining` via `#[derive(Default)]` on the enum.
+    #[serde(default)]
+    pub role: RelationRole,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -537,6 +556,22 @@ impl Ontology {
         }
     }
 
+    /// The declared [`RelationRole`] for `edge_type` — exact match first, then a
+    /// trimmed/case-insensitive fallback (the small model / a caller may pass a slightly
+    /// differently-cased relation name); an unknown relation defaults to `Chaining`
+    /// (fail-open: same behavior as if no ontology were loaded at all).
+    pub fn relation_role(&self, edge_type: &str) -> RelationRole {
+        if let Some(r) = self.relations.get(edge_type) {
+            return r.role;
+        }
+        let norm = edge_type.trim().to_lowercase();
+        self.relations
+            .iter()
+            .find(|(k, _)| k.trim().to_lowercase() == norm)
+            .map(|(_, r)| r.role)
+            .unwrap_or_default()
+    }
+
     /// Allowed (from-types, to-types) for a relation — empty vecs when the relation is
     /// unknown or leaves an end unconstrained. Used to disambiguate an edge endpoint when
     /// a Field and its Enum share a label (CONSTRAINED_BY `from` wants the Field, `to` the
@@ -824,6 +859,62 @@ requires_grounding = true
         assert!(ont.requires_grounding("Resolution"));
         assert!(!ont.requires_grounding("Symptom"));
         assert!(!ont.requires_grounding("Cause")); // undeclared → false, no panic
+    }
+
+    #[test]
+    fn relation_role_parses_and_defaults_to_chaining() {
+        let toml = r#"
+[entities.A]
+[entities.B]
+[relations.LEADS_TO]
+from = ["A"]
+to = ["B"]
+role = "chaining"
+[relations.MENTIONS]
+from = ["A"]
+to = ["B"]
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        assert!(matches!(o.relation_role("LEADS_TO"), RelationRole::Chaining));
+        assert!(matches!(o.relation_role("MENTIONS"), RelationRole::Chaining)); // absent -> default
+        assert!(matches!(o.relation_role("UNKNOWN_REL"), RelationRole::Chaining)); // unknown -> default
+    }
+
+    #[test]
+    fn relation_role_grounding_and_attribute_parse() {
+        let toml = r#"
+[entities.A]
+[entities.B]
+[relations.MENTIONS]
+from = ["A"]
+to = ["B"]
+role = "grounding"
+[relations.HAS_NAME]
+from = ["A"]
+to = ["B"]
+role = "attribute"
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        assert!(matches!(o.relation_role("MENTIONS"), RelationRole::Grounding));
+        assert!(matches!(o.relation_role("HAS_NAME"), RelationRole::Attribute));
+    }
+
+    #[test]
+    fn relation_role_normalized_lookup() {
+        // exact match works; a case/whitespace variant still resolves to the declared role
+        // (fuzzy/normalized lookup, mirroring how edge_type vocab is elsewhere case-exact but
+        // here we fall back to a trimmed/case-insensitive match before defaulting).
+        let toml = r#"
+[entities.A]
+[entities.B]
+[relations.LEADS_TO]
+from = ["A"]
+to = ["B"]
+role = "chaining"
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        assert!(matches!(o.relation_role("leads_to"), RelationRole::Chaining));
+        assert!(matches!(o.relation_role(" LEADS_TO "), RelationRole::Chaining));
     }
 
     #[test]

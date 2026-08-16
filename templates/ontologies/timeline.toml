@@ -13,12 +13,15 @@ requires_grounding = true
 [relations.BEFORE]
 from = ["Event"]
 to = ["Event"]
+role = "chaining"
 [relations.AFTER]
 from = ["Event"]
 to = ["Event"]
+role = "chaining"
 [relations.CAUSED]
 from = ["Event"]
 to = ["Event"]
+role = "chaining"
 
 [validation]
 strict = true

@@ -21,12 +21,15 @@ props = []
 [relations.SUPERSEDES]
 from = ["Standard", "Requirement"]
 to = ["Standard", "Requirement"]
+role = "chaining"
 [relations.DEFINED_IN]
 from = ["Requirement"]
 to = ["Standard"]
+role = "chaining"
 [relations.AFFECTS]
 from = ["Requirement"]
 to = ["Impacted"]
+role = "chaining"
 
 [validation]
 strict = true

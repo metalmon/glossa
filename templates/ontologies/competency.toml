@@ -19,12 +19,15 @@ props = []
 [relations.REQUIRES_SKILL]
 from = ["Role"]
 to = ["Skill"]
+role = "chaining"
 [relations.HAS_SKILL]
 from = ["Person"]
 to = ["Skill"]
+role = "chaining"
 [relations.PREREQUISITE_OF]
 from = ["Skill"]
 to = ["Skill"]
+role = "chaining"
 
 [validation]
 strict = true

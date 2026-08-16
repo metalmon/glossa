@@ -22,9 +22,11 @@ props = []
 [relations.CAUSED_BY]
 from = ["Symptom"]
 to = ["Cause"]
+role = "chaining"
 [relations.RESOLVED_BY]
 from = ["Cause", "Task"]
 to = ["Resolution"]
+role = "chaining"
 
 [validation]
 strict = true

@@ -19,12 +19,15 @@ props = []
 [relations.HAS_TOUCHPOINT]
 from = ["Stage"]
 to = ["Touchpoint"]
+role = "chaining"
 [relations.NEXT]
 from = ["Stage"]
 to = ["Stage"]
+role = "chaining"
 [relations.HAS_PAIN]
 from = ["Touchpoint"]
 to = ["PainPoint"]
+role = "chaining"
 
 [validation]
 strict = true

@@ -19,15 +19,19 @@ requires_grounding = true
 [relations.GRANTS]
 from = ["Role"]
 to = ["Permission"]
+role = "chaining"
 [relations.ASSIGNED]
 from = ["Grant"]
 to = ["Role"]
+role = "chaining"
 [relations.CONFLICTS_WITH]
 from = ["Permission"]
 to = ["Permission"]
+role = "chaining"
 [relations.CONSTRAINED_BY]
 from = ["Permission"]
 to = ["Forbidden"]
+role = "attribute"
 
 [validation]
 strict = true

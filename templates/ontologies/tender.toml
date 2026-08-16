@@ -16,6 +16,7 @@ requires_grounding = true
 [relations.ANSWERED_BY]
 from = ["TenderRequirement"]
 to = ["Response"]
+role = "chaining"
 
 [validation]
 strict = true

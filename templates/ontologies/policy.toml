@@ -19,9 +19,11 @@ props = []
 [relations.DEFINES]
 from = ["Policy"]
 to = ["Rule"]
+role = "chaining"
 [relations.HAS_EXCEPTION]
 from = ["Rule"]
 to = ["Exception"]
+role = "chaining"
 
 [validation]
 strict = true

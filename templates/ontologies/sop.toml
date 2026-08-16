@@ -16,9 +16,11 @@ requires_grounding = true
 [relations.HAS_STEP]
 from = ["Procedure"]
 to = ["Step"]
+role = "chaining"
 [relations.NEXT]
 from = ["Step"]
 to = ["Step"]
+role = "chaining"
 
 [validation]
 strict = true

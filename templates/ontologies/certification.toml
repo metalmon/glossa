@@ -21,9 +21,11 @@ requires_validity = true
 [relations.SUBJECT_TO]
 from = ["Product"]
 to = ["TechReg"]
+role = "chaining"
 [relations.REQUIRES_TEST]
 from = ["TechReg"]
 to = ["Test"]
+role = "chaining"
 
 [validation]
 strict = true

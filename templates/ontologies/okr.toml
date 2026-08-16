@@ -19,9 +19,11 @@ props = []
 [relations.MEASURED_BY]
 from = ["Objective"]
 to = ["KeyResult"]
+role = "chaining"
 [relations.ADVANCED_BY]
 from = ["KeyResult"]
 to = ["Initiative"]
+role = "chaining"
 
 [validation]
 strict = true

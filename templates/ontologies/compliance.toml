@@ -16,18 +16,23 @@ requires_grounding = true
 [relations.CONSTRAINS]
 from = ["NormativeRequirement"]
 to = ["Field"]
+role = "chaining"
 [relations.CONSTRAINED_BY]
 from = ["Field"]
 to = ["Range", "Regex", "Enum", "Required", "Forbidden"]
+role = "attribute"
 [relations.HAS_MIN]
 from = ["Range"]
 to = ["Literal"]
+role = "attribute"
 [relations.HAS_MAX]
 from = ["Range"]
 to = ["Literal"]
+role = "attribute"
 [relations.HAS_PATTERN]
 from = ["Regex"]
 to = ["Literal"]
+role = "attribute"
 
 [validation]
 strict = true

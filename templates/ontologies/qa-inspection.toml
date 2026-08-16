@@ -19,15 +19,19 @@ props = []
 [relations.MEASURES]
 from = ["Lot"]
 to = ["Parameter"]
+role = "chaining"
 [relations.CONSTRAINED_BY]
 from = ["Parameter"]
 to = ["Range", "Enum"]
+role = "attribute"
 [relations.HAS_MIN]
 from = ["Range"]
 to = ["Literal"]
+role = "attribute"
 [relations.HAS_MAX]
 from = ["Range"]
 to = ["Literal"]
+role = "attribute"
 
 [validation]
 strict = true

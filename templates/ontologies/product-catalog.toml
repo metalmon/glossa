@@ -19,15 +19,19 @@ props = []
 [relations.HAS_FEATURE]
 from = ["Product"]
 to = ["Feature"]
+role = "chaining"
 [relations.IN_PLAN]
 from = ["Feature"]
 to = ["Plan"]
+role = "chaining"
 [relations.REQUIRES]
 from = ["Feature"]
 to = ["Feature"]
+role = "chaining"
 [relations.REPLACES]
 from = ["Product"]
 to = ["Product"]
+role = "chaining"
 
 [validation]
 strict = true

@@ -19,12 +19,15 @@ props = []
 [relations.REPORTS_TO]
 from = ["Role"]
 to = ["Role"]
+role = "chaining"
 [relations.MEMBER_OF]
 from = ["Role"]
 to = ["Team"]
+role = "chaining"
 [relations.ACCOUNTABLE_FOR]
 from = ["Role"]
 to = ["Process"]
+role = "chaining"
 
 [validation]
 strict = true

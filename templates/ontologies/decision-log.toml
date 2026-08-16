@@ -19,12 +19,15 @@ props = []
 [relations.CHOOSES]
 from = ["Decision"]
 to = ["Option"]
+role = "chaining"
 [relations.CONSIDERED]
 from = ["Decision"]
 to = ["Option"]
+role = "chaining"
 [relations.DRIVEN_BY]
 from = ["Decision"]
 to = ["Criterion"]
+role = "chaining"
 
 [validation]
 strict = true

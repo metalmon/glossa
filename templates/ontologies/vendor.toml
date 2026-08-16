@@ -22,15 +22,19 @@ props = []
 [relations.PROVIDES]
 from = ["Vendor"]
 to = ["Service"]
+role = "chaining"
 [relations.GOVERNS]
 from = ["Contract"]
 to = ["Service"]
+role = "chaining"
 [relations.HAS_SLA]
 from = ["Contract"]
 to = ["Sla"]
+role = "chaining"
 [relations.SUBCONTRACTS]
 from = ["Vendor"]
 to = ["Vendor"]
+role = "chaining"
 
 [validation]
 strict = true

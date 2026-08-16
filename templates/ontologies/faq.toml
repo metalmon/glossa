@@ -16,12 +16,15 @@ requires_grounding = true
 [relations.ANSWERED_BY]
 from = ["Question"]
 to = ["Answer"]
+role = "chaining"
 [relations.RELATED_TO]
 from = ["Question"]
 to = ["Question"]
+role = "chaining"
 [relations.SUPERSEDES]
 from = ["Answer"]
 to = ["Answer"]
+role = "chaining"
 
 [validation]
 strict = true
