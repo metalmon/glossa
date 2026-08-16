@@ -42,14 +42,24 @@ const GRAPH_SYSTEM_PROMPT: &str =
      LEADS_TO facts it connects to, each with a `read` pointer — this is the pre-built path to the answer.\n\
      2. Follow that chain to the fact that matches what the question asks (a date, place, name, or \
      number). The chain already carries it — the answering fact is one of the connected statements.\n\
-     3. When the question wants a specific related entity, a ranking, or an extreme (which place, which \
-     year, the earliest/largest/first), run graph_query(sql) instead of inferring it from prose — read-only \
+     3. When the question asks for a specific entity reached along a relation — especially a multi-hop \
+     where the glossary chain doesn't directly connect the entity to the answer, because the link crosses \
+     into another document — call reach(<entity>, <the relation the question asks about>) to discover the \
+     target. It bridges across documents the graph doesn't directly connect. Answer at the level the \
+     question asks: the specific related entity it points at, not a broader parent — judge the level \
+     yourself from the assembled facts.\n\
+     4. When the question wants a ranking or an extreme (which place, which year, the earliest/largest/\
+     first) among several candidates, run graph_query(sql) instead of inferring it from prose — read-only \
      SQL over the graph (main view edges_labeled(src_label, edge_type, dst_label)). Match the source entity \
      and the relation, order or filter, take the target: it returns the exact related entity at the edge's \
      level. A fuzzy relation name (edge_type LIKE …) is fine; the engine resolves it to the graph's real ones.\n\
-     4. Open the answering fact with read(path, n) and answer from what the source says — the exact span \
+     5. Optionally, before committing to an answer found via reach, verify it: call \
+     reach(<entity>, <relation>, <candidate>) with the candidate as the target. A returned path grounds the \
+     candidate; no path means it was only co-mentioned or inferred from prose, not actually connected — \
+     reconsider.\n\
+     6. Open the answering fact with read(path, n) and answer from what the source says — the exact span \
      it gives. Answer at the level asked: the specific entity the question points at.\n\
-     5. If the chain doesn't reach the answer, glossary the next entity it names, or search(keywords), \
+     7. If the chain doesn't reach the answer, glossary the next entity it names, or search(keywords), \
      to find the missing fact — then read it and answer. Answer your best even if the corpus is quiet.\n\
      Reply with one line: `ANSWER: <shortest exact span>` — a name, place, date, or number, usually 1-4 words (or `yes` / `no`). Examples: `ANSWER: Chief of Protocol` · `ANSWER: 1972`.";
 
