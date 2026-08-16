@@ -1162,6 +1162,154 @@ pub fn path_between(
     prepend_note(note, body)
 }
 
+/// Default bridge budget when `bridge=true`: one cross-document hop covers almost all real
+/// multi-hops; a bigger budget compounds fuzzy-match error, so it is not exposed as a caller knob
+/// here — `bridge_budget >= 2` stays an explicit `traverse::reach` call, not the reader surface
+/// (design spec §7.5).
+const DEFAULT_REACH_BRIDGE_BUDGET: usize = 1;
+
+/// The cross-document reasoning primitive (design spec §6): one traversal, two directions.
+/// `to` omitted (all three `to_*` args empty) is **discovery/answering** — walk `relation` forward
+/// from `from`, crossing document boundaries on shared salient mentions, and return every node it
+/// reaches as a candidate answer; no answer is supplied by the caller. `to` given is
+/// **verification** — does a grounded path from `from` to that specific candidate exist? Same BFS
+/// engine (`crate::graph::traverse::reach`) both ways, `to` is simply optional.
+///
+/// `relation` fuzzy-matches an ontology edge type (`None` ⇒ all `chaining`-role relations,
+/// undirected). `bridge` toggles the cross-document bridge: `false` ⇒ bridge_budget 0 (graph-only,
+/// role-filtered, forward-first — no silent doc-crossing); `true` ⇒
+/// [`DEFAULT_REACH_BRIDGE_BUDGET`]. `max_depth` is clamped to `[1, 12]`, same as `path_between`.
+///
+/// Render (spec §6/§7.5 transparency MUST): every discovered/verified path is a hop chain — the
+/// `from` node's glossary-style handle, then one indented line per hop. An in-graph edge hop
+/// renders with an arrow (`--REL-->` / `<--REL--`, same convention as `path_between`); a
+/// cross-document **bridge hop** renders as `↝ bridged on "<term>" (conf 0.NN)` so the reader
+/// always sees WHERE and on what mention the reasoning crossed a document — never a silent jump.
+/// Discovery with nothing found, or verify with no grounded path, returns a plain-English message
+/// instead of an empty body.
+#[allow(clippy::too_many_arguments)]
+pub fn reach(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    ont: &crate::graph::ontology::Ontology,
+    from_node: Option<&str>,
+    from_path: Option<&str>,
+    from_n: Option<u64>,
+    relation: Option<&str>,
+    to_node: Option<&str>,
+    to_path: Option<&str>,
+    to_n: Option<u64>,
+    max_depth: usize,
+    bridge: bool,
+    trace: &TraceLog,
+) -> String {
+    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n) {
+        Ok(x) => x,
+        Err(m) => return format!("from: {m}"),
+    };
+    // `to` is optional: this is discovery mode only when the caller supplied no `to_*` ref at all.
+    // Only attempt to resolve `to` when one was actually given, so a discovery call never sees a
+    // spurious "to: ..." resolution error.
+    let to_requested =
+        to_node.is_some_and(|s| !s.trim().is_empty()) || (to_path.is_some() && to_n.is_some());
+    let (to, note_to) = if to_requested {
+        match resolve_node_ref(idx, g, to_node, to_path, to_n) {
+            Ok((id, note)) => (Some(id), note),
+            Err(m) => return format!("to: {m}"),
+        }
+    } else {
+        (None, None)
+    };
+    let notes: Vec<String> = [note_from, note_to].into_iter().flatten().collect();
+    let note = (!notes.is_empty()).then(|| notes.join("\n"));
+    let depth = max_depth.clamp(1, 12);
+    let budget = if bridge { DEFAULT_REACH_BRIDGE_BUDGET } else { 0 };
+
+    let body = match crate::graph::traverse::reach(g, ont, &from, relation, to.as_deref(), depth, budget)
+    {
+        Ok(res) => {
+            trace.log(
+                "reach",
+                json!({"from": from, "to": to, "relation": relation, "bridge": bridge}),
+                json!({"targets": res.targets.len(), "paths": res.paths.len()}),
+            );
+            render_reach_result(idx, g, &from, to.as_deref(), relation, depth, &res)
+        }
+        Err(e) => format!("reach error: {e}"),
+    };
+    prepend_note(note, body)
+}
+
+/// One hop-chain of a [`reach`] result: the anchor node's handle, then one indented line per hop —
+/// shared by discovery (one chain per discovered target) and verify (the single found path).
+fn render_reach_chain(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    hops: &[crate::graph::traverse::Hop],
+) -> String {
+    use crate::graph::traverse::HopVia;
+    let mut out = Vec::with_capacity(hops.len());
+    for (i, h) in hops.iter().enumerate() {
+        if i == 0 {
+            out.push(format!(
+                "{}{}",
+                endpoint_ref(idx, g, &h.node),
+                read_anchor(idx, g, &h.node)
+            ));
+            continue;
+        }
+        let arrow = match h.via.as_ref().expect("non-first reach hop has via") {
+            HopVia::Edge { edge_type, forward: true } => format!("--{edge_type}-->"),
+            HopVia::Edge { edge_type, forward: false } => format!("<--{edge_type}--"),
+            HopVia::Bridge { term, confidence } => {
+                format!("↝ bridged on \"{term}\" (conf {confidence:.2})")
+            }
+        };
+        out.push(format!(
+            "  {}  {}{}",
+            arrow,
+            endpoint_ref(idx, g, &h.node),
+            read_anchor(idx, g, &h.node)
+        ));
+    }
+    out.join("\n")
+}
+
+/// Render a [`crate::graph::traverse::ReachResult`]: verify-mode (`to = Some`) shows the single
+/// grounding path, or a "no grounded path" message when none closes; discovery mode (`to = None`)
+/// shows one hop chain per discovered target (blank-line separated), or a "no reachable targets"
+/// message when the walk finds nothing.
+fn render_reach_result(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    from: &str,
+    to: Option<&str>,
+    relation: Option<&str>,
+    depth: usize,
+    res: &crate::graph::traverse::ReachResult,
+) -> String {
+    match to {
+        Some(target) => match res.paths.first() {
+            Some(hops) => render_reach_chain(idx, g, hops),
+            None => format!("no grounded path from {from} to {target} within depth {depth}"),
+        },
+        None => {
+            if res.paths.is_empty() {
+                format!(
+                    "no reachable targets from {from} along {} within depth {depth}",
+                    relation.unwrap_or("any chaining relation")
+                )
+            } else {
+                res.paths
+                    .iter()
+                    .map(|hops| render_reach_chain(idx, g, hops))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            }
+        }
+    }
+}
+
 fn stats_example_line(
     g: &crate::graph::store::GraphStore,
     id: &str,
@@ -2487,6 +2635,155 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
         );
         assert!(clamped.contains("--REFERENCES-->"));
+    }
+
+    /// Add `n` distinct filler nodes so the corpus is large enough that a df=2 mention clears the
+    /// `reach` salience/IDF gate (mirrors `traverse::tests::fillers`).
+    fn reach_dnode(g: &GraphStore, id: &str, label: &str, doc: &str) {
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: "Entity".into(),
+            label: label.into(),
+            aliases: vec![],
+            prov: Provenance {
+                source_path: doc.into(),
+                range: None,
+                file_sig: None,
+                origin: "agent".into(),
+                confidence: 1.0,
+                created_at: 0,
+            },
+        })
+        .unwrap();
+    }
+    fn reach_fillers(g: &GraphStore, n: usize) {
+        for i in 0..n {
+            reach_dnode(g, &format!("rfiller{i}"), &format!("Fillerword{i}"), "filler.md");
+        }
+    }
+
+    #[test]
+    fn reach_tool_discovery_bridges_and_renders_target_handle_with_bridge_hop() {
+        // docA fact mentions salient term "Xanthium" and dead-ends in-doc (only a grounding edge);
+        // docB has a same-mention node with a chaining REL edge to the answer. `bridge=true` must
+        // discover it across docs; the render must show the bridge hop with its term + confidence
+        // AND the discovered target as a glossary-style handle. `bridge=false` must not cross.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::default();
+        reach_dnode(&g, "A_fact", "Xanthium", "docA.md");
+        reach_dnode(&g, "A_ent", "Local note", "docA.md");
+        g.put_edge(&edge("A_fact", "MENTIONS", "A_ent")).unwrap(); // grounding, not a chain hop
+        reach_dnode(&g, "B_T", "Xanthium", "docB.md");
+        reach_dnode(&g, "Target", "The Answer", "docB.md");
+        g.put_edge(&edge("B_T", "REL", "Target")).unwrap();
+        reach_fillers(&g, 25);
+
+        let out = reach(
+            &idx,
+            &g,
+            &ont,
+            Some("A_fact"),
+            None,
+            None,
+            Some("REL"),
+            None,
+            None,
+            None,
+            6,
+            true,
+            &TraceLog::disabled(),
+        );
+        assert!(out.contains("Target"), "expected the discovered target handle, got: {out}");
+        assert!(out.contains("[Entity]"), "expected a glossary-style handle, got: {out}");
+        assert!(
+            out.contains("↝ bridged on \"Xanthium\""),
+            "expected an explicit bridge hop naming its term, got: {out}"
+        );
+        assert!(out.contains("conf 0."), "expected a bridge confidence value, got: {out}");
+
+        let no_bridge = reach(
+            &idx,
+            &g,
+            &ont,
+            Some("A_fact"),
+            None,
+            None,
+            Some("REL"),
+            None,
+            None,
+            None,
+            6,
+            false,
+            &TraceLog::disabled(),
+        );
+        assert!(
+            !no_bridge.contains("Target"),
+            "bridge=false must not discover a cross-doc target, got: {no_bridge}"
+        );
+        assert!(
+            no_bridge.starts_with("no reachable targets"),
+            "expected a clear no-targets message, got: {no_bridge}"
+        );
+    }
+
+    #[test]
+    fn reach_tool_verify_mode_returns_path_or_no_grounded_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::default();
+        reach_dnode(&g, "A_fact", "Xanthium", "docA.md");
+        reach_dnode(&g, "B_T", "Xanthium", "docB.md");
+        reach_dnode(&g, "Target", "The Answer", "docB.md");
+        g.put_edge(&edge("B_T", "REL", "Target")).unwrap();
+        // Only co-mentioned via a different, unrelated term — never chaining-connected.
+        reach_dnode(&g, "Distractor", "Unrelated", "docC.md");
+        reach_fillers(&g, 25);
+
+        // A grounded candidate: reach discovers and returns the bridged path.
+        let hit = reach(
+            &idx,
+            &g,
+            &ont,
+            Some("A_fact"),
+            None,
+            None,
+            Some("REL"),
+            Some("Target"),
+            None,
+            None,
+            6,
+            true,
+            &TraceLog::disabled(),
+        );
+        assert!(hit.contains("Target"), "got: {hit}");
+        assert!(
+            hit.contains("↝ bridged on"),
+            "verify path should show the bridge hop, got: {hit}"
+        );
+
+        // A candidate with no chaining path to it — no grounded path, not a silent empty body.
+        let miss = reach(
+            &idx,
+            &g,
+            &ont,
+            Some("A_fact"),
+            None,
+            None,
+            Some("REL"),
+            Some("Distractor"),
+            None,
+            None,
+            6,
+            true,
+            &TraceLog::disabled(),
+        );
+        assert!(
+            miss.starts_with("no grounded path"),
+            "expected a clear no-grounded-path message, got: {miss}"
+        );
     }
 
     #[test]
