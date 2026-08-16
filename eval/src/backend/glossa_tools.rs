@@ -1,6 +1,29 @@
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
+use regex::Regex;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
+
+/// Stable node identifiers surfaced by a graph tool's rendered body, for the unproductive-streak
+/// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
+/// (glossary's main hits AND its chain hops, related, neighbors, reach, and graph_query's
+/// id-column handles) funnels a grounded node through the same one anchor —
+/// `tools::read_anchor`'s `— read <path>  #<ord> · <label>` — so scanning for that one literal
+/// covers all five tools uniformly, with no per-tool body parsing. It's also unambiguous: a
+/// glossary chain-hop line prints only `edge_type  [node_type]  label` (no bare node id at all,
+/// see `tools::chain_lines`), so a generic `<token>  [Type]` scan would misfire and treat the
+/// EDGE TYPE as if it were a stable node id — collapsing distinct endpoints reached via the same
+/// relation into one false "already seen". The read anchor has no such collision: "read " only
+/// ever precedes a path. The id is `path#ord` — the same shape a `read` call's own id would take.
+/// An ungrounded node (no MENTIONS edge, so no anchor at all) contributes nothing from that line;
+/// that's fine, the streak only needs SOME calls in a burst to register progress, not every line.
+fn extract_node_ids(body: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"—\s*read\s+(\S+)\s+#(\d+)").expect("valid regex"));
+    re.captures_iter(body)
+        .map(|c| format!("{}#{}", &c[1], &c[2]))
+        .collect()
+}
 
 /// Run a BM25 search (optionally scoped by path glob / file_type); model-facing numbered text + titles.
 ///
@@ -66,7 +89,11 @@ pub fn run_grep(
     )
 }
 
-/// Dispatch a tool by name. Returns (result string for the model, titles surfaced by a search, images from read).
+/// Dispatch a tool by name. Returns (result string for the model, ids surfaced for the
+/// unproductive-streak novelty tracker, images from read). The ids are search hit locations for
+/// `search`, and — for the graph tools (glossary/related/neighbors/reach/graph_query) —
+/// `path#ord` read-anchor ids scraped from the rendered body via [`extract_node_ids`]; `read`
+/// itself returns none here (its caller in `openai::execute_tool` uses the `path` arg instead).
 /// `root` is the corpus/notebook root, threaded through to `read` for notebook-file serving.
 pub fn exec(
     name: &str,
@@ -157,7 +184,8 @@ pub fn exec(
                 }
                 None => "(graph unavailable)".to_string(),
             };
-            (body, Vec::new(), Vec::new())
+            let ids = extract_node_ids(&body);
+            (body, ids, Vec::new())
         }
         "related" => {
             let node = args
@@ -178,7 +206,8 @@ pub fn exec(
                 }
                 None => "(graph unavailable)".to_string(),
             };
-            (body, Vec::new(), Vec::new())
+            let ids = extract_node_ids(&body);
+            (body, ids, Vec::new())
         }
         "neighbors" => {
             let node = args
@@ -214,7 +243,8 @@ pub fn exec(
                 ),
                 None => "(graph unavailable)".to_string(),
             };
-            (body, Vec::new(), Vec::new())
+            let ids = extract_node_ids(&body);
+            (body, ids, Vec::new())
         }
         "reach" => {
             let from = args
@@ -256,7 +286,8 @@ pub fn exec(
                 }
                 None => "(graph unavailable)".to_string(),
             };
-            (body, Vec::new(), Vec::new())
+            let ids = extract_node_ids(&body);
+            (body, ids, Vec::new())
         }
         "get_source_file" => {
             // Mirrors src/mcp.rs's `get_source_file` handler, minus the delivered file bytes:
@@ -288,7 +319,8 @@ pub fn exec(
                 Some(g) => glossa::tools::graph_query(idx, g, sql, trace),
                 None => "(graph unavailable)".to_string(),
             };
-            (body, Vec::new(), Vec::new())
+            let ids = extract_node_ids(&body);
+            (body, ids, Vec::new())
         }
         "resolve" => {
             // entity resolution — a Reader tool, so present in EVERY profile; both answer_hotpot

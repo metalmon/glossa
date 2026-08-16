@@ -374,10 +374,12 @@ fn parse_tool_args(call: &Value) -> Value {
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
 ///
 /// Returns `(body, ids)` — `ids` are the identifiers this call surfaced (what a session-aware MCP
-/// server would track for novelty): `search`'s hit locations (from `glossa_tools::exec`'s second
-/// return value), and for `read`, the `path` argument (that call's second value is empty, so the
-/// requested path stands in as the surfaced id). `run_agent_loop` uses these to detect an
-/// unproductive streak — many varied calls that surface nothing new.
+/// server would track for novelty), from `glossa_tools::exec`'s second return value: `search`'s hit
+/// locations, and the graph tools' (glossary/related/neighbors/reach/graph_query) `path#ord`
+/// read-anchor ids scraped from their rendered bodies. `read` itself surfaces no ids there, so it's
+/// special-cased here to the `path` argument instead. `run_agent_loop` uses these to detect an
+/// unproductive streak — many varied calls (including varied graph navigation) that surface
+/// nothing new — without falsely tripping on a reader that IS making real graph progress.
 fn execute_tool(
     name: &str,
     args: &Value,
@@ -637,6 +639,198 @@ mod tests {
             (format!("hit {}", *c), vec![format!("doc-{}.md", *c)]) // new id every call
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
+
+    // --- graph-tool id extraction: regression guard for the misfire the coordinator flagged -----
+    //
+    // The two mock-exec tests above prove the streak MECHANISM. These two prove the id SOURCE for
+    // the graph tools is correct: they drive `run_agent_loop` through the REAL `execute_tool` ->
+    // `glossa_tools::exec` -> `extract_node_ids` path (no mock exec), against a real indexed corpus
+    // + graph, so a genuine glossary/reach/neighbors-style reader can't be falsely steered mid
+    // navigation just because graph tools used to surface no ids at all.
+
+    use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
+    use glossa::index::store::DocIndex;
+
+    fn fixture_prov() -> Provenance {
+        Provenance {
+            source_path: "doc.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
+    }
+
+    /// Build a small real corpus + graph: an indexed markdown doc (so its Section nodes carry
+    /// working `read` anchors via the real `index_dir` path — the same machinery a real corpus
+    /// uses) plus a `hub` Entity node connected to `n` `fact_i` Entity nodes, each `MENTIONS`-
+    /// grounded to one of the doc's real sections. A `neighbors` call on `hub` therefore renders a
+    /// real `— read doc.md  #ord · …` anchor per fact, exactly like a genuine graph-reader's
+    /// glossary/reach/neighbors traversal would.
+    fn build_hub_fixture(n: usize) -> (tempfile::TempDir, DocIndex, GraphStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut md = String::from("# Root\nintro\n");
+        for i in 0..n {
+            md.push_str(&format!("\n## Sec{i}\nbody {i}\n"));
+        }
+        std::fs::write(dir.path().join("doc.md"), md).unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        let sec_ids: Vec<String> = g
+            .outgoing("doc.md")
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == "CONTAINS")
+            .map(|e| e.to)
+            .collect();
+        assert!(
+            sec_ids.len() >= n,
+            "expected >= {n} indexed sections, got {}: {sec_ids:?}",
+            sec_ids.len()
+        );
+
+        g.put_node(&Node {
+            id: "hub".into(),
+            node_type: "Entity".into(),
+            label: "hub".into(),
+            aliases: Vec::new(),
+            prov: fixture_prov(),
+        })
+        .unwrap();
+        for (i, sec_id) in sec_ids.iter().take(n).enumerate() {
+            let fact_id = format!("fact-{i}");
+            g.put_node(&Node {
+                id: fact_id.clone(),
+                node_type: "Entity".into(),
+                label: format!("Fact {i}"),
+                aliases: Vec::new(),
+                prov: fixture_prov(),
+            })
+            .unwrap();
+            // Ground the fact in a real section -> gives it a working `read` anchor.
+            g.put_edge(&Edge {
+                from: fact_id.clone(),
+                to: sec_id.clone(),
+                edge_type: glossa::graph::MENTIONS.to_string(),
+                prov: fixture_prov(),
+            })
+            .unwrap();
+            // A distinct edge type per fact, so `neighbors(hub, edge_types=[REL_i])` surfaces
+            // exactly ONE fact per call — mirrors a reader stepping to one node at a time.
+            g.put_edge(&Edge {
+                from: "hub".into(),
+                to: fact_id,
+                edge_type: format!("REL_{i}"),
+                prov: fixture_prov(),
+            })
+            .unwrap();
+        }
+        (dir, idx, g)
+    }
+
+    #[test]
+    fn loop_real_graph_navigation_to_distinct_nodes_never_falsely_steers() {
+        // K+1 REAL `neighbors` calls on the actual glossa_tools dispatch, each stepping to a
+        // DIFFERENT fact (distinct edge_types filter -> distinct MENTIONS-grounded target) — this is
+        // what a graph reader walking glossary -> neighbors -> neighbors -> ... looks like. Before
+        // the fix, graph tools surfaced zero ids, so this would misfire the steer at call K+1 even
+        // though every call reached genuinely new ground.
+        let n = UNPRODUCTIVE_STREAK_K + 1;
+        let (dir, idx, g) = build_hub_fixture(n);
+        let spec = glossa::tools::ChainSpec::default();
+        let trace = TraceLog::disabled();
+        let exec = |name: &str, args: &Value| {
+            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+        };
+
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if let Some(last_tool) = msgs.iter().rev().find(|m| m["role"] == "tool") {
+                let c = last_tool["content"].as_str().unwrap_or("");
+                assert!(
+                    !c.to_lowercase().contains("no new information"),
+                    "round {}: steer must not fire while reaching NEW graph nodes, got: {c:?}",
+                    *r
+                );
+            }
+            if *r > n {
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let i = *r - 1;
+            Ok(json!({
+                "role": "assistant", "content": "walking the graph",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": {
+                        "name": "neighbors",
+                        "arguments": json!({"node": "hub", "edge_types": [format!("REL_{i}")]}).to_string()
+                    }
+                }]
+            }))
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
+
+    #[test]
+    fn loop_real_graph_navigation_stuck_on_one_node_does_trigger_streak() {
+        // K+1 REAL `neighbors` calls with VARIED args (different direction/edge_types combinations,
+        // so none dedup) that all resolve to the SAME single grounded fact — a graph reader stuck
+        // re-probing one node from different angles. By the (K+1)th call the fed-back tool content
+        // must be the steer, proving re-surfaced (not just varied) graph-tool calls DO count as
+        // unproductive.
+        let (dir, idx, g) = build_hub_fixture(1);
+        let spec = glossa::tools::ChainSpec::default();
+        let trace = TraceLog::disabled();
+        let exec = |name: &str, args: &Value| {
+            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+        };
+
+        // Distinct argument objects that all resolve to the SAME single hub->fact-0 edge.
+        let variants = [
+            json!({"node": "hub"}),
+            json!({"node": "hub", "direction": "out"}),
+            json!({"node": "hub", "edge_types": ["REL_0"]}),
+            json!({"node": "hub", "edge_types": ["REL_0"], "direction": "out"}),
+        ];
+        assert!(
+            variants.len() >= UNPRODUCTIVE_STREAK_K + 1,
+            "need at least K+1 distinct variants"
+        );
+
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == UNPRODUCTIVE_STREAK_K + 2 {
+                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
+                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
+                let lc = c.to_lowercase();
+                assert!(
+                    lc.contains("no new information") && lc.contains("change approach"),
+                    "round {}: expected the unproductive-streak steer on a real re-surfaced graph \
+                     node, got: {c:?}",
+                    *r
+                );
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let args = variants[(*r - 1) % variants.len()].clone();
+            Ok(json!({
+                "role": "assistant", "content": "re-probing",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": { "name": "neighbors", "arguments": args.to_string() }
+                }]
+            }))
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 }
