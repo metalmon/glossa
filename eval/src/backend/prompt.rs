@@ -70,6 +70,11 @@ const GRAPH_SYSTEM_PROMPT: &str =
      READING PROSE — a name that merely appears near the entity in some text — is not settled until \
      reach confirms the connection: call reach(entity, relation, that answer); if no path comes back, \
      the two were only co-mentioned, not actually connected, so reconsider.\n\
+     When several searches keep returning more background but not the answer, that is the sign you are \
+     circling — widening the search finds context, not answers. The answer comes from following the \
+     exact relation the question names (reach / graph_query), not from more search. So either name that \
+     relation and traverse it, or — if the connection truly isn't there — commit your single best \
+     specific answer (a name, date, place, or number); never stall on a hedge like \"cannot be determined\".\n\
      \n\
      Reply with one line: `ANSWER: <shortest exact span>` — a name, place, date, or number, usually 1-4 words (or `yes` / `no`). Examples: `ANSWER: Chief of Protocol` · `ANSWER: 1972`.";
 
