@@ -2,6 +2,7 @@
 //! and score) and `kb-train` (build & learn: enrich the reasoning graph, optimize retrieval prompts).
 
 pub mod backend;
+pub mod bridge_probe;
 pub mod constraint_gepa_sop;
 pub mod constraint_score;
 pub mod constraint_synthetic;

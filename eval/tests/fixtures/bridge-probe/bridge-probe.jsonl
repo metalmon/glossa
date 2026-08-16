@@ -1,0 +1,12 @@
+{"id":"h1","question":"Which county is Nora Ashwell's childhood town part of?","answer":"Kestrel County","answer_aliases":[],"trap_type":"homonym","corpus_dir":"h1"}
+{"id":"h2","question":"Which borough is the town where Delia Cho was raised part of?","answer":"Renfrew Borough","answer_aliases":[],"trap_type":"homonym","corpus_dir":"h2"}
+{"id":"h3","question":"Which district administers the town where Farid Nasser began his career?","answer":"Thistledown District","answer_aliases":[],"trap_type":"homonym","corpus_dir":"h3"}
+{"id":"cw1","question":"Which guild is Ines Bellweather a member of?","answer":"Cartography Guild","answer_aliases":[],"trap_type":"common_word","corpus_dir":"cw1"}
+{"id":"cw2","question":"What organization does Tamsin Okafor serve as treasurer of?","answer":"Willowmere Historical Society","answer_aliases":[],"trap_type":"common_word","corpus_dir":"cw2"}
+{"id":"cw3","question":"Which company did Yusuf Adeyemi found?","answer":"Ridgeline Robotics","answer_aliases":[],"trap_type":"common_word","corpus_dir":"cw3"}
+{"id":"td1","question":"In which town did Elena Vasquez open her own studio?","answer":"Brindlewood","answer_aliases":[],"trap_type":"transitive_drift","corpus_dir":"td1"}
+{"id":"td2","question":"Which institute did Soren Blackwood join?","answer":"Lumen Institute","answer_aliases":[],"trap_type":"transitive_drift","corpus_dir":"td2"}
+{"id":"td3","question":"Which group does Priya Chandrasekaran lead?","answer":"Solstice Research Group","answer_aliases":[],"trap_type":"transitive_drift","corpus_dir":"td3"}
+{"id":"tp1","question":"Which county is Marcus Idowu's birthplace part of?","answer":"Vellmoor County","answer_aliases":[],"trap_type":"true_positive","corpus_dir":"tp1"}
+{"id":"tp2","question":"Which province is Ashferry, where Greta Lindholm relocated, located in?","answer":"Dunmore Province","answer_aliases":[],"trap_type":"true_positive","corpus_dir":"tp2"}
+{"id":"tp3","question":"Which municipality is Larkspur, where Tobias Reyner apprenticed, part of?","answer":"Windmere Municipality","answer_aliases":[],"trap_type":"true_positive","corpus_dir":"tp3"}
