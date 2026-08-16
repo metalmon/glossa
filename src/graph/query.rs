@@ -437,7 +437,7 @@ fn collect_from_function_arg_expr(a: &FunctionArgExpr, out: &mut Vec<String>) {
 
 /// A `col = 'lit'` string literal found in a `WHERE`/`ON` clause, classified by the column
 /// it's compared against so the resolver knows what kind of graph value to fuzzy-match it to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Literal {
     pub value: String,
     pub kind: LitKind,
@@ -494,7 +494,7 @@ pub(crate) enum Side {
 /// taking `&mut *inner`/`&mut *left`/`&mut *right` per step, identical to how
 /// [`locate_literals`] reads it via `walk_bool_tree`), then replace the operand named by
 /// `side` in the leaf `BinaryOp`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LitLoc {
     pub root: ExprRoot,
     pub path: Vec<Side>,
@@ -659,11 +659,9 @@ fn navigate_mut<'a>(root_expr: &'a mut Expr, path: &[Side]) -> Option<&'a mut Ex
 /// - [`LitKind::Relation`]: the operand is replaced verbatim with the resolved `edge_type`
 ///   string (e.g. `edge_type = 'LOCATED_IN'`).
 /// - [`LitKind::Entity`]: the leaf equality is *relaxed* to a `LIKE` (`Expr::Like`, SQLite
-///   renders it as the `LIKE` keyword) against `%<token>%`, so the label view still matches on
-///   substring. `token` is the resolved value unless it looks like a node id (contains `:`) —
-///   [`resolve_assignment`] always resolves entities to their original text today, but a future
-///   caller passing a real node id here should fall back to the literal's original text, since
-///   the label view is matched by text, not id.
+///   renders it as the `LIKE` keyword) against `%<resolved>%`, so the label view still matches on
+///   substring. [`resolve_assignment`] resolves entities to their original text today, so the
+///   pattern carries the literal's text; the relaxation from `=` to `LIKE` is the semantic change.
 ///
 /// Each literal is re-found in the clone via its recorded [`LitLoc`] (mirroring
 /// [`locate_literals`]'s addressing exactly) before being mutated; since every edit replaces an
@@ -695,7 +693,7 @@ pub(crate) fn rewrite(q: &Query, chosen: &[(Literal, String, f32)]) -> String {
                     Side::Left => (**right).clone(),
                     Side::Right => (**left).clone(),
                 };
-                let token = if resolved.contains(':') { lit.value.as_str() } else { resolved.as_str() };
+                let token = resolved.as_str();
                 *leaf = Expr::Like {
                     negated: false,
                     any: false,
@@ -1111,9 +1109,8 @@ fn substitution_note(lit: &Literal, resolved: &str, score: f32) -> Option<String
             }
         }
         LitKind::Entity => {
-            // Mirrors the token choice `rewrite` makes for the `LIKE` pattern.
-            let token = if resolved.contains(':') { lit.value.as_str() } else { resolved };
-            Some(format!("note: \"{}\" -> LIKE \"%{token}%\"", lit.value))
+            // Mirrors the `LIKE` pattern `rewrite` builds (the resolved text).
+            Some(format!("note: \"{}\" -> LIKE \"%{resolved}%\"", lit.value))
         }
     }
 }
@@ -1128,15 +1125,43 @@ fn render_rows(idx: &DocIndex, g: &GraphStore, cols: &[String], rows: &[Vec<Stri
     }
     rows.iter()
         .map(|row| {
-            row.iter()
+            // Render each cell: id-columns become glossary handles (which already embed the node
+            // label); everything else prints raw.
+            let cells: Vec<(bool, String)> = row
+                .iter()
                 .enumerate()
                 .map(|(i, val)| {
                     let is_id_col = cols
                         .get(i)
                         .map(|c| ID_COLUMNS.iter().any(|n| c.eq_ignore_ascii_case(n)))
                         .unwrap_or(false);
-                    if is_id_col && !val.is_empty() { render_handle(idx, g, val) } else { val.clone() }
+                    if is_id_col && !val.is_empty() {
+                        (true, render_handle(idx, g, val))
+                    } else {
+                        (false, val.clone())
+                    }
                 })
+                .collect();
+            // Drop a standalone label-column cell that a sibling handle on this row already spells
+            // out, so `SELECT id, label` doesn't print the label twice.
+            let handles: Vec<&str> =
+                cells.iter().filter(|(h, _)| *h).map(|(_, t)| t.as_str()).collect();
+            cells
+                .iter()
+                .enumerate()
+                .filter(|(i, (is_handle, text))| {
+                    if *is_handle || text.is_empty() {
+                        return true;
+                    }
+                    let is_label_col = cols.get(*i).is_some_and(|c| {
+                        matches!(
+                            c.to_ascii_lowercase().as_str(),
+                            "label" | "src_label" | "dst_label"
+                        )
+                    });
+                    !(is_label_col && handles.iter().any(|h| h.contains(text.as_str())))
+                })
+                .map(|(_, (_, text))| text.clone())
                 .collect::<Vec<_>>()
                 .join("  ")
         })
@@ -1296,6 +1321,27 @@ mod tests {
     }
 
     #[test]
+    fn locate_finds_a_literal_in_a_join_on_clause() {
+        // The equality lives in a JOIN ... ON, not WHERE — it must still be located, addressed
+        // via ExprRoot::JoinOn (from[0].joins[0]) so `rewrite` can re-find it in the clone.
+        let q = parse_readonly_select(
+            "SELECT n.label FROM nodes n JOIN edges_labeled e ON e.edge_type = 'located in'",
+        )
+        .unwrap();
+        let lits = locate_literals(&q);
+        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        assert_eq!(rel.value, "located in");
+        assert_eq!(
+            rel.loc,
+            LitLoc {
+                root: ExprRoot::JoinOn { table_idx: 0, join_idx: 0 },
+                path: vec![],
+                side: Side::Right,
+            },
+        );
+    }
+
+    #[test]
     fn relation_candidates_map_fuzzy_to_real_vocab() {
         let vocab = vec!["LEADS_TO".to_string(), "LOCATED_IN".to_string(), "CREATED_BY".to_string()];
         let top = relation_candidates("located in", &vocab, 2);
@@ -1432,6 +1478,24 @@ mod tests {
         assert!(
             crate::graph::query::run(&g, &idx, "   ").contains("nodes("),
             "empty -> schema"
+        );
+    }
+
+    #[test]
+    fn render_does_not_repeat_the_label_when_selecting_id_and_label() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# H\nx\n").unwrap();
+        crate::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:k", "Kepler orbit law")).unwrap();
+        // `id` renders as a glossary handle that already spells out the label; the standalone
+        // `label` column must not print it a second time on the same line.
+        let out = crate::graph::query::run(&g, &idx, "SELECT id, label FROM nodes");
+        assert_eq!(
+            out.matches("Kepler orbit law").count(),
+            1,
+            "label shown once, not duplicated: {out}"
         );
     }
 }
