@@ -564,12 +564,28 @@ impl Ontology {
         if let Some(r) = self.relations.get(edge_type) {
             return r.role;
         }
+        // Built-in structural edges (MENTIONS, CONTAINS, CO_OCCURS, NEXT, PREV) are never in the
+        // declared `relations` map — the 26 presets declare NO grounding relations. Without this
+        // they'd fall through to the Chaining default, and the cross-doc bridge in `traverse::reach`
+        // would walk `MENTIONS` as a chain hop and flood over grounding edges. Treat any undeclared
+        // CORE_EDGE as Grounding so the traverse layer skips it as a reasoning hop. An explicit
+        // declaration (checked above) still wins. See [[graph-cross-doc-bridge]].
+        if CORE_EDGES.contains(&edge_type) {
+            return RelationRole::Grounding;
+        }
         let norm = edge_type.trim().to_lowercase();
-        self.relations
+        if let Some(role) = self
+            .relations
             .iter()
             .find(|(k, _)| k.trim().to_lowercase() == norm)
             .map(|(_, r)| r.role)
-            .unwrap_or_default()
+        {
+            return role;
+        }
+        if CORE_EDGES.iter().any(|c| c.to_lowercase() == norm) {
+            return RelationRole::Grounding;
+        }
+        RelationRole::default()
     }
 
     /// Allowed (from-types, to-types) for a relation — empty vecs when the relation is
@@ -915,6 +931,32 @@ role = "chaining"
         let o = Ontology::parse(toml).unwrap();
         assert!(matches!(o.relation_role("leads_to"), RelationRole::Chaining));
         assert!(matches!(o.relation_role(" LEADS_TO "), RelationRole::Chaining));
+    }
+
+    #[test]
+    fn relation_role_undeclared_core_edges_are_grounding() {
+        // The 26 presets declare NO grounding relations; grounding is the built-in CORE_EDGES
+        // (MENTIONS, …). An undeclared CORE_EDGE must read as Grounding so `traverse::reach` never
+        // walks it as a reasoning chain hop (bridge-flood guard). See [[graph-cross-doc-bridge]].
+        let toml = r#"
+[entities.A]
+[entities.B]
+[relations.LEADS_TO]
+from = ["A"]
+to = ["B"]
+role = "chaining"
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        for core in ["MENTIONS", "CONTAINS", "CO_OCCURS", "NEXT", "PREV"] {
+            assert!(
+                matches!(o.relation_role(core), RelationRole::Grounding),
+                "undeclared core edge {core} must be Grounding"
+            );
+        }
+        // Normalized (case/whitespace) variant of a core edge also reads Grounding.
+        assert!(matches!(o.relation_role(" mentions "), RelationRole::Grounding));
+        // A real declared chaining relation is unaffected.
+        assert!(matches!(o.relation_role("LEADS_TO"), RelationRole::Chaining));
     }
 
     #[test]
