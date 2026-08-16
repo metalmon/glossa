@@ -89,7 +89,7 @@ fn tool_kind(name: &str) -> ToolKind {
         "index" | "reindex" | "purge" => ToolKind::CorpusMutate,
         // constraint_solve reads the graph: an identical call MUST re-run after any
         // graph mutation, else the model sees a stale verdict and fights the "cache".
-        "glossary" | "related" | "neighbors" | "path" | "resolve" | "graph_stats"
+        "glossary" | "related" | "neighbors" | "reach" | "resolve" | "graph_stats"
         | "constraint_solve" => ToolKind::GraphRead,
         _ => ToolKind::Corpus,
     }

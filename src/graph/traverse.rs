@@ -274,38 +274,6 @@ pub fn neighbors(
     Ok(out)
 }
 
-pub fn path(
-    g: &GraphStore,
-    from: &str,
-    to: &str,
-    max_depth: usize,
-) -> anyhow::Result<Option<Vec<String>>> {
-    if from == to {
-        return Ok(Some(vec![from.to_string()]));
-    }
-    let mut visited: HashSet<String> = HashSet::from([from.to_string()]);
-    let mut q: VecDeque<Vec<String>> = VecDeque::from([vec![from.to_string()]]);
-    while let Some(p) = q.pop_front() {
-        if p.len() > max_depth {
-            continue;
-        }
-        let last = p.last().unwrap().clone();
-        for e in g.outgoing(&last)? {
-            if e.to == to {
-                let mut found = p.clone();
-                found.push(e.to);
-                return Ok(Some(found));
-            }
-            if visited.insert(e.to.clone()) {
-                let mut np = p.clone();
-                np.push(e.to);
-                q.push_back(np);
-            }
-        }
-    }
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,22 +332,6 @@ mod tests {
 
         let only_rel = neighbors(&g, "a", Some(&["REL".to_string()]), 1).unwrap();
         assert_eq!(only_rel, vec!["b".to_string()]);
-    }
-
-    #[test]
-    fn path_finds_chain() {
-        let dir = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(dir.path()).unwrap();
-        for id in ["a", "b", "c"] {
-            node(&g, id);
-        }
-        edge(&g, "a", "b", "REL");
-        edge(&g, "b", "c", "REL");
-        assert_eq!(
-            path(&g, "a", "c", 5).unwrap(),
-            Some(vec!["a".into(), "b".into(), "c".into()])
-        );
-        assert_eq!(path(&g, "a", "z", 5).unwrap(), None);
     }
 
     #[test]

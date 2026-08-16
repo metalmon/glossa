@@ -548,7 +548,7 @@ fn make_exec(
         let ont = Ontology::load_or_default(&agent_g_dir);
         match name {
             "get_task" => (exec_get_task(&src_doc), vec![], vec![]),
-            "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors" | "path"
+            "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors" | "reach"
             | "resolve" | "get_source_file" => kb_eval::backend::glossa_tools::exec(
                 name,
                 args,
@@ -2395,7 +2395,7 @@ fn main() -> Result<()> {
             match name {
                 "get_task" => (exec_get_task(&src_doc_exec), vec![], vec![]),
                 "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors"
-                | "path" | "resolve" | "get_source_file" => kb_eval::backend::glossa_tools::exec(
+                | "reach" | "resolve" | "get_source_file" => kb_eval::backend::glossa_tools::exec(
                     name,
                     args,
                     &agent_g_dir_clone,

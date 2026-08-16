@@ -260,17 +260,6 @@ pub fn render_node(n: &Node, edges: &[Edge]) -> String {
     out
 }
 
-/// Human-readable rendering of a path query result.
-pub fn render_path(found: Option<&Vec<String>>, from: &str, to: &str, max_depth: usize) -> String {
-    match found {
-        Some(p) => {
-            let hops = p.len().saturating_sub(1);
-            format!("path ({hops} hops): {}", p.join(" → "))
-        }
-        None => format!("no path from {from} to {to} within depth {max_depth}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,19 +309,6 @@ mod tests {
             prov: prov(),
         };
         assert!(render_node(&n, &[]).contains("edges: none"));
-    }
-
-    #[test]
-    fn render_path_found_and_missing() {
-        let p = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(
-            render_path(Some(&p), "a", "c", 6),
-            "path (2 hops): a → b → c"
-        );
-        assert_eq!(
-            render_path(None, "a", "z", 6),
-            "no path from a to z within depth 6"
-        );
     }
 
     #[test]
