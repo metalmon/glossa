@@ -685,7 +685,19 @@ fn chain_lines(
     at: Option<&str>,
     stale: Option<&StaleChecker>,
 ) {
+    // Bound the walk: without a cap, a densely-connected reasoning graph (many facts sharing
+    // entities) lets a single glossary call render its whole connected component — hundreds of KB
+    // that overflow the reader's context. A depth cap plus a total-line budget keep the chain
+    // useful and small on any graph; sparse graphs (short chains) are unaffected.
+    const MAX_CHAIN_DEPTH: usize = 5;
+    const MAX_CHAIN_LINES: usize = 12;
+    if depth >= MAX_CHAIN_DEPTH || out.len() >= MAX_CHAIN_LINES {
+        return;
+    }
     for e in g.outgoing(id).unwrap_or_default() {
+        if out.len() >= MAX_CHAIN_LINES {
+            return;
+        }
         if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
             continue;
         }
@@ -747,12 +759,22 @@ pub fn glossary(
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
-            let lines: Vec<String> = ids
+            // A very common entity can be an alias on many facts; rendering each fact's full spine
+            // chain floods the reader's context (a hub entity ballooned to hundreds of lines). Cap
+            // the number of entry facts we expand — `resolve` returns them best-first, so the head
+            // is the most relevant — and note the remainder so the reader knows to narrow the query.
+            const GLOSSARY_MAX_ENTRIES: usize = 6;
+            let visible: Vec<&String> = ids
                 .iter()
                 .filter(|id| {
                     at.as_deref()
                         .is_none_or(|a| g.visible_at(id, a).unwrap_or(true))
                 })
+                .collect();
+            let truncated = visible.len().saturating_sub(GLOSSARY_MAX_ENTRIES);
+            let mut lines: Vec<String> = visible
+                .into_iter()
+                .take(GLOSSARY_MAX_ENTRIES)
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
@@ -857,6 +879,11 @@ pub fn glossary(
             if lines.is_empty() {
                 "(no matches)".to_string()
             } else {
+                if truncated > 0 {
+                    lines.push(format!(
+                        "… {truncated} more fact(s) name this entity — narrow the query or use reach/graph_query to pick the one you need."
+                    ));
+                }
                 lines.join("\n")
             }
         }

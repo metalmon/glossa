@@ -157,6 +157,16 @@ fn community_factor(src: Option<i64>, cand: Option<i64>) -> f32 {
 ///
 /// - `to = None`  → **discovery:** collect nodes reached by forward-following `relation` as answers.
 /// - `to = Some`  → **verify:** early-exit with the first path that reaches `to`.
+/// Global work budget for a single `reach`. Even on a pathologically dense graph (an
+/// over-connected LEADS_TO where nearly every node shares a bridgeable term), one reach must do
+/// bounded work: an uncapped traversal did O(nodes × shared-candidates) index queries and appeared
+/// to hang (minutes of low-CPU SQLite churn). These caps sit far above any thin reasoning-skeleton
+/// traversal — a real multi-hop answer is a few nodes and a bridge or two away — so normal results
+/// are unchanged; they only bound the fan-out on a dense graph, where an unbounded reach was
+/// useless anyway.
+pub(crate) const REACH_MAX_VISITED: usize = 512;
+const REACH_MAX_BRIDGE_RESOLVES: usize = 48;
+
 pub fn reach(
     g: &GraphStore,
     ont: &Ontology,
@@ -186,8 +196,15 @@ pub fn reach(
     let mut paths: Vec<Vec<Hop>> = Vec::new();
     let mut targets: Vec<String> = Vec::new();
     let mut targets_seen: HashSet<String> = HashSet::new();
+    let mut bridge_resolves: usize = 0;
 
     while let Some(item) = q.pop_front() {
+        // Global work budget: stop admitting more of a pathologically dense graph. Whatever has
+        // been found so far is returned; for a verify (`to = Some`) this conservatively reports
+        // "no path within budget" rather than churning the whole component.
+        if visited.len() >= REACH_MAX_VISITED {
+            break;
+        }
         // path.len()-1 == edges walked so far.
         if item.path.len() > max_depth {
             continue;
@@ -224,8 +241,10 @@ pub fn reach(
             }
         }
 
-        // Cross-document bridge — only at an in-graph dead end and within the per-path budget.
-        if dead_end && item.bridges < bridge_budget {
+        // Cross-document bridge — only at an in-graph dead end, within the per-path budget, and
+        // within the global bridge-resolve budget (each resolve is a corpus-wide index query; on a
+        // dense graph an unbounded count of them is what made reach appear to hang).
+        if dead_end && item.bridges < bridge_budget && bridge_resolves < REACH_MAX_BRIDGE_RESOLVES {
             if let Some(node) = g.get_node(&last)? {
                 let term = node.label.clone();
                 let norm_term = normalize_label(&term);
@@ -237,6 +256,9 @@ pub fn reach(
                     && bridged_terms.insert(norm_term.clone())
                     && g.term_is_salient(&term)?
                 {
+                    // Count the expensive resolve against the global budget (the salience gate has
+                    // passed, so the corpus-wide resolve + per-candidate fan-out is about to run).
+                    bridge_resolves += 1;
                     // Resolve the mention → same-mention nodes in OTHER documents only.
                     let mut others: Vec<(String, bool, Option<i64>)> = Vec::new();
                     for cand in g.resolve(&term)? {
@@ -424,6 +446,36 @@ mod tests {
     // ---- reach() tests ------------------------------------------------------------------------
 
     use crate::graph::ontology::Ontology;
+
+    #[test]
+    fn reach_discovery_is_bounded_by_global_visited_budget() {
+        // A relation-chain longer than the global budget. Uncapped, discovery returns every node
+        // on the chain; the budget must bound total work (and thus the target count) so a
+        // pathologically dense/long graph can't make one reach churn the whole component — the
+        // real-world stall was an over-connected LEADS_TO where reach did O(component) index work.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let n = REACH_MAX_VISITED + 200;
+        for i in 0..n {
+            node(&g, &format!("n{i}"));
+        }
+        for i in 0..n - 1 {
+            edge(&g, &format!("n{i}"), &format!("n{}", i + 1), "REL");
+        }
+        let ont = Ontology::default();
+        // max_depth far exceeds the chain length, so the VISITED budget — not depth — is the limit.
+        let res = reach(&g, &ont, "n0", Some("REL"), None, n + 10, 0).unwrap();
+        assert!(
+            res.targets.len() <= REACH_MAX_VISITED,
+            "discovery targets {} must be bounded by the visited budget {REACH_MAX_VISITED}",
+            res.targets.len()
+        );
+        assert!(
+            res.targets.len() < n - 1,
+            "the budget must actually bite on an over-long chain (got all {} targets)",
+            res.targets.len()
+        );
+    }
 
     /// A node with an explicit label and source document (the doc identity the bridge crosses).
     fn dnode(g: &GraphStore, id: &str, label: &str, doc: &str) {
