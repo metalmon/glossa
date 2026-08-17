@@ -140,21 +140,21 @@ pub fn compose(
         for t in tokens(anc) {
             anchor_toks.insert(t);
         }
-        let na = normalize(anc);
-        let mut seeds: HashSet<String> = HashSet::new();
-        for (alias, fs) in &idx.alias_facts {
-            if (alias.contains(&na) || na.contains(alias.as_str()))
-                && (alias.len() as i64 - na.len() as i64).abs() < 12
-            {
-                for f in fs {
-                    seeds.insert(f.clone());
-                }
-            }
-        }
+        // Seed via the graph's own resolve (BM25/IDF over labels+aliases) — like the kb-test
+        // symptom lookup, it handles a rich phrase by weighting the DISCRIMINATIVE tokens, so a
+        // topic like "<entity> <what you want>" still lands on the entity's facts, not on generic
+        // high-frequency words. Fall back to a tolerant alias-substring match only if resolve is dry.
+        let mut seeds: HashSet<String> =
+            g.resolve(anc)?.into_iter().filter(|id| idx.fact_label.contains_key(id)).collect();
         if seeds.is_empty() {
-            for id in g.resolve(anc)? {
-                if idx.fact_label.contains_key(&id) {
-                    seeds.insert(id);
+            let na = normalize(anc);
+            for (alias, fs) in &idx.alias_facts {
+                if (alias.contains(&na) || na.contains(alias.as_str()))
+                    && (alias.len() as i64 - na.len() as i64).abs() < 12
+                {
+                    for f in fs {
+                        seeds.insert(f.clone());
+                    }
                 }
             }
         }

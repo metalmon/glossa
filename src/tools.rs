@@ -729,10 +729,27 @@ fn chain_lines(
 /// `Some`), flags any resolved node (or chain hop) whose source has drifted since grounding with
 /// an inline `⚠ stale` marker — advisory only, never hides the node.
 #[allow(clippy::too_many_arguments)]
+/// Back-compat wrapper: `glossary` without a ranking query. Composed candidates fall back to
+/// ranking by the entity name.
 pub fn glossary(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     name: &str,
+    spec: &ChainSpec,
+    trace: &TraceLog,
+    as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
+) -> String {
+    glossary_with_query(idx, g, name, None, spec, trace, as_of, stale)
+}
+
+/// Look an entity up. `query` (when the caller has it — e.g. the full question) ranks the composed
+/// neighbourhood by the question's own terms, not just the entity name; `None` ranks by the name.
+pub fn glossary_with_query(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    name: &str,
+    query: Option<&str>,
     spec: &ChainSpec,
     trace: &TraceLog,
     as_of: Option<&str>,
@@ -885,9 +902,16 @@ pub fn glossary(
                     // Seed from the looked-up NAME (compose's own tolerant alias match), so this
                     // works whether the name resolved to a Fact or short-circuited to a Section
                     // title. The name doubles as the (weak) query for IDF ordering.
-                    if let Ok(cands) =
-                        crate::graph::compose::compose(g, &aidx, &[name], name, 20, 8)
-                    {
+                    // Rank the composed neighbourhood by the QUESTION when we have it (its rare
+                    // relation terms float the answer fact up); fall back to the entity name.
+                    if let Ok(cands) = crate::graph::compose::compose(
+                        g,
+                        &aidx,
+                        &[name],
+                        query.unwrap_or(name),
+                        20,
+                        8,
+                    ) {
                         let shown: std::collections::HashSet<&str> =
                             ids.iter().map(|s| s.as_str()).collect();
                         let extra: Vec<String> = cands

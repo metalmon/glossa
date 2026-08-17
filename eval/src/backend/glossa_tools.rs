@@ -191,14 +191,23 @@ pub fn exec(
         }
         "glossary" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // Optional: the full question, so the composed neighbourhood ranks by its terms.
+            let query = args.get("query").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
             // Loose like the MCP surface: a JSON string or a bare number both work.
             let as_of: Option<String> = args.get("as_of").and_then(|v| {
                 glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
             });
             let body = match graph {
-                Some(g) => {
-                    glossa::tools::glossary(idx, g, name, spec, trace, as_of.as_deref(), None)
-                }
+                Some(g) => glossa::tools::glossary_with_query(
+                    idx,
+                    g,
+                    name,
+                    query,
+                    spec,
+                    trace,
+                    as_of.as_deref(),
+                    None,
+                ),
                 None => "(graph unavailable)".to_string(),
             };
             let ids = extract_node_ids(&body);

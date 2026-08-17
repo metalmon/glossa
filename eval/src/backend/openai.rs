@@ -197,7 +197,10 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             "description": "Look a named entity up in the pre-built reasoning graph: returns its grounded node plus its typed relations (part-of, created-by, family-of, located-in, member-of, …), each anchored to a source chunk. One call surfaces the chain that would otherwise take several searches.",
             "parameters": {
                 "type": "object",
-                "properties": { "name": { "type": "string", "description": "the term or entity to look up" } },
+                "properties": {
+                    "name": { "type": "string", "description": "the term or entity to look up" },
+                    "query": { "type": "string", "description": "the full question you are trying to answer — this ranks the composed facts by what you actually need, so pass it whenever you have one" }
+                },
                 "required": ["name"]
             }
         }
