@@ -587,18 +587,11 @@ fn meta_suffix(
     id: &str,
     stale: Option<&StaleChecker>,
 ) -> String {
+    // community / pagerank / degree are SIMILAR-derived (generalize) — they belong to the `related`
+    // cross-case view, not the reasoning surface. Dropped here so glossary/related edge lines stay
+    // a thin grounded chain (they also bloated the reader's context). Staleness stays: it is a
+    // grounding-integrity signal, not a similarity metric.
     let mut parts = Vec::new();
-    if let Ok(Some(m)) = g.node_meta(id) {
-        if let Some(c) = m.community {
-            parts.push(format!("comm {c}"));
-        }
-        if let Some(pr) = m.pagerank {
-            parts.push(format!("pr {pr:.3}"));
-        }
-        if let Some(d) = m.degree {
-            parts.push(format!("deg {d}"));
-        }
-    }
     if let Some(sc) = stale {
         if let Ok(Some(node)) = g.get_node(id) {
             if sc.is_stale(&node) {
@@ -3272,31 +3265,22 @@ strict = true
     }
 
     #[test]
-    fn glossary_surfaces_community_centrality_after_generalize() {
+    fn glossary_omits_similar_derived_meta_even_after_generalize() {
+        // community/pagerank/degree are SIMILAR-derived — they belong to `related`, not glossary's
+        // reasoning surface. glossary must NOT surface them even once node_meta is populated.
         let (_dir, g) = graph_fixture();
         let idir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
 
-        // Before the pass there is no node_meta → output is unannotated (back-compat).
-        let before = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
-        assert!(
-            !before.contains("comm "),
-            "no meta annotation before generalize: {before}"
-        );
-
-        // Run the generalization pass → community/centrality land in node_meta.
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
         let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
+        assert!(after.contains("org:acme"), "still shows the node id: {after}");
         assert!(
-            after.contains("org:acme"),
-            "still shows the node id: {after}"
-        );
-        assert!(
-            after.contains("comm "),
-            "glossary surfaces community after generalize: {after}"
+            !after.contains("comm ") && !after.contains(" pr ") && !after.contains(" deg "),
+            "glossary must not surface SIMILAR-derived community/pagerank/degree: {after}"
         );
     }
 
