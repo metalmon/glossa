@@ -101,11 +101,16 @@ pub(crate) fn lmstudio_chat(
     messages: &[Value],
     timeout: Duration,
 ) -> anyhow::Result<Value> {
+    // Sampling temperature: overridable via KB_EVAL_TEMP for noise-sensitivity runs (default 0.8).
+    let temperature: f64 = std::env::var("KB_EVAL_TEMP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.8);
     let body = json!({
         "model": model,
         "messages": messages,
         "tools": tools,
-        "temperature": 0.8
+        "temperature": temperature
     });
     let body_str = serde_json::to_string(&body)?;
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
