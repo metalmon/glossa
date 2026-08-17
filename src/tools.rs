@@ -877,6 +877,34 @@ pub fn glossary(
                         "… {truncated} more fact(s) name this entity — narrow the query or use reach/graph_query to pick the one you need."
                     ));
                 }
+                // Composed neighborhood: the few facts reachable from this entity's facts by joining
+                // on SPECIFIC (low document-frequency) shared entities — i.e. the multi-hop target
+                // the reader would otherwise have to walk to by hand, surfaced right here. Bounded by
+                // the df-gate + a hop cap + an output cap so glossary stays a thin grounded list.
+                if let Ok(aidx) = crate::graph::compose::build_alias_index(g) {
+                    // Seed from the looked-up NAME (compose's own tolerant alias match), so this
+                    // works whether the name resolved to a Fact or short-circuited to a Section
+                    // title. The name doubles as the (weak) query for IDF ordering.
+                    if let Ok(cands) =
+                        crate::graph::compose::compose(g, &aidx, &[name], name, 20, 8)
+                    {
+                        let shown: std::collections::HashSet<&str> =
+                            ids.iter().map(|s| s.as_str()).collect();
+                        let extra: Vec<String> = cands
+                            .iter()
+                            .filter(|c| !shown.contains(c.id.as_str()))
+                            .map(|c| {
+                                format!("{}  [Fact]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id))
+                            })
+                            .collect();
+                        if !extra.is_empty() {
+                            lines.push(
+                                "— composed (facts reachable from here via shared entities) —".to_string(),
+                            );
+                            lines.extend(extra);
+                        }
+                    }
+                }
                 lines.join("\n")
             }
         }

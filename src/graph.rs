@@ -22,4 +22,5 @@ pub mod lock;
 pub mod ops;
 pub mod query;
 pub mod temporal;
+pub mod compose;
 pub mod traverse;

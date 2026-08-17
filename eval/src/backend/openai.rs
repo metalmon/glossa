@@ -194,7 +194,7 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "glossary",
-            "description": "START HERE for any named entity in the question. Looks it up in the pre-built reasoning graph: returns its grounded node plus its typed relations (part-of, created-by, family-of, located-in, member-of, …), each anchored to a source chunk. One call surfaces the chain that would otherwise take several searches.",
+            "description": "Look a named entity up in the pre-built reasoning graph: returns its grounded node plus its typed relations (part-of, created-by, family-of, located-in, member-of, …), each anchored to a source chunk. One call surfaces the chain that would otherwise take several searches.",
             "parameters": {
                 "type": "object",
                 "properties": { "name": { "type": "string", "description": "the term or entity to look up" } },
