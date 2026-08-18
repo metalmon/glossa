@@ -83,7 +83,7 @@ pub fn search(
         Ok(hits) => {
             let th: Vec<_> = hits
                 .iter()
-                .map(|h| json!({"path": h.path, "location": h.location, "score": h.score}))
+                .map(|h| json!({"path": h.path, "location": h.location, "score": h.score, "snippet": h.snippet}))
                 .collect();
             trace.log("search", json!({"query": query}), json!(th));
             let body = if hits.is_empty() {
@@ -1678,8 +1678,9 @@ fn slice_pdf_page(doc_path: &std::path::Path, page: u64) -> anyhow::Result<Vec<u
 /// `crate::graph::query::run`, which handles empty queries (returns schema), fuzzy literal
 /// resolution, and rendering.
 pub fn graph_query(idx: &DocIndex, g: &crate::graph::store::GraphStore, sql: &str, trace: &TraceLog) -> String {
-    trace.log("graph_query", json!({"sql": sql}), json!({}));
-    crate::graph::query::run(g, idx, sql)
+    let body = crate::graph::query::run(g, idx, sql);
+    trace.log("graph_query", json!({"sql": sql}), json!({"result": body}));
+    body
 }
 
 #[cfg(test)]

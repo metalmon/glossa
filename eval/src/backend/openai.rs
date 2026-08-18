@@ -183,8 +183,26 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
+    let grep = json!({
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Exact / regex line search over the raw corpus text — the precise complement to `search`. Where `search` ranks fuzzily by topic, `grep` returns EVERY line that literally matches, as `path:#n: line`. Reach for it the moment you know the exact string you want (a name, title, phrase): it finds the specific entity that BM25 buries under broad topic matches, and the `#n` doubles as the `read` key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "text or regex to match literally against corpus lines" },
+                    "path": { "type": "string", "description": "optional: scope the search to one document path (as shown in a result)" },
+                    "ignore_case": { "type": "boolean", "description": "case-insensitive match (default false)" },
+                    "fixed": { "type": "boolean", "description": "treat pattern as a literal string, not a regex (default false)" },
+                    "word": { "type": "boolean", "description": "match whole words only (default false)" }
+                },
+                "required": ["pattern"]
+            }
+        }
+    });
     if !graph_on {
-        return Value::Array(vec![search, read]);
+        return Value::Array(vec![search, grep, read]);
     }
     // graph-ON arm: lead with the reasoning-graph tools so the model FOLLOWS the pre-built
     // multi-hop chain instead of re-deriving it with many flat searches. Ordering matters — a weak
@@ -264,7 +282,7 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    Value::Array(vec![glossary, neighbors, reach, related, graph_query, search, read])
+    Value::Array(vec![glossary, neighbors, reach, related, graph_query, search, grep, read])
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
@@ -1026,6 +1044,15 @@ mod schema_tests {
         let gi = names.iter().position(|n| n == "glossary").expect("glossary present");
         let si = names.iter().position(|n| n == "search").expect("search present");
         assert!(gi < si, "graph tools must lead search in graph-ON; got {names:?}");
+    }
+
+    #[test]
+    fn grep_is_advertised_in_both_arms() {
+        // grep was mirrored into the tensorzero surface but never into this backend's hardcoded
+        // schema, so the model was never offered the precise line-lookup that complements fuzzy
+        // `search`. It must appear in both graph-OFF and graph-ON.
+        assert!(tool_names(&tools_schema(false)).contains(&"grep".into()), "graph-OFF must advertise grep");
+        assert!(tool_names(&tools_schema(true)).contains(&"grep".into()), "graph-ON must advertise grep");
     }
 
     #[test]

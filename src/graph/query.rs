@@ -1063,7 +1063,7 @@ pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
     }
     let q = match parse_readonly_select(sql) {
         Ok(q) => q,
-        Err(e) => return e,
+        Err(e) => return format!("{e}\n\n{}", schema_help(g)),
     };
 
     let lits = locate_literals(&q);
@@ -1081,11 +1081,11 @@ pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
 
     let rows = match g.run_select(&real_sql, 50) {
         Ok(rows) => rows,
-        Err(e) => return format!("query error: {e}"),
+        Err(e) => return format!("query error: {e}\n\n{}", schema_help(g)),
     };
     let cols = match g.select_columns(&real_sql) {
         Ok(cols) => cols,
-        Err(e) => return format!("query error: {e}"),
+        Err(e) => return format!("query error: {e}\n\n{}", schema_help(g)),
     };
 
     let body = render_rows(idx, g, &cols, &rows);
@@ -1497,5 +1497,25 @@ mod tests {
             1,
             "label shown once, not duplicated: {out}"
         );
+    }
+
+    #[test]
+    fn query_error_carries_the_schema_so_the_model_can_self_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# H\nx\n").unwrap();
+        crate::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:a", "x")).unwrap();
+        // `src_label` lives on the edges_labeled VIEW, not on `edges` — the exact mistake the weak
+        // reader made 12 times. The error must hand back the schema (which names edges_labeled) so
+        // the next attempt can correct instead of blindly re-issuing the same broken query.
+        let out = crate::graph::query::run(
+            &g,
+            &idx,
+            "SELECT dst_label FROM edges WHERE src_label LIKE '%x%'",
+        );
+        assert!(out.contains("query error"), "surfaces the real error: {out}");
+        assert!(out.contains("edges_labeled"), "appends the schema: {out}");
     }
 }

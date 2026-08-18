@@ -19,6 +19,7 @@ pub fn system_prompt(graph_on: bool) -> &'static str {
 const FLAT_SYSTEM_PROMPT: &str =
     "You answer a question using glossa, a document-search tool over MCP with two tools:\n\
      - search(query): full-text BM25 search. Pass short KEYWORDS, not a sentence. Morphology-aware.\n\
+     - grep(pattern): exact/regex line search — use it when you know the precise string (a name, title, phrase); returns every literal match as `path:#n: line`, catching what fuzzy search buries.\n\
      - read(path, location): open a result to read its full text.\n\
      Strategy (follow it):\n\
      1. Break the question into key entities/terms.\n\
@@ -55,6 +56,8 @@ const GRAPH_SYSTEM_PROMPT: &str =
      first) among candidates, let SQL over the graph decide rather than guessing from prose.\n\
      - read(path, n): open a fact's source to read its exact wording.\n\
      - search(keywords): fall back to full-text when the graph is quiet.\n\
+     - grep(pattern): exact/regex line search when you know the precise string — the specific name \
+     or title BM25 buries under broad topic matches; returns every literal match as `path:#n: line`.\n\
      \n\
      The answer is the entity the question's OWN relation lands on directly — its immediate target, \
      one step away. Not a broader entity that merely contains that target, not the far end of a \
