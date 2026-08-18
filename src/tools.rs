@@ -158,7 +158,14 @@ pub fn grep(
                 json!({"hits": hits.len()}),
             );
             if hits.is_empty() {
-                "(no matches)".to_string()
+                // Feedback in the glossary/graph_query spirit: a weak model tends to over-build the
+                // pattern (long `.*`/`|` regex) and match nothing. Steer it back to a simple literal
+                // instead of leaving it to guess why zero came back.
+                "(no matches) — the pattern matched no line. It is likely too specific: try ONE or \
+                 two distinctive words, not a long regex with .* or | alternations. If you meant \
+                 your text literally, set fixed:true. Fall back to search (morphology-aware BM25) \
+                 when you don't know the exact string."
+                    .to_string()
             } else {
                 hits.iter()
                     .map(|h| h.display_line())
@@ -166,7 +173,10 @@ pub fn grep(
                     .join("\n")
             }
         }
-        Err(e) => format!("grep error: {e}"),
+        Err(e) => format!(
+            "grep error: {e}\nThat pattern failed as a regex. Set fixed:true to match it as a \
+             literal string, or simplify it to one or two distinctive words."
+        ),
     }
 }
 
@@ -1909,6 +1919,28 @@ mod tests {
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
         assert!(out.images[0].bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn grep_no_match_steers_to_a_simpler_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("doc.md"), b"# Doc\nthe quick brown fox\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        // An over-built regex (the 4b's failure mode) matches nothing — the return must coach it
+        // back to a simple literal instead of a bare "(no matches)".
+        let out = grep(
+            d.path(),
+            &i,
+            "quick.*purple.*elephant|elephant.*quick",
+            &GrepOpts::default(),
+            &TraceLog::disabled(),
+        );
+        assert!(out.contains("no matches"), "still reports the miss: {out}");
+        assert!(
+            out.contains("fixed:true") && out.contains("distinctive"),
+            "coaches toward a simpler literal: {out}"
+        );
     }
 
     #[test]

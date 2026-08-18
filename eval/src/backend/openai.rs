@@ -187,7 +187,7 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Exact / regex line search over the raw corpus text — the precise complement to `search`. Where `search` ranks fuzzily by topic, `grep` returns EVERY line that literally matches, as `path:#n: line`. Reach for it the moment you know the exact string you want (a name, title, phrase): it finds the specific entity that BM25 buries under broad topic matches, and the `#n` doubles as the `read` key.",
+            "description": "Exact / regex line search over the raw corpus text — the precise complement to `search`. Where `search` ranks fuzzily by topic, `grep` returns EVERY line that literally matches, as `path:#n: line`. Reach for it the moment you know the exact string you want (a name, title, phrase): it finds the specific entity that BM25 buries under broad topic matches, and the `#n` doubles as the `read` key. Keep the pattern SIMPLE — one or two distinctive words. A long regex with `.*` or `|` alternations usually matches nothing; when you mean your text literally, set `fixed:true`.",
             "parameters": {
                 "type": "object",
                 "properties": {
