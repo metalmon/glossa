@@ -126,6 +126,15 @@ pub struct GraphStore {
     /// BM25 search view over node labels/aliases, for `resolve`'s fuzzy match. Derived from the
     /// node table and rebuilt lazily when it falls out of sync (see `resolve`).
     node_index: crate::graph::node_index::NodeIndex,
+    /// The `.glossa` directory, kept for the on-disk PPR transition cache.
+    gdir: std::path::PathBuf,
+    /// Cached PPR transition (nodes+edges as a generic digraph), keyed by a CONTENT signature over
+    /// the node ids and edge endpoints — the same drift-detection node_index uses, so a delete,
+    /// in-place edit, or re-index (which a count-only key would miss) invalidates it. Reused across
+    /// the many `glossary`/PPR calls in a session (a full build per call was the cost) and persisted
+    /// to `.glossa/ppr_transition.json` so it survives the process; a signature mismatch on either
+    /// the in-memory or on-disk copy triggers a rebuild.
+    ppr_transition: Mutex<Option<(u64, std::sync::Arc<crate::graph::ppr::Transition>)>>,
 }
 
 impl GraphStore {
@@ -173,7 +182,89 @@ impl GraphStore {
         Ok(GraphStore {
             conn: Mutex::new(conn),
             node_index,
+            gdir,
+            ppr_transition: Mutex::new(None),
         })
+    }
+
+    /// The PPR transition for the current graph, keyed by a content signature. Served from the
+    /// in-memory cache when the signature matches, else loaded from `.glossa/ppr_transition.json`
+    /// when the persisted signature matches (survives the process), else built and persisted. The
+    /// signature covers node ids + edge endpoints, so a delete / in-place edit / re-index — anything
+    /// that changes the graph topology — forces a rebuild, unlike a count-only key.
+    pub fn ppr_transition(&self) -> anyhow::Result<std::sync::Arc<crate::graph::ppr::Transition>> {
+        let sig = {
+            let c = self.conn.lock().unwrap();
+            Self::transition_sig(&c)?
+        };
+        if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
+            if *k == sig {
+                return Ok(t.clone());
+            }
+        }
+        // Cross-process cache: load the persisted transition if its signature still matches.
+        if let Some(t) = self.load_ppr_transition(sig) {
+            let arc = std::sync::Arc::new(t);
+            *self.ppr_transition.lock().unwrap() = Some((sig, arc.clone()));
+            return Ok(arc);
+        }
+        // Build fresh, persist, cache.
+        let built = std::sync::Arc::new(crate::graph::ppr::build_transition(self)?);
+        let _ = self.save_ppr_transition(sig, &built); // best-effort; a failed write just re-builds next process
+        *self.ppr_transition.lock().unwrap() = Some((sig, built.clone()));
+        Ok(built)
+    }
+
+    /// A content fingerprint of the graph's TOPOLOGY — a hash of every node `id` (id order) and
+    /// every edge `(efrom, eto)` (endpoint order). Changes on any add, delete, endpoint rewrite, or
+    /// re-index, so it catches drift a raw count misses. Deterministic (`DefaultHasher` has fixed
+    /// keys), so it is comparable across process runs and can be persisted beside the cache. Node
+    /// labels/types are deliberately excluded — the walk is ontology-blind, so relabeling a node
+    /// without changing the topology does not require a rebuild.
+    fn transition_sig(c: &rusqlite::Connection) -> anyhow::Result<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut ns = c.prepare("SELECT id FROM nodes ORDER BY id")?;
+        let mut nrows = ns.query([])?;
+        while let Some(r) = nrows.next()? {
+            let id: String = r.get(0)?;
+            id.hash(&mut h);
+        }
+        0u8.hash(&mut h); // separator so a node id can't collide with an edge endpoint
+        let mut es = c.prepare("SELECT efrom, eto FROM edges ORDER BY efrom, eto")?;
+        let mut erows = es.query([])?;
+        while let Some(r) = erows.next()? {
+            let f: String = r.get(0)?;
+            let t: String = r.get(1)?;
+            f.hash(&mut h);
+            t.hash(&mut h);
+        }
+        Ok(h.finish())
+    }
+
+    fn ppr_cache_path(&self) -> std::path::PathBuf {
+        self.gdir.join("ppr_transition.json")
+    }
+
+    fn load_ppr_transition(&self, sig: u64) -> Option<crate::graph::ppr::Transition> {
+        let bytes = std::fs::read(self.ppr_cache_path()).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        if v.get("sig")?.as_u64()? != sig {
+            return None; // stale — a rebuild will overwrite it
+        }
+        let ids: Vec<String> = serde_json::from_value(v.get("ids")?.clone()).ok()?;
+        let adj: Vec<Vec<usize>> = serde_json::from_value(v.get("adj")?.clone()).ok()?;
+        Some(crate::graph::ppr::Transition::from_parts(ids, adj))
+    }
+
+    fn save_ppr_transition(
+        &self,
+        sig: u64,
+        t: &crate::graph::ppr::Transition,
+    ) -> anyhow::Result<()> {
+        let v = serde_json::json!({ "sig": sig, "ids": t.ids(), "adj": t.adj() });
+        std::fs::write(self.ppr_cache_path(), serde_json::to_vec(&v)?)?;
+        Ok(())
     }
 
     // ── private helpers: take &Connection (no Mutex locking) ─────────────────

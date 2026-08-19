@@ -28,6 +28,19 @@ impl Transition {
     fn index_of(&self, id: &str) -> Option<usize> {
         self.idx.get(id).copied()
     }
+    /// Node ids in walk order (for persistence).
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
+    /// Undirected adjacency in walk order (for persistence).
+    pub fn adj(&self) -> &[Vec<usize>] {
+        &self.adj
+    }
+    /// Reassemble from persisted `(ids, adj)`; the id->index map is derived, not stored.
+    pub fn from_parts(ids: Vec<String>, adj: Vec<Vec<usize>>) -> Transition {
+        let idx = ids.iter().cloned().enumerate().map(|(i, s)| (s, i)).collect();
+        Transition { ids, idx, adj }
+    }
 }
 
 /// Load every node + edge into a symmetric adjacency. Edges whose endpoints aren't both present, and

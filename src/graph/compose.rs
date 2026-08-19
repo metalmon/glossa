@@ -211,7 +211,7 @@ pub fn compose_ppr(
     query: &str,
     k: usize,
 ) -> anyhow::Result<Vec<Candidate>> {
-    let trans = ppr::build_transition(g)?;
+    let trans = g.ppr_transition()?;
     if trans.is_empty() {
         return Ok(vec![]);
     }
@@ -225,6 +225,7 @@ pub fn compose_ppr(
         *seeds.entry(id).or_default() += 2.0;
     }
     let ranked = ppr::ppr(&trans, &seeds, 0.15, 30, 1e-6);
+    // (`trans` is Arc<Transition>; &trans deref-coerces to &Transition)
     if ranked.is_empty() {
         return Ok(vec![]);
     }
@@ -304,6 +305,25 @@ mod tests {
     fn link(g: &GraphStore, a: &str, b: &str) {
         g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
             .unwrap();
+    }
+
+    #[test]
+    fn ppr_transition_persists_to_disk_and_survives_reopen() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let g = GraphStore::open(d.path()).unwrap();
+            fact(&g, "a", "A", &[]);
+            fact(&g, "b", "B", &[]);
+            link(&g, "a", "b");
+            assert_eq!(g.ppr_transition().unwrap().len(), 2);
+        }
+        assert!(
+            d.path().join(".glossa/ppr_transition.json").exists(),
+            "transition cache persisted to disk"
+        );
+        // A fresh handle (new process, conceptually) loads it from disk — counts match, no rebuild.
+        let g2 = GraphStore::open(d.path()).unwrap();
+        assert_eq!(g2.ppr_transition().unwrap().len(), 2, "loads across a reopen");
     }
 
     #[test]
