@@ -904,39 +904,27 @@ pub fn glossary_with_query(
                         "… {truncated} more fact(s) name this entity — narrow the query or use reach/graph_query to pick the one you need."
                     ));
                 }
-                // Composed neighborhood: the few facts reachable from this entity's facts by joining
-                // on SPECIFIC (low document-frequency) shared entities — i.e. the multi-hop target
-                // the reader would otherwise have to walk to by hand, surfaced right here. Bounded by
-                // the df-gate + a hop cap + an output cap so glossary stays a thin grounded list.
-                if let Ok(aidx) = crate::graph::compose::build_alias_index(g) {
-                    // Seed from the looked-up NAME (compose's own tolerant alias match), so this
-                    // works whether the name resolved to a Fact or short-circuited to a Section
-                    // title. The name doubles as the (weak) query for IDF ordering.
-                    // Rank the composed neighbourhood by the QUESTION when we have it (its rare
-                    // relation terms float the answer fact up); fall back to the entity name.
-                    if let Ok(cands) = crate::graph::compose::compose(
-                        g,
-                        &aidx,
-                        &[name],
-                        query.unwrap_or(name),
-                        20,
-                        8,
-                    ) {
-                        let shown: std::collections::HashSet<&str> =
-                            ids.iter().map(|s| s.as_str()).collect();
-                        let extra: Vec<String> = cands
-                            .iter()
-                            .filter(|c| !shown.contains(c.id.as_str()))
-                            .map(|c| {
-                                format!("{}  [Fact]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id))
-                            })
-                            .collect();
-                        if !extra.is_empty() {
-                            lines.push(
-                                "— composed (facts reachable from here via shared entities) —".to_string(),
-                            );
-                            lines.extend(extra);
-                        }
+                // Composed neighborhood via Personalized PageRank: seed a random walk with restart
+                // from the question's lexical hits (resolve over the node index) plus this entity,
+                // and surface the top non-structural nodes it reaches by CONNECTIVITY — the multi-hop
+                // target the reader would otherwise walk to by hand. Ontology-blind (the walk reads
+                // no edge/node types), so a terminal answer that shares no words with the question
+                // still floats up, and hubs disperse without a df cap.
+                if let Ok(cands) =
+                    crate::graph::compose::compose_ppr(g, name, query.unwrap_or(name), 20)
+                {
+                    let shown: std::collections::HashSet<&str> =
+                        ids.iter().map(|s| s.as_str()).collect();
+                    let extra: Vec<String> = cands
+                        .iter()
+                        .filter(|c| !shown.contains(c.id.as_str()))
+                        .map(|c| format!("{}  [Fact]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id)))
+                        .collect();
+                    if !extra.is_empty() {
+                        lines.push(
+                            "— composed (reachable from here via the reasoning graph) —".to_string(),
+                        );
+                        lines.extend(extra);
                     }
                 }
                 lines.join("\n")
@@ -3228,16 +3216,9 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &t
         )
         .contains(":#7:"));
-        assert_eq!(
-            grep(
-                d.path(),
-                &i,
-                "nomatchzzz",
-                &crate::grep::GrepOpts::default(),
-                &t
-            ),
-            "(no matches)"
-        );
+        let no = grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t);
+        assert!(no.starts_with("(no matches)"), "still reports the miss: {no}");
+        assert!(no.contains("fixed:true"), "coaches toward a simpler literal: {no}");
         assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }

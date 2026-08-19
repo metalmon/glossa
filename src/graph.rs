@@ -2,6 +2,7 @@ pub mod doctor;
 pub mod node_index;
 pub mod ontology;
 pub mod ontology_export;
+pub mod ppr;
 pub mod store;
 
 /// The structural anchor edge from a reasoning node to the section that is its evidence. A FIXED

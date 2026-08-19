@@ -5,6 +5,7 @@
 //! Universal + math-only: no learned model, no relation typing, no domain logic. The composition
 //! the weak model fails at lives here; the model only supplies anchor strings + the query.
 
+use crate::graph::ppr;
 use crate::graph::store::GraphStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -198,10 +199,62 @@ pub fn compose(
     Ok(scored)
 }
 
+/// PPR-ranked composed candidates — the connectivity-based successor to [`compose`]. Seed a random
+/// walk with restart from the question's lexical hits (`resolve` over the node index) plus the
+/// anchor entity, rank every node by connectivity, and surface the top-`k` non-structural
+/// (reasoning/evidence) nodes. Ontology-blind: the walk reads no edge_type/node_type, and the only
+/// type check — skipping STRUCTURAL_NODES on output — is a fixed system contract, not an ontology
+/// choice. Structural nodes still carry mass *through* the walk, which is how it bridges documents.
+pub fn compose_ppr(
+    g: &GraphStore,
+    name: &str,
+    query: &str,
+    k: usize,
+) -> anyhow::Result<Vec<Candidate>> {
+    let trans = ppr::build_transition(g)?;
+    if trans.is_empty() {
+        return Ok(vec![]);
+    }
+    // Seed the restart vector: whole-question lexical hits get mass decreasing by BM25 rank; the
+    // anchor entity the reader looked up gets a strong boost. No NER, no relation names.
+    let mut seeds: HashMap<String, f32> = HashMap::new();
+    for (rank, id) in g.resolve(query)?.into_iter().take(20).enumerate() {
+        *seeds.entry(id).or_default() += 1.0 / (1.0 + rank as f32);
+    }
+    for id in g.resolve(name)?.into_iter().take(5) {
+        *seeds.entry(id).or_default() += 2.0;
+    }
+    let ranked = ppr::ppr(&trans, &seeds, 0.15, 30, 1e-6);
+    if ranked.is_empty() {
+        return Ok(vec![]);
+    }
+    // id -> (node_type, label), one pass; avoids a DB hit per ranked node.
+    let meta: HashMap<String, (String, String)> =
+        g.all_nodes()?.into_iter().map(|n| (n.id, (n.node_type, n.label))).collect();
+    let structural: HashSet<&str> = crate::graph::STRUCTURAL_NODES.iter().copied().collect();
+    let seed_ids: HashSet<&String> = seeds.keys().collect();
+    let mut out = Vec::new();
+    for (id, score) in ranked {
+        if out.len() >= k {
+            break;
+        }
+        if seed_ids.contains(&id) {
+            continue; // the seeds are what the reader already has; surface what they LEAD to
+        }
+        if let Some((nt, label)) = meta.get(&id) {
+            if structural.contains(nt.as_str()) {
+                continue;
+            }
+            out.push(Candidate { id, label: label.clone(), score });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::store::{GraphStore, Node, Provenance};
+    use crate::graph::store::{Edge, GraphStore, Node, Provenance};
 
     fn prov() -> Provenance {
         Provenance { source_path: "s.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 }
@@ -246,6 +299,41 @@ mod tests {
         let r = reachable(&idx, &seeds, 5, 3, 1000);
         assert!(r.contains("prize"), "specific bridge followed");
         assert!(!r.contains("hub0"), "generic hub NOT followed");
+    }
+
+    fn link(g: &GraphStore, a: &str, b: &str) {
+        g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
+            .unwrap();
+    }
+
+    #[test]
+    fn compose_ppr_surfaces_the_connected_terminal_not_a_lexical_lookalike() {
+        // Path-described question: the terminal answer shares NO tokens with the question, so the
+        // old lexical rank cannot float it. PPR must, via connectivity: seed on the anchor, walk
+        // Ann -> bridge -> terminal. A disconnected fact of the SAME shape ("first in the world")
+        // must not surface — it has the words' shape but no path from the anchor.
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        fact(&g, "ann", "Ann", &["Ann"]);
+        fact(&g, "bridge", "Ann studied at Redbrick University", &["Redbrick"]);
+        fact(&g, "terminal", "ranked seventh in the world", &[]);
+        fact(&g, "distractor", "ranked first in the world", &[]);
+        link(&g, "ann", "bridge");
+        link(&g, "bridge", "terminal");
+        // distractor is intentionally isolated.
+        // Seed only on the anchor (exact resolve, no BM25 contamination): terminal and distractor
+        // draw NO direct seed mass, so the terminal can only arrive via connectivity — and the
+        // disconnected lexical lookalike cannot arrive at all.
+        let out = compose_ppr(&g, "Ann", "Ann", 5).unwrap();
+        let labels: Vec<&str> = out.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("seventh in the world")),
+            "connected terminal surfaces: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("first in the world")),
+            "disconnected lookalike does NOT surface: {labels:?}"
+        );
     }
 
     #[test]
