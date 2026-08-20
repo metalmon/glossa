@@ -246,26 +246,12 @@ impl EndpointResolver<'_> {
             label_type_to_id,
             batch_ids,
         } = self;
-        if batch_ids.contains(label) {
-            return Some(label.to_string());
-        }
-        if g.get_node(label).ok().flatten().is_some() {
-            return Some(label.to_string());
-        }
-        // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
-        // separators ("docs/foo.docx"), but the stored Document node id uses the host
-        // separator ("docs\foo.docx"). Resolve it through the SAME path normalization as
-        // section refs (canonical_document_path) so it matches without the caller hand-
-        // writing backslashes. A non-path label (e.g. a Reference "Some External Reference")
-        // resolves to no indexed document and falls through to label matching below.
-        if let Some(p) = idx.canonical_document_path(label) {
-            if g.get_node(&p).ok().flatten().is_some() {
-                return Some(p);
-            }
-        }
-        // When the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a Field, `to`
-        // an Enum) and a Field and its Enum share this label, pick the existing node of the
-        // wanted type so the two do not collide onto one node (the Enum->Enum rejection).
+        // Type-first: when the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a
+        // Field, `to` an Enum; RESOLVED_BY `to` is a Resolution) and same-label nodes of several
+        // types coexist, pick the node of the wanted type BEFORE the blind label bypasses below —
+        // otherwise an ambiguous label that happens to match a batch id / existing node id would
+        // land on the wrong-typed node. A fixed-type relation with no node of a wanted type falls
+        // through to the label bypasses.
         if !prefer_types.is_empty() {
             let norm = normalize_label(label);
             for t in prefer_types {
@@ -281,6 +267,23 @@ impl EndpointResolver<'_> {
                         }
                     }
                 }
+            }
+        }
+        if batch_ids.contains(label) {
+            return Some(label.to_string());
+        }
+        if g.get_node(label).ok().flatten().is_some() {
+            return Some(label.to_string());
+        }
+        // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
+        // separators ("docs/foo.docx"), but the stored Document node id uses the host
+        // separator ("docs\foo.docx"). Resolve it through the SAME path normalization as
+        // section refs (canonical_document_path) so it matches without the caller hand-
+        // writing backslashes. A non-path label (e.g. a Reference "Some External Reference")
+        // resolves to no indexed document and falls through to label matching below.
+        if let Some(p) = idx.canonical_document_path(label) {
+            if g.get_node(&p).ok().flatten().is_some() {
+                return Some(p);
             }
         }
         if let Some(id) = label_to_id.get(&normalize_label(label)) {
@@ -1456,6 +1459,45 @@ strict = true
             .expect("Resolution 'Cache' node must exist");
         assert_ne!(sym, res, "the two nodes must have distinct ids");
         assert_eq!(out.nodes, 2, "both nodes reported as written");
+    }
+
+    /// An edge whose relation fixes the endpoint type (RESOLVED_BY `to` = Resolution) must land on
+    /// the Resolution node when a same-label Symptom node also exists — resolution is type-first.
+    #[test]
+    fn edge_resolves_to_relation_fixed_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        // Two "Cache" nodes (Symptom + Resolution) + a Symptom "Source". The relation fixes `to`
+        // to Resolution, so the edge must land on the Resolution "Cache", not the Symptom one.
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Source", "case1.docx"),
+                unode("Symptom", "Cache", "case1.docx"),
+                unode("Resolution", "Cache", "case1.docx"),
+            ],
+            vec![uedge("Source", "RESOLVED_BY", "Cache", "case1.docx")],
+            1_000_000,
+        );
+        assert!(out.dropped.is_empty(), "edge kept: {:?}", out.dropped);
+        let res_cache = g
+            .find_by_label_type("Cache", "Resolution")
+            .unwrap()
+            .expect("Resolution Cache");
+        let edges = g.all_edges().unwrap();
+        let e = edges
+            .iter()
+            .find(|e| e.edge_type == "RESOLVED_BY")
+            .expect("edge written");
+        assert_eq!(
+            e.to, res_cache,
+            "edge lands on the relation-fixed (Resolution) type, not the Symptom Cache"
+        );
     }
 
     /// Two nodes in one batch share the SAME normalized label AND the SAME type. They are the
