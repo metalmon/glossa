@@ -569,6 +569,10 @@ struct NeighborsArgs {
 struct GlossaryArgs {
     #[schemars(description = "concept in your own words, e.g. \"connection loss\"")]
     name: String,
+    #[schemars(
+        description = "the full problem or question you are trying to solve, written out completely as a whole sentence — not a short phrase or the bare concept. It ranks the returned facts by what you actually need, so a complete, specific question ranks the right chain far higher than a terse one."
+    )]
+    query: String,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_string_loose"
@@ -1068,10 +1072,11 @@ impl GlossaServer {
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
         let stale = crate::tools::StaleChecker::new(self.root.clone());
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::glossary(
+            crate::tools::glossary_with_query(
                 &idx,
                 &g,
                 &a.name,
+                Some(a.query.as_str()).filter(|s| !s.is_empty()),
                 &spec,
                 &self.trace,
                 a.as_of.as_deref(),
@@ -1701,8 +1706,9 @@ mod tests {
         assert_eq!(ne2.as_of, Some("2022".to_string()));
 
         let gl: GlossaryArgs =
-            serde_json::from_str(r#"{"name":"loss","as_of":"2022-06-01"}"#).unwrap();
+            serde_json::from_str(r#"{"name":"loss","query":"why is the connection lost","as_of":"2022-06-01"}"#).unwrap();
         assert_eq!(gl.as_of, Some("2022-06-01".to_string()));
+        assert_eq!(gl.query, "why is the connection lost");
 
         let re: RelatedArgs =
             serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
