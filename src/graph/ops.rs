@@ -484,31 +484,31 @@ pub fn graph_upsert(
     // on the rare hash collision `disambiguate_id` appends `-2/-3` rather than letting one fact
     // silently overwrite another. `norm_to_id` is the single source of truth; every later step
     // (nodespec, validity, edge endpoints) reads its id from here instead of recomputing.
-    let mut norm_to_id: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut id_owner: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new(); // id -> the normalized label that owns it
+    let mut norm_to_id: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new(); // (norm, type) -> id
+    let mut id_owner: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new(); // id -> owning (norm, type)
     let mut label_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut label_type_to_id: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     for (nd, _) in &valid_nodes {
         let norm = normalize_label(&nd.label);
+        let key = (norm.clone(), nd.node_type.clone());
         let id = norm_to_id
-            .entry(norm.clone())
+            .entry(key.clone())
             .or_insert_with(|| {
                 let base = id_for(ont, &nd.node_type, &nd.label);
                 let final_id = disambiguate_id(&base, |cand| {
-                    // taken iff some OTHER label already owns this id — in this batch, or as an
-                    // existing graph node whose (normalized) label differs.
                     if let Some(owner) = id_owner.get(cand) {
-                        if owner != &norm {
+                        if owner != &key {
                             return true;
                         }
                     }
-                    matches!(g.get_node(cand), Ok(Some(n)) if normalize_label(&n.label) != norm)
+                    matches!(g.get_node(cand), Ok(Some(n))
+                        if (normalize_label(&n.label), n.node_type.clone()) != key)
                 });
-                id_owner.insert(final_id.clone(), norm.clone());
+                id_owner.insert(final_id.clone(), key.clone());
                 final_id
             })
             .clone();
@@ -520,7 +520,7 @@ pub fn graph_upsert(
     let nodespecs: Vec<NodeSpec> = valid_nodes
         .iter()
         .map(|(nd, canonical)| {
-            let id = norm_to_id[&normalize_label(&nd.label)].clone();
+            let id = norm_to_id[&(normalize_label(&nd.label), nd.node_type.clone())].clone();
             // Preserve existing aliases when this upsert omits them. Re-sending a node
             // to touch its label/source (or to re-anchor a dropped edge) must NOT
             // silently wipe an Enum's values — a common small-model self-correction
@@ -558,7 +558,7 @@ pub fn graph_upsert(
         .iter()
         .map(|(nd, _)| {
             (
-                norm_to_id[&normalize_label(&nd.label)].clone(),
+                norm_to_id[&(normalize_label(&nd.label), nd.node_type.clone())].clone(),
                 ValidityInput {
                     valid_from_norm: nd.valid_from_norm.clone(),
                     valid_from_raw: nd.valid_from_raw.clone(),
@@ -1456,6 +1456,31 @@ strict = true
             .expect("Resolution 'Cache' node must exist");
         assert_ne!(sym, res, "the two nodes must have distinct ids");
         assert_eq!(out.nodes, 2, "both nodes reported as written");
+    }
+
+    /// Two nodes in one batch share the SAME normalized label AND the SAME type. They are the
+    /// same fact and must collapse onto a single node — keying identity by (label, type) must
+    /// not accidentally split idempotent re-sends.
+    #[test]
+    fn same_label_same_type_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Cache", "case1.docx"),
+                unode("Symptom", "Cache", "case1.docx"),
+            ],
+            vec![],
+            1_000_000,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(g.node_count().unwrap(), 1, "same (label,type) is one node");
     }
 
     /// `<path>#0` resolves to the first chunk. The model often writes 0-based refs out of
