@@ -223,19 +223,33 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    let neighbors = json!({
+    let glob = json!({
         "type": "function",
         "function": {
-            "name": "neighbors",
-            "description": "Follow ONE hop: the typed 1-hop edges from a graph node — the direct relations (e.g. created-by, part-of, family-of) stored in the graph. Use it to step from an entity to the bridge entity.",
+            "name": "glob",
+            "description": "List documents whose path matches a shell glob (e.g. `*.md`, `**/report*`). One `path  (N chunks)` per line. Use to see what documents exist before searching.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node": { "type": "string", "description": "graph node id, exactly as shown on a `glossary` line (e.g. `person:clancy-brown`) — the id, NOT the label" },
-                    "path": { "type": "string", "description": "document path (use with `n` instead of `node`)" },
-                    "n": { "type": "integer", "description": "chunk number (use with `path`)" },
-                    "direction": { "type": "string", "description": "out | in | both (default both)" }
-                }
+                    "pattern": { "type": "string", "description": "shell glob over document paths" }
+                },
+                "required": ["pattern"]
+            }
+        }
+    });
+    let get_source_file = json!({
+        "type": "function",
+        "function": {
+            "name": "get_source_file",
+            "description": "Deliver the ORIGINAL source file behind a citation for attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a result and, for a PDF, the cited page `n`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "document path from a search/grep result" },
+                    "n": { "type": "integer", "description": "cited page number (PDF only)" },
+                    "raw": { "type": "boolean", "description": "deliver a DOCX as-is instead of converting to PDF (default false)" }
+                },
+                "required": ["path"]
             }
         }
     });
@@ -255,20 +269,6 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    let related = json!({
-        "type": "function",
-        "function": {
-            "name": "related",
-            "description": "Nodes related to a graph node — similar / same-community / transitive-closure links. Use to widen from a hit to its neighborhood when a direct hop isn't enough.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "node": { "type": "string", "description": "graph node id from a `glossary` line (e.g. `person:clancy-brown`)" },
-                    "path": { "type": "string", "description": "document path (use with `n` instead of `node`)" }
-                }
-            }
-        }
-    });
     let sql = json!({
         "type": "function",
         "function": {
@@ -282,7 +282,19 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    Value::Array(vec![glossary, neighbors, reach, related, sql, search, grep, read])
+    // Graph-ON tool set = the MCP Reader profile, one-to-one (routable subset): the reasoning-graph
+    // tools + corpus search/read + glob/get_source_file. `neighbors`/`resolve`/`constraint_solve` are
+    // NOT here (withheld from Reader as clutter); `ls`/`get_ontology` aren't routed in the eval.
+    Value::Array(vec![
+        glossary,
+        reach,
+        sql,
+        search,
+        grep,
+        read,
+        glob,
+        get_source_file,
+    ])
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
@@ -1064,8 +1076,12 @@ mod schema_tests {
             "graph-OFF must NOT advertise graph tools"
         );
         let on = tool_names(&tools_schema(true));
-        for t in ["glossary", "related", "neighbors", "reach", "sql"] {
+        // The graph-ON set mirrors the MCP Reader profile (routable subset).
+        for t in ["glossary", "reach", "sql", "glob", "get_source_file"] {
             assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
+        }
+        for t in ["neighbors", "related", "resolve"] {
+            assert!(!on.contains(&t.to_string()), "{t} is withheld from Reader — graph-ON must NOT advertise it");
         }
         assert!(
             !on.contains(&"path".into()),

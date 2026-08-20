@@ -75,11 +75,13 @@ const EDITOR_TOOLS: &[&str] = &[
     "graph_stats",
     "graph_doctor",
     // Read-only, but withheld from Reader: low-level or rarely-reached navigation the weak reader
-    // never calls in practice (measured), so it is clutter that muddies tool choice. `sql` is NOT
-    // here — it moved into the reader set. `related` stays for now, pending an A/B.
+    // never calls in practice (measured over many runs: resolve 0%, constraint_solve 0%, neighbors
+    // ~2%, related ~2-8% and correlating with wrong answers), so it is clutter that muddies tool
+    // choice. `sql` is NOT here — it moved into the reader set.
     "resolve",
     "neighbors",
     "constraint_solve",
+    "related",
 ];
 const FULL_TOOLS: &[&str] = &["purge"];
 const GRAPH_TOOLS: &[&str] = &[
@@ -2295,7 +2297,8 @@ mod tests {
         // Low-level / rarely-reached read tools are withheld from Reader to cut tool-choice clutter.
         assert!(
             !reader.contains(&"resolve".to_string())
-                && !reader.contains(&"neighbors".to_string()),
+                && !reader.contains(&"neighbors".to_string())
+                && !reader.contains(&"related".to_string()),
             "reader does not get the decluttered read tools"
         );
         assert!(
