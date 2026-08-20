@@ -773,7 +773,7 @@ pub fn glossary_with_query(
         Ok(ids) => {
             trace.log(
                 "glossary",
-                json!({ "name": name }),
+                json!({ "name": name, "query": query }),
                 json!({ "ids": ids.len() }),
             );
             if ids.is_empty() {
