@@ -1,4 +1,4 @@
-//! Fuzzy read-only SQL over the reasoning graph (the `graph_query` tool).
+//! Fuzzy read-only SQL over the reasoning graph (the `sql` tool).
 //! Parse -> read-only gate -> locate fuzzy literals -> constrained resolution -> rewrite ->
 //! execute -> chainable render. See docs/superpowers/specs/2026-08-15-graph-query-fuzzy-sql-design.md
 
@@ -12,7 +12,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 
-/// Tables/views the `graph_query` tool is allowed to read.
+/// Tables/views the `sql` tool is allowed to read.
 const WHITELIST: &[&str] = &["nodes", "edges", "node_validity", "edges_labeled"];
 
 /// Parse `sql`, then gate it to a single read-only `SELECT` over whitelisted tables/views.
@@ -1005,7 +1005,7 @@ fn entity_candidates(g: &GraphStore, name: &str, k: usize) -> Vec<(String, f32)>
         .collect()
 }
 
-/// Self-describing schema help for an empty/unclear `graph_query` call: the queryable
+/// Self-describing schema help for an empty/unclear `sql` call: the queryable
 /// tables/views and their columns, the graph's *actual* `edge_type` and `node_type`
 /// vocabularies (distinct values currently in use), and one example query.
 pub(crate) fn schema_help(g: &GraphStore) -> String {
@@ -1019,7 +1019,7 @@ pub(crate) fn schema_help(g: &GraphStore) -> String {
         .unwrap_or_default();
 
     let mut out = String::new();
-    out.push_str("graph_query: read-only SQL over the reasoning graph.\n\n");
+    out.push_str("sql: read-only SQL over the reasoning graph.\n\n");
     out.push_str("Queryable tables/views:\n");
     out.push_str("  nodes(id, node_type, label)\n");
     out.push_str("  edges(efrom, edge_type, eto)\n");

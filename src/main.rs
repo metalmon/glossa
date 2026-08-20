@@ -314,7 +314,7 @@ enum GraphAction {
         #[arg(long = "as-of")]
         as_of: Option<String>,
     },
-    /// Run a read-only SQL SELECT over the graph (the `graph_query` tool). Empty SQL prints the schema.
+    /// Run a read-only SQL SELECT over the graph (the `sql` tool). Empty SQL prints the schema.
     Query {
         /// a SELECT over nodes/edges/node_validity/edges_labeled; empty = show schema
         #[arg(default_value = "")]
@@ -1287,7 +1287,7 @@ fn main() -> anyhow::Result<()> {
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let trace = glossa::trace::TraceLog::disabled();
-                println!("{}", glossa::tools::graph_query(&idx, &g, &sql, &trace));
+                println!("{}", glossa::tools::sql(&idx, &g, &sql, &trace));
                 Ok(())
             }
             GraphAction::Ls {

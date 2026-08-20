@@ -52,7 +52,7 @@ const GRAPH_SYSTEM_PROMPT: &str =
      into other documents when the link leaves this one — this is how you close a multi-hop the \
      visible chain doesn't. Pass a candidate answer as a third argument to check it is really \
      connected, not just co-mentioned.\n\
-     - graph_query(sql): when the answer is a ranking or an extreme (which / earliest / largest / \
+     - sql(sql): when the answer is a ranking or an extreme (which / earliest / largest / \
      first) among candidates, let SQL over the graph decide rather than guessing from prose.\n\
      - read(path, n): open a fact's source to read its exact wording.\n\
      - search(keywords): fall back to full-text when the graph is quiet.\n\
@@ -69,13 +69,13 @@ const GRAPH_SYSTEM_PROMPT: &str =
      question asks and take its direct target — reach(entity, that-relation) returns exactly that. \
      Ground the answer in the graph or its source.\n\
      Where your answer came from decides whether it is settled: an answer that came out of a graph \
-     traversal (reach or graph_query returned it) is already grounded. But an answer you inferred by \
+     traversal (reach or sql returned it) is already grounded. But an answer you inferred by \
      READING PROSE — a name that merely appears near the entity in some text — is not settled until \
      reach confirms the connection: call reach(entity, relation, that answer); if no path comes back, \
      the two were only co-mentioned, not actually connected, so reconsider.\n\
      When several searches keep returning more background but not the answer, that is the sign you are \
      circling — widening the search finds context, not answers. The answer comes from following the \
-     exact relation the question names (reach / graph_query), not from more search. So either name that \
+     exact relation the question names (reach / sql), not from more search. So either name that \
      relation and traverse it, or — if the connection truly isn't there — commit your single best \
      specific answer (a name, date, place, or number); never stall on a hedge like \"cannot be determined\".\n\
      \n\

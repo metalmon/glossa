@@ -158,7 +158,7 @@ pub fn grep(
                 json!({"hits": hits.len()}),
             );
             if hits.is_empty() {
-                // Feedback in the glossary/graph_query spirit: a weak model tends to over-build the
+                // Feedback in the glossary/sql spirit: a weak model tends to over-build the
                 // pattern (long `.*`/`|` regex) and match nothing. Steer it back to a simple literal
                 // instead of leaving it to guess why zero came back.
                 "(no matches) — the pattern matched no line. It is likely too specific: try ONE or \
@@ -901,7 +901,7 @@ pub fn glossary_with_query(
             } else {
                 if truncated > 0 {
                     lines.push(format!(
-                        "… {truncated} more fact(s) name this entity — narrow the query or use reach/graph_query to pick the one you need."
+                        "… {truncated} more fact(s) name this entity — narrow the query or use reach/sql to pick the one you need."
                     ));
                 }
                 // Composed neighborhood via Personalized PageRank: seed a random walk with restart
@@ -1685,9 +1685,9 @@ fn slice_pdf_page(doc_path: &std::path::Path, page: u64) -> anyhow::Result<Vec<u
 /// Fuzzy read-only SQL query over the reasoning graph. Traces the call and delegates to
 /// `crate::graph::query::run`, which handles empty queries (returns schema), fuzzy literal
 /// resolution, and rendering.
-pub fn graph_query(idx: &DocIndex, g: &crate::graph::store::GraphStore, sql: &str, trace: &TraceLog) -> String {
+pub fn sql(idx: &DocIndex, g: &crate::graph::store::GraphStore, sql: &str, trace: &TraceLog) -> String {
     let body = crate::graph::query::run(g, idx, sql);
-    trace.log("graph_query", json!({"sql": sql}), json!({"result": body}));
+    trace.log("sql", json!({"sql": sql}), json!({"result": body}));
     body
 }
 
@@ -3532,7 +3532,7 @@ strict = true
         let t = TraceLog::disabled();
 
         // Empty call should return schema (contains "nodes(")
-        let result = graph_query(&idx, &g, "", &t);
+        let result = sql(&idx, &g, "", &t);
         assert!(
             result.contains("nodes("),
             "empty query should return schema: {result}"
@@ -3540,7 +3540,7 @@ strict = true
 
         // Real query should return something
         let query = "SELECT id, label FROM nodes LIMIT 1";
-        let result = graph_query(&idx, &g, query, &t);
+        let result = sql(&idx, &g, query, &t);
         assert!(
             !result.is_empty(),
             "query should return results: {result}"

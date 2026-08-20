@@ -269,10 +269,10 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    let graph_query = json!({
+    let sql = json!({
         "type": "function",
         "function": {
-            "name": "graph_query",
+            "name": "sql",
             "description": "Read-only SQL SELECT over the reasoning graph. Reach for it when the answer is a SPECIFIC related entity, a ranking, or an extreme ('which place/which year', 'the earliest/largest/first'): let the query carry the judgment instead of inferring from prose. Match the source entity and the relation, order or filter, take the target — it hands back the exact related entity AT THE EDGE'S LEVEL, the immediate one the question points at, not a broader parent. A fuzzy relation name is fine — `edge_type LIKE '%…%'` — the engine resolves it to the graph's real relation names. Main view for traversal (a join is one hop): edges_labeled(src_label, edge_type, dst_label, efrom, eto). Call it once with an EMPTY query first to see the schema and this graph's real edge_type/node_type vocabulary. Also: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...).",
             "parameters": {
                 "type": "object",
@@ -282,7 +282,7 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    Value::Array(vec![glossary, neighbors, reach, related, graph_query, search, grep, read])
+    Value::Array(vec![glossary, neighbors, reach, related, sql, search, grep, read])
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
@@ -401,7 +401,7 @@ fn parse_tool_args(call: &Value) -> Value {
 ///
 /// Returns `(body, ids)` — `ids` are the identifiers this call surfaced (what a session-aware MCP
 /// server would track for novelty), from `glossa_tools::exec`'s second return value: `search`'s hit
-/// locations, and the graph tools' (glossary/related/neighbors/reach/graph_query) `path#ord`
+/// locations, and the graph tools' (glossary/related/neighbors/reach/sql) `path#ord`
 /// read-anchor ids scraped from their rendered bodies. `read` itself surfaces no ids there, so it's
 /// special-cased here to the `path` argument instead. `run_agent_loop` uses these to detect an
 /// unproductive streak — many varied calls (including varied graph navigation) that surface
@@ -1064,7 +1064,7 @@ mod schema_tests {
             "graph-OFF must NOT advertise graph tools"
         );
         let on = tool_names(&tools_schema(true));
-        for t in ["glossary", "related", "neighbors", "reach", "graph_query"] {
+        for t in ["glossary", "related", "neighbors", "reach", "sql"] {
             assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
         }
         assert!(
@@ -1072,8 +1072,8 @@ mod schema_tests {
             "reach replaces path — graph-ON must NOT advertise the removed path tool"
         );
         assert!(
-            !off.contains(&"graph_query".into()),
-            "graph-OFF must NOT advertise graph_query"
+            !off.contains(&"sql".into()),
+            "graph-OFF must NOT advertise sql"
         );
         assert!(
             !off.contains(&"reach".into()),

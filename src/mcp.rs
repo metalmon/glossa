@@ -73,8 +73,13 @@ const EDITOR_TOOLS: &[&str] = &[
     "graph_update",
     "graph_generalize",
     "graph_stats",
-    "graph_query",
     "graph_doctor",
+    // Read-only, but withheld from Reader: low-level or rarely-reached navigation the weak reader
+    // never calls in practice (measured), so it is clutter that muddies tool choice. `sql` is NOT
+    // here — it moved into the reader set. `related` stays for now, pending an A/B.
+    "resolve",
+    "neighbors",
+    "constraint_solve",
 ];
 const FULL_TOOLS: &[&str] = &["purge"];
 const GRAPH_TOOLS: &[&str] = &[
@@ -1492,14 +1497,14 @@ impl GlossaServer {
     #[tool(
         description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto)."
     )]
-    async fn graph_query(
+    async fn sql(
         &self,
         Parameters(a): Parameters<GraphQueryArgs>,
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::graph_query(&idx, &g, &a.sql, &self.trace),
+            crate::tools::sql(&idx, &g, &a.sql, &self.trace),
         )]))
     }
 
@@ -2266,10 +2271,7 @@ mod tests {
             editor.contains(&"graph_stats".to_string()),
             "editor exposes graph stats"
         );
-        assert!(
-            editor.contains(&"graph_query".to_string()),
-            "editor exposes graph_query"
-        );
+        assert!(editor.contains(&"sql".to_string()), "editor exposes sql");
         assert!(
             editor.contains(&"graph_doctor".to_string()),
             "editor exposes the report-only graph_doctor tool"
@@ -2288,9 +2290,13 @@ mod tests {
             !reader.contains(&"graph_stats".to_string()),
             "reader cannot graph_stats"
         );
+        // sql (formerly graph_query) is read-only and moved INTO the reader set.
+        assert!(reader.contains(&"sql".to_string()), "reader can run sql");
+        // Low-level / rarely-reached read tools are withheld from Reader to cut tool-choice clutter.
         assert!(
-            !reader.contains(&"graph_query".to_string()),
-            "reader cannot graph_query"
+            !reader.contains(&"resolve".to_string())
+                && !reader.contains(&"neighbors".to_string()),
+            "reader does not get the decluttered read tools"
         );
         assert!(
             !reader.contains(&"graph_doctor".to_string()),
@@ -2302,11 +2308,13 @@ mod tests {
         assert!(full.contains(&"purge".to_string()));
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
-        // resolve is a universally available tool — present in EVERY profile (not gated).
-        for prof in [&reader, &editor, &full] {
+        // resolve is a low-level primitive: kept for editor/full, withheld from Reader (a tool the
+        // reader never calls in practice — clutter that muddies tool choice).
+        assert!(!reader.contains(&"resolve".to_string()), "reader does not get resolve");
+        for prof in [&editor, &full] {
             assert!(
                 prof.contains(&"resolve".to_string()),
-                "resolve must be in every profile"
+                "editor/full keep resolve"
             );
         }
 

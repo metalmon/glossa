@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Tables/views a `graph_query` SELECT may read. `run_select`/`select_columns` install
+/// Tables/views a `sql` SELECT may read. `run_select`/`select_columns` install
 /// [`query_authorizer`] on the connection for the query, so SQLite denies any read of a table
 /// outside this set — at prepare time, for every table access regardless of where it hides in the
 /// statement (function args, window `OVER`, nested subqueries, CTE bodies). This is the
@@ -1871,7 +1871,7 @@ mod tests {
 
     #[test]
     fn run_select_authorizer_denies_non_whitelisted_table_reads() {
-        // Engine-level backstop for graph_query: SQLite authorizes every table read at prepare
+        // Engine-level backstop for sql: SQLite authorizes every table read at prepare
         // time, so a read of a non-whitelisted table is denied no matter where in the AST it
         // hides — closing the whack-a-mole that a syntactic table-walk cannot.
         let dir = tempfile::tempdir().unwrap();

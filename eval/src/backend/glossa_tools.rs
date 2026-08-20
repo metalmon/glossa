@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 /// Stable node identifiers surfaced by a graph tool's rendered body, for the unproductive-streak
 /// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
-/// (glossary's main hits AND its chain hops, related, neighbors, reach, and graph_query's
+/// (glossary's main hits AND its chain hops, related, neighbors, reach, and sql's
 /// id-column handles) funnels a grounded node through `tools::node_ref`'s anchor in ONE of two
 /// forms, both built from the SAME `<path>  #<ord>` token (`tools.rs:532`):
 ///   - **entity/reasoning node**: `tools::read_anchor` wraps it as `— read <path>  #<ord> · <label>`
@@ -108,7 +108,7 @@ pub fn run_grep(
 
 /// Dispatch a tool by name. Returns (result string for the model, ids surfaced for the
 /// unproductive-streak novelty tracker, images from read). The ids are search hit locations for
-/// `search`, and — for the graph tools (glossary/related/neighbors/reach/graph_query) —
+/// `search`, and — for the graph tools (glossary/related/neighbors/reach/sql) —
 /// `path#ord` read-anchor ids scraped from the rendered body via [`extract_node_ids`]; `read`
 /// itself returns none here (its caller in `openai::execute_tool` uses the `path` arg instead).
 /// `root` is the corpus/notebook root, threaded through to `read` for notebook-file serving.
@@ -337,12 +337,12 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
-        "graph_query" => {
+        "sql" => {
             // `sql` is inherently a string (mirrors the real MCP `GraphQueryArgs`); empty/absent
             // returns the schema instead of running a query.
             let sql = args.get("sql").and_then(|v| v.as_str()).unwrap_or("");
             let body = match graph {
-                Some(g) => glossa::tools::graph_query(idx, g, sql, trace),
+                Some(g) => glossa::tools::sql(idx, g, sql, trace),
                 None => "(graph unavailable)".to_string(),
             };
             let ids = extract_node_ids(&body);
@@ -406,7 +406,7 @@ pub fn next_best_action(
         return repeat_nudge(name, args);
     };
     // Complementary tools to fan the fixated term across; skip the one just called. glossary +
-    // search are the two text lookups; graph_query turns the term into a relation probe.
+    // search are the two text lookups; sql turns the term into a relation probe.
     let mut candidates: Vec<(&str, Value)> = Vec::new();
     if name != "search" {
         candidates.push(("search", json!({ "query": term })));
@@ -414,10 +414,10 @@ pub fn next_best_action(
     if name != "glossary" {
         candidates.push(("glossary", json!({ "name": term })));
     }
-    if graph.is_some() && name != "graph_query" {
+    if graph.is_some() && name != "sql" {
         let t = term.replace('\'', " ");
         candidates.push((
-            "graph_query",
+            "sql",
             json!({
                 "sql": format!(
                     "SELECT src_label, edge_type, dst_label FROM edges_labeled \
@@ -492,7 +492,7 @@ mod tests {
             Some("blue widget")
         );
         assert_eq!(repeated_term("read", &json!({"path":"x.md","n":1})), None);
-        assert_eq!(repeated_term("graph_query", &json!({"sql":"SELECT 1"})), None);
+        assert_eq!(repeated_term("sql", &json!({"sql":"SELECT 1"})), None);
         assert_eq!(repeated_term("glossary", &json!({"name":"   "})), None);
     }
 
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(csv_string, array_form, "comma-separated string must filter identically");
     }
 
-    /// `graph_query` dispatch: empty `sql` returns the schema (mirrors the real MCP tool's
+    /// `sql` dispatch: empty `sql` returns the schema (mirrors the real MCP tool's
     /// "empty query returns the schema" contract); no graph falls back to the same
     /// "(graph unavailable)" text every other graph tool arm returns.
     #[test]
@@ -902,7 +902,7 @@ mod tests {
         let trace = TraceLog::disabled();
 
         let with_graph = exec(
-            "graph_query",
+            "sql",
             &json!({"sql": ""}),
             dir.path(),
             &idx,
@@ -912,10 +912,10 @@ mod tests {
         )
         .0;
         assert!(!with_graph.is_empty(), "empty sql should return the schema help text");
-        assert!(with_graph.contains("graph_query"), "got: {with_graph}");
+        assert!(with_graph.contains("sql"), "got: {with_graph}");
 
         let no_graph = exec(
-            "graph_query",
+            "sql",
             &json!({"sql": ""}),
             dir.path(),
             &idx,
