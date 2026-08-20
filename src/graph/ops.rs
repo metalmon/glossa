@@ -218,6 +218,44 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
     Ok(None)
 }
 
+/// Outcome of resolving an edge endpoint reference (`from`/`to`) to a node id.
+#[derive(Debug, PartialEq)]
+enum EndpointResolution {
+    /// Resolved to exactly this node id.
+    Resolved(String),
+    /// No node matched the reference.
+    NoMatch,
+    /// A bare label under an unfixed-type relation matched more than one node TYPE, so the
+    /// reference is genuinely ambiguous. Carries the candidate (id, type) pairs so the caller
+    /// can re-issue qualified — never a silent pick.
+    Ambiguous(Vec<(String, String)>),
+}
+
+/// If `token` names a declared entity type (or a built-in structural type), return its canonical
+/// spelling; else None. Used to recognize a `Type:label` endpoint qualifier.
+fn declared_type_name(ont: &Ontology, token: &str) -> Option<String> {
+    ont.entity_types()
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case(token))
+        .cloned()
+        .or_else(|| {
+            ["Document", "Section", "Term", "Topic"]
+                .iter()
+                .find(|t| t.eq_ignore_ascii_case(token))
+                .map(|t| t.to_string())
+        })
+}
+
+/// Render ambiguity candidates as `sym:<hash> [Symptom] or res:<hash> [Resolution]` for an
+/// actionable dropped-edge message.
+fn fmt_candidates(cands: &[(String, String)]) -> String {
+    cands
+        .iter()
+        .map(|(id, t)| format!("{id} [{t}]"))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
 /// Shared resolution context for `EndpointResolver::resolve` — the index, graph, ontology,
 /// and the batch-local lookup maps that every endpoint resolution needs, grouped so the
 /// resolver takes two arguments (`label`, `prefer_types`) instead of eight.
@@ -237,7 +275,8 @@ impl EndpointResolver<'_> {
     /// node-TYPE token the model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234")
     /// — gated on the token naming a declared type, so ordinary multi-word labels are never
     /// mangled. Returns None when nothing matches.
-    fn resolve(&self, label: &str, prefer_types: &[String]) -> Option<String> {
+    fn resolve(&self, label: &str, prefer_types: &[String]) -> EndpointResolution {
+        use EndpointResolution::*;
         let Self {
             idx,
             g,
@@ -246,6 +285,33 @@ impl EndpointResolver<'_> {
             label_type_to_id,
             batch_ids,
         } = self;
+
+        // Explicit `Type:label` qualifier: when the caller writes "<declared type>:<label>",
+        // resolve straight to that typed node — the escape hatch for a genuinely ambiguous bare
+        // label. Node ids embed the SHORT id_abbrev ("sym:<hash>"), never the full type name, so
+        // a real id is not caught here and still resolves via the id bypasses below.
+        if let Some((head, rest)) = label.split_once(':') {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                if let Some(canon) = declared_type_name(ont, head.trim()) {
+                    let norm = normalize_label(rest);
+                    if let Some(id) = label_type_to_id.get(&(norm.clone(), canon.clone())) {
+                        return Resolved(id.clone());
+                    }
+                    if let Ok(ids) = g.ids_by_label_norm(rest) {
+                        for id in ids {
+                            if let Ok(Some(n)) = g.get_node(&id) {
+                                if n.node_type == canon {
+                                    return Resolved(id);
+                                }
+                            }
+                        }
+                    }
+                    return NoMatch;
+                }
+            }
+        }
+
         // Type-first: when the relation fixes this endpoint's type (CONSTRAINED_BY `from` is a
         // Field, `to` an Enum; RESOLVED_BY `to` is a Resolution) and same-label nodes of several
         // types coexist, pick the node of the wanted type BEFORE the blind label bypasses below —
@@ -256,24 +322,24 @@ impl EndpointResolver<'_> {
             let norm = normalize_label(label);
             for t in prefer_types {
                 if let Some(id) = label_type_to_id.get(&(norm.clone(), t.clone())) {
-                    return Some(id.clone());
+                    return Resolved(id.clone());
                 }
             }
             if let Ok(ids) = g.ids_by_label_norm(label) {
                 for id in ids {
                     if let Ok(Some(n)) = g.get_node(&id) {
                         if prefer_types.iter().any(|t| t == &n.node_type) {
-                            return Some(id);
+                            return Resolved(id);
                         }
                     }
                 }
             }
         }
         if batch_ids.contains(label) {
-            return Some(label.to_string());
+            return Resolved(label.to_string());
         }
         if g.get_node(label).ok().flatten().is_some() {
-            return Some(label.to_string());
+            return Resolved(label.to_string());
         }
         // A Document endpoint (e.g. DEPENDS_ON doc->doc) arrives with the agent's path
         // separators ("docs/foo.docx"), but the stored Document node id uses the host
@@ -283,11 +349,25 @@ impl EndpointResolver<'_> {
         // resolves to no indexed document and falls through to label matching below.
         if let Some(p) = idx.canonical_document_path(label) {
             if g.get_node(&p).ok().flatten().is_some() {
-                return Some(p);
+                return Resolved(p);
             }
         }
+
+        // Bare label under an UNFIXED-type relation (empty prefer_types): if it matches nodes of
+        // more than one type it is genuinely ambiguous. Return the candidate type-qualified ids so
+        // the caller can qualify (by id or `Type:label`) — never silently pick one, which was the
+        // old label-keyed last-wins bug. A single-type match (any count) resolves normally below.
+        if prefer_types.is_empty() {
+            let cands = self.label_candidates(label);
+            let distinct: std::collections::BTreeSet<&str> =
+                cands.iter().map(|(_, t)| t.as_str()).collect();
+            if distinct.len() > 1 {
+                return Ambiguous(cands);
+            }
+        }
+
         if let Some(id) = label_to_id.get(&normalize_label(label)) {
-            return Some(id.clone());
+            return Resolved(id.clone());
         }
         if let Some((first, rest)) = label.split_once(char::is_whitespace) {
             let rest = rest.trim();
@@ -301,27 +381,67 @@ impl EndpointResolver<'_> {
                         .any(|t| t.eq_ignore_ascii_case(first)));
             if is_type {
                 if let Some(id) = label_to_id.get(&normalize_label(rest)) {
-                    return Some(id.clone());
+                    return Resolved(id.clone());
                 }
-                if let Some(id) = g.ids_by_label_norm(rest).ok()?.into_iter().next() {
-                    return Some(id);
+                if let Ok(ids) = g.ids_by_label_norm(rest) {
+                    if let Some(id) = ids.into_iter().next() {
+                        return Resolved(id);
+                    }
                 }
             }
         }
         // Exact match against EXISTING nodes via the label_norm index (replaces the old prebuilt
         // all_nodes map — same unfiltered "first exact" semantics, but O(log N) instead of O(N)).
-        if let Some(id) = g.ids_by_label_norm(label).ok()?.into_iter().next() {
-            return Some(id);
+        if let Ok(ids) = g.ids_by_label_norm(label) {
+            if let Some(id) = ids.into_iter().next() {
+                return Resolved(id);
+            }
         }
         const STRUCTURAL: &[&str] = &["Document", "Section", "Term", "Topic"];
-        let ids = g.resolve(label).ok()?;
-        ids.into_iter()
+        let Ok(ids) = g.resolve(label) else {
+            return NoMatch;
+        };
+        match ids
+            .into_iter()
             .filter_map(|id| g.get_node(&id).ok().flatten())
             .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
             // all morphology matches contain the query's terms; the SHORTEST label is the closest
             // superset of the model's (often truncated) reference.
             .min_by_key(|n| n.label.split_whitespace().count())
             .map(|n| n.id)
+        {
+            Some(id) => Resolved(id),
+            None => NoMatch,
+        }
+    }
+
+    /// All (id, type) nodes whose normalized label equals `label`'s — batch nodes (from
+    /// `label_type_to_id`) plus existing graph nodes (from the label index), deduped by id and
+    /// sorted for a stable ambiguity message.
+    fn label_candidates(&self, label: &str) -> Vec<(String, String)> {
+        let norm = normalize_label(label);
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for ((n, t), id) in self.label_type_to_id.iter() {
+            if *n == norm && seen.insert(id.clone()) {
+                out.push((id.clone(), t.clone()));
+            }
+        }
+        if let Ok(ids) = self.g.ids_by_label_norm(label) {
+            for id in ids {
+                if seen.contains(&id) {
+                    continue;
+                }
+                if let Ok(Some(nd)) = self.g.get_node(&id) {
+                    if normalize_label(&nd.label) == norm {
+                        seen.insert(id.clone());
+                        out.push((id, nd.node_type));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
     }
 }
 
@@ -661,8 +781,15 @@ pub fn graph_upsert(
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolver.resolve(&from_ep, &from_types) {
-                        Some(id) => from_resolved = Some(id),
-                        None => {
+                        EndpointResolution::Resolved(id) => from_resolved = Some(id),
+                        EndpointResolution::Ambiguous(cands) => {
+                            errs.push(format!(
+                                "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" is ambiguous — matches {} — reference the node by id or qualify as Type:label",
+                                fmt_candidates(&cands)
+                            ));
+                            edge_ok = false;
+                        }
+                        EndpointResolution::NoMatch => {
                             errs.push(format!(
                             "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" matches no node — add a node with that label"
                         ));
@@ -690,8 +817,15 @@ pub fn graph_upsert(
                 Ok(None) => {
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolver.resolve(&to_ep, &to_types) {
-                        Some(id) => to_resolved = Some(id),
-                        None => {
+                        EndpointResolution::Resolved(id) => to_resolved = Some(id),
+                        EndpointResolution::Ambiguous(cands) => {
+                            errs.push(format!(
+                                "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" is ambiguous — matches {} — reference the node by id or qualify as Type:label",
+                                fmt_candidates(&cands)
+                            ));
+                            edge_ok = false;
+                        }
+                        EndpointResolution::NoMatch => {
                             errs.push(format!(
                             "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" matches no node — add a node with that label"
                         ));
@@ -1353,6 +1487,21 @@ to = ["Resolution"]
 strict = true
 "#;
 
+    /// A loose/minimal overlay: `RELATED_TO` is declared but fixes NEITHER endpoint's type
+    /// (empty from/to), so `endpoint_types` is empty and an edge under it is addressed purely by
+    /// label — the non-strict case where a same-label pair is genuinely ambiguous.
+    const LOOSE_ONT: &str = r#"
+[entities.Symptom]
+id_prefix = "sym"
+props = []
+[entities.Resolution]
+id_prefix = "res"
+props = []
+[relations.RELATED_TO]
+[validation]
+strict = false
+"#;
+
     fn unode(node_type: &str, label: &str, src: &str) -> UpsertNode {
         UpsertNode {
             node_type: node_type.into(),
@@ -1523,6 +1672,125 @@ strict = true
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(g.node_count().unwrap(), 1, "same (label,type) is one node");
+    }
+
+    /// Non-strict ontology: a bare label under an unfixed-type relation (`RELATED_TO`) that
+    /// matches TWO differently-typed nodes is genuinely ambiguous. The resolver must NOT silently
+    /// pick one (the old last-wins behavior) — it returns an actionable result naming both
+    /// candidate type-qualified ids so the caller can re-issue precisely. The edge is dropped
+    /// (not written to a guessed node); the nodes still land (partial apply).
+    #[test]
+    fn loose_ontology_ambiguous_bare_label_returns_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(LOOSE_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Source", "case1.docx"),
+                unode("Symptom", "Cache", "case1.docx"),
+                unode("Resolution", "Cache", "case1.docx"),
+            ],
+            // "Cache" is ambiguous (Symptom + Resolution) under the untyped RELATED_TO.
+            vec![uedge("Source", "RELATED_TO", "Cache", "case1.docx")],
+            1_000_000,
+        );
+
+        // No RELATED_TO edge may be written — the ambiguity is not silently guessed.
+        let related = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == "RELATED_TO")
+            .count();
+        assert_eq!(related, 0, "ambiguous edge must not be silently written");
+
+        // The dropped message names BOTH candidate type-qualified ids so the caller can qualify.
+        let sym_cache = id_for(&ont, "Symptom", "Cache");
+        let res_cache = id_for(&ont, "Resolution", "Cache");
+        let dropped = out.dropped.join("\n");
+        assert!(
+            dropped.to_lowercase().contains("ambiguous"),
+            "message should flag ambiguity: {dropped:?}"
+        );
+        assert!(
+            dropped.contains(&sym_cache) && dropped.contains(&res_cache),
+            "message should name both candidate ids ({sym_cache}, {res_cache}): {dropped:?}"
+        );
+
+        // Nodes still land (partial apply, not a whole-batch rejection).
+        assert_eq!(g.node_count().unwrap(), 3, "the three nodes are still written");
+    }
+
+    /// The escape hatch: addressing the endpoint by its type-qualified node id resolves precisely
+    /// under the same loose ontology — no ambiguity, edge lands on the intended (Resolution) node.
+    #[test]
+    fn loose_ontology_id_addressed_endpoint_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(LOOSE_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let res_cache = id_for(&ont, "Resolution", "Cache");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Source", "case1.docx"),
+                unode("Symptom", "Cache", "case1.docx"),
+                unode("Resolution", "Cache", "case1.docx"),
+            ],
+            vec![uedge("Source", "RELATED_TO", &res_cache, "case1.docx")],
+            1_000_000,
+        );
+        assert!(out.dropped.is_empty(), "id-addressed edge kept: {:?}", out.dropped);
+        let e = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.edge_type == "RELATED_TO")
+            .expect("edge written");
+        assert_eq!(e.to, res_cache, "id-addressed endpoint lands on the Resolution Cache");
+    }
+
+    /// The `Type:label` convenience qualifier resolves an otherwise-ambiguous label to the node of
+    /// that declared type under the loose ontology.
+    #[test]
+    fn loose_ontology_type_label_qualifier_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(LOOSE_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let sym_cache = id_for(&ont, "Symptom", "Cache");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Source", "case1.docx"),
+                unode("Symptom", "Cache", "case1.docx"),
+                unode("Resolution", "Cache", "case1.docx"),
+            ],
+            vec![uedge("Source", "RELATED_TO", "Symptom:Cache", "case1.docx")],
+            1_000_000,
+        );
+        assert!(out.dropped.is_empty(), "qualified edge kept: {:?}", out.dropped);
+        let e = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.edge_type == "RELATED_TO")
+            .expect("edge written");
+        assert_eq!(e.to, sym_cache, "Type:label qualifier lands on the Symptom Cache");
     }
 
     /// `<path>#0` resolves to the first chunk. The model often writes 0-based refs out of
@@ -1715,7 +1983,7 @@ strict = true
         let got = resolver.resolve("docs/case1.docx", &[]);
         assert_eq!(
             got,
-            Some("docs\\case1.docx".to_string()),
+            EndpointResolution::Resolved("docs\\case1.docx".to_string()),
             "forward-slash Document endpoint should resolve to the stored Document id"
         );
     }
@@ -1768,7 +2036,7 @@ strict = true
             batch_ids: &std::collections::HashSet::new(),
         };
         let ok = resolver.resolve("Connection loss", &[]);
-        assert_eq!(ok, Some(sym_id));
+        assert_eq!(ok, EndpointResolution::Resolved(sym_id));
     }
 
     /// Edge whose `to` label has no corresponding node is rejected; message names the label.
