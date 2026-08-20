@@ -56,7 +56,9 @@ pub fn build_alias_index(g: &GraphStore) -> anyhow::Result<AliasIndex> {
     let mut tok_df: HashMap<String, usize> = HashMap::new();
     let mut n_facts = 0usize;
     for node in g.all_nodes()? {
-        if node.node_type != "Fact" {
+        // Include every reasoning node, ontology-agnostic: skip only the FIXED structural node types
+        // (a system contract, not an ontology choice) — never a hardcoded domain type like "Fact".
+        if crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
             continue;
         }
         n_facts += 1;
@@ -293,42 +295,25 @@ pub fn fuse(
     out
 }
 
-fn env_f(key: &str, default: f32) -> f32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
+/// Rank-damping constant for the fusion. A convention (the value RRF papers use is ~60; a smaller
+/// constant just lets the top ranks matter more on these short candidate lists), NOT a knob tuned to
+/// any corpus — the fusion stays parameter-free.
+const RRF_K: f32 = 10.0;
 
-/// Hybrid composed section: fuse the lexical (`compose`) and connectivity (`compose_ppr`) candidate
-/// lists. The fusion arm is selected at runtime by `KB_PPR_FUSION` so every variant runs from one
-/// binary (a research knob, not a baked choice): `compose` | `ppr` | `fuse` (default). `fuse` reads
-/// `KB_PPR_K` (rank damping, default 10), `KB_PPR_WC`/`KB_PPR_WPPR` (source weights, default 1), and
-/// `KB_PPR_CONS` (consensus multiplier, default 1 = pure RRF).
+/// The composed section: PARAMETER-FREE reciprocal-rank fusion of the lexical (`compose`) and
+/// connectivity (`compose_ppr`) rankings. Equal source weights, no consensus multiplier, a fixed
+/// rank-damping constant — nothing is fit to a particular corpus, so there is nothing to overfit.
+/// A node ranked well by EITHER signal surfaces; a node ranked well by BOTH surfaces highest.
 pub fn compose_hybrid(
     g: &GraphStore,
     name: &str,
     query: &str,
     k: usize,
 ) -> anyhow::Result<Vec<Candidate>> {
-    let mode = std::env::var("KB_PPR_FUSION").unwrap_or_else(|_| "fuse".to_string());
-    let mut ppr = compose_ppr(g, name, query, k * 2)?;
-    if mode == "ppr" {
-        ppr.truncate(k);
-        return Ok(ppr);
-    }
+    let ppr = compose_ppr(g, name, query, k * 2)?;
     let aidx = build_alias_index(g)?;
-    let mut comp = compose(g, &aidx, &[name], query, k * 2, 8)?;
-    if mode == "compose" {
-        comp.truncate(k);
-        return Ok(comp);
-    }
-    Ok(fuse(
-        &comp,
-        &ppr,
-        env_f("KB_PPR_K", 10.0),
-        env_f("KB_PPR_WC", 1.0),
-        env_f("KB_PPR_WPPR", 1.0),
-        env_f("KB_PPR_CONS", 1.0),
-        k,
-    ))
+    let comp = compose(g, &aidx, &[name], query, k * 2, 8)?;
+    Ok(fuse(&comp, &ppr, RRF_K, 1.0, 1.0, 1.0, k))
 }
 
 #[cfg(test)]

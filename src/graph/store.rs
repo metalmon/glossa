@@ -128,14 +128,19 @@ pub struct GraphStore {
     node_index: crate::graph::node_index::NodeIndex,
     /// The `.glossa` directory, kept for the on-disk PPR transition cache.
     gdir: std::path::PathBuf,
-    /// Cached PPR transition (nodes+edges as a generic digraph), keyed by a CONTENT signature over
-    /// the node ids and edge endpoints — the same drift-detection node_index uses, so a delete,
-    /// in-place edit, or re-index (which a count-only key would miss) invalidates it. Reused across
-    /// the many `glossary`/PPR calls in a session (a full build per call was the cost) and persisted
-    /// to `.glossa/ppr_transition.json` so it survives the process; a signature mismatch on either
-    /// the in-memory or on-disk copy triggers a rebuild.
-    ppr_transition: Mutex<Option<(u64, std::sync::Arc<crate::graph::ppr::Transition>)>>,
+    /// Cached PPR transition (nodes+edges as a generic digraph). The in-memory copy is keyed by a
+    /// CHEAP file signature — the (mtime, len) of `graph.sqlite` and its `-wal` — so a hot call is an
+    /// O(1) stat, not an O(nodes+edges) scan; the expensive content-signature scan runs only when the
+    /// DB files changed on disk. The on-disk cache (`.glossa/ppr_transition.json`) is keyed by that
+    /// content signature so it survives the process and self-heals on a delete / in-place edit /
+    /// re-index that a count would miss.
+    ppr_transition: Mutex<Option<(DbFileSig, std::sync::Arc<crate::graph::ppr::Transition>)>>,
 }
+
+/// Cheap freshness signature of the graph DB: (mtime_nanos, len) of `graph.sqlite` and its `-wal`
+/// sidecar. Any commit changes the `-wal` (or the main file on checkpoint), so this catches writes
+/// without reading a single row.
+type DbFileSig = (u128, u64, u128, u64);
 
 impl GraphStore {
     pub fn open(dir: &Path) -> anyhow::Result<GraphStore> {
@@ -193,26 +198,50 @@ impl GraphStore {
     /// signature covers node ids + edge endpoints, so a delete / in-place edit / re-index — anything
     /// that changes the graph topology — forces a rebuild, unlike a count-only key.
     pub fn ppr_transition(&self) -> anyhow::Result<std::sync::Arc<crate::graph::ppr::Transition>> {
-        let sig = {
-            let c = self.conn.lock().unwrap();
-            Self::transition_sig(&c)?
-        };
+        // Hot path: a cheap file stat. If the DB files haven't changed, the in-memory transition is
+        // still valid — return it without touching a row.
+        let fsig = self.db_filesig();
         if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
-            if *k == sig {
+            if *k == fsig {
                 return Ok(t.clone());
             }
         }
-        // Cross-process cache: load the persisted transition if its signature still matches.
-        if let Some(t) = self.load_ppr_transition(sig) {
-            let arc = std::sync::Arc::new(t);
-            *self.ppr_transition.lock().unwrap() = Some((sig, arc.clone()));
-            return Ok(arc);
-        }
-        // Build fresh, persist, cache.
-        let built = std::sync::Arc::new(crate::graph::ppr::build_transition(self)?);
-        let _ = self.save_ppr_transition(sig, &built); // best-effort; a failed write just re-builds next process
-        *self.ppr_transition.lock().unwrap() = Some((sig, built.clone()));
-        Ok(built)
+        // Cold or the DB changed: now the O(nodes+edges) content signature is worth it, to validate
+        // the on-disk cache (which survives across processes, where mtime isn't comparable).
+        let csig = {
+            let c = self.conn.lock().unwrap();
+            Self::transition_sig(&c)?
+        };
+        let arc = if let Some(t) = self.load_ppr_transition(csig) {
+            std::sync::Arc::new(t)
+        } else {
+            let built = std::sync::Arc::new(crate::graph::ppr::build_transition(self)?);
+            let _ = self.save_ppr_transition(csig, &built); // best-effort; a failed write just re-builds
+            built
+        };
+        *self.ppr_transition.lock().unwrap() = Some((fsig, arc.clone()));
+        Ok(arc)
+    }
+
+    /// (mtime_nanos, len) of `graph.sqlite` and its `-wal` sidecar; missing files read as (0, 0).
+    fn db_filesig(&self) -> DbFileSig {
+        let stat = |p: std::path::PathBuf| -> (u128, u64) {
+            std::fs::metadata(&p)
+                .ok()
+                .map(|m| {
+                    let mt = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    (mt, m.len())
+                })
+                .unwrap_or((0, 0))
+        };
+        let (mm, ml) = stat(self.gdir.join("graph.sqlite"));
+        let (wm, wl) = stat(self.gdir.join("graph.sqlite-wal"));
+        (mm, ml, wm, wl)
     }
 
     /// A content fingerprint of the graph's TOPOLOGY — a hash of every node `id` (id order) and

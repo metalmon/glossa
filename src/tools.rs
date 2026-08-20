@@ -918,7 +918,17 @@ pub fn glossary_with_query(
                     let extra: Vec<String> = cands
                         .iter()
                         .filter(|c| !shown.contains(c.id.as_str()))
-                        .map(|c| format!("{}  [Fact]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id)))
+                        .map(|c| {
+                            // Show the node's ACTUAL type, whatever the ontology calls it — never a
+                            // hardcoded "Fact".
+                            let ty = g
+                                .get_node(&c.id)
+                                .ok()
+                                .flatten()
+                                .map(|n| n.node_type)
+                                .unwrap_or_default();
+                            format!("{}  [{ty}]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id))
+                        })
                         .collect();
                     if !extra.is_empty() {
                         lines.push(
