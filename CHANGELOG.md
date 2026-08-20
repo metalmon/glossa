@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`--source-file` flag** (env `GLOSSA_SOURCE_FILE`). `get_source_file` — delivery of the original source file behind a citation — is now **off by default** and opt-in, mirroring how image output is opt-in via `--vision`. Many clients can't consume the returned file resource, so the tool is withheld unless a client that uses it opts in.
+
+### Changed
+
+- **`graph_query` renamed to `sql`.** The read-only SQL-over-the-reasoning-graph tool is now `sql` (one short word); behavior is unchanged. Call it with an empty query to get the schema.
+- **`sql` is now available to the `reader` profile.** It is read-only and useful for rankings/extremes, so answer agents get it (previously editor/full only).
+- **Reader profile decluttered.** `neighbors`, `related`, `resolve`, and `constraint_solve` are withheld from `reader` (editor/full keep them). A weak answer model chooses better from fewer tools, and the value of those low-level navigation tools is already surfaced in `glossary`'s composed section.
+- **`glossary`'s composed section now ranks by graph connectivity, not just lexical overlap.** It fuses the lexical alias-join with a Personalized-PageRank walk over the graph (parameter-free reciprocal-rank fusion), so a multi-hop answer that shares no words with the question — which a plain lexical rank can't float — now surfaces. `glossary` gained an optional `query` (the full question) to rank the neighborhood by what the question actually needs.
+
 ## [0.3.3] — 2026-08-15
 
 ### Added

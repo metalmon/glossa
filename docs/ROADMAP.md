@@ -25,7 +25,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **MCP:** 22 tools (24 with `--features constraint`), profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
 - **CLI:** `kb search|grep|glob|read|index|graph …|mcp` — scripting-first, not a TUI.
 - **Source-file delivery:** `get_source_file` returns the original document for a hit; docx is auto-converted to PDF for viewing (`src/convert/docx_pdf.rs`).
-- **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `related`, structural `neighbors` (typed 1-hop edges) and `path` (shortest connection between two nodes), formatted `graph_upsert` responses (Written / Merged / REJECTED).
+- **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `related`, structural `neighbors` (typed 1-hop edges) and `reach` (cross-document connection between two nodes), formatted `graph_upsert` responses (Written / Merged / REJECTED).
 - **Ontology presets** *(post-v0.2.7)*: 26 baked task ontologies (Tier 1 conformance / Tier 2 operational), `kb ontology list/show/init/suggest` + `kb index --ontology <name>`; thin reasoning skeletons — one grounded terminal per preset, no Evidence node.
 - **Mandatory grounding + valid-time** *(post-v0.2.7)*: `requires_grounding` / `requires_validity` enforced at `graph_upsert` and advertised by `get_ontology`; valid-time Phase 1 — `--as-of` / `as_of`, `SUPERSEDES`, per-node status (current/future/expired).
 - **Graph doctor** *(post-v0.2.7)*: `kb graph doctor` + MCP `graph_doctor` — ungrounded / stale (source `file_sig` drift) / incomplete report and targeted prune; `generalize` is derived-layer only; inline `⚠ stale` marker on reads.

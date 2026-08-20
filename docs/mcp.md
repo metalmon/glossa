@@ -14,17 +14,19 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 
 | Profile | Typical use | Disabled tools |
 |---------|-------------|----------------|
-| `reader` | Answer agents | `index`, `graph_*`, `purge`, `note`, `del` |
+| `reader` | Answer agents | `index`, graph writes (`graph_upsert`/`graph_delete`/`graph_update`/`graph_generalize`/`graph_stats`/`graph_doctor`/`graph_build`), `purge`, `note`, `del`, and the low-level graph-navigation tools `neighbors`, `related`, `resolve`, `constraint_solve` |
 | `editor` | Index + graph + notebook write | `purge` |
 | `full` | Admin | (none) |
 
-Reader keeps **notebook read** (`ls` to list notes; note content is read with the regular `read` tool) to inspect specialist notes.
+Reader's tool set is deliberately lean — a weak answer model chooses better from fewer tools. It keeps the reasoning-graph entry points it actually uses (`glossary`, `reach`, `sql`) plus corpus search/read; the low-level navigation tools (`neighbors`, `related`, `resolve`) that a reader rarely reaches for are withheld (their value is already surfaced in `glossary`'s composed section). Reader also keeps **notebook read** (`ls` to list notes; note content is read with the regular `read` tool).
 
 `--no-graph` hides all graph and index tools (search + read only) for eval control arms.
 
-Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=1`). Without it, `read` strips `page_image` and `include_images` from its schema and never returns `Content::image` (`get_source_file` is unaffected). This is off by default because a figure-heavy page's base64 image payload can overflow the stdio JSON-RPC frame and drop the connection; enabling `--vision` is safe on `--transport streamable-http`. When enabled, all images are served as JPEG (embedded PNGs re-encoded, real JPEGs passed through). `-N` / `--noimage` is a deprecated no-op kept for compatibility (images are already off unless `--vision` is set).
+Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=1`). Without it, `read` strips `page_image` and `include_images` from its schema and never returns `Content::image`. This is off by default because a figure-heavy page's base64 image payload can overflow the stdio JSON-RPC frame and drop the connection; enabling `--vision` is safe on `--transport streamable-http`. When enabled, all images are served as JPEG (embedded PNGs re-encoded, real JPEGs passed through). `-N` / `--noimage` is a deprecated no-op kept for compatibility (images are already off unless `--vision` is set).
 
-`resolve`, `get_ontology`, and `constraint_solve` are available in every profile. `constraint_solve` and `graph_build` are only registered when the binary is built with `--features constraint` — without it, these tools are absent from the tool list.
+Original-file delivery (`get_source_file`) is likewise **off by default** and opt-in via `--source-file` (or `GLOSSA_SOURCE_FILE=1`). Many clients can't consume the returned file resource, so the tool is withheld unless a client that uses it opts in.
+
+`get_ontology` is available in every profile. `resolve` and `constraint_solve` are editor/full only (withheld from reader). `constraint_solve` and `graph_build` are only registered when the binary is built with `--features constraint` — without it, these tools are absent from the tool list.
 
 ## Tools
 
@@ -34,14 +36,15 @@ Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
 | `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only |
-| `get_source_file` | ✓ | ✓ | ✓ | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF |
-| `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors |
-| `related` | ✓ | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
-| `neighbors` | ✓ | ✓ | ✓ | A node's direct structural edges (typed, 1-hop, with direction) |
-| `path` | ✓ | ✓ | ✓ | Shortest connection (chain of edges) between two nodes |
-| `resolve` | ✓ | ✓ | ✓ | Entity resolution by name |
+| `get_source_file` | ✓† | ✓† | ✓† | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF. **† Off by default; opt in with `--source-file`** |
+| `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. Pass `query` (the full question) to rank the composed neighborhood by what the question actually needs |
+| `reach` | ✓ | ✓ | ✓ | Cross-document reasoning bridge — walk a relation from a node (discovery), or add a candidate to verify the connection. Replaces the old `path` tool (`bridge: false` = in-document connectivity only) |
+| `sql` | ✓ | ✓ | ✓ | Read-only SQL SELECT over the reasoning graph — for a ranking or extreme ('which / earliest / largest / first'). Call with an empty query to get the schema and this graph's real edge/node vocabulary |
+| `related` | | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
+| `neighbors` | | ✓ | ✓ | A node's direct structural edges (typed, 1-hop, with direction) |
+| `resolve` | | ✓ | ✓ | Entity resolution by name |
 | `get_ontology` | ✓ | ✓ | ✓ | Knowledge-base ontology as JSON: parameters, constraints, relations, graph-building patterns |
-| `constraint_solve` | ✓* | ✓* | ✓* | CSP solver over the constraint graph (`validate` / `infer` / `check`); only available with `--features constraint` |
+| `constraint_solve` | | ✓* | ✓* | CSP solver over the constraint graph (`validate` / `infer` / `check`); editor/full only, and only available with `--features constraint` |
 | `ls` | ✓ | ✓ | ✓ | List notebook notes (agent workspace); read note content with `read` |
 | `note` | | ✓ | ✓ | Create/replace — or with `append: true` extend — a notebook note (`doc`, `file`, `content`; `.csp` = validated limit table) |
 | `del` | | ✓ | ✓ | Delete a notebook note |
@@ -63,10 +66,10 @@ Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 
 1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
 2. **`read(path, n)`** — open full chunk text (with `--vision`, embedded office images are returned as JPEG vision content; `page_image: true` renders a PDF page as a JPEG for hard-to-parse tables/layout).
-3. **`glossary("concept")`** — jump to reasoning graph; get cause → resolution chain with `read` anchors.
-4. **`related(node_id)`** — alternate cases (SIMILAR, COMMUNITY) when the first chain is close but wrong.
-5. **`neighbors(node_id)`** / **`path(from, to)`** — inspect a node's direct structural edges, or the shortest chain connecting two nodes.
-6. **`graph_upsert`** (editor) — add validated reasoning nodes; response shows what was written.
+3. **`glossary("concept", query)`** — jump to the reasoning graph; get the cause → resolution chain with `read` anchors, plus a composed neighborhood ranked by `query` (pass the full question).
+4. **`reach(from, relation)`** — close a multi-hop: walk the relation from a node, crossing document boundaries, or add a candidate to verify the connection.
+5. **`sql`** — when the answer is a ranking or extreme, let read-only SQL over the graph decide instead of guessing from prose.
+6. **`graph_upsert`** (editor) — add validated reasoning nodes; response shows what was written. Editor/full also expose `related` / `neighbors` / `resolve` for direct graph inspection.
 
 ### `graph_upsert` response
 
