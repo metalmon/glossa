@@ -911,7 +911,7 @@ pub fn glossary_with_query(
                 // no edge/node types), so a terminal answer that shares no words with the question
                 // still floats up, and hubs disperse without a df cap.
                 if let Ok(cands) =
-                    crate::graph::compose::compose_ppr(g, name, query.unwrap_or(name), 20)
+                    crate::graph::compose::compose_hybrid(g, name, query.unwrap_or(name), 20)
                 {
                     let shown: std::collections::HashSet<&str> =
                         ids.iter().map(|s| s.as_str()).collect();

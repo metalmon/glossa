@@ -252,10 +252,123 @@ pub fn compose_ppr(
     Ok(out)
 }
 
+/// Reciprocal-rank fusion of two candidate rankings into one. Score-unit-agnostic — it reads the
+/// two *rankings*, never their raw (incomparable) scores: `score = wc/(k+rank_compose) +
+/// wp/(k+rank_ppr)`, multiplied by `cons` when a node appears in BOTH lists (the consensus reward).
+/// Dedup by id; label from whichever list first carries it. Returns the top-`out_k` by fused score.
+/// The three research arms are just parameter settings: pure RRF (wc=wp=1, cons=1), consensus-boost
+/// (cons>1), weighted (wc≠wp).
+pub fn fuse(
+    compose: &[Candidate],
+    ppr: &[Candidate],
+    k: f32,
+    wc: f32,
+    wp: f32,
+    cons: f32,
+    out_k: usize,
+) -> Vec<Candidate> {
+    // id -> (fused score, label, in_compose, in_ppr)
+    let mut acc: HashMap<String, (f32, String, bool, bool)> = HashMap::new();
+    for (r, c) in compose.iter().enumerate() {
+        let e = acc.entry(c.id.clone()).or_insert((0.0, c.label.clone(), false, false));
+        e.0 += wc / (k + r as f32);
+        e.2 = true;
+    }
+    for (r, c) in ppr.iter().enumerate() {
+        let e = acc.entry(c.id.clone()).or_insert((0.0, c.label.clone(), false, false));
+        e.0 += wp / (k + r as f32);
+        e.3 = true;
+    }
+    let mut out: Vec<Candidate> = acc
+        .into_iter()
+        .map(|(id, (mut s, label, in_c, in_p))| {
+            if in_c && in_p {
+                s *= cons;
+            }
+            Candidate { id, label, score: s }
+        })
+        .collect();
+    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(out_k);
+    out
+}
+
+fn env_f(key: &str, default: f32) -> f32 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Hybrid composed section: fuse the lexical (`compose`) and connectivity (`compose_ppr`) candidate
+/// lists. The fusion arm is selected at runtime by `KB_PPR_FUSION` so every variant runs from one
+/// binary (a research knob, not a baked choice): `compose` | `ppr` | `fuse` (default). `fuse` reads
+/// `KB_PPR_K` (rank damping, default 10), `KB_PPR_WC`/`KB_PPR_WPPR` (source weights, default 1), and
+/// `KB_PPR_CONS` (consensus multiplier, default 1 = pure RRF).
+pub fn compose_hybrid(
+    g: &GraphStore,
+    name: &str,
+    query: &str,
+    k: usize,
+) -> anyhow::Result<Vec<Candidate>> {
+    let mode = std::env::var("KB_PPR_FUSION").unwrap_or_else(|_| "fuse".to_string());
+    let mut ppr = compose_ppr(g, name, query, k * 2)?;
+    if mode == "ppr" {
+        ppr.truncate(k);
+        return Ok(ppr);
+    }
+    let aidx = build_alias_index(g)?;
+    let mut comp = compose(g, &aidx, &[name], query, k * 2, 8)?;
+    if mode == "compose" {
+        comp.truncate(k);
+        return Ok(comp);
+    }
+    Ok(fuse(
+        &comp,
+        &ppr,
+        env_f("KB_PPR_K", 10.0),
+        env_f("KB_PPR_WC", 1.0),
+        env_f("KB_PPR_WPPR", 1.0),
+        env_f("KB_PPR_CONS", 1.0),
+        k,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
+
+    fn cand(id: &str) -> Candidate {
+        Candidate { id: id.into(), label: id.into(), score: 0.0 }
+    }
+
+    #[test]
+    fn fuse_floats_the_consensus_node_above_single_source_ones() {
+        // X tops BOTH lists; A and B each appear in only one. Fusion must rank X first (it is the
+        // agreement), with A and B still present.
+        let compose = [cand("X"), cand("A")];
+        let ppr = [cand("X"), cand("B")];
+        let out = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 1.0, 5);
+        assert_eq!(out[0].id, "X", "consensus node ranks first: {:?}", out.iter().map(|c| &c.id).collect::<Vec<_>>());
+        assert!(out.iter().any(|c| c.id == "A") && out.iter().any(|c| c.id == "B"), "both singles kept");
+    }
+
+    #[test]
+    fn consensus_multiplier_raises_a_both_node_score() {
+        let compose = [cand("A"), cand("X")]; // X at rank 1 in compose
+        let ppr = [cand("B"), cand("X")]; // X at rank 1 in ppr
+        let plain = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 1.0, 5);
+        let boosted = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 2.0, 5);
+        let sx = |o: &[Candidate]| o.iter().find(|c| c.id == "X").unwrap().score;
+        assert!(sx(&boosted) > sx(&plain), "cons>1 strictly raises the both-node score");
+    }
+
+    #[test]
+    fn weighted_fusion_favors_the_heavier_source() {
+        // A leads compose, B leads ppr; nothing is shared. Weighting ppr heavier must put B on top.
+        let compose = [cand("A")];
+        let ppr = [cand("B")];
+        let out = fuse(&compose, &ppr, 10.0, 1.0, 3.0, 1.0, 5);
+        assert_eq!(out[0].id, "B", "heavier ppr weight wins: {:?}", out.iter().map(|c| (&c.id, c.score)).collect::<Vec<_>>());
+    }
 
     fn prov() -> Provenance {
         Provenance { source_path: "s.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 }
