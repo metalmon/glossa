@@ -237,22 +237,6 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    let get_source_file = json!({
-        "type": "function",
-        "function": {
-            "name": "get_source_file",
-            "description": "Deliver the ORIGINAL source file behind a citation for attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a result and, for a PDF, the cited page `n`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "document path from a search/grep result" },
-                    "n": { "type": "integer", "description": "cited page number (PDF only)" },
-                    "raw": { "type": "boolean", "description": "deliver a DOCX as-is instead of converting to PDF (default false)" }
-                },
-                "required": ["path"]
-            }
-        }
-    });
     let reach = json!({
         "type": "function",
         "function": {
@@ -282,19 +266,11 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
             }
         }
     });
-    // Graph-ON tool set = the MCP Reader profile, one-to-one (routable subset): the reasoning-graph
-    // tools + corpus search/read + glob/get_source_file. `neighbors`/`resolve`/`constraint_solve` are
-    // NOT here (withheld from Reader as clutter); `ls`/`get_ontology` aren't routed in the eval.
-    Value::Array(vec![
-        glossary,
-        reach,
-        sql,
-        search,
-        grep,
-        read,
-        glob,
-        get_source_file,
-    ])
+    // Graph-ON tool set = the MCP Reader profile, one-to-one (default, routable subset): the
+    // reasoning-graph tools + corpus search/read + glob. `neighbors`/`resolve`/`constraint_solve`/
+    // `related` are withheld from Reader as clutter; `get_source_file` is opt-in (off by default);
+    // `ls`/`get_ontology` aren't routed in the eval.
+    Value::Array(vec![glossary, reach, sql, search, grep, read, glob])
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
@@ -1077,11 +1053,11 @@ mod schema_tests {
         );
         let on = tool_names(&tools_schema(true));
         // The graph-ON set mirrors the MCP Reader profile (routable subset).
-        for t in ["glossary", "reach", "sql", "glob", "get_source_file"] {
+        for t in ["glossary", "reach", "sql", "glob", "search", "grep", "read"] {
             assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
         }
-        for t in ["neighbors", "related", "resolve"] {
-            assert!(!on.contains(&t.to_string()), "{t} is withheld from Reader — graph-ON must NOT advertise it");
+        for t in ["neighbors", "related", "resolve", "get_source_file"] {
+            assert!(!on.contains(&t.to_string()), "{t} is withheld from the default Reader — graph-ON must NOT advertise it");
         }
         assert!(
             !on.contains(&"path".into()),
