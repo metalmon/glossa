@@ -6,7 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.3.4] — 2026-08-20
+## [0.3.4] — 2026-08-21
+
+### Fixed
+
+- **Silent cross-type node conflation in `graph_upsert`.** A node's identity is now its `(label, type)`, not its label alone. Two nodes that share a label but differ in type (which the ontology already promises are distinct) stayed distinct instead of the second silently collapsing onto the first's id — a general silent-corruption hole in the core graph, and the deterministic cause of the constraint compiler's failures. Edge-endpoint resolution is type-first: when a relation fixes an endpoint's type, the edge lands on the correct-typed node.
+- **Ambiguous edge endpoints under a non-strict ontology.** When a relation fixes neither endpoint type and a bare label matches two differently-typed nodes, `graph_upsert` no longer silently picks one. It drops the edge with an actionable message naming the candidate type-qualified ids, and accepts an explicit `Type:label` qualifier (e.g. `Symptom:cache`) — or a node id — to address the endpoint precisely.
+- **Recovery for graphs built before this release:** the fix is forward-only — no data is migrated. A graph already conflated under the old behavior self-heals on a corpus **re-index** (`kb index`), which regenerates a clean graph from the source documents.
 
 ### Added
 
