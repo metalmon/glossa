@@ -1,6 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "bridge": {
+      "default": null,
+      "description": "cross-document bridge: when an in-graph chain dead-ends, resolve its mention to same-named nodes in OTHER documents and continue there (default true). false = graph-only, in-document connectivity — this reproduces the old `path` tool exactly when combined with to+no relation.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "from": {
       "default": null,
       "description": "start: graph node id (or use from_path+from_n)",
@@ -37,9 +45,17 @@
         "null"
       ]
     },
+    "relation": {
+      "default": null,
+      "description": "relation to follow, fuzzy-matched to the ontology's real edge types (e.g. \"located\" matches LOCATED_IN); omit for ALL chaining relations (undirected — 'is this connected at all')",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "to": {
       "default": null,
-      "description": "end: graph node id (or use to_path+to_n)",
+      "description": "end: graph node id to VERIFY a connection to (or use to_path+to_n); omit for DISCOVERY — find every node `from` reaches along `relation`",
       "type": [
         "string",
         "null"

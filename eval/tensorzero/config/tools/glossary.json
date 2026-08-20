@@ -12,10 +12,15 @@
     "name": {
       "description": "concept in your own words, e.g. \"connection loss\"",
       "type": "string"
+    },
+    "query": {
+      "description": "the full problem or question you are trying to solve, written out completely as a whole sentence — not a short phrase or the bare concept. It ranks the returned facts by what you actually need, so a complete, specific question ranks the right chain far higher than a terse one.",
+      "type": "string"
     }
   },
   "required": [
-    "name"
+    "name",
+    "query"
   ],
   "type": "object"
 }

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "sql": {
+      "default": "",
+      "description": "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema instead of running a query",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
