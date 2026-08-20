@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-08-20
+
 ### Added
 
 - **`--source-file` flag** (env `GLOSSA_SOURCE_FILE`). `get_source_file` — delivery of the original source file behind a citation — is now **off by default** and opt-in, mirroring how image output is opt-in via `--vision`. Many clients can't consume the returned file resource, so the tool is withheld unless a client that uses it opts in.
