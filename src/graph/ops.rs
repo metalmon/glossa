@@ -1413,6 +1413,51 @@ strict = true
         assert!(out.message.contains("Written:"), "{}", out.message);
     }
 
+    /// Two nodes in one batch share a normalized label but declare DIFFERENT types.
+    /// They are distinct facts and must be written as two distinct nodes — neither dropped,
+    /// neither silently collapsed onto the other's id. (Currently the id is cached by label
+    /// alone, so the second type conflates onto the first; this test pins the correct
+    /// behavior and fails until that is fixed.)
+    #[test]
+    fn same_label_different_type_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        // Same label "Cache", two distinct declared types, no edges.
+        let nodes = vec![
+            unode("Symptom", "Cache", "case1.docx"),
+            unode("Resolution", "Cache", "case1.docx"),
+        ];
+        let out = graph_upsert(&idx, &g, &ont, nodes, vec![], 1_000_000);
+
+        assert!(!out.rejected, "should not be rejected: {}", out.message);
+        assert!(
+            out.dropped.is_empty(),
+            "nothing should be dropped: {:?}",
+            out.dropped
+        );
+
+        // Two distinct nodes must land in the graph, one per type.
+        assert_eq!(
+            g.node_count().unwrap(),
+            2,
+            "same label + different type must stay distinct, not merge into one node"
+        );
+        let sym = g
+            .find_by_label_type("Cache", "Symptom")
+            .unwrap()
+            .expect("Symptom 'Cache' node must exist");
+        let res = g
+            .find_by_label_type("Cache", "Resolution")
+            .unwrap()
+            .expect("Resolution 'Cache' node must exist");
+        assert_ne!(sym, res, "the two nodes must have distinct ids");
+        assert_eq!(out.nodes, 2, "both nodes reported as written");
+    }
+
     /// `<path>#0` resolves to the first chunk. The model often writes 0-based refs out of
     /// programming habit; the tool tolerates it (numbering is 1-based) instead of erroring,
     /// so it doesn't loop guessing chunk numbers. Out-of-range numbers still error, with a
