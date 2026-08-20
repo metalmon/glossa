@@ -217,9 +217,9 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "the term or entity to look up" },
-                    "query": { "type": "string", "description": "the full question you are trying to answer — this ranks the composed facts by what you actually need, so pass it whenever you have one" }
+                    "query": { "type": "string", "description": "the full question you are trying to answer, written out completely as a whole sentence — not a short phrase or the bare entity. It ranks the returned facts by what the question actually needs, so a complete, specific question ranks far better than a terse one." }
                 },
-                "required": ["name"]
+                "required": ["name", "query"]
             }
         }
     });
