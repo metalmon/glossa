@@ -99,14 +99,20 @@ const GRAPH_TOOLS: &[&str] = &[
     "purge",
 ];
 
+/// Launch-time tool-gating flags, bundled so `GlossaServer::new` doesn't grow a tail of positional
+/// bools. All default off (every capability on); each `no_*` withholds one. Set from CLI args.
+#[derive(Clone, Copy, Default)]
+pub struct ServerFlags {
+    /// Withhold the reasoning-graph tools (`--no-graph`): a plain file-search server.
+    pub no_graph: bool,
+    /// Withhold image delivery from `read` (images are opt-in via `--vision`).
+    pub no_image: bool,
+    /// Withhold `get_source_file` (original-file delivery is opt-in via `--source-file`).
+    pub no_source_file: bool,
+}
+
 impl GlossaServer {
-    pub fn new(
-        root: PathBuf,
-        profile: Profile,
-        trace: bool,
-        no_graph: bool,
-        no_image: bool,
-    ) -> Self {
+    pub fn new(root: PathBuf, profile: Profile, trace: bool, flags: ServerFlags) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
             for t in EDITOR_TOOLS
@@ -121,12 +127,15 @@ impl GlossaServer {
                 router.disable_route(*t);
             }
         }
-        if no_graph {
+        if flags.no_graph {
             for t in GRAPH_TOOLS {
                 router.disable_route(*t);
             }
         }
-        if no_image {
+        if flags.no_source_file {
+            router.disable_route("get_source_file");
+        }
+        if flags.no_image {
             if let Some(route) = router.map.get_mut("read") {
                 let mut schema: serde_json::Value = serde_json::to_value(&*route.attr.input_schema)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
@@ -171,7 +180,7 @@ impl GlossaServer {
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicUsize::new(0)),
-            no_image,
+            no_image: flags.no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
             http: Arc::new(crate::http_metrics::HttpMetrics::default()),
         }
@@ -1779,8 +1788,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let s1 = srv.baseline_sig("a.md");
         assert!(s1.is_some(), "known file has a baseline sig");
@@ -1802,7 +1810,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, false, false);
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, ServerFlags::default());
         // Another process holds the agent-graph write lock.
         std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
         let held = std::fs::OpenOptions::new()
@@ -1836,8 +1844,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         // In-place edit (no dir-mtime change → B1 freshen alone would miss it).
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1876,8 +1883,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         // Create the note via the tool (write-through indexes it).
         srv.note(Parameters(NoteArgs {
@@ -1969,8 +1975,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let path = "d.md".to_string(); // canonical key: corpus-root-relative
 
@@ -2000,8 +2005,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let out = srv
             .grep(Parameters(GrepArgs {
@@ -2041,8 +2045,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let out = format!(
             "{:?}",
@@ -2071,8 +2074,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let out = format!(
             "{:?}",
@@ -2105,8 +2107,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // pre-cancelled → the loop must return promptly, not hang
@@ -2148,8 +2149,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         srv.run_generalize();
         let g = GraphStore::open(dir.path()).unwrap();
@@ -2168,8 +2168,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         assert!(srv.readiness(), "index + graph open → ready");
         let m = srv.metrics_text();
@@ -2208,8 +2207,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
 
         // Another editor holds the cross-process generalize lock.
@@ -2250,7 +2248,7 @@ mod tests {
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
         let reader =
-            GlossaServer::new(root.clone(), Profile::Reader, false, false, false).enabled_tools();
+            GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default()).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         assert!(reader.contains(&"ls".to_string()));
         assert!(!reader.contains(&"note".to_string()) && !reader.contains(&"del".to_string()));
@@ -2262,7 +2260,7 @@ mod tests {
         assert!(!reader.contains(&"write".to_string()));
 
         let editor =
-            GlossaServer::new(root.clone(), Profile::Editor, false, false, false).enabled_tools();
+            GlossaServer::new(root.clone(), Profile::Editor, false, ServerFlags::default()).enabled_tools();
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(
@@ -2307,7 +2305,7 @@ mod tests {
         );
 
         let full =
-            GlossaServer::new(root.clone(), Profile::Full, false, false, false).enabled_tools();
+            GlossaServer::new(root.clone(), Profile::Full, false, ServerFlags::default()).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
@@ -2321,12 +2319,36 @@ mod tests {
             );
         }
 
-        let ng = GlossaServer::new(root, Profile::Editor, false, true, false).enabled_tools();
+        let ng = GlossaServer::new(root, Profile::Editor, false, ServerFlags { no_graph: true, ..Default::default() }).enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
         assert!(
             !ng.contains(&"related".to_string())
                 && !ng.contains(&"graph_upsert".to_string())
                 && !ng.contains(&"index".to_string())
+        );
+    }
+
+    #[test]
+    fn source_file_flag_gates_get_source_file() {
+        let root = std::path::PathBuf::from(".");
+        // On by default (every profile) …
+        let on = GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default())
+            .enabled_tools();
+        assert!(
+            on.contains(&"get_source_file".to_string()),
+            "get_source_file is available by default"
+        );
+        // … and withheld when the --source-file opt-in is off (no_source_file), any profile.
+        let off = GlossaServer::new(
+            root,
+            Profile::Full,
+            false,
+            ServerFlags { no_source_file: true, ..Default::default() },
+        )
+        .enabled_tools();
+        assert!(
+            !off.contains(&"get_source_file".to_string()),
+            "no_source_file withholds get_source_file"
         );
     }
 
@@ -2339,8 +2361,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
 
         // File added AFTER the server exists (as an external agent would).
@@ -2372,8 +2393,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         std::fs::write(dir.path().join("a.md"), b"# A\nrewritetoken\n").unwrap();
         srv.index(Parameters(IndexArgs {
@@ -2404,8 +2424,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let names: Vec<String> = srv
             .tool_specs()
@@ -2423,8 +2442,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         let names: Vec<String> = srv
             .tool_specs()
@@ -2450,8 +2468,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         // Another process holds the index lock for the whole handler call.
         let _holder = crate::index::lock::try_index_lock(dir.path()).unwrap();
@@ -2484,8 +2501,7 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            false,
-            false,
+            ServerFlags::default(),
         );
         srv.note(Parameters(NoteArgs {
             doc: "a.md".into(),

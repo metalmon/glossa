@@ -226,6 +226,11 @@ enum Cmd {
         /// JSON-RPC frame and drop the connection. Safe to enable on `--transport streamable-http`.
         #[arg(long = "vision", env = "GLOSSA_VISION")]
         vision: bool,
+        /// Enable the `get_source_file` tool — delivers the ORIGINAL source file behind a citation
+        /// (for attribution/download). OFF by default: many clients can't use the returned file
+        /// resource, and it is dead weight where nothing consumes it. Opt in when the client does.
+        #[arg(long = "source-file", env = "GLOSSA_SOURCE_FILE")]
+        source_file: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
         #[arg(
             long,
@@ -520,6 +525,7 @@ pub(crate) struct ServeParams {
     pub trace: bool,
     pub no_graph: bool,
     pub no_image: bool,
+    pub no_source_file: bool,
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
@@ -538,7 +544,16 @@ pub(crate) fn run_serve(
     handle_signals: bool,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
-    let server = glossa::mcp::GlossaServer::new(p.path, p.profile, p.trace, p.no_graph, p.no_image);
+    let server = glossa::mcp::GlossaServer::new(
+        p.path,
+        p.profile,
+        p.trace,
+        glossa::mcp::ServerFlags {
+            no_graph: p.no_graph,
+            no_image: p.no_image,
+            no_source_file: p.no_source_file,
+        },
+    );
     // Freshness runs on EVERY instance (readers stay current). The heavy generalize loop runs ONLY on
     // the indexer (editor/full); among multiple editors it is further serialized by generalize.lock.
     let run_maintenance = p.profile != glossa::mcp::Profile::Reader;
@@ -1197,6 +1212,7 @@ fn main() -> anyhow::Result<()> {
             no_graph,
             no_image,
             vision,
+            source_file,
             transport,
             bind,
             allowed_hosts,
@@ -1222,6 +1238,8 @@ fn main() -> anyhow::Result<()> {
                     no_graph,
                     // Images are opt-in via --vision; the legacy --noimage still forces them off.
                     no_image: no_image || !vision,
+                    // get_source_file is opt-in via --source-file (off by default).
+                    no_source_file: !source_file,
                     transport,
                     bind,
                     allowed_hosts,

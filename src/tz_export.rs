@@ -114,8 +114,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Full,
         false,
-        false,
-        false,
+        crate::mcp::ServerFlags::default(),
     );
     let mut full_tools = full_srv.tool_specs();
     full_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -125,8 +124,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Reader,
         false,
-        false,
-        false,
+        crate::mcp::ServerFlags::default(),
     );
     let mut reader_tools = reader_srv.tool_specs();
     reader_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -137,8 +135,7 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Editor,
         false,
-        false,
-        false,
+        crate::mcp::ServerFlags::default(),
     );
     let mut editor_tools = editor_srv.tool_specs();
     editor_tools.sort_by(|a, b| a.name.cmp(&b.name));
