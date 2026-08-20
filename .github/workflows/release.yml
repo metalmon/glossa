@@ -41,7 +41,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build kb
-        run: cargo build --release --locked --target ${{ matrix.target }} -p glossa --bin kb
+        # Release ships the lean binary: no default features — no `notebook`, no `constraint`.
+        run: cargo build --release --locked --target ${{ matrix.target }} -p glossa --bin kb --no-default-features
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'

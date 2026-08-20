@@ -40,10 +40,11 @@ jobs:
           done
           exit 1
 
-      # Minimal build — no default features, notebook explicitly on (the one non-core feature we
-      # always ship). Guards that nothing outside `notebook` leaked a hard dependency.
-      - name: cargo test (glossa, minimal + notebook)
-        run: cargo test -p glossa --release --locked --no-default-features --features notebook
+      # Lean release config — NO default features (no notebook, no constraint). This is exactly what
+      # the release binary ships, so CI guards it: nothing outside a feature may hard-depend on
+      # notebook/constraint, and no test may assume those tools without a `#[cfg(feature = …)]` gate.
+      - name: cargo test (glossa, no default features — release config)
+        run: cargo test -p glossa --release --locked --no-default-features
 
       # Full build — every feature (notebook + lingua + constraint).
       - name: cargo test (glossa, all features)

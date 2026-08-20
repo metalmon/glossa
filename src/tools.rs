@@ -2027,6 +2027,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "notebook")]
     #[test]
     fn read_serves_notebook_file_by_doc_scoped_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -3233,6 +3234,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 
+    #[cfg(feature = "notebook")]
     #[test]
     fn grep_matches_lines_in_a_notebook_file() {
         let dir = tempfile::tempdir().unwrap();

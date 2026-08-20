@@ -1,6 +1,6 @@
 [package]
 name = "glossa"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 
 [lib]
@@ -52,7 +52,7 @@ sqlparser = "0.53"
 windows-service = "0.7"
 
 [features]
-default = ["notebook"]
+default = []
 notebook = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]

@@ -1874,6 +1874,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "notebook")]
     #[tokio::test]
     async fn read_picks_up_an_external_note_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -2250,6 +2251,7 @@ mod tests {
         let reader =
             GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default()).enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
+        #[cfg(feature = "notebook")]
         assert!(reader.contains(&"ls".to_string()));
         assert!(!reader.contains(&"note".to_string()) && !reader.contains(&"del".to_string()));
         assert!(
@@ -2261,6 +2263,7 @@ mod tests {
 
         let editor =
             GlossaServer::new(root.clone(), Profile::Editor, false, ServerFlags::default()).enabled_tools();
+        #[cfg(feature = "notebook")]
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
         assert!(
@@ -2307,6 +2310,7 @@ mod tests {
         let full =
             GlossaServer::new(root.clone(), Profile::Full, false, ServerFlags::default()).enabled_tools();
         assert!(full.contains(&"purge".to_string()));
+        #[cfg(feature = "notebook")]
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
         // resolve is a low-level primitive: kept for editor/full, withheld from Reader (a tool the
