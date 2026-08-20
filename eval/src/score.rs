@@ -74,8 +74,8 @@ fn is_token_subslice(needle: &[String], haystack: &[String]) -> bool {
 /// token sequence is a contiguous run inside the other (either direction). This
 /// credits a correct concise answer against a verbose gold — e.g. `3rd century BC`
 /// vs the gold `as early as the 3rd century BC` (MuSiQue ships no aliases for it) —
-/// while still rejecting an over-hop to a broader entity (`Trnava Region` shares no
-/// run with `Senica District`). Token-level, so `yes` never matches inside `yesterday`.
+/// while still rejecting an over-hop to a broader entity (`Lakeshore Region` shares no
+/// run with `Riverton District`). Token-level, so `yes` never matches inside `yesterday`.
 pub fn contains_match(pred: &str, gold: &str) -> bool {
     let p: Vec<String> = normalize(pred).split_whitespace().map(str::to_string).collect();
     let g: Vec<String> = normalize(gold).split_whitespace().map(str::to_string).collect();
@@ -301,9 +301,9 @@ mod alias_score_tests {
             "gold contained in wordier pred"
         );
         // Over-hop to a broader entity must still fail (no shared contiguous run).
-        let golds3 = vec!["Senica District".to_string()];
+        let golds3 = vec!["Riverton District".to_string()];
         assert!(
-            !relaxed_match_any("Trnava Region", &golds3),
+            !relaxed_match_any("Lakeshore Region", &golds3),
             "over-hop to a broader entity is not a containment match"
         );
         // Token-level, not raw substring: "yes" must not match inside "yesterday".

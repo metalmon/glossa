@@ -1297,13 +1297,13 @@ mod tests {
     #[test]
     fn locate_classifies_relation_vs_entity_equalities() {
         let q = parse_readonly_select(
-            "SELECT dst_label FROM edges_labeled WHERE src_label = 'Senica' AND edge_type = 'located in'"
+            "SELECT dst_label FROM edges_labeled WHERE src_label = 'Riverton' AND edge_type = 'located in'"
         ).unwrap();
         let lits = locate_literals(&q);
         let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
         let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap();
         assert_eq!(rel.value, "located in");
-        assert_eq!(ent.value, "Senica");
+        assert_eq!(ent.value, "Riverton");
         // LIKE stays fuzzy already -> not collected
         let q2 = parse_readonly_select("SELECT label FROM nodes WHERE label LIKE '%Kepler%'").unwrap();
         assert!(locate_literals(&q2).is_empty());
@@ -1356,14 +1356,14 @@ mod tests {
     fn resolution_prefers_the_assignment_backed_by_a_real_edge() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        g.put_node(&node_fact("f:senica", "Senica")).unwrap();
-        g.put_node(&node_fact("f:distr", "Senica District")).unwrap();
-        g.put_edge(&edge("f:senica", "LOCATED_IN", "f:distr")).unwrap();
+        g.put_node(&node_fact("f:riverton", "Riverton")).unwrap();
+        g.put_node(&node_fact("f:distr", "Riverton District")).unwrap();
+        g.put_edge(&edge("f:riverton", "LOCATED_IN", "f:distr")).unwrap();
         // vocab also has a lexically-closer-but-edgeless relation
         g.put_node(&node_fact("f:x", "x")).unwrap();
         g.put_edge(&edge("f:x", "LOCATION_OF", "f:x")).unwrap();
         let q = parse_readonly_select(
-            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Riverton' AND edge_type='located'",
         )
         .unwrap();
         let lits = locate_literals(&q);
@@ -1371,7 +1371,7 @@ mod tests {
         let rel = chosen.iter().find(|(l, _, _)| matches!(l.kind, LitKind::Relation)).unwrap();
         assert_eq!(
             rel.1, "LOCATED_IN",
-            "picks the relation that actually connects Senica, not the lexically-nearest edgeless one"
+            "picks the relation that actually connects Riverton, not the lexically-nearest edgeless one"
         );
     }
 
@@ -1379,20 +1379,20 @@ mod tests {
     fn resolution_edge_constraint_overrides_lexical_rank() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        // Real edge for Senica -> Senica District uses a relation name that is lexically FAR
+        // Real edge for Riverton -> Riverton District uses a relation name that is lexically FAR
         // from the query word 'located'.
-        g.put_node(&node_fact("f:senica", "Senica")).unwrap();
-        g.put_node(&node_fact("f:distr", "Senica District")).unwrap();
-        g.put_edge(&edge("f:senica", "SITED_IN", "f:distr")).unwrap();
+        g.put_node(&node_fact("f:riverton", "Riverton")).unwrap();
+        g.put_node(&node_fact("f:distr", "Riverton District")).unwrap();
+        g.put_edge(&edge("f:riverton", "SITED_IN", "f:distr")).unwrap();
         // LOCATED_NEAR is in the vocab (so it's a relation_candidates hit) and is the lexical
         // top match for 'located' (substring), but it only connects unrelated nodes -- it is
-        // edgeless between Senica and its district.
+        // edgeless between Riverton and its district.
         g.put_node(&node_fact("f:p", "p")).unwrap();
         g.put_node(&node_fact("f:q", "q")).unwrap();
         g.put_edge(&edge("f:p", "LOCATED_NEAR", "f:q")).unwrap();
 
         let q = parse_readonly_select(
-            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Riverton' AND edge_type='located'",
         )
         .unwrap();
         let lits = locate_literals(&q);
@@ -1417,7 +1417,7 @@ mod tests {
     #[test]
     fn rewrite_substitutes_relation_and_relaxes_entity_to_like() {
         let q = parse_readonly_select(
-            "SELECT dst_label FROM edges_labeled WHERE src_label='Senica' AND edge_type='located'",
+            "SELECT dst_label FROM edges_labeled WHERE src_label='Riverton' AND edge_type='located'",
         )
         .unwrap();
         // Drive the test through the real addressing produced by `locate_literals`, rather than
@@ -1425,23 +1425,23 @@ mod tests {
         let lits = locate_literals(&q);
         let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap().clone();
         let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap().clone();
-        let chosen = vec![(rel, "LOCATED_IN".to_string(), 0.8f32), (ent, "Senica".to_string(), 0.9f32)];
+        let chosen = vec![(rel, "LOCATED_IN".to_string(), 0.8f32), (ent, "Riverton".to_string(), 0.9f32)];
 
         let sql = rewrite(&q, &chosen);
         assert!(sql.contains("edge_type = 'LOCATED_IN'"), "sql: {sql}");
-        assert!(sql.to_lowercase().contains("src_label like '%senica%'"), "sql: {sql}");
+        assert!(sql.to_lowercase().contains("src_label like '%riverton%'"), "sql: {sql}");
     }
 
     #[test]
     fn locate_unwraps_a_parenthesized_operand_of_and() {
         let q = parse_readonly_select(
-            "SELECT dst_label FROM edges_labeled WHERE (src_label = 'Senica') AND edge_type = 'x'",
+            "SELECT dst_label FROM edges_labeled WHERE (src_label = 'Riverton') AND edge_type = 'x'",
         )
         .unwrap();
         let lits = locate_literals(&q);
         let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap();
         let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
-        assert_eq!(ent.value, "Senica");
+        assert_eq!(ent.value, "Riverton");
         assert_eq!(rel.value, "x");
     }
 

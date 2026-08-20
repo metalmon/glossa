@@ -589,7 +589,7 @@ impl GraphStore {
 
     /// Whether at least one row of `edges_labeled` matches all of the given constraints
     /// (each `None` constraint is unconstrained/matches anything). `src_like`/`dst_like` are
-    /// SQL `LIKE` patterns (e.g. `%Senica%`) matched against the joined endpoint labels;
+    /// SQL `LIKE` patterns (e.g. `%Riverton%`) matched against the joined endpoint labels;
     /// `edge_type` is matched exactly. Used to check whether a candidate (src, relation, dst)
     /// assignment is actually backed by a real edge, not just lexically plausible.
     pub fn edge_exists_like(
@@ -1750,8 +1750,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for (id, label) in [
-            ("f:a", "Senica is a town"),
-            ("f:b", "Senica District is a district"),
+            ("f:a", "Riverton is a town"),
+            ("f:b", "Riverton District is a district"),
         ] {
             g.put_node(&Node {
                 id: id.into(),
@@ -1780,9 +1780,9 @@ mod tests {
         assert_eq!(
             (sl.as_str(), rel.as_str(), dl.as_str()),
             (
-                "Senica is a town",
+                "Riverton is a town",
                 "LOCATED_IN",
-                "Senica District is a district"
+                "Riverton District is a district"
             )
         );
     }
