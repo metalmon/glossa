@@ -20,6 +20,7 @@ pub mod lab;
 pub mod prep;
 pub mod report;
 pub mod run;
+pub mod scaffold;
 pub mod score;
 pub mod sop;
 pub mod trace_read;

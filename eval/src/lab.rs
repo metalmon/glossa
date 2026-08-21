@@ -23,8 +23,31 @@ fn default_dataset() -> String {
 pub struct Endpoint {
     pub endpoint: String,
     pub model: String,
+    /// Inline literal API key. Prefer `api_key_env` to keep secrets out of the file.
+    #[serde(default)]
+    pub api_key: String,
+    /// Name of an env var to read the API key from (optional).
     #[serde(default)]
     pub api_key_env: String,
+    /// Per-endpoint request timeout, in seconds.
+    #[serde(default = "d120")]
+    pub timeout_secs: u64,
+}
+
+impl Endpoint {
+    /// Resolve the API key for this endpoint: an inline `api_key` wins; otherwise
+    /// fall back to reading `api_key_env` from the environment; otherwise `None`.
+    pub fn resolve_key(&self) -> Option<String> {
+        if !self.api_key.is_empty() {
+            return Some(self.api_key.clone());
+        }
+        if !self.api_key_env.is_empty() {
+            if let Ok(v) = std::env::var(&self.api_key_env) {
+                return Some(v);
+            }
+        }
+        None
+    }
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -45,8 +68,6 @@ pub struct Defaults {
     pub judge_prompt: String,
     #[serde(default = "default_dataset")]
     pub dataset: String,
-    #[serde(default = "d120")]
-    pub timeout_secs: u64,
 }
 
 impl Default for Defaults {
@@ -55,7 +76,6 @@ impl Default for Defaults {
             prompt: default_prompt(),
             judge_prompt: default_judge_prompt(),
             dataset: default_dataset(),
-            timeout_secs: d120(),
         }
     }
 }
@@ -117,6 +137,6 @@ mod tests {
         assert_eq!(c.corpus, "../kb-abac");
         assert_eq!(c.defaults.dataset, "dataset.toml"); // default
         assert!(c.judge.is_none());
-        assert_eq!(c.defaults.timeout_secs, 120);
+        assert_eq!(c.model.timeout_secs, 120);
     }
 }

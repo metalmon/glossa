@@ -27,6 +27,10 @@ path = "src/bin/convert-xlsx.rs"
 name = "kb-dump-episode"
 path = "src/bin/kb-dump-episode.rs"
 
+[[bin]]
+name = "kbx"
+path = "src/bin/kbx.rs"
+
 [dependencies]
 glossa = { path = "..", features = ["constraint"] }
 glossa-constraint = { path = "../constraint" }

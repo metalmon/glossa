@@ -66,11 +66,7 @@ pub fn judge(
     gold: &str,
     answer: &str,
 ) -> anyhow::Result<Judgement> {
-    let api_key = if ep.api_key_env.is_empty() {
-        None
-    } else {
-        std::env::var(&ep.api_key_env).ok()
-    };
+    let api_key = ep.resolve_key();
     let user = format!(
         "QUESTION: {question}\nGOLD: {gold}\nANSWER: {answer}\n\
          Reply with one line reason then `VERDICT: correct|partial|wrong`."
@@ -79,8 +75,14 @@ pub fn judge(
         json!({ "role": "system", "content": judge_md }),
         json!({ "role": "user", "content": user }),
     ];
-    let msg = chat_once(&ep.endpoint, &ep.model, &messages, api_key.as_deref())
-        .context("judge endpoint request failed")?;
+    let msg = chat_once(
+        &ep.endpoint,
+        &ep.model,
+        &messages,
+        api_key.as_deref(),
+        ep.timeout_secs,
+    )
+    .context("judge endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
     Ok(parse_verdict(content))
 }

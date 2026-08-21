@@ -123,7 +123,7 @@ impl OpenAiBackend {
     }
 }
 
-/// Minimal one-shot OpenAI-compatible chat call: no tools, default 120s timeout. Shared by
+/// Minimal one-shot OpenAI-compatible chat call: no tools, caller-supplied timeout. Shared by
 /// callers that just want a plain completion (e.g. the file-prompt judge in `judge.rs`) instead
 /// of the full tool-calling agent loop — thin wrapper over `lmstudio_chat` so both paths drive
 /// the endpoint identically (same retry-on-transport-drop behavior).
@@ -132,6 +132,7 @@ pub(crate) fn chat_once(
     model: &str,
     messages: &[Value],
     api_key: Option<&str>,
+    timeout_secs: u64,
 ) -> anyhow::Result<Value> {
     let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
     lmstudio_chat(
@@ -140,7 +141,7 @@ pub(crate) fn chat_once(
         api_key,
         &Value::Array(Vec::new()),
         messages,
-        Duration::from_secs(120),
+        Duration::from_secs(timeout_secs),
     )
 }
 
