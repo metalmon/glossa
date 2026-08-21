@@ -154,9 +154,9 @@ pub(crate) fn lmstudio_chat(
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
 /// shared registry (`glossa::tools::registry::registry()`) instead of a hand-written per-tool
 /// JSON block — MCP and the eval agent can no longer drift apart on name/description/schema.
-/// Graph-gated descriptors (glossary/related/neighbors/reach) are included only when
-/// `graph_on`; registry order is preserved as-is (search/read/grep/glob first, then the graph
-/// tools), so ordering here is a byproduct of the registry, not a curated hand-order.
+/// Graph-gated descriptors (glossary/reach/sql) are included only when `graph_on`; registry
+/// order is preserved as-is (search/read/grep/glob first, then the graph tools), so ordering
+/// here is a byproduct of the registry, not a curated hand-order.
 pub(crate) fn tools_schema(graph_on: bool) -> Value {
     let tools: Vec<Value> = glossa::tools::registry::registry()
         .iter()
@@ -305,16 +305,11 @@ fn execute_tool(
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
 ) -> (String, Vec<String>) {
-    // The registry is the single source of truth for what's advertised to the model; a name
-    // outside it (a hallucinated or stale call, e.g. a tool no longer exposed) gets an explicit
-    // error here rather than silently falling through to `glossa_tools::exec`'s broader internal
-    // dispatch (which also serves non-agent-facing callers).
-    if !glossa::tools::registry::registry()
-        .iter()
-        .any(|d| d.name == name)
-    {
-        return (format!("unknown tool: {name}"), Vec::new());
-    }
+    // No registry-membership pre-check here: `registry()` is the ADVERTISING source (what
+    // `tools_schema` puts in front of the model); execution dispatches whatever
+    // `glossa_tools::exec` supports, which is a superset (it also serves non-agent-facing
+    // callers, e.g. related/neighbors for MCP's Editor/Full profiles). `exec` already returns
+    // its own "unknown tool" body for names it genuinely doesn't handle, so it is the sole gate.
     let (body, ids, _images) =
         crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
     let ids = if name == "read" {
@@ -957,12 +952,19 @@ mod schema_tests {
     #[test]
     fn openai_tools_hide_graph_gated_when_off() {
         let names = tool_names(&tools_schema(false));
-        for gated in ["glossary", "related", "neighbors", "reach"] {
+        // related/neighbors aren't in the registry at all (withheld from the Reader profile as
+        // measured clutter) — only glossary/reach/sql are graph-gated now.
+        for gated in ["glossary", "reach", "sql"] {
             assert!(
                 !names.contains(&gated.to_string()),
                 "graph-OFF must NOT advertise graph-gated tool {gated}; got {names:?}"
             );
         }
-        assert!(names.contains(&"search".into()) && names.contains(&"read".into()));
+        for ungated in ["search", "read", "grep", "glob"] {
+            assert!(
+                names.contains(&ungated.to_string()),
+                "graph-OFF must advertise ungated tool {ungated}; got {names:?}"
+            );
+        }
     }
 }

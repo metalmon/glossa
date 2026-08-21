@@ -671,7 +671,7 @@ struct GraphStatsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GraphQueryArgs {
+pub(crate) struct GraphQueryArgs {
     // `sql` is inherently a string — the loose json_util helpers exist to coerce numbers/bools
     // an LLM client sent as strings, which doesn't apply here. `default` so a missing/absent
     // `sql` deserializes to "" (empty → the tool returns the schema).
@@ -1105,7 +1105,6 @@ impl GlossaServer {
         )]))
     }
 
-    // keep in sync with registry::DESC_RELATED (see search's comment above for why this is a literal).
     #[tool(
         description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
     )]
@@ -1131,7 +1130,6 @@ impl GlossaServer {
         )]))
     }
 
-    // keep in sync with registry::DESC_NEIGHBORS (see search's comment above for why this is a literal).
     #[tool(
         description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
     )]
@@ -1512,6 +1510,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_SQL (see search's comment above for why this is a literal).
     #[tool(
         description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto)."
     )]
