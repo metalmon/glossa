@@ -421,7 +421,7 @@ fn internal(e: anyhow::Error) -> McpError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SearchArgs {
+pub(crate) struct SearchArgs {
     #[schemars(
         description = "natural-language keywords (morphology-aware, BM25-ranked) — NOT a regex"
     )]
@@ -443,7 +443,7 @@ struct SearchArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GlobArgs {
+pub(crate) struct GlobArgs {
     #[schemars(
         description = "ripgrep -g glob over document paths, e.g. * or **/* (all documents), or *<name-fragment>* to find a file by name"
     )]
@@ -466,7 +466,7 @@ struct IndexArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ReadArgs {
+pub(crate) struct ReadArgs {
     #[schemars(description = "document path, exactly as shown in a search result")]
     path: String,
     #[serde(deserialize_with = "crate::json_util::deserialize_u32_loose")]
@@ -521,7 +521,7 @@ struct SourceFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RelatedArgs {
+pub(crate) struct RelatedArgs {
     #[serde(default)]
     #[schemars(
         description = "reasoning-node id from a `glossary` line (e.g. `sym:...`) — call after glossary to find alternate/similar cases"
@@ -549,7 +549,7 @@ struct RelatedArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct NeighborsArgs {
+pub(crate) struct NeighborsArgs {
     #[serde(default)]
     #[schemars(description = "graph node id (from a `glossary` line, e.g. `sym:...`)")]
     node: Option<String>,
@@ -582,7 +582,7 @@ struct NeighborsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GlossaryArgs {
+pub(crate) struct GlossaryArgs {
     #[schemars(description = "concept in your own words, e.g. \"connection loss\"")]
     name: String,
     #[schemars(
@@ -600,7 +600,7 @@ struct GlossaryArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ReachArgs {
+pub(crate) struct ReachArgs {
     #[serde(default)]
     #[schemars(description = "start: graph node id (or use from_path+from_n)")]
     from: Option<String>,
@@ -766,7 +766,7 @@ struct LsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GrepArgs {
+pub(crate) struct GrepArgs {
     #[schemars(
         description = "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window."
     )]

@@ -1,6 +1,8 @@
 //! Single source of truth for the agent tools' model-facing output. Both the MCP server
 //! (src/mcp.rs) and the kb-eval harness call these so prod and eval render identically.
 
+pub mod registry;
+
 use crate::grep::GrepOpts;
 use crate::index::store::{DocIndex, RankedHit};
 use crate::trace::TraceLog;
@@ -1716,7 +1718,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("sample.pdf"),
-            include_bytes!("../tests/fixtures/sample.pdf"),
+            include_bytes!("../../tests/fixtures/sample.pdf"),
         )
         .unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
@@ -1817,7 +1819,7 @@ mod tests {
     fn slice_pdf_page_yields_a_valid_pdf() {
         let d = tempfile::tempdir().unwrap();
         let pdf = d.path().join("sample.pdf");
-        std::fs::write(&pdf, include_bytes!("../tests/fixtures/sample.pdf")).unwrap();
+        std::fs::write(&pdf, include_bytes!("../../tests/fixtures/sample.pdf")).unwrap();
         // The core runtime check: pdf_oxide extracts page 1 into its own real PDF (text preserved).
         let bytes = slice_pdf_page(&pdf, 1).expect("extract page 1");
         assert!(bytes.starts_with(b"%PDF"));
@@ -1896,7 +1898,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("sample.pdf"),
-            include_bytes!("../tests/fixtures/sample.pdf"),
+            include_bytes!("../../tests/fixtures/sample.pdf"),
         )
         .unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
@@ -1946,7 +1948,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("sample.pdf"),
-            include_bytes!("../tests/fixtures/sample.pdf"),
+            include_bytes!("../../tests/fixtures/sample.pdf"),
         )
         .unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
