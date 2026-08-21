@@ -1002,6 +1002,8 @@ fn read_common(
 
 #[tool_router]
 impl GlossaServer {
+    // keep in sync with registry::DESC_SEARCH (rmcp's #[tool(description=…)] rejects a
+    // non-literal path expr; the mcp_tool_list_matches_registry test enforces byte-equality).
     #[tool(
         description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
     )]
@@ -1022,6 +1024,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
+    // keep in sync with registry::DESC_READ (see search's comment above for why this is a literal).
     #[tool(
         description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
     )]
@@ -1075,6 +1078,7 @@ impl GlossaServer {
         Ok(CallToolResult::success(content))
     }
 
+    // keep in sync with registry::DESC_GLOSSARY (see search's comment above for why this is a literal).
     #[tool(
         description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
     )]
@@ -1101,6 +1105,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_RELATED (see search's comment above for why this is a literal).
     #[tool(
         description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
     )]
@@ -1126,6 +1131,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_NEIGHBORS (see search's comment above for why this is a literal).
     #[tool(
         description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
     )]
@@ -1154,6 +1160,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_REACH (see search's comment above for why this is a literal).
     #[tool(
         description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read path #n` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump. Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
     )]
@@ -1519,6 +1526,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_GREP (see search's comment above for why this is a literal).
     #[tool(
         description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
     )]
@@ -1556,6 +1564,7 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_GLOB (see search's comment above for why this is a literal).
     #[tool(
         description = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text)."
     )]
@@ -2437,6 +2446,45 @@ mod tests {
             .collect();
         assert!(names.contains(&"reach".to_string()), "reach tool present");
         assert!(!names.contains(&"path".to_string()), "path tool removed");
+    }
+
+    #[test]
+    fn mcp_tool_list_matches_registry() {
+        // Names + descriptions the MCP server advertises for every agent-facing (registry) tool
+        // must equal `crate::tools::registry::registry()` byte-for-byte — the single guard that
+        // keeps mcp.rs and the registry from drifting apart. Profile::Full is the superset profile
+        // (keeps resolve/related/neighbors that Reader withholds as clutter), so it is a strict
+        // superset of the registry names; the extra admin/structural tools (index, purge, resolve,
+        // graph_upsert, ...) are expected and NOT compared.
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Full,
+            false,
+            ServerFlags::default(),
+        );
+        let mcp: std::collections::BTreeMap<String, String> = srv
+            .tool_specs()
+            .into_iter()
+            .map(|t| (t.name.to_string(), t.description.unwrap_or_default().to_string()))
+            .collect();
+        let reg = crate::tools::registry::registry();
+        for d in &reg {
+            let mcp_desc = mcp
+                .get(d.name)
+                .unwrap_or_else(|| panic!("MCP does not advertise registry tool {}", d.name));
+            assert_eq!(
+                mcp_desc, d.description,
+                "description drift between mcp.rs and registry for {}",
+                d.name
+            );
+        }
+        let reg_names: std::collections::BTreeSet<_> = reg.iter().map(|d| d.name).collect();
+        let mcp_names: std::collections::BTreeSet<_> = mcp.keys().map(String::as_str).collect();
+        assert!(
+            reg_names.is_subset(&mcp_names),
+            "registry tool set must be a subset of what MCP advertises: reg={reg_names:?} mcp={mcp_names:?}"
+        );
     }
 
     #[test]
