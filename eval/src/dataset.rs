@@ -7,7 +7,7 @@ pub struct Paragraph {
     pub sentences: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Question {
     pub id: String,
     pub question: String,
@@ -17,6 +17,9 @@ pub struct Question {
     pub answer_aliases: Vec<String>,
     pub paragraphs: Vec<Paragraph>,
     pub supporting_titles: Vec<String>,
+    /// Free-form case tags carried by `dataset.toml` (e.g. filtering a run to a subset);
+    /// empty for formats that don't carry them (hotpot/musique/questions).
+    pub tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +71,7 @@ pub fn parse_hotpot(json: &str) -> anyhow::Result<Vec<Question>> {
                     .map(|(title, sentences)| Paragraph { title, sentences })
                     .collect(),
                 supporting_titles: titles,
+                tags: Vec::new(),
             }
         })
         .collect())
@@ -129,6 +133,7 @@ pub fn parse_musique(jsonl: &str) -> anyhow::Result<Vec<Question>> {
                 })
                 .collect(),
             supporting_titles: titles,
+            tags: Vec::new(),
         });
     }
     Ok(out)
@@ -186,6 +191,7 @@ pub fn parse_questions(jsonl: &str) -> anyhow::Result<Vec<Question>> {
             answer_aliases: r.answer_aliases,
             paragraphs: Vec::new(),
             supporting_titles: r.supporting_titles,
+            tags: Vec::new(),
         });
     }
     Ok(out)

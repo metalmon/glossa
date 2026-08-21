@@ -88,6 +88,27 @@ impl AgentBackend for OpenAiBackend {
     }
 }
 
+/// Minimal one-shot OpenAI-compatible chat call: no tools, default 120s timeout. Shared by
+/// callers that just want a plain completion (e.g. the file-prompt judge in `judge.rs`) instead
+/// of the full tool-calling agent loop — thin wrapper over `lmstudio_chat` so both paths drive
+/// the endpoint identically (same retry-on-transport-drop behavior).
+pub(crate) fn chat_once(
+    endpoint: &str,
+    model: &str,
+    messages: &[Value],
+    api_key: Option<&str>,
+) -> anyhow::Result<Value> {
+    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+    lmstudio_chat(
+        &url,
+        model,
+        api_key,
+        &Value::Array(Vec::new()),
+        messages,
+        Duration::from_secs(120),
+    )
+}
+
 /// One OpenAI-compatible `/v1/chat/completions` POST to an LM Studio-style endpoint. Returns the
 /// assistant `message` object (already extracted from `choices[0].message`). Samples at
 /// `temperature: 0.8` — temp 0 is not a reliable greedy mode on this reasoning model/backend

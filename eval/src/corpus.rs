@@ -55,6 +55,7 @@ mod tests {
             }],
             answer_aliases: vec![],
             supporting_titles: vec!["Bob Page".into()],
+            tags: vec![],
         }
     }
 

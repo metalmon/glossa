@@ -698,6 +698,7 @@ mod tests {
             answer_aliases: aliases.iter().map(|s| s.to_string()).collect(),
             paragraphs: vec![],
             supporting_titles: vec![],
+            tags: vec![],
         }
     }
 

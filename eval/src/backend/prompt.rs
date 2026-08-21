@@ -119,6 +119,7 @@ mod tests {
             paragraphs: vec![],
             answer_aliases: vec![],
             supporting_titles: vec![],
+            tags: vec![],
         }
     }
 
