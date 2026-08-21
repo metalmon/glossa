@@ -157,6 +157,7 @@ fn main() -> anyhow::Result<()> {
                         api_key,
                         timeout,
                         use_graph: !no_graph,
+                        system_prompt: None,
                     })
                 }
                 BackendKind::Cli => {

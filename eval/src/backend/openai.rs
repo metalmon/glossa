@@ -22,6 +22,11 @@ pub struct OpenAiBackend {
     /// graph-ON arm when true (opens the graph and advertises the graph tools); graph-OFF
     /// baseline when false (flat search/read only). The A/B knob for the graph-transfer eval.
     pub use_graph: bool,
+    /// Runtime-injected system prompt (e.g. loaded from an editable `.md` file at launch), used
+    /// VERBATIM as the system message when `Some`. `None` preserves today's behavior exactly:
+    /// the compiled `prompt::system_prompt(self.use_graph)`. This is what lets the reader's
+    /// prompt be edited without a rebuild.
+    pub system_prompt: Option<String>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -72,10 +77,7 @@ impl AgentBackend for OpenAiBackend {
             (body, ids)
         };
 
-        let messages = vec![
-            json!({ "role": "system", "content": prompt::system_prompt(graph.is_some()) }),
-            json!({ "role": "user", "content": prompt::user_prompt(q) }),
-        ];
+        let messages = self.build_messages(q);
         // Next-best-action on a stuck (repeated) call: fan the fixated query across the
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
@@ -85,6 +87,39 @@ impl AgentBackend for OpenAiBackend {
         };
         let raw = run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS)?;
         Ok(prompt::parse_answer(&raw))
+    }
+}
+
+impl OpenAiBackend {
+    /// Assemble the two seed messages (system + user) for one question. When `self.system_prompt`
+    /// is `Some`, its content becomes the system message VERBATIM (a runtime `.md` override —
+    /// no rebuild needed to edit the reader's prompt); `None` preserves today's behavior exactly:
+    /// the compiled `prompt::system_prompt(self.use_graph)`. (`GraphStore::open` in `answer()`
+    /// creates the store on demand, so `graph.is_some()` there and `self.use_graph` here agree in
+    /// practice — the config flag is what actually decides which prompt variant is compiled.)
+    fn build_messages(&self, q: &Question) -> Vec<Value> {
+        let system = match &self.system_prompt {
+            Some(s) => s.clone(),
+            None => prompt::system_prompt(self.use_graph).to_string(),
+        };
+        vec![
+            json!({ "role": "system", "content": system }),
+            json!({ "role": "user", "content": prompt::user_prompt(q) }),
+        ]
+    }
+
+    /// Test-only constructor: minimal backend with an injected system prompt, for exercising
+    /// `build_messages` without a live endpoint or corpus.
+    #[cfg(test)]
+    fn for_test_with_prompt(s: &str) -> Self {
+        OpenAiBackend {
+            endpoint: String::new(),
+            model: String::new(),
+            api_key: None,
+            timeout: Duration::from_secs(1),
+            use_graph: false,
+            system_prompt: Some(s.to_string()),
+        }
     }
 }
 
@@ -362,6 +397,19 @@ mod tests {
     /// Default `on_repeat` for tests that don't exercise NBA: a static nudge.
     fn nudge(name: &str, _args: &Value) -> String {
         format!("(dup {name}) you already called this — try a different tool or change the query")
+    }
+
+    #[test]
+    fn agent_uses_injected_system_prompt() {
+        let b = OpenAiBackend::for_test_with_prompt("SYS-MARKER-123");
+        let msgs = b.build_messages(&Question {
+            question: "hi".into(),
+            ..Default::default()
+        });
+        assert_eq!(msgs[0]["role"], "system");
+        assert!(msgs[0]["content"].as_str().unwrap().contains("SYS-MARKER-123"));
+        assert_eq!(msgs[1]["role"], "user");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("hi"));
     }
 
     #[test]
