@@ -151,126 +151,28 @@ pub(crate) fn lmstudio_chat(
     Ok(msg)
 }
 
-/// OpenAI function-tool schema for glossa's search/read.
+/// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
+/// shared registry (`glossa::tools::registry::registry()`) instead of a hand-written per-tool
+/// JSON block — MCP and the eval agent can no longer drift apart on name/description/schema.
+/// Graph-gated descriptors (glossary/related/neighbors/reach) are included only when
+/// `graph_on`; registry order is preserved as-is (search/read/grep/glob first, then the graph
+/// tools), so ordering here is a byproduct of the registry, not a curated hand-order.
 pub(crate) fn tools_schema(graph_on: bool) -> Value {
-    let search = json!({
-        "type": "function",
-        "function": {
-            "name": "search",
-            "description": "Full-text BM25 search over the knowledge base. Pass short KEYWORDS (morphology-aware), not a sentence. Returns ranked results as `path:location: snippet  [score]`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "keywords to search for" },
-                    "limit": { "type": "integer", "description": "max results (default 10)" }
-                },
-                "required": ["query"]
-            }
-        }
-    });
-    let read = json!({
-        "type": "function",
-        "function": {
-            "name": "read",
-            "description": "Read a chunk's full text. `path` is a document path from a search/glossary result; `n` is the chunk number shown as `[#n]`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "document path, exactly as shown in a search result" },
-                    "n": { "type": "integer", "description": "chunk number to read, exactly as shown in `[#n]` (page number for PDFs)" }
-                },
-                "required": ["path", "n"]
-            }
-        }
-    });
-    let grep = json!({
-        "type": "function",
-        "function": {
-            "name": "grep",
-            "description": "Exact / regex line search over the raw corpus text — the precise complement to `search`. Where `search` ranks fuzzily by topic, `grep` returns EVERY line that literally matches, as `path:#n: line`. Reach for it the moment you know the exact string you want (a name, title, phrase): it finds the specific entity that BM25 buries under broad topic matches, and the `#n` doubles as the `read` key. Keep the pattern SIMPLE — one or two distinctive words. A long regex with `.*` or `|` alternations usually matches nothing; when you mean your text literally, set `fixed:true`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "text or regex to match literally against corpus lines" },
-                    "path": { "type": "string", "description": "optional: scope the search to one document path (as shown in a result)" },
-                    "ignore_case": { "type": "boolean", "description": "case-insensitive match (default false)" },
-                    "fixed": { "type": "boolean", "description": "treat pattern as a literal string, not a regex (default false)" },
-                    "word": { "type": "boolean", "description": "match whole words only (default false)" }
-                },
-                "required": ["pattern"]
-            }
-        }
-    });
-    if !graph_on {
-        return Value::Array(vec![search, grep, read]);
-    }
-    // graph-ON arm: lead with the reasoning-graph tools so the model FOLLOWS the pre-built
-    // multi-hop chain instead of re-deriving it with many flat searches. Ordering matters — a weak
-    // model reaches for the first-listed tool — so `glossary` (the entry point) comes before
-    // `search`, which stays as a fallback.
-    let glossary = json!({
-        "type": "function",
-        "function": {
-            "name": "glossary",
-            "description": "Look a named entity up in the pre-built reasoning graph: returns its grounded node plus its typed relations (part-of, created-by, family-of, located-in, member-of, …), each anchored to a source chunk. One call surfaces the chain that would otherwise take several searches.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "the term or entity to look up" },
-                    "query": { "type": "string", "description": "the full question you are trying to answer, written out completely as a whole sentence — not a short phrase or the bare entity. It ranks the returned facts by what the question actually needs, so a complete, specific question ranks far better than a terse one." }
-                },
-                "required": ["name", "query"]
-            }
-        }
-    });
-    let glob = json!({
-        "type": "function",
-        "function": {
-            "name": "glob",
-            "description": "List documents whose path matches a shell glob (e.g. `*.md`, `**/report*`). One `path  (N chunks)` per line. Use to see what documents exist before searching.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "shell glob over document paths" }
-                },
-                "required": ["pattern"]
-            }
-        }
-    });
-    let reach = json!({
-        "type": "function",
-        "function": {
-            "name": "reach",
-            "description": "The reasoning-chain tool — one call, two uses. ANSWER a relational multi-hop: give `from` and `relation`, omit `to`, and it discovers every node `from` reaches along that relation, crossing document boundaries on shared mentions when the in-graph chain dead-ends — use this instead of inferring the answer from prose. VERIFY a candidate you already formed: add `to` and it returns the grounded connecting chain, or nothing if the candidate doesn't actually connect. `relation` is fuzzy-matched to the graph's real edge types (omit for any connection at all). Subsumes a plain 'are these two connected' lookup: give both `from` and `to`, omit `relation`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from": { "type": "string", "description": "start: graph node id from a `glossary` line (e.g. `person:clancy-brown`)" },
-                    "relation": { "type": "string", "description": "relation to follow, fuzzy-matched to the graph's real edge types (e.g. \"located\"); omit for any connection" },
-                    "to": { "type": "string", "description": "end: graph node id from a `glossary` line — VERIFY mode; omit for DISCOVERY (find what `from` reaches)" }
-                },
-                "required": ["from"]
-            }
-        }
-    });
-    let sql = json!({
-        "type": "function",
-        "function": {
-            "name": "sql",
-            "description": "Read-only SQL SELECT over the reasoning graph. Reach for it when the answer is a SPECIFIC related entity, a ranking, or an extreme ('which place/which year', 'the earliest/largest/first'): let the query carry the judgment instead of inferring from prose. Match the source entity and the relation, order or filter, take the target — it hands back the exact related entity AT THE EDGE'S LEVEL, the immediate one the question points at, not a broader parent. A fuzzy relation name is fine — `edge_type LIKE '%…%'` — the engine resolves it to the graph's real relation names. Main view for traversal (a join is one hop): edges_labeled(src_label, edge_type, dst_label, efrom, eto). Call it once with an EMPTY query first to see the schema and this graph's real edge_type/node_type vocabulary. Also: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": { "type": "string", "description": "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema with the real edge_type/node_type vocabulary instead of running a query" }
+    let tools: Vec<Value> = glossa::tools::registry::registry()
+        .iter()
+        .filter(|d| !d.graph_gated || graph_on)
+        .map(|d| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.params_schema,
                 }
-            }
-        }
-    });
-    // Graph-ON tool set = the MCP Reader profile, one-to-one (default, routable subset): the
-    // reasoning-graph tools + corpus search/read + glob. `neighbors`/`resolve`/`constraint_solve`/
-    // `related` are withheld from Reader as clutter; `get_source_file` is opt-in (off by default);
-    // `ls`/`get_ontology` aren't routed in the eval.
-    Value::Array(vec![glossary, reach, sql, search, grep, read, glob])
+            })
+        })
+        .collect();
+    Value::Array(tools)
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
@@ -403,6 +305,16 @@ fn execute_tool(
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
 ) -> (String, Vec<String>) {
+    // The registry is the single source of truth for what's advertised to the model; a name
+    // outside it (a hallucinated or stale call, e.g. a tool no longer exposed) gets an explicit
+    // error here rather than silently falling through to `glossa_tools::exec`'s broader internal
+    // dispatch (which also serves non-agent-facing callers).
+    if !glossa::tools::registry::registry()
+        .iter()
+        .any(|d| d.name == name)
+    {
+        return (format!("unknown tool: {name}"), Vec::new());
+    }
     let (body, ids, _images) =
         crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
     let ids = if name == "read" {
@@ -1024,56 +936,33 @@ mod schema_tests {
     }
 
     #[test]
-    fn graph_tools_lead_in_graph_on() {
-        // Ordering nudges tool choice: a weak model reaches for the first-listed tool. In graph-ON
-        // the graph entry point (glossary) must precede the flat `search`, so the model probes the
-        // pre-built chain before falling back to keyword search.
-        let names = tool_names(&tools_schema(true));
-        let gi = names.iter().position(|n| n == "glossary").expect("glossary present");
-        let si = names.iter().position(|n| n == "search").expect("search present");
-        assert!(gi < si, "graph tools must lead search in graph-ON; got {names:?}");
-    }
-
-    #[test]
     fn grep_is_advertised_in_both_arms() {
-        // grep was mirrored into the tensorzero surface but never into this backend's hardcoded
-        // schema, so the model was never offered the precise line-lookup that complements fuzzy
-        // `search`. It must appear in both graph-OFF and graph-ON.
+        // grep is ungated in the registry, so it must appear in both graph-OFF and graph-ON.
         assert!(tool_names(&tools_schema(false)).contains(&"grep".into()), "graph-OFF must advertise grep");
         assert!(tool_names(&tools_schema(true)).contains(&"grep".into()), "graph-ON must advertise grep");
     }
 
     #[test]
-    fn tools_schema_gates_graph_tools_on_graph_on() {
-        let off = tool_names(&tools_schema(false));
-        assert!(off.contains(&"search".into()) && off.contains(&"read".into()));
-        assert!(
-            !off.contains(&"glossary".into()),
-            "graph-OFF must NOT advertise graph tools"
-        );
-        let on = tool_names(&tools_schema(true));
-        // The graph-ON set mirrors the MCP Reader profile (routable subset).
-        for t in ["glossary", "reach", "sql", "glob", "search", "grep", "read"] {
-            assert!(on.contains(&t.to_string()), "graph-ON must advertise {t}");
+    fn openai_tools_match_registry_graph_on() {
+        // graph-ON advertises the FULL registry, in registry order — no hand-curated subset or
+        // reordering; MCP and the eval agent render from the same source of truth.
+        let names = tool_names(&tools_schema(true));
+        let reg: Vec<_> = glossa::tools::registry::registry()
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect();
+        assert_eq!(names, reg, "graph-ON tool set must equal registry order");
+    }
+
+    #[test]
+    fn openai_tools_hide_graph_gated_when_off() {
+        let names = tool_names(&tools_schema(false));
+        for gated in ["glossary", "related", "neighbors", "reach"] {
+            assert!(
+                !names.contains(&gated.to_string()),
+                "graph-OFF must NOT advertise graph-gated tool {gated}; got {names:?}"
+            );
         }
-        for t in ["neighbors", "related", "resolve", "get_source_file"] {
-            assert!(!on.contains(&t.to_string()), "{t} is withheld from the default Reader — graph-ON must NOT advertise it");
-        }
-        assert!(
-            !on.contains(&"path".into()),
-            "reach replaces path — graph-ON must NOT advertise the removed path tool"
-        );
-        assert!(
-            !off.contains(&"sql".into()),
-            "graph-OFF must NOT advertise sql"
-        );
-        assert!(
-            !off.contains(&"reach".into()),
-            "graph-OFF must NOT advertise reach"
-        );
-        assert!(
-            on.contains(&"search".into()) && on.contains(&"read".into()),
-            "flat tools remain in graph-ON"
-        );
+        assert!(names.contains(&"search".into()) && names.contains(&"read".into()));
     }
 }
