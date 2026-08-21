@@ -92,6 +92,28 @@ fn splice(
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+/// Sorted tool names the TZ **Reader**-profile dump would emit — i.e. the same
+/// `GlossaServer::tool_specs()` call `dump()` uses for the `answer_hotpot` tool-list region
+/// (step 2b above), exposed standalone so a test (here, and the Task 5 cross-surface test) can
+/// assert it stays equal to `crate::tools::registry::registry()`'s names. The registry was
+/// deliberately trimmed to mirror the Reader MCP surface, so these two lists are expected to be
+/// identical, not just overlapping.
+pub fn reader_tool_names() -> Vec<String> {
+    let reader_srv = crate::mcp::GlossaServer::new(
+        std::path::PathBuf::from("."),
+        crate::mcp::Profile::Reader,
+        false,
+        crate::mcp::ServerFlags::default(),
+    );
+    let mut names: Vec<String> = reader_srv
+        .tool_specs()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Generate TZ tool config from the live MCP definitions.
 ///
 /// * Writes `<config_dir>/tools/<name>.json` for every Full-profile tool (includes
@@ -277,7 +299,7 @@ type = \"boolean\"\n";
         std::fs::create_dir_all(config_dir.join("tools")).unwrap();
 
         let n = dump(config_dir).unwrap();
-        // Reader profile has 6 tools: glob, glossary, grep, related, read, search
+        // `n` is the Full-profile tool count (every tool.json written); just check dump ran.
         assert!(n >= 1, "expected at least 1 tool, got {}", n);
 
         // (a) tools/search.json exists and parses as JSON with a "properties" key
@@ -389,6 +411,36 @@ type = \"boolean\"\n";
             !answer_region.contains("\"done\""),
             "answer list must NOT carry 'done'"
         );
+    }
+
+    #[test]
+    fn reader_profile_tool_names_match_registry() {
+        // The registry (`crate::tools::registry::registry()`) is the 7 answer-finding/reasoning
+        // tools an eval agent actually drives. The Reader MCP profile carries a few MORE tools
+        // than that on purpose — non-reasoning surfaces the answer-loop never calls and that have
+        // no `glossa_tools::exec` executor:
+        //   - get_source_file — delivers the original file as a resource, for citation/download,
+        //     not for the model to read content from (that's `read`).
+        //   - get_ontology    — schema introspection for graph_upsert authors, not the reader
+        //     prompt.
+        //   - ls              — lists notebook notes; notebook is an editor/enrich-loop concern.
+        // So the relationship is registry ⊆ reader-profile dump, not equality: every registry
+        // tool must be exposed by the Reader profile, but the Reader profile may (and does)
+        // expose a few more. If this ever fails, either a registry tool silently dropped out of
+        // the Reader profile (real drift — investigate), or the registry grew a name the MCP
+        // surface doesn't have (typo/rename).
+        let reg: Vec<String> = crate::tools::registry::registry()
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect();
+        let reader = reader_tool_names();
+        for name in &reg {
+            assert!(
+                reader.contains(name),
+                "registry tool '{name}' is missing from the Reader-profile MCP dump \
+                 (reader profile has: {reader:?})"
+            );
+        }
     }
 
     #[test]
