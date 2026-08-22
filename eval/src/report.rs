@@ -96,9 +96,19 @@ pub fn summary_text(results: &[CaseResult]) -> String {
 /// alphanumeric byte become `_`. Used by `write_case` so ids containing `/` (or other punctuation)
 /// don't escape `cases_dir` or collide with reserved characters.
 fn sanitize_id(id: &str) -> String {
-    id.chars()
+    use std::hash::{Hash, Hasher};
+    let cleaned: String = id
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+        .collect();
+    // Append a deterministic short hash of the RAW id. Cleaning folds every non-alnum char to `_`,
+    // so distinct ids like "a-b" and "a.b" would otherwise share a filename and one `write_case`
+    // would silently overwrite the other's persisted JSON — corrupting `--resume`. The hash keeps
+    // filenames unique; `DefaultHasher::new()` has a fixed seed, so it is stable across runs (a
+    // resume in a later process finds the same file).
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    format!("{cleaned}-{:08x}", h.finish() as u32)
 }
 
 /// Persist a single case as `<cases_dir>/<sanitized-id>.json` (pretty JSON). Creates `cases_dir`
@@ -275,6 +285,18 @@ mod tests {
         let loaded = load_cases(&cases_dir).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "a/b:c");
+    }
+
+    #[test]
+    fn write_case_ids_that_clean_alike_do_not_collide() {
+        // "a-b" and "a.b" both fold to "a_b"; without the hash suffix they'd overwrite each other.
+        let dir = tempfile::tempdir().unwrap();
+        let cases_dir = dir.path().join("cases");
+        write_case(&cases_dir, &case("a-b", Verdict::Correct)).unwrap();
+        write_case(&cases_dir, &case("a.b", Verdict::Wrong)).unwrap();
+        let mut ids: Vec<String> = load_cases(&cases_dir).unwrap().into_iter().map(|c| c.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a-b".to_string(), "a.b".to_string()]);
     }
 
     #[test]
