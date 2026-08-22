@@ -5,9 +5,11 @@
 pub mod candidates;
 pub mod chunks;
 pub mod extract;
+pub mod finalize;
 pub mod judge;
 
 pub use candidates::{candidate_pairs, CandidatePair};
 pub use chunks::chunk_text;
 pub use extract::{extract_doc, parse_and_validate_upsert, ExtractStats};
+pub use finalize::finalize;
 pub use judge::{judge_pair, run_judge, JudgeStats};
