@@ -90,17 +90,16 @@ fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
 
 /// Orchestrate the `kbx build` pipeline over the corpus at `paths.root`: extract -> candidates ->
 /// judge -> finalize, running only the stage(s) `opts.stage` selects (`All` runs all four in
-/// order). Ensures the corpus is indexed first (structural `Document`/`Section` nodes + chunks),
-/// then resolves the ontology, `lab.toml`, and the `builder.md`/`bridge.md` prompts once up
-/// front — every stage this run touches shares them.
+/// order). Execution order: resolve the ontology (never fails — defaults when no
+/// `ontology.toml`), ensure the corpus is indexed (structural `Document`/`Section` nodes + chunks
+/// that every stage depends on), open the build checkpoint, then run each selected stage in turn.
+/// `lab.toml` and the `builder.md`/`bridge.md` prompts are LAZY-loaded, one per stage, only when
+/// that stage is actually selected: Extract needs `lab` + `builder.md`; Judge needs `lab` +
+/// `bridge.md`; Candidates and Finalize need neither. This means `--stage finalize` or
+/// `--stage candidates` runs on an indexed corpus with no `.glossa/kbx/` prompt files present at
+/// all — only Extract/Judge (which call a model) require a scaffolded workspace.
 pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
     let ontology = Ontology::load_or_default(&paths.root);
-    let lab = LabConfig::load_at(&paths.lab)
-        .with_context(|| format!("loading {}", paths.lab.display()))?;
-    let builder_md = std::fs::read_to_string(&paths.builder)
-        .with_context(|| format!("reading {}", paths.builder.display()))?;
-    let bridge_md = std::fs::read_to_string(&paths.bridge)
-        .with_context(|| format!("reading {}", paths.bridge.display()))?;
 
     // Incremental — a no-op if the corpus is already fully indexed. Guarantees the structural
     // Document/Section nodes and chunks that extraction/candidates/judge all depend on exist.
@@ -117,6 +116,11 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
     let run_finalize_stage = matches!(opts.stage, BuildStage::All | BuildStage::Finalize);
 
     if run_extract {
+        let lab = LabConfig::load_at(&paths.lab)
+            .with_context(|| format!("loading {}", paths.lab.display()))?;
+        let builder_md = std::fs::read_to_string(&paths.builder)
+            .with_context(|| format!("reading {}", paths.builder.display()))?;
+
         // A fresh, short-lived handle: enumerate then drop before extract_doc opens its own
         // per-document GraphStore connection, so nothing else holds `graph.sqlite` open across
         // the whole (possibly slow, model-calling) extraction loop.
@@ -165,6 +169,11 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
         }
 
         if run_judge_stage {
+            let lab = LabConfig::load_at(&paths.lab)
+                .with_context(|| format!("loading {}", paths.lab.display()))?;
+            let bridge_md = std::fs::read_to_string(&paths.bridge)
+                .with_context(|| format!("reading {}", paths.bridge.display()))?;
+
             let idx = DocIndex::open_or_create(&paths.root).context("open doc index")?;
             let pb = progress_bar(pairs.len(), opts.no_progress);
             pb.set_message("judge");
@@ -189,19 +198,22 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scaffold::scaffold_init;
     use glossa::graph::store::{Edge, Node, Provenance};
     use glossa::graph::MENTIONS;
 
-    /// Scaffold a full `.glossa/kbx/` workspace (lab.toml + builder/bridge prompts — `run_build`
-    /// reads them up front regardless of which stage actually needs them) over a tiny corpus with
-    /// one grounded `Fact` node, and index it. Model-free stages only (finalize/candidates) run
-    /// against this fixture; extract/judge need a live endpoint and are out of scope here.
+    /// A tiny indexed corpus with one grounded `Fact` node — deliberately WITHOUT scaffolding
+    /// `.glossa/kbx/` (no lab.toml, no builder/bridge prompts). Since the lazy-load fix,
+    /// Finalize/Candidates need neither, so this is exactly the fixture that proves it: only
+    /// Extract/Judge (out of scope here — both need a live model endpoint) would fail against it.
     fn synthetic_corpus() -> (tempfile::TempDir, KbxPaths) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("d.md"), "# Title\n\nGrounded chunk body.\n").unwrap();
-        let paths = scaffold_init(root, false).unwrap();
+        let paths = KbxPaths::for_root(root.to_path_buf());
+        assert!(
+            !paths.kbx_dir.exists(),
+            "fixture must have no .glossa/kbx workspace scaffolded"
+        );
         glossa::index::store::index_dir(root, true).unwrap();
 
         let g = GraphStore::open(root).unwrap();
@@ -235,6 +247,8 @@ mod tests {
 
     #[test]
     fn run_build_finalize_stage_runs_without_error() {
+        // No `.glossa/kbx/` at all (see `synthetic_corpus`) — Finalize must not touch lab.toml/
+        // builder.md/bridge.md, so this run must succeed anyway.
         let (_dir, paths) = synthetic_corpus();
         let opts = BuildOpts {
             stage: BuildStage::Finalize,
@@ -249,11 +263,14 @@ mod tests {
 
     #[test]
     fn run_build_candidates_stage_computes_cross_doc_pairs() {
+        // No `.glossa/kbx/` here either — Candidates must not touch lab.toml/builder.md/
+        // bridge.md, so this run must succeed with none of them present.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("a.md"), "# A\n\nAlpha body.\n").unwrap();
         std::fs::write(root.join("b.md"), "# B\n\nBeta body.\n").unwrap();
-        let paths = scaffold_init(root, false).unwrap();
+        let paths = KbxPaths::for_root(root.to_path_buf());
+        assert!(!paths.kbx_dir.exists());
         glossa::index::store::index_dir(root, true).unwrap();
 
         let g = GraphStore::open(root).unwrap();
