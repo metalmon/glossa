@@ -161,6 +161,14 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// Shared reqwest client (connection-pool + TLS-session reuse across chat calls). The per-request
+/// timeout is set on the `RequestBuilder`, so one client serves the reader and judge endpoints even
+/// when their `timeout_secs` differ.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 /// Sync HTTP bridge: POST our JSON request `body` (the `{model, messages, tools, temperature}` shape
 /// `lmstudio_chat`/`chat_once` build) to an OpenAI-compatible `/v1/chat/completions` endpoint via
 /// `reqwest` and return the assistant `message` object (`choices[0].message`) as a raw `Value`.
@@ -196,39 +204,51 @@ fn chat_http(
     // Reasoning models like MiMo (OpenCode Zen) return `reasoning_content` on assistant tool-call
     // turns and REQUIRE it echoed back on the next request; the SDK's typed structs silently drop
     // that field, causing HTTP 400 mid-loop. Passing raw `Value` messages preserves it end-to-end.
-    // reqwest still gives robust transport/TLS; we keep an explicit retry for transient drops.
-    let http = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .context("build reqwest client")?;
-
+    // reqwest still gives robust transport/TLS; we retry ONLY transient failures (transport drop,
+    // 429 rate-limit, 5xx) — a 4xx (bad key / malformed request) or a parse error is a hard error
+    // surfaced immediately, so a real config bug isn't hidden behind seconds of backoff.
     let mut last_err = None;
     for attempt in 1..=4u32 {
-        let outcome: anyhow::Result<Value> = runtime().block_on(async {
-            let mut rb = http.post(&url).json(&body);
+        let (retryable, outcome): (bool, anyhow::Result<Value>) = runtime().block_on(async {
+            let mut rb = http_client().post(&url).timeout(timeout).json(&body);
             if let Some(key) = api_key.filter(|k| !k.is_empty()) {
                 rb = rb.bearer_auth(key);
             }
-            let resp = rb.send().await.context("send chat request")?;
+            let resp = match rb.send().await {
+                Ok(r) => r,
+                Err(e) => return (true, Err(anyhow!("send chat request: {e}"))),
+            };
             let status = resp.status();
-            let text = resp.text().await.context("read chat response body")?;
+            let text = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => return (true, Err(anyhow!("read chat response body: {e}"))),
+            };
             if !status.is_success() {
-                bail!(
-                    "chat endpoint returned {status}: {}",
-                    text.chars().take(400).collect::<String>()
+                let retryable = status.as_u16() == 429 || status.is_server_error();
+                return (
+                    retryable,
+                    Err(anyhow!(
+                        "chat endpoint returned {status}: {}",
+                        text.chars().take(400).collect::<String>()
+                    )),
                 );
             }
-            let v: Value = serde_json::from_str(&text).context("parse chat response json")?;
-            v.pointer("/choices/0/message")
-                .cloned()
-                .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
+            match serde_json::from_str::<Value>(&text) {
+                Ok(v) => match v.pointer("/choices/0/message").cloned() {
+                    Some(m) => (false, Ok(m)),
+                    None => (false, Err(anyhow!("chat response had no choices[0].message"))),
+                },
+                Err(e) => (false, Err(anyhow!("parse chat response json: {e}"))),
+            }
         });
         match outcome {
             Ok(msg) => return Ok(msg),
             Err(e) => {
                 last_err = Some(e);
-                if attempt < 4 {
+                if retryable && attempt < 4 {
                     std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+                } else {
+                    break;
                 }
             }
         }
