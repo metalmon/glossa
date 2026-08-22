@@ -1,11 +1,15 @@
 //! `kbx build` stage 2 — mechanical cross-document candidate grouping (Task 6).
 //!
 //! Purely mechanical: no model calls, no judgment. Groups non-structural graph nodes by shared
-//! NORMALIZED alias/label and keeps only entities whose nodes are grounded (via their first
-//! `MENTIONS` edge) in ≥2 DISTINCT documents — a same-doc match is not a cross-doc candidate.
-//! Each cross-doc node pair is emitted once (deduped by unordered id pair, even when two nodes
-//! share more than one alias/label). Judging which of these candidates are real cross-doc
-//! reasoning links is a LATER (model-judged) stage; this one only proposes.
+//! NORMALIZED ALIAS ONLY (per spec — alias-only is validated as sufficient on the pilot
+//! reference; `apply_upsert` already globally dedups nodes by normalized (label, node_type) at
+//! write time, so folding the label into this key would only additionally catch accidental
+//! cross-node-TYPE label collisions, widening the candidate set beyond the validated scope) and
+//! keeps only entities whose nodes are grounded (via their first `MENTIONS` edge) in ≥2 DISTINCT
+//! documents — a same-doc match is not a cross-doc candidate. Each cross-doc node pair is
+//! emitted once (deduped by unordered id pair, even when two nodes share more than one alias).
+//! Judging which of these candidates are real cross-doc reasoning links is a LATER
+//! (model-judged) stage; this one only proposes.
 
 use anyhow::Result;
 use glossa::graph::store::{normalize_label, GraphStore};
@@ -22,8 +26,10 @@ pub struct CandidatePair {
 }
 
 /// The document a node is grounded in: the path part (before `#`) of its first `MENTIONS` edge
-/// target, in the order `GraphStore::outgoing` returns edges. `None` when the node has no
-/// `MENTIONS` edge — an ungrounded node can't anchor a cross-doc candidate.
+/// target, in the order `GraphStore::outgoing` returns edges. Any live `MENTIONS` edge gives the
+/// same doc for a given node in practice, so the "first" pick is just a cheap way to grab one —
+/// it doesn't matter which. `None` when the node has no `MENTIONS` edge — an ungrounded node
+/// can't anchor a cross-doc candidate.
 fn grounding_doc(g: &GraphStore, node_id: &str) -> Result<Option<String>> {
     let edges = g.outgoing(node_id)?;
     Ok(edges
@@ -32,9 +38,10 @@ fn grounding_doc(g: &GraphStore, node_id: &str) -> Result<Option<String>> {
         .map(|e| e.to.split('#').next().unwrap_or(&e.to).to_string()))
 }
 
-/// Mechanically group non-structural nodes by shared normalized alias/label, keeping only
-/// entities whose nodes span ≥2 distinct grounding documents, and emit each cross-doc node pair
-/// once (deduped by unordered id pair, even when two nodes share more than one alias/label key).
+/// Mechanically group non-structural nodes by shared normalized ALIAS (label is intentionally
+/// excluded from the key — see module docs), keeping only entities whose nodes span ≥2 distinct
+/// grounding documents, and emit each cross-doc node pair once (deduped by unordered id pair,
+/// even when two nodes share more than one alias).
 pub fn candidate_pairs(g: &GraphStore) -> Result<Vec<CandidatePair>> {
     // key -> [(node_id, doc)], in a BTreeMap so iteration (and emission) order is deterministic
     // regardless of sqlite row order.
@@ -48,7 +55,6 @@ pub fn candidate_pairs(g: &GraphStore) -> Result<Vec<CandidatePair>> {
             continue;
         };
         let mut keys: Vec<String> = node.aliases.iter().map(|a| normalize_label(a)).collect();
-        keys.push(normalize_label(&node.label));
         keys.sort();
         keys.dedup();
         for key in keys {
@@ -159,6 +165,17 @@ mod tests {
         let g = mem_graph();
         put_fact(&g, "f1", "n1", ["X"], "a.md#1");
         put_fact(&g, "f2", "n2", ["X"], "a.md#2");
+        let pairs = candidate_pairs(&g).unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn shared_label_alone_does_not_group_without_a_shared_alias() {
+        // Two cross-doc nodes with the SAME label but DISJOINT aliases must not pair — grouping
+        // is alias-only, per spec (label is not folded into the key).
+        let g = mem_graph();
+        put_fact(&g, "f1", "shared", ["X"], "a.md#1");
+        put_fact(&g, "f2", "shared", ["Y"], "b.md#1");
         let pairs = candidate_pairs(&g).unwrap();
         assert!(pairs.is_empty());
     }
