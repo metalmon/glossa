@@ -137,6 +137,40 @@ pub fn changed_docs_to_drop(delta: &Delta, final_extract: &[String]) -> Vec<Stri
         .collect()
 }
 
+/// Fold every non-alphanumeric char to `_` — mirrors `sanitize_id`'s own cleaning step (minus its
+/// trailing hash), so a raw node/doc id can be matched against an already-sanitized checkpoint
+/// filename without needing to un-sanitize the filename (impossible in general: sanitizing is
+/// lossy, several distinct raw ids can fold to the same cleaned string before the hash tells them
+/// apart).
+fn fold_for_match(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// Invalidate the checkpoint marks that a `doc`'s dropped reasoning nodes made stale: `doc`'s own
+/// `extract:{doc}` mark (so a `--resume` run re-extracts it instead of silently skipping it and
+/// leaving it with ZERO reasoning nodes), plus every `judge:{a}#{b}` mark whose sanitized filename
+/// contains one of `dropped_ids`' folded form (its bridge edge, if any, was cascade-deleted along
+/// with the node it referenced — the checkpoint mark is the only stale trace of that judgment
+/// left, and leaving it would suppress a re-judge the dropped node needs). File-system-only, no
+/// model/network — safe to call unconditionally, whether or not either mark actually existed.
+fn invalidate_marks_for(cp: &Checkpoint, doc: &str, dropped_ids: &[String]) -> Result<()> {
+    cp.remove(&format!("extract:{doc}"))
+        .with_context(|| format!("removing extract:{doc} checkpoint mark"))?;
+    if dropped_ids.is_empty() {
+        return Ok(());
+    }
+    let folded: Vec<String> = dropped_ids.iter().map(|id| fold_for_match(id)).collect();
+    for name in cp.done_ids() {
+        if name.starts_with("judge_") && folded.iter().any(|f| name.contains(f.as_str())) {
+            cp.remove_raw(&name)
+                .with_context(|| format!("removing stale judge checkpoint mark {name}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Clear a build run's persistent checkpoint (`run_dir/done/`) — `--force`'s "true full rebuild"
 /// half: without this, the judge stage's `judge:{a}#{b}` marks from a prior run would keep every
 /// already-judged pair skipped even though the caller asked to redo everything. A no-op when the
@@ -226,13 +260,23 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // alone — b.md just stays CHANGED for the next, unrestricted run to pick up). Under
         // `--force`, `docs` is every enumerated doc, so every changed doc qualifies and gets
         // dropped+re-extracted, which is the correct full-rebuild behavior.
+        //
+        // Either way, dropping a doc's nodes invalidates any checkpoint mark that recorded work
+        // now undone: the doc's own `extract:{doc}` mark (so `--resume` doesn't skip re-extracting
+        // it and leave it with ZERO reasoning nodes) and every `judge:{a}#{b}` mark referencing a
+        // dropped node id (its bridge edge was cascade-deleted with the node, so the checkpoint
+        // mark is the only stale trace left — leaving it would suppress a needed re-judge).
         for doc in &delta.gone {
-            drop_doc_nodes(&g, doc)
+            let dropped_ids = drop_doc_nodes(&g, doc)
                 .with_context(|| format!("dropping gone-doc reasoning nodes for {doc}"))?;
+            invalidate_marks_for(&cp, doc, &dropped_ids)
+                .with_context(|| format!("invalidating checkpoint marks for {doc}"))?;
         }
         for doc in changed_docs_to_drop(&delta, &docs) {
-            drop_doc_nodes(&g, &doc)
+            let dropped_ids = drop_doc_nodes(&g, &doc)
                 .with_context(|| format!("dropping stale reasoning nodes for {doc}"))?;
+            invalidate_marks_for(&cp, &doc, &dropped_ids)
+                .with_context(|| format!("invalidating checkpoint marks for {doc}"))?;
         }
         drop(g);
 
@@ -701,6 +745,89 @@ mod tests {
             no_progress: true,
         };
         run_build(paths, opts).unwrap();
+
+        let g = GraphStore::open(&root).unwrap();
+        assert!(g.get_node("f_gone").unwrap().is_none());
+    }
+
+    // ---- Fix round 2 (checkpoint marks left stale after a node drop) ----
+
+    /// The exact scenario from review: `extract:a.md` and `judge:fA#fB` are marked done from a
+    /// prior run; a.md's nodes are dropped this run (it owns `fA`). Both marks must be
+    /// invalidated — `extract:a.md` so `--resume` re-extracts a.md instead of leaving it with
+    /// zero reasoning nodes, `judge:fA#fB` so the pair (whose node `fA` no longer exists) gets
+    /// re-judged rather than silently losing its bridge. An unrelated `judge:fX#fY` mark, which
+    /// references neither dropped id, must survive untouched.
+    #[test]
+    fn invalidate_marks_for_removes_extract_and_referencing_judge_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::open(&dir.path().join("runs").join("build")).unwrap();
+        cp.mark("extract:a.md", "done").unwrap();
+        cp.mark("judge:fA#fB", "yes").unwrap();
+        cp.mark("judge:fX#fY", "no").unwrap();
+
+        invalidate_marks_for(&cp, "a.md", &["fA".to_string()]).unwrap();
+
+        assert!(!cp.is_done("extract:a.md"));
+        assert!(!cp.is_done("judge:fA#fB"));
+        assert!(cp.is_done("judge:fX#fY"));
+    }
+
+    /// `invalidate_marks_for` must still remove the doc's own `extract:{doc}` mark even when no
+    /// nodes were actually dropped for it (an empty `dropped_ids`) — e.g. a doc classified CHANGED
+    /// whose reasoning nodes had already been removed by an earlier step in the same run.
+    #[test]
+    fn invalidate_marks_for_removes_extract_mark_even_with_no_dropped_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::open(&dir.path().join("runs").join("build")).unwrap();
+        cp.mark("extract:a.md", "done").unwrap();
+
+        invalidate_marks_for(&cp, "a.md", &[]).unwrap();
+
+        assert!(!cp.is_done("extract:a.md"));
+    }
+
+    /// End-to-end through the real `run_build` wiring (not just the pure helper): a GONE doc's
+    /// prior `extract:{doc}` mark and a `judge:*` mark referencing its dropped node must both be
+    /// invalidated by an ordinary (non-`--force`) run. GONE docs are never in the final extract
+    /// list, so this needs no live model — the extract loop body never runs for them.
+    #[test]
+    fn run_build_invalidates_checkpoint_marks_for_dropped_gone_doc_nodes() {
+        let (_dir, paths) = delta_regression_corpus();
+        let root = paths.root.clone();
+        let run_dir = paths.runs.join("build");
+
+        // Simulate marks left over from the run that originally extracted/judged doc_gone.md's
+        // fact, before that file was deleted from the corpus.
+        let cp = Checkpoint::open(&run_dir).unwrap();
+        cp.mark("extract:doc_gone.md", "done").unwrap();
+        cp.mark("judge:f_gone#f_a", "yes").unwrap();
+        cp.mark("judge:unrelated_a#unrelated_b", "no").unwrap();
+        drop(cp);
+
+        let opts = BuildOpts {
+            stage: BuildStage::Extract,
+            doc: Some("nonexistent.md".to_string()),
+            limit: None,
+            force: false,
+            resume: false,
+            no_progress: true,
+        };
+        run_build(paths, opts).unwrap();
+
+        let cp = Checkpoint::open(&run_dir).unwrap();
+        assert!(
+            !cp.is_done("extract:doc_gone.md"),
+            "gone doc's stale extract mark must be invalidated"
+        );
+        assert!(
+            !cp.is_done("judge:f_gone#f_a"),
+            "judge mark referencing the dropped node must be invalidated"
+        );
+        assert!(
+            cp.is_done("judge:unrelated_a#unrelated_b"),
+            "an unrelated judge mark must survive"
+        );
 
         let g = GraphStore::open(&root).unwrap();
         assert!(g.get_node("f_gone").unwrap().is_none());

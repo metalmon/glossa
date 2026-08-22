@@ -35,6 +35,27 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// Remove a unit's mark (same id passed to `mark`/`is_done`) — e.g. when the work it recorded
+    /// as done is invalidated (its underlying graph nodes were dropped) and must be redone on the
+    /// next run instead of being skipped. A no-op if the mark doesn't exist.
+    pub fn remove(&self, unit_id: &str) -> io::Result<()> {
+        let filename = sanitize_id(unit_id);
+        self.remove_raw(&filename)
+    }
+
+    /// Remove a mark by its exact on-disk filename, as returned by `done_ids()` — for batch
+    /// invalidation by pattern (e.g. every `judge:*` mark referencing a node that was just
+    /// dropped), where only the already-sanitized filename is known, not the original unit id
+    /// (sanitizing folds distinct ids' punctuation to the same `_`, so it can't be un-sanitized).
+    /// A no-op if the file doesn't exist.
+    pub fn remove_raw(&self, filename: &str) -> io::Result<()> {
+        let path = self.dir.join(filename);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
     /// List all done unit IDs (sanitized filenames in the checkpoint directory).
     pub fn done_ids(&self) -> Vec<String> {
         match fs::read_dir(&self.dir) {
@@ -67,5 +88,20 @@ mod tests {
         // survives reopen
         let cp2 = Checkpoint::open(d.path()).unwrap();
         assert!(cp2.is_done("doc/a.md#judge:pair-1"));
+    }
+
+    #[test]
+    fn remove_clears_a_mark_and_is_a_noop_when_absent() {
+        let d = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::open(d.path()).unwrap();
+        cp.mark("extract:a.md", "done").unwrap();
+        assert!(cp.is_done("extract:a.md"));
+
+        cp.remove("extract:a.md").unwrap();
+        assert!(!cp.is_done("extract:a.md"));
+
+        // Removing again (already absent) must not error.
+        cp.remove("extract:a.md").unwrap();
+        assert!(!cp.is_done("extract:a.md"));
     }
 }

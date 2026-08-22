@@ -118,10 +118,12 @@ pub fn compute_delta(root: &Path, idx: &DocIndex, g: &GraphStore) -> Result<Delt
 /// Delete every non-structural (reasoning) node grounded ONLY to `doc` — every live `MENTIONS`
 /// edge it carries targets `doc`, none targets a different doc. A node with a live `MENTIONS` to
 /// another doc survives (it's still needed there); an ungrounded node is left alone (not this
-/// function's concern). Returns the number of nodes removed.
-pub fn drop_doc_nodes(g: &GraphStore, doc: &str) -> Result<usize> {
+/// function's concern). Returns the ids of the nodes actually removed — the caller (`run_build`)
+/// needs them to invalidate any checkpoint mark (e.g. a `judge:{a}#{b}` pair) that referenced one
+/// of them, since its cascade-deleted edges make the checkpoint the only stale record left.
+pub fn drop_doc_nodes(g: &GraphStore, doc: &str) -> Result<Vec<String>> {
     let nodes = g.all_nodes().context("listing graph nodes")?;
-    let mut removed = 0usize;
+    let mut removed = Vec::new();
     for n in &nodes {
         if STRUCTURAL_NODES.contains(&n.node_type.as_str()) {
             continue;
@@ -132,7 +134,7 @@ pub fn drop_doc_nodes(g: &GraphStore, doc: &str) -> Result<usize> {
         }
         g.delete_node(&n.id)
             .with_context(|| format!("deleting node {} grounded only to {doc}", n.id))?;
-        removed += 1;
+        removed.push(n.id.clone());
     }
     Ok(removed)
 }
@@ -230,7 +232,7 @@ mod tests {
         put_fact(&g, "f_multi", &["a.md#1", "b.md#1"], None);
 
         let removed = drop_doc_nodes(&g, "a.md").unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed, vec!["f_only_a".to_string()]);
         assert!(g.get_node("f_only_a").unwrap().is_none());
         assert!(g.get_node("f_multi").unwrap().is_some());
     }
