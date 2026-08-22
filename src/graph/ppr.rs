@@ -94,7 +94,9 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
     for e in g.all_edges()? {
         if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
             if a != b {
-                let w = edge_tier_weight(&e.edge_type);
+                // Guard confidence: treat 0 or negative as 1.0 (default) so legacy graphs are unchanged
+                let confidence = if e.prov.confidence > 0.0 { e.prov.confidence } else { 1.0 };
+                let w = edge_tier_weight(&e.edge_type) * confidence;
                 adj[a].push((b, w));
                 adj[b].push((a, w)); // symmetric — a multi-hop answer may need to walk "backward"
             }
@@ -375,5 +377,17 @@ mod tests {
             rank_of(&out, "terminal") < rank_of(&out, "sibling"),
             "reasoning terminal must outrank the SIMILAR-clustered sibling: {out:?}"
         );
+    }
+
+    #[test]
+    fn low_confidence_edge_carries_less_mass() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for x in ["a", "b"] { node(&g, x); }
+        let mut p = prov(); p.confidence = 0.5;
+        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "LEADS_TO".into(), prov: p }).unwrap();
+        let t = build_transition(&g).unwrap();
+        let ai = t.ids().iter().position(|s| s == "a").unwrap();
+        assert_eq!(t.adj()[ai][0].1, 0.5); // 1.0 (tier) * 0.5 (confidence)
     }
 }
