@@ -36,6 +36,13 @@ use std::path::Path;
 pub struct JudgeStats {
     pub judged: usize,
     pub linked: usize,
+    /// Pairs the model said YES to but for which `spine_edge_type` could not resolve a single
+    /// relation (zero or ambiguous Chaining candidates for the endpoint types). Distinct from
+    /// `linked == 0` on its own: a run can legitimately end with no YES verdicts at all
+    /// (`skipped_ambiguous == 0`), but a nonzero `skipped_ambiguous` means the model WANTED a
+    /// link and the ontology couldn't supply an unambiguous relation for it — a config defect
+    /// worth surfacing to the caller, not silence.
+    pub skipped_ambiguous: usize,
 }
 
 /// Parse a `judge_pair` reply's verdict: the LAST `VERDICT:` line (case-insensitive), `yes` ->
@@ -89,8 +96,13 @@ pub fn judge_pair(
 /// The single declared `RelationRole::Chaining` relation whose `from`/`to` accept
 /// (`a_type`, `b_type`) in that order — the ontology-general stand-in for a hardcoded spine edge
 /// type. Mirrors `Ontology::validate_edge`'s own "empty or `*` or exact match" allowance rule.
-/// `None` when zero or more than one relation fits (nothing to write, or genuinely ambiguous —
-/// either way not this function's call to guess).
+///
+/// `None` when zero or more than one relation fits. Either case means a would-be spine edge gets
+/// dropped (a model YES with nowhere to land), which is an ontology/config defect, not a quiet
+/// no-op — so both branches log via `eprintln!` (the crate doesn't pull in `tracing`), and are
+/// worded distinctly: "no Chaining relation covers types" (zero matches) vs "ambiguous spine
+/// relation" with the candidate names listed (more than one matches, e.g. two Chaining relations
+/// like CAUSES/PRECEDES both declared Fact->Fact).
 fn spine_edge_type(ont: &Ontology, a_type: &str, b_type: &str) -> Option<String> {
     let allows = |allowed: &[String], t: &str| {
         allowed.is_empty() || allowed.iter().any(|x| x == "*" || x == t)
@@ -109,7 +121,22 @@ fn spine_edge_type(ont: &Ontology, a_type: &str, b_type: &str) -> Option<String>
     candidates.dedup();
     match candidates.as_slice() {
         [one] => Some((*one).clone()),
-        _ => None,
+        [] => {
+            eprintln!(
+                "kbx build: no Chaining relation covers types {a_type}->{b_type} \
+                 (would-be spine edge dropped)"
+            );
+            None
+        }
+        many => {
+            let names: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+            eprintln!(
+                "kbx build: ambiguous spine relation for {a_type}->{b_type}: {} \
+                 (would-be spine edge dropped)",
+                names.join(", ")
+            );
+            None
+        }
     }
 }
 
@@ -163,17 +190,20 @@ pub fn run_judge(
         stats.judged += 1;
 
         if yes {
-            if let Some(edge_type) = spine_edge_type(&ont, &node_a.node_type, &node_b.node_type) {
-                let edge = EdgeSpec {
-                    from: pair.a.clone(),
-                    to: pair.b.clone(),
-                    edge_type,
-                    source_path: node_a.prov.source_path.clone(),
-                    range: None,
-                    confidence: None,
-                };
-                apply_upsert(g, &ont, Vec::new(), vec![edge], now, root)?;
-                stats.linked += 1;
+            match spine_edge_type(&ont, &node_a.node_type, &node_b.node_type) {
+                Some(edge_type) => {
+                    let edge = EdgeSpec {
+                        from: pair.a.clone(),
+                        to: pair.b.clone(),
+                        edge_type,
+                        source_path: node_a.prov.source_path.clone(),
+                        range: None,
+                        confidence: None,
+                    };
+                    apply_upsert(g, &ont, Vec::new(), vec![edge], now, root)?;
+                    stats.linked += 1;
+                }
+                None => stats.skipped_ambiguous += 1,
             }
         }
 
@@ -197,5 +227,73 @@ mod tests {
         // last VERDICT wins
         assert!(!parse_yes_no("VERDICT: yes\nVERDICT: no"));
         assert!(parse_yes_no("VERDICT: no\nVERDICT: yes"));
+    }
+
+    /// Table-driven: `spine_edge_type` is pure (no model, no IO), so every case is built from an
+    /// in-memory `Ontology::parse` TOML and checked directly, no live endpoint needed.
+    #[test]
+    fn spine_edge_type_resolution_table() {
+        // 1. Single matching Chaining relation -> Some(that).
+        let single = Ontology::parse(
+            r#"
+[entities.Fact]
+[relations.LEADS_TO]
+from = ["Fact"]
+to = ["Fact"]
+role = "chaining"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            spine_edge_type(&single, "Fact", "Fact"),
+            Some("LEADS_TO".to_string())
+        );
+
+        // 2. Two Chaining relations both declared over the same endpoint types -> ambiguous ->
+        // None (e.g. CAUSES/PRECEDES both Fact->Fact, per the review's motivating example).
+        let ambiguous = Ontology::parse(
+            r#"
+[entities.Fact]
+[relations.CAUSES]
+from = ["Fact"]
+to = ["Fact"]
+role = "chaining"
+[relations.PRECEDES]
+from = ["Fact"]
+to = ["Fact"]
+role = "chaining"
+"#,
+        )
+        .unwrap();
+        assert_eq!(spine_edge_type(&ambiguous, "Fact", "Fact"), None);
+
+        // 3. Zero matching relations (declared Chaining relation exists but endpoint types don't
+        // fit) -> None.
+        let zero = Ontology::parse(
+            r#"
+[entities.Fact]
+[entities.Other]
+[relations.LEADS_TO]
+from = ["Other"]
+to = ["Other"]
+role = "chaining"
+"#,
+        )
+        .unwrap();
+        assert_eq!(spine_edge_type(&zero, "Fact", "Fact"), None);
+
+        // 4. A Grounding-role relation with matching endpoint types must be excluded, not chosen
+        // — only Chaining relations are eligible spine edges.
+        let grounding_only = Ontology::parse(
+            r#"
+[entities.Fact]
+[relations.MENTIONS_FACT]
+from = ["Fact"]
+to = ["Fact"]
+role = "grounding"
+"#,
+        )
+        .unwrap();
+        assert_eq!(spine_edge_type(&grounding_only, "Fact", "Fact"), None);
     }
 }
