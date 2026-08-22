@@ -83,7 +83,10 @@ const GRAPH_SYSTEM_PROMPT: &str =
 
 /// The per-question user turn.
 pub fn user_prompt(q: &Question) -> String {
-    format!("Question: {}", q.question)
+    // Trim the question: a trailing newline in the user message (when a system message is also
+    // present) is rejected by some strict OpenAI-compatible providers with HTTP 400. Datasets
+    // routinely carry `\r\n` line endings, so normalize here for every backend.
+    format!("Question: {}", q.question.trim())
 }
 
 /// Combined single-string prompt for CLI agents that take one prompt argument.

@@ -67,6 +67,9 @@ pub fn judge(
     answer: &str,
 ) -> anyhow::Result<Judgement> {
     let api_key = ep.resolve_key();
+    // Trim the embedded fields so the judge message stays tidy and never ends on a stray newline
+    // (some strict providers reject a message ending in `\n` — see prompt::user_prompt).
+    let (question, gold, answer) = (question.trim(), gold.trim(), answer.trim());
     let user = format!(
         "QUESTION: {question}\nGOLD: {gold}\nANSWER: {answer}\n\
          Reply with one line reason then `VERDICT: correct|partial|wrong`."

@@ -44,6 +44,10 @@ jobs:
         # Release ships the lean binary: no default features — no `notebook`, no `constraint`.
         run: cargo build --release --locked --target ${{ matrix.target }} -p glossa --bin kb --no-default-features
 
+      - name: Build kbx
+        # kbx is the file-first eval/train/build toolkit (lives in the kb-eval crate).
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
@@ -51,6 +55,7 @@ jobs:
           stem="glossa-${tag}-${{ matrix.target }}"
           mkdir -p "dist/${stem}"
           cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
+          cp "target/${{ matrix.target }}/release/kbx" "dist/${stem}/"
           cp README.md LICENSE "dist/${stem}/"
           tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
 
@@ -62,6 +67,7 @@ jobs:
           $stem = "glossa-${tag}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
+          Copy-Item "target/${{ matrix.target }}/release/kbx.exe" "dist/$stem/"
           Copy-Item README.md, LICENSE "dist/$stem/"
           Compress-Archive -Path "dist/$stem" -DestinationPath "dist/$stem.zip"
 
