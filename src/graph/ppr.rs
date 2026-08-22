@@ -9,6 +9,30 @@
 use crate::graph::store::GraphStore;
 use std::collections::HashMap;
 
+/// Mechanical-similarity edge types: derived by `generalize` from token/embedding overlap, NOT
+/// authored reasoning. A SYSTEM-level tier (like STRUCTURAL_NODES), not a domain-ontology choice.
+const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
+
+/// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
+/// Env-tunable so the killer sweep re-runs without recompiling. Default 0.1.
+fn sim_weight() -> f32 {
+    std::env::var("GLOSSA_PPR_SIM_WEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|w| *w >= 0.0 && w.is_finite())
+        .unwrap_or(0.1)
+}
+
+/// System-level tier weight for an edge in the PPR walk. Reads only `edge_type` membership in a
+/// fixed set — never node_type or domain relations (the ontology-blind contract holds).
+pub(crate) fn edge_tier_weight(edge_type: &str) -> f32 {
+    if SIMILARITY_EDGES.contains(&edge_type) {
+        sim_weight()
+    } else {
+        1.0
+    }
+}
+
 /// A symmetric transition structure built once from the graph's nodes + edges. Ontology-blind:
 /// every stored edge becomes a bidirectional transition of equal weight (confidence-weighting is a
 /// future knob, deliberately not wired here).
@@ -257,5 +281,17 @@ mod tests {
         node(&g, "a");
         let t = build_transition(&g).unwrap();
         assert!(ppr(&t, &seed(&[("nonexistent", 1.0)]), 0.15, 50, 1e-6).is_empty());
+    }
+
+    #[test]
+    fn similarity_edges_weigh_below_reasoning() {
+        // default w_sim = 0.1 (no env set in test)
+        assert_eq!(edge_tier_weight("LEADS_TO"), 1.0);
+        assert_eq!(edge_tier_weight("MENTIONS"), 1.0);
+        assert_eq!(edge_tier_weight("CONTAINS"), 1.0); // structural still carries cross-doc mass
+        assert_eq!(edge_tier_weight("NEXT"), 1.0);
+        assert!(edge_tier_weight("SIMILAR") < 1.0);
+        assert_eq!(edge_tier_weight("SIMILAR"), 0.1);
+        assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN"), 1.0); // default = reasoning tier
     }
 }
