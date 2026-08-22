@@ -88,8 +88,8 @@ enum Cmd {
         /// Only extract the first N enumerated documents.
         #[arg(long)]
         limit: Option<usize>,
-        /// Placeholder for a later incremental rebuild; currently a NO-OP (this build is always
-        /// full).
+        /// Bypass the incremental delta (which by default extracts only new/changed docs) for a
+        /// full rebuild: extract every document and re-judge every candidate pair.
         #[arg(long)]
         force: bool,
         /// Skip units already recorded done in the build checkpoint.
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
             no_progress,
         } => {
             let paths = workspace::resolve(path);
-            run_build(
+            let report = run_build(
                 paths,
                 BuildOpts {
                     stage,
@@ -153,7 +153,13 @@ fn main() -> Result<()> {
                     resume,
                     no_progress,
                 },
-            )
+            )?;
+            println!(
+                "build report: {} doc(s) extracted, {} pair(s) judged",
+                report.docs_extracted.len(),
+                report.pairs_judged
+            );
+            Ok(())
         }
     }
 }

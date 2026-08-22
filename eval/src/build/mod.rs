@@ -28,7 +28,9 @@ use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::path::Path;
 
 /// Which stage(s) of the build pipeline a `kbx build` invocation should run. `All` (the clap
 /// default) runs every stage, in pipeline order.
@@ -50,8 +52,9 @@ pub struct BuildOpts {
     pub doc: Option<String>,
     /// Only extract the first N enumerated documents.
     pub limit: Option<usize>,
-    /// Placeholder for Task 12's incremental rebuild. Currently a NO-OP: this task's build is
-    /// always a full run regardless of `--force`.
+    /// Bypass incremental delta detection entirely: extract EVERY enumerated document (not just
+    /// NEW/CHANGED) and clear the run's judge checkpoint first, so every candidate pair is
+    /// re-judged too — a true full rebuild.
     pub force: bool,
     /// Skip units (documents for extract, pairs for judge) already recorded done in the build
     /// checkpoint.
@@ -90,6 +93,46 @@ fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
     Ok(docs)
 }
 
+/// How much of a `run_build` pass actually did — the outcome of the incremental gate plus the
+/// judge stage, inspectable by callers (tests, the CLI summary) instead of only printed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuildReport {
+    /// Corpus-relative paths of every document `extract_doc` actually ran over this pass, in
+    /// enumeration order. Empty when the Extract stage didn't run at all (e.g. `--stage judge`).
+    pub docs_extracted: Vec<String>,
+    /// Candidate pairs the Judge stage actually sent to the model this pass (mirrors
+    /// `JudgeStats::judged`; a pair already checkpointed from a prior run doesn't count). Zero
+    /// when the Judge stage didn't run at all.
+    pub pairs_judged: usize,
+}
+
+/// Model-free selection of which docs `run_build`'s extract stage processes this pass:
+/// `force` bypasses the delta entirely — every doc in `all_docs`; otherwise NEW ∪ CHANGED from
+/// `delta`, restricted to (and order-preserving from) `all_docs` so a doc the delta names but
+/// `all_docs` no longer enumerates can't sneak into the extract list. Pure and model-free by
+/// design — the one piece of the incremental-gate logic this task can unit-test without a live
+/// model (`--stage extract` itself cannot be).
+pub fn plan_extract(delta: &Delta, force: bool, all_docs: &[String]) -> Vec<String> {
+    if force {
+        return all_docs.to_vec();
+    }
+    let wanted: HashSet<&String> = delta.new.iter().chain(delta.changed.iter()).collect();
+    all_docs.iter().filter(|d| wanted.contains(d)).cloned().collect()
+}
+
+/// Clear a build run's persistent checkpoint (`run_dir/done/`) — `--force`'s "true full rebuild"
+/// half: without this, the judge stage's `judge:{a}#{b}` marks from a prior run would keep every
+/// already-judged pair skipped even though the caller asked to redo everything. A no-op when the
+/// checkpoint dir doesn't exist yet (first-ever build).
+fn clear_checkpoint(run_dir: &Path) -> Result<()> {
+    let done_dir = run_dir.join("done");
+    if done_dir.exists() {
+        std::fs::remove_dir_all(&done_dir)
+            .with_context(|| format!("clearing checkpoint {}", done_dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Orchestrate the `kbx build` pipeline over the corpus at `paths.root`: extract -> candidates ->
 /// judge -> finalize, running only the stage(s) `opts.stage` selects (`All` runs all four in
 /// order). Execution order: resolve the ontology (never fails — defaults when no
@@ -100,7 +143,7 @@ fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
 /// `bridge.md`; Candidates and Finalize need neither. This means `--stage finalize` or
 /// `--stage candidates` runs on an indexed corpus with no `.glossa/kbx/` prompt files present at
 /// all — only Extract/Judge (which call a model) require a scaffolded workspace.
-pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
+pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
     let ontology = Ontology::load_or_default(&paths.root);
 
     // Incremental — a no-op if the corpus is already fully indexed. Guarantees the structural
@@ -110,7 +153,14 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
     // Build state lives under a single, stable `runs/build/` dir: unlike `kbx eval`'s per-tag
     // run history, one corpus has exactly one in-progress build to resume/checkpoint.
     let run_dir = paths.runs.join("build");
+    // `--force` = a true full rebuild: clear the checkpoint BEFORE it's (re)opened below, so
+    // every `judge:{a}#{b}` (and `extract:{doc}`) mark from a prior run is gone and nothing gets
+    // skipped.
+    if opts.force {
+        clear_checkpoint(&run_dir).context("clearing build checkpoint for --force")?;
+    }
     let cp = Checkpoint::open(&run_dir).context("open build checkpoint")?;
+    let mut report = BuildReport::default();
 
     let run_extract = matches!(opts.stage, BuildStage::All | BuildStage::Extract);
     let run_candidates_stage = matches!(opts.stage, BuildStage::All | BuildStage::Candidates);
@@ -130,6 +180,29 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
             let g = GraphStore::open(&paths.root).context("open graph store to enumerate docs")?;
             enumerate_docs(&g)?
         };
+
+        // Incremental gate (default): compute the new/changed/gone delta against the reasoning
+        // graph already built, drop the CHANGED+GONE docs' stale reasoning nodes (they're about
+        // to be superseded, or their doc vanished entirely), then restrict extraction to NEW ∪
+        // CHANGED only. `--force` bypasses this whole step — `docs` stays every enumerated doc.
+        if !opts.force {
+            let idx =
+                DocIndex::open_or_create(&paths.root).context("open doc index for delta")?;
+            let delta = {
+                let g = GraphStore::open(&paths.root).context("open graph store to compute delta")?;
+                compute_delta(&paths.root, &idx, &g)?
+            };
+            {
+                let g = GraphStore::open(&paths.root)
+                    .context("open graph store to drop stale doc nodes")?;
+                for doc in delta.changed.iter().chain(delta.gone.iter()) {
+                    drop_doc_nodes(&g, doc)
+                        .with_context(|| format!("dropping stale reasoning nodes for {doc}"))?;
+                }
+            }
+            docs = plan_extract(&delta, false, &docs);
+        }
+
         if let Some(d) = &opts.doc {
             docs.retain(|p| p == d);
         }
@@ -151,6 +224,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
             total.nodes += stats.nodes;
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
+            report.docs_extracted.push(doc.clone());
             pb.inc(1);
         }
         pb.finish_and_clear();
@@ -186,6 +260,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
                 "judge: {} judged, {} linked, {} skipped (ambiguous spine relation)",
                 stats.judged, stats.linked, stats.skipped_ambiguous
             );
+            report.pairs_judged = stats.judged;
         }
     }
 
@@ -194,7 +269,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<()> {
         println!("{summary}");
     }
 
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -332,5 +407,71 @@ mod tests {
         let pairs = candidate_pairs(&g).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].entity, "shared");
+    }
+
+    /// `--stage extract` calls a live model, so `run_build` itself can't be unit-tested for the
+    /// incremental gate. `plan_extract` is the pure, model-free decision it delegates to —
+    /// exercised directly here per Task 12's test ruling. Case: a synthetic delta with one
+    /// CHANGED doc selects only that doc, dropping the unchanged one.
+    #[test]
+    fn plan_extract_selects_changed_only() {
+        let delta = Delta {
+            new: vec![],
+            changed: vec!["b.md".to_string()],
+            gone: vec![],
+        };
+        let all_docs = vec!["a.md".to_string(), "b.md".to_string()];
+        assert_eq!(plan_extract(&delta, false, &all_docs), vec!["b.md".to_string()]);
+    }
+
+    /// NEW docs (not just CHANGED) are included in the non-force selection.
+    #[test]
+    fn plan_extract_includes_new_docs() {
+        let delta = Delta {
+            new: vec!["c.md".to_string()],
+            changed: vec!["b.md".to_string()],
+            gone: vec![],
+        };
+        let all_docs = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+        assert_eq!(
+            plan_extract(&delta, false, &all_docs),
+            vec!["b.md".to_string(), "c.md".to_string()]
+        );
+    }
+
+    /// `--force` bypasses the delta entirely: every enumerated doc, even ones the delta doesn't
+    /// name as new/changed at all (a fully unchanged corpus still gets a full re-extract).
+    #[test]
+    fn plan_extract_force_selects_all() {
+        let delta = Delta::default(); // nothing new/changed/gone
+        let all_docs = vec!["a.md".to_string(), "b.md".to_string()];
+        assert_eq!(plan_extract(&delta, true, &all_docs), all_docs);
+    }
+
+    /// `--force`'s other half: clearing the persistent checkpoint so a pair judged in a prior run
+    /// isn't silently skipped. `clear_checkpoint` must make a previously-marked pair report
+    /// `!is_done` again on the next `Checkpoint::open`.
+    #[test]
+    fn force_clears_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("runs").join("build");
+        let cp = Checkpoint::open(&run_dir).unwrap();
+        cp.mark("judge:a#b", "yes").unwrap();
+        assert!(cp.is_done("judge:a#b"));
+
+        clear_checkpoint(&run_dir).unwrap();
+
+        let cp2 = Checkpoint::open(&run_dir).unwrap();
+        assert!(!cp2.is_done("judge:a#b"));
+    }
+
+    /// `clear_checkpoint` must be a no-op (not an error) when the run has never checkpointed
+    /// anything yet — the first-ever `--force` build on a fresh corpus.
+    #[test]
+    fn clear_checkpoint_noop_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("runs").join("build");
+        assert!(!run_dir.exists());
+        clear_checkpoint(&run_dir).unwrap();
     }
 }
