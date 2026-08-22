@@ -41,6 +41,16 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Official OpenAI Rust SDK: robust transport/TLS/tool-calling for the chat backend, replacing a
+# fragile hand-rolled ureq path (openai.rs). `chat-completion` pulls in both the typed chat types
+# and the `Client::chat()` API surface (this crate has no API surface enabled by default).
+async-openai = { version = "0.41", features = ["chat-completion"] }
+# async-openai's own HTTP transport; used directly to build a `reqwest::Client` with a caller
+# timeout and hand it to the SDK client via `with_http_client`. reqwest 0.13 defaults to rustls
+# (no OpenSSL), matching async-openai's default TLS backend.
+reqwest = "0.13"
+# Shared multi-thread runtime so the (still-sync) agent loop can `block_on` the SDK's async calls.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 uuid = { version = "1", features = ["v7"] }
 rand = "0.8"
 base64 = "0.22"

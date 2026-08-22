@@ -1,10 +1,14 @@
 use super::{prompt, AgentBackend};
 use crate::dataset::Question;
 use anyhow::{anyhow, bail, Context};
+use async_openai::config::OpenAIConfig;
+use async_openai::types::chat::CreateChatCompletionRequest;
+use async_openai::Client as OpenAiSdkClient;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Generic OpenAI-compatible chat backend (LM Studio, llama.cpp server, vLLM, OpenRouter, …).
@@ -126,7 +130,7 @@ impl OpenAiBackend {
 /// Minimal one-shot OpenAI-compatible chat call: no tools, caller-supplied timeout. Shared by
 /// callers that just want a plain completion (e.g. the file-prompt judge in `judge.rs`) instead
 /// of the full tool-calling agent loop — thin wrapper over `lmstudio_chat` so both paths drive
-/// the endpoint identically (same retry-on-transport-drop behavior).
+/// the endpoint identically (same SDK transport).
 pub(crate) fn chat_once(
     endpoint: &str,
     model: &str,
@@ -145,11 +149,105 @@ pub(crate) fn chat_once(
     )
 }
 
-/// One OpenAI-compatible `/v1/chat/completions` POST to an LM Studio-style endpoint. Returns the
-/// assistant `message` object (already extracted from `choices[0].message`). Samples at
-/// `temperature: 0.8` — temp 0 is not a reliable greedy mode on this reasoning model/backend
-/// (unstable outputs), so runs are stochastic and must be averaged over N. Shared by the eval
-/// backend and the graph GEPA optimizer so both drive the same server the same way.
+/// Shared tokio runtime backing the sync bridge below: the agent loop (`run_agent_loop` and every
+/// caller of `lmstudio_chat`/`chat_once`) is deliberately synchronous, but `async-openai`'s client
+/// is async-only. One process-wide multi-thread runtime lets every call just `block_on` instead of
+/// threading an executor through the whole sync call stack.
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build the tokio runtime backing the OpenAI SDK bridge")
+    })
+}
+
+/// Sync bridge: our JSON request `body` (the same `{model, messages, tools, temperature}` shape
+/// `lmstudio_chat` has always built) -> a typed `async-openai` `CreateChatCompletionRequest` -> a
+/// real SDK call -> the assistant `message` object as a `Value`, matching what callers got from the
+/// old hand-rolled ureq path (`choices[0].message`).
+///
+/// `endpoint` is the bare host (NOT ending in `/v1` or `/v1/chat/completions` — e.g.
+/// `http://localhost:1234`); `async-openai` appends `/chat/completions` to the configured
+/// `api_base` itself, so we hand it `{endpoint}/v1` and let the SDK do the rest.
+fn chat_via_sdk(
+    endpoint: &str,
+    api_key: Option<&str>,
+    body: &Value,
+    timeout: Duration,
+) -> anyhow::Result<Value> {
+    let base = format!("{}/v1", endpoint.trim_end_matches('/'));
+    let mut cfg = OpenAIConfig::new().with_api_base(base);
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        cfg = cfg.with_api_key(key);
+    }
+    // Wire the caller-supplied timeout through a dedicated reqwest client — async-openai has no
+    // timeout knob of its own, only `with_http_client`/`with_http_service` to swap the transport.
+    let http_client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build reqwest client for the openai sdk bridge")?;
+    let client = OpenAiSdkClient::with_config(cfg).with_http_client(http_client);
+
+    // Normalize message content: trim trailing whitespace from every message. Some strict
+    // OpenAI-compatible providers (OpenCode Zen / mimo) return HTTP 400 when the last message in
+    // the conversation ends in a newline — and in the multi-turn agent loop that trailing message
+    // can be a user prompt, a tool result, or an assistant turn. Trimming here (the single send
+    // choke-point) fixes it for all of them without changing content semantics.
+    let mut body = body.clone();
+    if let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for m in msgs {
+            if let Some(s) = m.get("content").and_then(Value::as_str) {
+                let trimmed = s.trim_end().to_string();
+                m["content"] = Value::String(trimmed);
+            }
+        }
+    }
+    let req: CreateChatCompletionRequest =
+        serde_json::from_value(body).context("deserialize chat request for the openai sdk")?;
+
+    // Retry transient/flaky failures (the SDK owns transport, so we restore the resilience the old
+    // ureq path had). Large multi-turn requests to some providers (OpenCode Zen / mimo) return a
+    // non-deterministic HTTP 400 that usually succeeds on a resend, plus real connection drops.
+    let mut last_err = None;
+    let mut resp = None;
+    for attempt in 1..=4u32 {
+        match runtime().block_on(client.chat().create(req.clone())) {
+            Ok(r) => {
+                resp = Some(r);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+                }
+            }
+        }
+    }
+    let resp = match resp {
+        Some(r) => r,
+        None => bail!("openai sdk chat failed after 4 attempts: {}", last_err.unwrap()),
+    };
+
+    let Some(choice) = resp.choices.into_iter().next() else {
+        bail!("openai sdk response had no choices");
+    };
+    serde_json::to_value(choice.message).context("serialize response message")
+}
+
+/// One OpenAI-compatible `/v1/chat/completions` call to an LM Studio-style endpoint, driven through
+/// `async-openai` (see `chat_via_sdk`). Returns the assistant `message` object (already extracted
+/// from `choices[0].message`). Samples at `temperature: 0.8` — temp 0 is not a reliable greedy mode
+/// on this reasoning model/backend (unstable outputs), so runs are stochastic and must be averaged
+/// over N. Shared by the eval backend and the graph GEPA optimizer so both drive the same server
+/// the same way.
+///
+/// `url` is accepted in its historical form (ending in `/v1/chat/completions`, per `answer()` and
+/// `chat_once` below) and stripped back down to the bare endpoint here, so this is a drop-in
+/// replacement — no caller had to change how it builds `url`.
 pub(crate) fn lmstudio_chat(
     url: &str,
     model: &str,
@@ -169,43 +267,16 @@ pub(crate) fn lmstudio_chat(
         "tools": tools,
         "temperature": temperature
     });
-    let body_str = serde_json::to_string(&body)?;
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
     // with descriptions) sent to the endpoint, to prove what the model actually receives.
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
-        let _ = std::fs::write(&p, &body_str);
+        let _ = std::fs::write(&p, serde_json::to_string(&body)?);
     }
-    // Retry transient network drops: LM Studio occasionally closes a pooled keep-alive connection
-    // that ureq then reuses → "established connection was aborted" (os error 10060). A fresh request
-    // (new connection) + short backoff recovers it. Non-transport errors (HTTP status) surface at once.
-    let mut attempt = 0u32;
-    let resp = loop {
-        let mut req = ureq::post(url)
-            .timeout(timeout)
-            .set("Content-Type", "application/json");
-        if let Some(key) = api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        match req.send_string(&body_str) {
-            Ok(r) => break r,
-            Err(ureq::Error::Transport(t)) if attempt < 3 => {
-                attempt += 1;
-                std::thread::sleep(Duration::from_millis(400 * attempt as u64));
-                continue;
-            }
-            Err(e) => return Err(anyhow!("endpoint request failed: {e}")),
-        }
-    };
-    let text = resp.into_string().context("read endpoint response")?;
-    let v: Value = serde_json::from_str(&text).context("parse endpoint json")?;
-    if let Some(err) = v.get("error") {
-        bail!("endpoint returned error: {err}");
-    }
-    let msg = v["choices"][0]["message"].clone();
-    if msg.is_null() {
-        bail!("endpoint response missing choices[0].message: {text}");
-    }
-    Ok(msg)
+    let endpoint = url
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches("/v1")
+        .trim_end_matches('/');
+    chat_via_sdk(endpoint, api_key, &body, timeout)
 }
 
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
