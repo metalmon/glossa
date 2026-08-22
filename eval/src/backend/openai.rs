@@ -135,15 +135,15 @@ pub(crate) fn chat_once(
     api_key: Option<&str>,
     timeout_secs: u64,
 ) -> anyhow::Result<Value> {
-    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
-    lmstudio_chat(
-        &url,
-        model,
-        api_key,
-        &Value::Array(Vec::new()),
-        messages,
-        Duration::from_secs(timeout_secs),
-    )
+    // One-shot (the file-prompt judge): greedy sampling so grading is reproducible run-to-run
+    // (NOT the reader's stochastic KB_EVAL_TEMP), and NO `tools` field at all — a strict provider
+    // (the MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+    });
+    chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
 }
 
 /// Shared tokio runtime backing the sync bridge below: the agent loop (`run_agent_loop` and every
@@ -234,10 +234,21 @@ fn chat_http(
                 );
             }
             match serde_json::from_str::<Value>(&text) {
-                Ok(v) => match v.pointer("/choices/0/message").cloned() {
-                    Some(m) => (false, Ok(m)),
-                    None => (false, Err(anyhow!("chat response had no choices[0].message"))),
-                },
+                Ok(v) => {
+                    // Some OpenAI-compatible servers (LM Studio) return HTTP 200 with an
+                    // `{"error": …}` body instead of a non-2xx status — surface it, don't discard
+                    // it behind a vague "no choices" message.
+                    if let Some(err) = v.get("error") {
+                        (false, Err(anyhow!("chat endpoint returned an error: {err}")))
+                    } else {
+                        match v.pointer("/choices/0/message").cloned() {
+                            Some(m) => (false, Ok(m)),
+                            None => {
+                                (false, Err(anyhow!("chat response had no choices[0].message")))
+                            }
+                        }
+                    }
+                }
                 Err(e) => (false, Err(anyhow!("parse chat response json: {e}"))),
             }
         });
