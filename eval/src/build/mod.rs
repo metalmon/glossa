@@ -52,9 +52,10 @@ pub struct BuildOpts {
     pub doc: Option<String>,
     /// Only extract the first N enumerated documents.
     pub limit: Option<usize>,
-    /// Bypass incremental delta detection entirely: extract EVERY enumerated document (not just
-    /// NEW/CHANGED) and clear the run's judge checkpoint first, so every candidate pair is
-    /// re-judged too — a true full rebuild.
+    /// Bypass the incremental extract-list narrowing: extract EVERY enumerated document (not
+    /// just NEW/CHANGED) and clear the run's judge checkpoint first, so every candidate pair is
+    /// re-judged too — a true full rebuild. Gone-doc nodes are still dropped either way (see
+    /// `run_build`'s extract stage) since a gone doc never comes back.
     pub force: bool,
     /// Skip units (documents for extract, pairs for judge) already recorded done in the build
     /// checkpoint.
@@ -120,6 +121,22 @@ pub fn plan_extract(delta: &Delta, force: bool, all_docs: &[String]) -> Vec<Stri
     all_docs.iter().filter(|d| wanted.contains(d)).cloned().collect()
 }
 
+/// Which of `delta.changed`'s docs should have their stale reasoning nodes dropped this run:
+/// only those actually present in `final_extract` (the fully-narrowed, post `--doc`/`--limit`
+/// extract list). A changed doc NOT in `final_extract` keeps its nodes — dropping them without a
+/// same-run re-extraction to replace them would silently orphan facts until some later,
+/// unrestricted run picks the doc back up (it stays `changed` until then, never lost). Model-free
+/// and pure, like `plan_extract`, so the drop-scoping decision is unit-testable on its own.
+pub fn changed_docs_to_drop(delta: &Delta, final_extract: &[String]) -> Vec<String> {
+    let extract_set: HashSet<&String> = final_extract.iter().collect();
+    delta
+        .changed
+        .iter()
+        .filter(|d| extract_set.contains(d))
+        .cloned()
+        .collect()
+}
+
 /// Clear a build run's persistent checkpoint (`run_dir/done/`) — `--force`'s "true full rebuild"
 /// half: without this, the judge stage's `judge:{a}#{b}` marks from a prior run would keep every
 /// already-judged pair skipped even though the caller asked to redo everything. A no-op when the
@@ -181,34 +198,43 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             enumerate_docs(&g)?
         };
 
-        // Incremental gate (default): compute the new/changed/gone delta against the reasoning
-        // graph already built, drop the CHANGED+GONE docs' stale reasoning nodes (they're about
-        // to be superseded, or their doc vanished entirely), then restrict extraction to NEW ∪
-        // CHANGED only. `--force` bypasses this whole step — `docs` stays every enumerated doc.
-        if !opts.force {
-            let idx =
-                DocIndex::open_or_create(&paths.root).context("open doc index for delta")?;
-            let delta = {
-                let g = GraphStore::open(&paths.root).context("open graph store to compute delta")?;
-                compute_delta(&paths.root, &idx, &g)?
-            };
-            {
-                let g = GraphStore::open(&paths.root)
-                    .context("open graph store to drop stale doc nodes")?;
-                for doc in delta.changed.iter().chain(delta.gone.iter()) {
-                    drop_doc_nodes(&g, doc)
-                        .with_context(|| format!("dropping stale reasoning nodes for {doc}"))?;
-                }
-            }
-            docs = plan_extract(&delta, false, &docs);
-        }
+        // Incremental gate: compute the new/changed/gone delta against the reasoning graph
+        // already built, narrow `docs` to the FINAL extract list (NEW ∪ CHANGED, or every
+        // enumerated doc under `--force`) via `plan_extract`, THEN apply `--doc`/`--limit` — in
+        // that order, so the drop step below (which must match what's actually about to be
+        // re-extracted) sees the fully-narrowed list, not the pre-`--doc`/`--limit` one.
+        let idx = DocIndex::open_or_create(&paths.root).context("open doc index for delta")?;
+        let g = GraphStore::open(&paths.root).context("open graph store for delta/drop")?;
+        let delta = compute_delta(&paths.root, &idx, &g)?;
 
+        docs = plan_extract(&delta, opts.force, &docs);
         if let Some(d) = &opts.doc {
             docs.retain(|p| p == d);
         }
         if let Some(n) = opts.limit {
             docs.truncate(n);
         }
+
+        // GONE docs' nodes are dropped ALWAYS — unconditionally, regardless of `--force` and
+        // regardless of `--doc`/`--limit` narrowing. A gone doc never comes back, so there is no
+        // "wait for a same-run re-extraction" concern the way there is for CHANGED; leaving its
+        // orphaned nodes in place would make `--force` a lie ("full rebuild" with stragglers).
+        //
+        // CHANGED docs' nodes are dropped ONLY for docs still in the final, narrowed `docs` list:
+        // dropping a changed doc's nodes without re-extracting it in this SAME run would silently
+        // orphan its facts (e.g. `--doc a.md` while b.md also changed must leave b.md's nodes
+        // alone — b.md just stays CHANGED for the next, unrestricted run to pick up). Under
+        // `--force`, `docs` is every enumerated doc, so every changed doc qualifies and gets
+        // dropped+re-extracted, which is the correct full-rebuild behavior.
+        for doc in &delta.gone {
+            drop_doc_nodes(&g, doc)
+                .with_context(|| format!("dropping gone-doc reasoning nodes for {doc}"))?;
+        }
+        for doc in changed_docs_to_drop(&delta, &docs) {
+            drop_doc_nodes(&g, &doc)
+                .with_context(|| format!("dropping stale reasoning nodes for {doc}"))?;
+        }
+        drop(g);
 
         let pb = progress_bar(docs.len(), opts.no_progress);
         pb.set_message("extract");
@@ -473,5 +499,210 @@ mod tests {
         let run_dir = dir.path().join("runs").join("build");
         assert!(!run_dir.exists());
         clear_checkpoint(&run_dir).unwrap();
+    }
+
+    // ---- Fix round 1 (drop-scoping bugs found in review) ----
+
+    /// Pure unit test for `changed_docs_to_drop`: a doc excluded from `final_extract` (e.g. by
+    /// `--doc`/`--limit`) must NOT be selected for dropping, even though it's in `delta.changed`
+    /// — this is the CRITICAL bug's fix (dropping without a same-run re-extraction silently
+    /// orphans facts).
+    #[test]
+    fn changed_docs_to_drop_excludes_doc_not_in_final_extract() {
+        let delta = Delta {
+            new: vec![],
+            changed: vec!["a.md".to_string(), "b.md".to_string()],
+            gone: vec![],
+        };
+        let final_extract = vec!["b.md".to_string()]; // a.md was excluded by --doc/--limit
+        assert_eq!(
+            changed_docs_to_drop(&delta, &final_extract),
+            vec!["b.md".to_string()]
+        );
+    }
+
+    /// Under `--force`, `final_extract` is every enumerated doc, so every changed doc qualifies
+    /// for dropping (it's about to be re-extracted this same run).
+    #[test]
+    fn changed_docs_to_drop_includes_all_changed_when_final_extract_is_everything() {
+        let delta = Delta {
+            new: vec![],
+            changed: vec!["a.md".to_string(), "b.md".to_string()],
+            gone: vec![],
+        };
+        let final_extract = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+        assert_eq!(
+            changed_docs_to_drop(&delta, &final_extract),
+            vec!["a.md".to_string(), "b.md".to_string()]
+        );
+    }
+
+    /// A minimal `.glossa/kbx/lab.toml` + `builder.md` scaffold: just enough for `run_build`'s
+    /// Extract stage to load its lab config/prompt. No model call happens unless `extract_doc` is
+    /// actually invoked, which the regression tests below avoid by narrowing `--doc` to a path
+    /// that matches no enumerated document — the final extract list ends up empty, so the loop
+    /// body (the only thing that would call a live model) never runs, while the delta/drop wiring
+    /// this fix touches still executes for real inside `run_build` itself.
+    fn scaffold_lab_and_builder(paths: &KbxPaths) {
+        std::fs::create_dir_all(&paths.kbx_dir).unwrap();
+        std::fs::write(
+            &paths.lab,
+            "[model]\nendpoint = \"http://unused\"\nmodel = \"unused\"\n",
+        )
+        .unwrap();
+        std::fs::write(&paths.builder, "unused builder prompt").unwrap();
+    }
+
+    /// Regression fixture: a.md's reasoning node carries a current `file_sig` (unchanged), b.md's
+    /// is stale (changed), and a third node is grounded only to a doc that was never indexed
+    /// (gone) — mirrors `incremental.rs`'s own `unchanged_new_changed_gone_delta` fixture style.
+    fn delta_regression_corpus() -> (tempfile::TempDir, KbxPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.md"), "# A\n\nAlpha body.\n").unwrap();
+        std::fs::write(root.join("b.md"), "# B\n\nBeta body.\n").unwrap();
+        glossa::index::store::index_dir(root, true).unwrap();
+
+        let paths = KbxPaths::for_root(root.to_path_buf());
+        scaffold_lab_and_builder(&paths);
+
+        let prov = |src: &str, file_sig: Option<glossa::index::manifest::FileSig>| Provenance {
+            source_path: src.into(),
+            range: None,
+            file_sig,
+            origin: "agent".into(),
+            confidence: 0.9,
+            created_at: 1,
+        };
+
+        let g = GraphStore::open(root).unwrap();
+
+        let sig_a = glossa::index::store::file_sig(&root.join("a.md")).unwrap();
+        g.put_node(&Node {
+            id: "f_a".into(),
+            node_type: "Fact".into(),
+            label: "f_a".into(),
+            aliases: vec!["f_a".into()],
+            prov: prov("a.md", Some(sig_a)),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "f_a".into(),
+            to: "a.md#1".into(),
+            edge_type: MENTIONS.into(),
+            prov: prov("a.md", Some(sig_a)),
+        })
+        .unwrap();
+
+        let stale_sig = glossa::index::manifest::FileSig {
+            mtime_secs: 1,
+            size: 999_999,
+        };
+        g.put_node(&Node {
+            id: "f_b".into(),
+            node_type: "Fact".into(),
+            label: "f_b".into(),
+            aliases: vec!["f_b".into()],
+            prov: prov("b.md", Some(stale_sig)),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "f_b".into(),
+            to: "b.md#1".into(),
+            edge_type: MENTIONS.into(),
+            prov: prov("b.md", Some(stale_sig)),
+        })
+        .unwrap();
+
+        g.put_node(&Node {
+            id: "f_gone".into(),
+            node_type: "Fact".into(),
+            label: "f_gone".into(),
+            aliases: vec!["f_gone".into()],
+            prov: prov("doc_gone.md", None),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "f_gone".into(),
+            to: "doc_gone.md#1".into(),
+            edge_type: MENTIONS.into(),
+            prov: prov("doc_gone.md", None),
+        })
+        .unwrap();
+        drop(g);
+
+        (dir, paths)
+    }
+
+    /// CRITICAL bug regression: `--doc` (or `--limit`) narrowing the extract list to exclude a
+    /// CHANGED doc must NOT drop that doc's reasoning nodes this run.
+    #[test]
+    fn run_build_extract_keeps_changed_doc_nodes_when_doc_flag_excludes_it() {
+        let (_dir, paths) = delta_regression_corpus();
+        let root = paths.root.clone();
+
+        let opts = BuildOpts {
+            stage: BuildStage::Extract,
+            doc: Some("nonexistent.md".to_string()),
+            limit: None,
+            force: false,
+            resume: false,
+            no_progress: true,
+        };
+        let report = run_build(paths, opts).unwrap();
+        assert!(report.docs_extracted.is_empty());
+
+        let g = GraphStore::open(&root).unwrap();
+        assert!(
+            g.get_node("f_b").unwrap().is_some(),
+            "changed doc's node must survive when --doc excludes it from this run's extract list"
+        );
+        assert!(g.get_node("f_a").unwrap().is_some());
+    }
+
+    /// IMPORTANT bug regression: GONE docs' nodes are dropped unconditionally — even under
+    /// `--force` (which used to skip the whole delta/drop step) and even when `--doc` narrows the
+    /// extract list to nothing.
+    #[test]
+    fn run_build_force_still_drops_gone_doc_nodes_even_when_doc_flag_narrows_to_nothing() {
+        let (_dir, paths) = delta_regression_corpus();
+        let root = paths.root.clone();
+
+        let opts = BuildOpts {
+            stage: BuildStage::Extract,
+            doc: Some("nonexistent.md".to_string()),
+            limit: None,
+            force: true,
+            resume: false,
+            no_progress: true,
+        };
+        let report = run_build(paths, opts).unwrap();
+        assert!(report.docs_extracted.is_empty());
+
+        let g = GraphStore::open(&root).unwrap();
+        assert!(
+            g.get_node("f_gone").unwrap().is_none(),
+            "gone doc's node must be dropped even under --force + --doc narrowing to nothing"
+        );
+    }
+
+    /// Same GONE-always guarantee without `--force`, confirming it isn't force-specific.
+    #[test]
+    fn run_build_drops_gone_doc_nodes_by_default_regardless_of_doc_flag() {
+        let (_dir, paths) = delta_regression_corpus();
+        let root = paths.root.clone();
+
+        let opts = BuildOpts {
+            stage: BuildStage::Extract,
+            doc: Some("nonexistent.md".to_string()),
+            limit: None,
+            force: false,
+            resume: false,
+            no_progress: true,
+        };
+        run_build(paths, opts).unwrap();
+
+        let g = GraphStore::open(&root).unwrap();
+        assert!(g.get_node("f_gone").unwrap().is_none());
     }
 }
