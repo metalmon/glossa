@@ -95,7 +95,7 @@ pub fn summary_text(results: &[CaseResult]) -> String {
 /// Sanitize a case id into a filesystem-safe filename stem: path separators and any non
 /// alphanumeric byte become `_`. Used by `write_case` so ids containing `/` (or other punctuation)
 /// don't escape `cases_dir` or collide with reserved characters.
-fn sanitize_id(id: &str) -> String {
+pub fn sanitize_id(id: &str) -> String {
     use std::hash::{Hash, Hasher};
     let cleaned: String = id
         .chars()
