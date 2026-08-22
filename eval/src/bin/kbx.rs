@@ -15,6 +15,7 @@ use kb_eval::lab::LabConfig;
 use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
+use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -29,31 +30,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold a fresh eval workspace: lab.toml + answer.md/judge.md + dataset.toml + runs/.
+    /// Scaffold a fresh eval workspace at `<path>/.glossa/kbx/`: lab.toml + prompts + dataset.toml + runs/.
     Init {
-        /// Workspace directory to create/populate (created if missing).
-        dir: PathBuf,
-        /// Overwrite existing template files instead of refusing.
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Overwrite existing template files instead of skipping them.
         #[arg(long)]
         force: bool,
     },
-    /// Run a workspace's dataset.toml against its corpus and write a run report.
+    /// Run a corpus's `.glossa/kbx/dataset.toml` against it and write a run report.
     Eval {
-        /// Workspace directory (must contain lab.toml, or all pieces given via flags).
-        workspace: PathBuf,
-        /// Run tag (report dir name under runs/). Default: slug(workspace)-slug(dataset).
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Run tag (report dir name under runs/). Default: slug(root)-slug(dataset).
         #[arg(long)]
         tag: Option<String>,
-        /// Override lab.toml's `corpus`.
-        #[arg(long)]
-        corpus: Option<PathBuf>,
-        /// Override lab.toml's `defaults.dataset`.
+        /// Override the workspace's default `dataset.toml`.
         #[arg(long)]
         dataset: Option<PathBuf>,
-        /// Override lab.toml's `defaults.prompt` (the answer-agent system prompt file).
+        /// Override the workspace's default `answer.md` (the answer-agent system prompt file).
         #[arg(long)]
         prompt: Option<PathBuf>,
-        /// Override lab.toml's `defaults.judge_prompt`.
+        /// Override the workspace's default `judge.md`.
         #[arg(long)]
         judge: Option<PathBuf>,
         /// Only run the first N cases (after --tag-filter).
@@ -78,15 +78,15 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Init { dir, force } => {
-            scaffold_init(&dir, force)?;
-            println!("initialized kbx workspace at {}", dir.display());
+        Cmd::Init { path, force } => {
+            let root = workspace::resolve(path).root;
+            let paths = scaffold_init(&root, force)?;
+            println!("initialized kbx workspace at {}", paths.kbx_dir.display());
             Ok(())
         }
         Cmd::Eval {
-            workspace,
+            path,
             tag,
-            corpus,
             dataset,
             prompt,
             judge: judge_path,
@@ -96,9 +96,8 @@ fn main() -> Result<()> {
             resume,
             no_progress,
         } => run_eval(EvalArgs {
-            workspace,
+            path,
             tag,
-            corpus,
             dataset,
             prompt,
             judge: judge_path,
@@ -112,9 +111,8 @@ fn main() -> Result<()> {
 }
 
 struct EvalArgs {
-    workspace: PathBuf,
+    path: Option<PathBuf>,
     tag: Option<String>,
-    corpus: Option<PathBuf>,
     dataset: Option<PathBuf>,
     prompt: Option<PathBuf>,
     judge: Option<PathBuf>,
@@ -125,23 +123,40 @@ struct EvalArgs {
     no_progress: bool,
 }
 
+/// The concrete files/dirs an `eval` run reads from and writes to, after folding the workspace's
+/// `KbxPaths` defaults with any `--dataset`/`--prompt`/`--judge` CLI overrides. `root` doubles as
+/// the corpus dir passed to the agent backend and recorded in `RunMeta`.
+struct EvalPaths {
+    root: PathBuf,
+    dataset: PathBuf,
+    prompt: PathBuf,
+    judge_prompt: PathBuf,
+    runs: PathBuf,
+}
+
+/// Fold `KbxPaths` (the `.glossa/kbx/` layout) with CLI overrides into the paths an `eval` run
+/// actually uses. `root` (the corpus) is never overridable — it IS the kb-style PATH the whole
+/// workspace resolved against.
+fn resolve_eval_paths(
+    paths: &KbxPaths,
+    dataset: Option<PathBuf>,
+    prompt: Option<PathBuf>,
+    judge: Option<PathBuf>,
+) -> EvalPaths {
+    EvalPaths {
+        root: paths.root.clone(),
+        dataset: dataset.unwrap_or_else(|| paths.dataset.clone()),
+        prompt: prompt.unwrap_or_else(|| paths.answer.clone()),
+        judge_prompt: judge.unwrap_or_else(|| paths.judge.clone()),
+        runs: paths.runs.clone(),
+    }
+}
+
 fn run_eval(args: EvalArgs) -> Result<()> {
-    let workspace = args.workspace;
-    let lab = LabConfig::load(&workspace)
-        .with_context(|| format!("loading lab.toml under {}", workspace.display()))?;
-    let mut paths = lab.resolve(&workspace);
-    if let Some(c) = args.corpus {
-        paths.corpus = c;
-    }
-    if let Some(d) = args.dataset {
-        paths.dataset = d;
-    }
-    if let Some(p) = args.prompt {
-        paths.prompt = p;
-    }
-    if let Some(j) = args.judge {
-        paths.judge_prompt = j;
-    }
+    let kbx_paths = workspace::resolve(args.path);
+    let lab = LabConfig::load_at(&kbx_paths.lab)
+        .with_context(|| format!("loading {}", kbx_paths.lab.display()))?;
+    let paths = resolve_eval_paths(&kbx_paths, args.dataset, args.prompt, args.judge);
 
     let answer_md = std::fs::read_to_string(&paths.prompt)
         .with_context(|| format!("reading prompt {}", paths.prompt.display()))?;
@@ -159,8 +174,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let tag = args
         .tag
         .clone()
-        .unwrap_or_else(|| default_tag(&workspace, &paths.dataset));
-    let runs_dir = workspace.join("runs");
+        .unwrap_or_else(|| default_tag(&paths.root, &paths.dataset));
+    let runs_dir = paths.runs.clone();
     let cases_dir = runs_dir.join(&tag).join("cases");
 
     // --resume: whatever already has a persisted `<id>.json` under cases_dir is done — skip it and
@@ -208,7 +223,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
         pb.set_message(q.id.clone());
-        let before = list_trace_files(&paths.corpus);
+        let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
             endpoint: lab.model.endpoint.clone(),
@@ -218,7 +233,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             use_graph: true,
             system_prompt: Some(answer_md.clone()),
         };
-        let answer = match backend.answer(&paths.corpus, q) {
+        let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("case {}: agent error: {e}", q.id);
@@ -226,7 +241,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             }
         };
 
-        let (tools, transcript) = read_new_trace(&paths.corpus, &before);
+        let (tools, transcript) = read_new_trace(&paths.root, &before);
 
         let golds = gold_forms(q);
         let em = if relaxed_match_any(&answer, &golds) {
@@ -287,7 +302,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .as_ref()
             .map(|j| j.model.clone())
             .unwrap_or_default(),
-        corpus: paths.corpus.display().to_string(),
+        corpus: paths.root.display().to_string(),
         n: all_results.len(),
         timestamp,
     };
@@ -360,11 +375,11 @@ fn read_new_trace(corpus: &Path, before: &HashSet<String>) -> (Vec<String>, Stri
     (tools, text)
 }
 
-/// Stable slug: `slug(workspace basename)-slug(dataset stem)` — no clock in it, so repeat runs
-/// against the same workspace/dataset land in the same `runs/<tag>/` unless the caller passes
-/// `--tag` (the run's own timestamp still lives in `RunMeta`/the report body).
-fn default_tag(workspace: &Path, dataset: &Path) -> String {
-    let ws = workspace
+/// Stable slug: `slug(root basename)-slug(dataset stem)` — no clock in it, so repeat runs against
+/// the same corpus/dataset land in the same `runs/<tag>/` unless the caller passes `--tag` (the
+/// run's own timestamp still lives in `RunMeta`/the report body).
+fn default_tag(root: &Path, dataset: &Path) -> String {
+    let root_name = root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
@@ -372,7 +387,7 @@ fn default_tag(workspace: &Path, dataset: &Path) -> String {
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("dataset");
-    format!("{}-{}", slugify(ws), slugify(ds))
+    format!("{}-{}", slugify(root_name), slugify(ds))
 }
 
 fn slugify(s: &str) -> String {
@@ -418,6 +433,40 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(gold_forms(&q), vec!["Bob".to_string(), "Robert".to_string()]);
+    }
+
+    /// `kbx eval`'s path resolver: given a scaffolded `.glossa/kbx/` workspace, the corpus is
+    /// `paths.root` (the workspace root itself, not the kbx subdir) and the dataset defaults to
+    /// the one under `.glossa/kbx/` — unless a CLI override is given.
+    #[test]
+    fn eval_path_resolver_uses_root_as_corpus_and_kbx_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let scaffolded = scaffold_init(dir.path(), false).unwrap();
+
+        let kbx_paths = workspace::resolve(Some(dir.path().to_path_buf()));
+        let resolved = resolve_eval_paths(&kbx_paths, None, None, None);
+
+        assert_eq!(resolved.root, dir.path());
+        assert_eq!(resolved.dataset, scaffolded.dataset);
+        assert!(resolved
+            .dataset
+            .starts_with(dir.path().join(".glossa").join("kbx")));
+        assert_eq!(resolved.prompt, scaffolded.answer);
+        assert_eq!(resolved.judge_prompt, scaffolded.judge);
+        assert_eq!(resolved.runs, scaffolded.runs);
+    }
+
+    #[test]
+    fn eval_path_resolver_honors_cli_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_init(dir.path(), false).unwrap();
+        let kbx_paths = workspace::resolve(Some(dir.path().to_path_buf()));
+
+        let custom_dataset = dir.path().join("custom-dataset.toml");
+        let resolved = resolve_eval_paths(&kbx_paths, Some(custom_dataset.clone()), None, None);
+
+        assert_eq!(resolved.dataset, custom_dataset);
+        assert_eq!(resolved.root, dir.path());
     }
 
     #[test]
