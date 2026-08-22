@@ -1,6 +1,10 @@
 //! Ontology-agnostic Personalized PageRank (random walk with restart) over the reasoning graph.
 //!
-//! The graph is treated as a generic weighted digraph: `edge_type` and `node_type` are NEVER read.
+//! The graph is treated as a generic weighted digraph: `node_type` and domain relations are NEVER
+//! read. `edge_type` IS read, but only for a fixed system-level tier check (mechanical-similarity
+//! edges like `SIMILAR`, derived by `generalize` from token/embedding overlap, are down-weighted
+//! relative to authored/structural edges) — the ontology-blind contract holds at the node level and
+//! for domain-specific relations, never at the SIMILAR-vs-everything-else tier.
 //! Mass starts on the question's lexical seed nodes and flows across edges, ranking every node by
 //! CONNECTIVITY to the question's neighborhood. This floats the terminal node of a multi-hop chain
 //! even when it shares no tokens with the question — the thing lexical ranking cannot do — and it
@@ -39,8 +43,10 @@ pub(crate) fn edge_tier_weight(edge_type: &str) -> f32 {
 pub const TRANSITION_CACHE_VERSION: u32 = 2;
 
 /// A symmetric transition structure built once from the graph's nodes + edges. Ontology-blind:
-/// every stored edge becomes a bidirectional transition of equal weight (confidence-weighting is a
-/// future knob, deliberately not wired here).
+/// every stored edge becomes a bidirectional transition weighted by its system-level tier (see
+/// `edge_tier_weight`) — mechanical-similarity edges carry less mass than authored/structural ones,
+/// no longer "equal weight" (confidence-weighting is a separate future knob, deliberately not wired
+/// here).
 pub struct Transition {
     ids: Vec<String>,                 // idx -> node id
     idx: HashMap<String, usize>,      // node id -> idx
