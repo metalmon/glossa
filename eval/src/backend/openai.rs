@@ -1,6 +1,6 @@
 use super::{prompt, AgentBackend};
 use crate::dataset::Question;
-use anyhow::{anyhow, bail, Context};
+use anyhow::anyhow;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
