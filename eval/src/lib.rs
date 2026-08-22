@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod bridge_probe;
+pub mod build;
 pub mod checkpoint;
 pub mod constraint_gepa_sop;
 pub mod constraint_score;
