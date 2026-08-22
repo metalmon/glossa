@@ -521,6 +521,7 @@ impl Ontology {
         // Constraint types (Range, Enum, Formula, …) are node types too: the agent
         // instantiates them and links Field → CONSTRAINED_BY → <constraint node>.
         if CORE_NODES.contains(&node_type)
+            || node_type == crate::graph::FACT
             || self.entity_types.contains(node_type)
             || self.constraint_types.contains_key(node_type)
             || !self.strict
@@ -538,6 +539,9 @@ impl Ontology {
         to_type: &str,
     ) -> Result<(), String> {
         if CORE_EDGES.contains(&edge_type) {
+            return Ok(());
+        }
+        if edge_type == crate::graph::LEADS_TO {
             return Ok(());
         }
         match self.relations.get(edge_type) {
@@ -637,6 +641,30 @@ params = ["min", "max"]
 [constraint_types.Regex]
 params = ["pattern"]
 "#;
+
+    #[test]
+    fn fact_and_leads_to_are_standard_under_strict_typed_ontology() {
+        // A strict ontology declaring ONLY a typed layer (no Fact / no LEADS_TO).
+        let toml = r#"
+[entities.Symptom]
+[entities.Cause]
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[validation]
+strict = true
+"#;
+        let o = Ontology::parse(toml).unwrap();
+        // Fact (base reasoning node) is accepted even though undeclared.
+        assert!(o.validate_node(crate::graph::FACT).is_ok());
+        // LEADS_TO (base chaining relation) is accepted Fact->Fact even though undeclared.
+        assert!(o.validate_edge(crate::graph::LEADS_TO, crate::graph::FACT, crate::graph::FACT).is_ok());
+        // ...and it is a reasoning hop, not grounding.
+        assert!(matches!(o.relation_role(crate::graph::LEADS_TO), RelationRole::Chaining));
+        // The typed layer still validates normally.
+        assert!(o.validate_edge("CAUSED_BY", "Symptom", "Cause").is_ok());
+        assert!(o.validate_node("Bogus").is_err()); // unrelated unknown type still rejected
+    }
 
     #[test]
     fn meta_and_patterns_parsed() {
