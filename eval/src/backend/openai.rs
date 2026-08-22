@@ -124,10 +124,9 @@ impl OpenAiBackend {
     }
 }
 
-/// Minimal one-shot OpenAI-compatible chat call: no tools, caller-supplied timeout. Shared by
-/// callers that just want a plain completion (e.g. the file-prompt judge in `judge.rs`) instead
-/// of the full tool-calling agent loop — thin wrapper over `lmstudio_chat` so both paths drive
-/// the endpoint identically (same SDK transport).
+/// Minimal one-shot OpenAI-compatible chat call: a plain completion (e.g. the file-prompt judge in
+/// `judge.rs`) instead of the full tool-calling agent loop. Builds a greedy (temperature 0), tools
+/// free request body and drives it through `chat_http` — the same transport the agent loop uses.
 pub(crate) fn chat_once(
     endpoint: &str,
     model: &str,
@@ -274,9 +273,9 @@ fn chat_http(
 /// over N. Shared by the eval backend and the graph GEPA optimizer so both drive the same server
 /// the same way.
 ///
-/// `url` is accepted in its historical form (ending in `/v1/chat/completions`, per `answer()` and
-/// `chat_once` below) and stripped back down to the bare endpoint here, so this is a drop-in
-/// replacement — no caller had to change how it builds `url`.
+/// `url` is accepted in its historical form (ending in `/v1/chat/completions`, as `answer()` builds
+/// it) and stripped back down to the bare endpoint here before `chat_http` re-appends the suffix, so
+/// this stayed a drop-in replacement — the reader call site did not change how it builds `url`.
 pub(crate) fn lmstudio_chat(
     url: &str,
     model: &str,
