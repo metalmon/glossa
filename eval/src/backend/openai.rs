@@ -333,8 +333,10 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
 /// each surface zero new identifiers trips the steer. Named so the TDD tests and the loop agree on
-/// one number instead of a magic literal in two places.
-const UNPRODUCTIVE_STREAK_K: usize = 3;
+/// one number instead of a magic literal in two places. `pub(crate)` so callers outside this module
+/// (e.g. `build::extract`'s regression test for the graph_upsert ids fix) can size their fixtures
+/// off the real threshold instead of duplicating the literal.
+pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 
 /// Drive a tool-calling chat to a final textual answer.
 ///

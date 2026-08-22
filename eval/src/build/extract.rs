@@ -202,6 +202,15 @@ pub fn extract_doc(
         if name == "graph_upsert" {
             match parse_and_validate_upsert(args, ontology) {
                 Ok((nodes, edges)) => {
+                    // Surfaced ids for the unproductive-streak novelty tracker: the requested node
+                    // ids. A batch of distinct nodes must register as "new" progress even though
+                    // graph_upsert's own reply is a short confirmation/rejection string with no
+                    // `path#ord` anchors of its own (`extract_node_ids` would find nothing in it).
+                    // Without this, 3+ consecutive distinct graph_upsert calls — very plausible
+                    // (several facts from one read, or retries after a rejection) — would each
+                    // surface zero ids and, at UNPRODUCTIVE_STREAK_K, have their real result
+                    // (confirmation OR rejection text) replaced by the generic steer.
+                    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
                     let mentions = edges
                         .iter()
                         .filter(|e| e.edge_type == glossa::graph::MENTIONS)
@@ -215,10 +224,10 @@ pub fn extract_doc(
                                     "upserted {} node(s), {} edge(s)",
                                     r.nodes_written, r.edges_written
                                 ),
-                                Vec::new(),
+                                ids,
                             )
                         }
-                        Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
+                        Err(e) => (format!("graph_upsert REJECTED: {e}"), ids),
                     }
                 }
                 Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
@@ -262,6 +271,86 @@ strict = true
     /// CORE_EDGE, always allowed regardless of the ontology.
     fn flat_ontology() -> Ontology {
         Ontology::parse(FLAT_ONT).expect("flat test ontology parses")
+    }
+
+    /// Regression test for the ids-fix: mirrors `extract_doc`'s `graph_upsert` exec arm
+    /// (parse -> validate -> apply_upsert, returning the requested node ids as the surfaced
+    /// ids) directly against `run_agent_loop`, with no live model. Before the fix this arm
+    /// always returned `Vec::new()` for ids, so N+1 consecutive DISTINCT `graph_upsert` calls
+    /// (very plausible — several facts from one read) each looked "unproductive" to the
+    /// streak detector; by the (K+1)th call its real "upserted ..." confirmation would have
+    /// been replaced by the generic steer. Mirrors
+    /// `openai::tests::loop_unproductive_streak_never_fires_when_calls_are_productive`.
+    #[test]
+    fn loop_distinct_graph_upsert_calls_never_trip_unproductive_streak() {
+        use crate::backend::openai::{run_agent_loop, UNPRODUCTIVE_STREAK_K};
+        use glossa::graph::store::GraphStore;
+        use std::cell::RefCell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ont = flat_ontology();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // Same shape as extract_doc's graph_upsert arm: parse -> validate -> apply_upsert,
+        // returning the requested node ids as the surfaced ids (the fix under test).
+        let exec = |_name: &str, args: &Value| -> (String, Vec<String>) {
+            match parse_and_validate_upsert(args, &ont) {
+                Ok((nodes, edges)) => {
+                    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+                    match apply_upsert(&g, &ont, nodes, edges, 1, dir.path()) {
+                        Ok(r) => (format!("upserted {} node(s)", r.nodes_written), ids),
+                        Err(e) => (format!("graph_upsert REJECTED: {e}"), ids),
+                    }
+                }
+                Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
+            }
+        };
+
+        let n = UNPRODUCTIVE_STREAK_K + 1; // enough distinct calls to have tripped the old bug
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if let Some(last_tool) = msgs.iter().rev().find(|m| m["role"] == "tool") {
+                let c = last_tool["content"].as_str().unwrap_or("");
+                assert!(
+                    !c.to_lowercase().contains("no new information"),
+                    "round {}: steer must not fire on distinct graph_upsert writes, got: {c:?}",
+                    *r
+                );
+                assert!(
+                    c.contains("upserted"),
+                    "round {}: the real graph_upsert confirmation must reach the model, got: {c:?}",
+                    *r
+                );
+            }
+            if *r > n {
+                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
+            }
+            let i = *r - 1;
+            Ok(json!({
+                "role": "assistant", "content": "writing",
+                "tool_calls": [{
+                    "id": format!("c{}", *r),
+                    "function": {
+                        "name": "graph_upsert",
+                        "arguments": json!({
+                            "nodes": [{
+                                "id": format!("f{i}"),
+                                "node_type": "Fact",
+                                "label": format!("fact {i}"),
+                                "source_path": "d.md"
+                            }],
+                            "edges": []
+                        }).to_string()
+                    }
+                }]
+            }))
+        };
+
+        let nudge = |name: &str, _args: &Value| format!("(dup {name}) you already called this");
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        assert_eq!(out, "ANSWER: done");
     }
 
     #[test]
