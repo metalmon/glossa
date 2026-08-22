@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use kb_eval::backend::openai::OpenAiBackend;
 use kb_eval::backend::AgentBackend;
+use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::judge::{judge, Judgement, Verdict};
@@ -73,6 +74,31 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
+    /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
+    Build {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Which stage(s) of the pipeline to run.
+        #[arg(long, value_enum, default_value = "all")]
+        stage: BuildStage,
+        /// Restrict extraction to a single document (its corpus-relative path).
+        #[arg(long)]
+        doc: Option<String>,
+        /// Only extract the first N enumerated documents.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Placeholder for a later incremental rebuild; currently a NO-OP (this build is always
+        /// full).
+        #[arg(long)]
+        force: bool,
+        /// Skip units already recorded done in the build checkpoint.
+        #[arg(long)]
+        resume: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -107,6 +133,28 @@ fn main() -> Result<()> {
             resume,
             no_progress,
         }),
+        Cmd::Build {
+            path,
+            stage,
+            doc,
+            limit,
+            force,
+            resume,
+            no_progress,
+        } => {
+            let paths = workspace::resolve(path);
+            run_build(
+                paths,
+                BuildOpts {
+                    stage,
+                    doc,
+                    limit,
+                    force,
+                    resume,
+                    no_progress,
+                },
+            )
+        }
     }
 }
 
@@ -503,5 +551,69 @@ mod tests {
         let (tools, transcript) = read_new_trace(dir.path(), &before);
         assert_eq!(tools, vec!["read".to_string(), "search".to_string()]);
         assert!(transcript.contains("read") && transcript.contains("search"));
+    }
+
+    #[test]
+    fn build_cmd_defaults_stage_to_all() {
+        let cli = Cli::try_parse_from(["kbx", "build"]).unwrap();
+        match cli.cmd {
+            Cmd::Build {
+                stage,
+                doc,
+                limit,
+                force,
+                resume,
+                no_progress,
+                path,
+            } => {
+                assert_eq!(stage, BuildStage::All);
+                assert!(doc.is_none());
+                assert!(limit.is_none());
+                assert!(!force);
+                assert!(!resume);
+                assert!(!no_progress);
+                assert!(path.is_none());
+            }
+            _ => panic!("expected Cmd::Build"),
+        }
+    }
+
+    #[test]
+    fn build_cmd_parses_stage_and_flags() {
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "build",
+            "/corpus",
+            "--stage",
+            "judge",
+            "--doc",
+            "a.md",
+            "--limit",
+            "3",
+            "--force",
+            "--resume",
+            "--no-progress",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Build {
+                path,
+                stage,
+                doc,
+                limit,
+                force,
+                resume,
+                no_progress,
+            } => {
+                assert_eq!(path, Some(PathBuf::from("/corpus")));
+                assert_eq!(stage, BuildStage::Judge);
+                assert_eq!(doc, Some("a.md".to_string()));
+                assert_eq!(limit, Some(3));
+                assert!(force);
+                assert!(resume);
+                assert!(no_progress);
+            }
+            _ => panic!("expected Cmd::Build"),
+        }
     }
 }
