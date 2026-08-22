@@ -87,7 +87,7 @@ fn build_tools_schema() -> Value {
         "type": "function",
         "function": {
             "name": "graph_upsert",
-            "description": "Write reasoning nodes/edges this document STATES. Each node needs a unique `id` (your choice), a `node_type` the ontology allows (see the system prompt — an out-of-ontology type rejects the WHOLE call), and a `label`. Ground every node with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`).",
+            "description": "Write reasoning nodes/edges this document STATES. Each node needs a unique `id` (your choice), `node_type` MUST be `Fact` (any other value rejects the WHOLE call), a `label`, and `aliases` listing the entities it mentions. Ground every node with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -160,15 +160,24 @@ pub fn extract_doc(
     let trace = TraceLog::disabled();
     let spec = glossa::tools::ChainSpec::from_ontology(ontology);
 
-    let allowed: Vec<String> = ontology.entity_types().iter().cloned().collect();
+    // Build no longer offers the ontology's declared entity types: extraction is pinned to a
+    // single flat node type (`Fact`), always-permitted by `Ontology::validate_node` regardless
+    // of what the corpus's ontology declares (Task 1). The model still names the entities each
+    // Fact mentions, but as `aliases` on the Fact node — not as separate typed entity nodes —
+    // since stage 2's candidate grouping (mechanical, not model-judged) needs them to find
+    // cross-doc bridge candidates.
     let system = format!(
-        "{builder_md}\n\nAllowed node types (ontology): {}",
-        allowed.join(", ")
+        "{builder_md}\n\nThe ONLY node type you may emit is `Fact`. Do not emit any other \
+         node_type, even if one seems to fit better — every reasoning node this pass writes is \
+         a `Fact`. Ground every Fact with a MENTIONS edge to the section you read it from (`to`: \
+         `<path>#n`). List the entities each Fact mentions in its `aliases` array — this is how \
+         later stages find facts that share an entity across documents, so name them precisely \
+         (e.g. the exact term the document uses), not a paraphrase."
     );
     let user = format!(
-        "Extract the reasoning nodes this document STATES. Read what you need; ground each \
-         node with a MENTIONS edge to its `{doc_path}#n`. Emit only node types the ontology \
-         allows.\n\nDocument: {doc_path}"
+        "Extract the reasoning facts this document STATES. Read what you need; ground each \
+         Fact with a MENTIONS edge to its `{doc_path}#n`, and list the entities it mentions as \
+         `aliases`.\n\nDocument: {doc_path}"
     );
     let messages = vec![
         json!({ "role": "system", "content": system }),
@@ -384,5 +393,18 @@ strict = true
         let (nodes, edges) = parse_and_validate_upsert(&serde_json::json!({}), &ont).unwrap();
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+    }
+
+    /// The pin's whole point: extraction is fixed to `Fact` regardless of what the corpus's
+    /// ontology declares. Here the ontology is a STRICT typed one that doesn't even declare
+    /// `Fact` (only `Symptom`) — `Fact` still validates because Task 1 made it always-permitted
+    /// by `Ontology::validate_node`, independent of `strict` or the declared entity set.
+    #[test]
+    fn extract_accepts_fact_under_strict_typed_ontology() {
+        let ont = Ontology::parse("[entities.Symptom]\n[validation]\nstrict=true\n").unwrap();
+        let call = serde_json::json!({
+            "nodes":[{"id":"f1","node_type":"Fact","label":"x","source_path":"d.md"}],"edges":[]
+        });
+        assert!(parse_and_validate_upsert(&call, &ont).is_ok());
     }
 }

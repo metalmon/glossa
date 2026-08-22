@@ -326,10 +326,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             let stats = run_judge(&paths.root, &lab, &bridge_md, &g, &idx, &pairs, &cp, &pb)
                 .context("judging candidate pairs")?;
             pb.finish_and_clear();
-            println!(
-                "judge: {} judged, {} linked, {} skipped (ambiguous spine relation)",
-                stats.judged, stats.linked, stats.skipped_ambiguous
-            );
+            println!("judge: {} judged, {} linked", stats.judged, stats.linked);
             report.pairs_judged = stats.judged;
         }
     }

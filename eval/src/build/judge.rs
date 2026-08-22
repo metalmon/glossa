@@ -11,11 +11,13 @@
 //! judged pair (YES and NO alike) is marked, or a `--resume` run would re-judge every rejected
 //! pair forever.
 //!
-//! The spine edge's `edge_type` is never hardcoded: it's resolved from the ontology by role
-//! (`RelationRole::Chaining`) and by the endpoint node types the declared relation's `from`/`to`
-//! accept — same shape as `Ontology::validate_edge`'s own from/to check, just enumerating instead
-//! of checking one name. `apply_upsert` still validates/auto-corrects the write against the
-//! ontology; this only picks WHICH relation name to offer it.
+//! `kbx build` pairs are always Fact->Fact (Task 2 pins extraction to a single flat `Fact` node
+//! type), so the spine edge's `edge_type` is hardcoded to `glossa::graph::LEADS_TO` via
+//! `spine_edge_for_build` rather than resolved from the ontology by role/endpoint types — the
+//! ontology-general resolution this module used to do (picking a declared `RelationRole::Chaining`
+//! relation whose `from`/`to` fit the pair) is left to a later `distil` stage that re-types the
+//! flat build graph against a real ontology. `apply_upsert` still validates the write; `LEADS_TO`
+//! is always-permitted by `Ontology::validate_edge` regardless of what's declared (Task 1).
 
 use crate::backend::openai::chat_once;
 use crate::build::chunks::chunk_text;
@@ -24,7 +26,7 @@ use crate::checkpoint::Checkpoint;
 use crate::lab::{Endpoint, LabConfig};
 use anyhow::Context;
 use glossa::graph::agent::{apply_upsert, EdgeSpec};
-use glossa::graph::ontology::{Ontology, RelationRole};
+use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use indicatif::ProgressBar;
@@ -36,13 +38,6 @@ use std::path::Path;
 pub struct JudgeStats {
     pub judged: usize,
     pub linked: usize,
-    /// Pairs the model said YES to but for which `spine_edge_type` could not resolve a single
-    /// relation (zero or ambiguous Chaining candidates for the endpoint types). Distinct from
-    /// `linked == 0` on its own: a run can legitimately end with no YES verdicts at all
-    /// (`skipped_ambiguous == 0`), but a nonzero `skipped_ambiguous` means the model WANTED a
-    /// link and the ontology couldn't supply an unambiguous relation for it — a config defect
-    /// worth surfacing to the caller, not silence.
-    pub skipped_ambiguous: usize,
 }
 
 /// Parse a `judge_pair` reply's verdict: the LAST `VERDICT:` line (case-insensitive), `yes` ->
@@ -93,57 +88,20 @@ pub fn judge_pair(
     Ok(parse_yes_no(content))
 }
 
-/// The single declared `RelationRole::Chaining` relation whose `from`/`to` accept
-/// (`a_type`, `b_type`) in that order — the ontology-general stand-in for a hardcoded spine edge
-/// type. Mirrors `Ontology::validate_edge`'s own "empty or `*` or exact match" allowance rule.
-///
-/// `None` when zero or more than one relation fits. Either case means a would-be spine edge gets
-/// dropped (a model YES with nowhere to land), which is an ontology/config defect, not a quiet
-/// no-op — so both branches log via `eprintln!` (the crate doesn't pull in `tracing`), and are
-/// worded distinctly: "no Chaining relation covers types" (zero matches) vs "ambiguous spine
-/// relation" with the candidate names listed (more than one matches, e.g. two Chaining relations
-/// like CAUSES/PRECEDES both declared Fact->Fact).
-fn spine_edge_type(ont: &Ontology, a_type: &str, b_type: &str) -> Option<String> {
-    let allows = |allowed: &[String], t: &str| {
-        allowed.is_empty() || allowed.iter().any(|x| x == "*" || x == t)
-    };
-    let mut candidates: Vec<&String> = ont
-        .raw_relations()
-        .iter()
-        .filter(|(name, r)| {
-            matches!(ont.relation_role(name), RelationRole::Chaining)
-                && allows(&r.from, a_type)
-                && allows(&r.to, b_type)
-        })
-        .map(|(name, _)| name)
-        .collect();
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [one] => Some((*one).clone()),
-        [] => {
-            eprintln!(
-                "kbx build: no Chaining relation covers types {a_type}->{b_type} \
-                 (would-be spine edge dropped)"
-            );
-            None
-        }
-        many => {
-            let names: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
-            eprintln!(
-                "kbx build: ambiguous spine relation for {a_type}->{b_type}: {} \
-                 (would-be spine edge dropped)",
-                names.join(", ")
-            );
-            None
-        }
-    }
+/// The edge type `kbx build`'s judge writes on a YES verdict. Build pairs are always Fact->Fact
+/// (extraction is pinned to a single flat `Fact` node type — Task 2), so there's no per-pair
+/// resolution to do: the spine edge is always `glossa::graph::LEADS_TO`. Factored to a function
+/// (rather than inlined at the call site) purely as a test seam — asserting the constant directly
+/// wouldn't prove the judge's write path actually uses it.
+fn spine_edge_for_build() -> &'static str {
+    glossa::graph::LEADS_TO
 }
 
 /// Judge every candidate pair not already checkpointed: fetch both nodes' grounded chunk text,
-/// ask `judge_pair`, and on YES write one spine edge (`apply_upsert`) using the ontology-resolved
-/// `edge_type`. Marks the checkpoint for EVERY judged pair, YES or NO — a NO leaves no graph
-/// trace, so the checkpoint is the only thing that stops a `--resume` run from re-judging it.
+/// ask `judge_pair`, and on YES write one spine edge (`apply_upsert`) with `edge_type` fixed to
+/// `spine_edge_for_build()`. Marks the checkpoint for EVERY judged pair, YES or NO — a NO leaves
+/// no graph trace, so the checkpoint is the only thing that stops a `--resume` run from
+/// re-judging it.
 pub fn run_judge(
     root: &Path,
     lab: &LabConfig,
@@ -190,21 +148,16 @@ pub fn run_judge(
         stats.judged += 1;
 
         if yes {
-            match spine_edge_type(&ont, &node_a.node_type, &node_b.node_type) {
-                Some(edge_type) => {
-                    let edge = EdgeSpec {
-                        from: pair.a.clone(),
-                        to: pair.b.clone(),
-                        edge_type,
-                        source_path: node_a.prov.source_path.clone(),
-                        range: None,
-                        confidence: None,
-                    };
-                    apply_upsert(g, &ont, Vec::new(), vec![edge], now, root)?;
-                    stats.linked += 1;
-                }
-                None => stats.skipped_ambiguous += 1,
-            }
+            let edge = EdgeSpec {
+                from: pair.a.clone(),
+                to: pair.b.clone(),
+                edge_type: spine_edge_for_build().to_string(),
+                source_path: node_a.prov.source_path.clone(),
+                range: None,
+                confidence: None,
+            };
+            apply_upsert(g, &ont, Vec::new(), vec![edge], now, root)?;
+            stats.linked += 1;
         }
 
         cp.mark(&unit_id, if yes { "yes" } else { "no" })?;
@@ -229,71 +182,11 @@ mod tests {
         assert!(parse_yes_no("VERDICT: no\nVERDICT: yes"));
     }
 
-    /// Table-driven: `spine_edge_type` is pure (no model, no IO), so every case is built from an
-    /// in-memory `Ontology::parse` TOML and checked directly, no live endpoint needed.
+    /// The pin's contract for the judge half: `kbx build` pairs are always Fact->Fact, so the
+    /// YES-write's edge type is always `glossa::graph::LEADS_TO` — no ontology resolution, no
+    /// live model needed to prove it.
     #[test]
-    fn spine_edge_type_resolution_table() {
-        // 1. Single matching Chaining relation -> Some(that).
-        let single = Ontology::parse(
-            r#"
-[entities.Fact]
-[relations.LEADS_TO]
-from = ["Fact"]
-to = ["Fact"]
-role = "chaining"
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            spine_edge_type(&single, "Fact", "Fact"),
-            Some("LEADS_TO".to_string())
-        );
-
-        // 2. Two Chaining relations both declared over the same endpoint types -> ambiguous ->
-        // None (e.g. CAUSES/PRECEDES both Fact->Fact, per the review's motivating example).
-        let ambiguous = Ontology::parse(
-            r#"
-[entities.Fact]
-[relations.CAUSES]
-from = ["Fact"]
-to = ["Fact"]
-role = "chaining"
-[relations.PRECEDES]
-from = ["Fact"]
-to = ["Fact"]
-role = "chaining"
-"#,
-        )
-        .unwrap();
-        assert_eq!(spine_edge_type(&ambiguous, "Fact", "Fact"), None);
-
-        // 3. Zero matching relations (declared Chaining relation exists but endpoint types don't
-        // fit) -> None.
-        let zero = Ontology::parse(
-            r#"
-[entities.Fact]
-[entities.Other]
-[relations.LEADS_TO]
-from = ["Other"]
-to = ["Other"]
-role = "chaining"
-"#,
-        )
-        .unwrap();
-        assert_eq!(spine_edge_type(&zero, "Fact", "Fact"), None);
-
-        // 4. A Grounding-role relation with matching endpoint types must be excluded, not chosen
-        // — only Chaining relations are eligible spine edges.
-        let grounding_only = Ontology::parse(
-            r#"
-[entities.Fact]
-[relations.MENTIONS_FACT]
-from = ["Fact"]
-to = ["Fact"]
-role = "grounding"
-"#,
-        )
-        .unwrap();
-        assert_eq!(spine_edge_type(&grounding_only, "Fact", "Fact"), None);
+    fn build_judge_writes_leads_to_for_fact_pairs() {
+        assert_eq!(spine_edge_for_build(), glossa::graph::LEADS_TO);
     }
 }
