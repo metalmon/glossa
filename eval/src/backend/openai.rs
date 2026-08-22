@@ -1,9 +1,6 @@
 use super::{prompt, AgentBackend};
 use crate::dataset::Question;
 use anyhow::{anyhow, bail, Context};
-use async_openai::config::OpenAIConfig;
-use async_openai::types::chat::CreateChatCompletionRequest;
-use async_openai::Client as OpenAiSdkClient;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -150,8 +147,8 @@ pub(crate) fn chat_once(
 }
 
 /// Shared tokio runtime backing the sync bridge below: the agent loop (`run_agent_loop` and every
-/// caller of `lmstudio_chat`/`chat_once`) is deliberately synchronous, but `async-openai`'s client
-/// is async-only. One process-wide multi-thread runtime lets every call just `block_on` instead of
+/// caller of `lmstudio_chat`/`chat_once`) is deliberately synchronous, but `reqwest`'s client is
+/// async-only. One process-wide multi-thread runtime lets every call just `block_on` instead of
 /// threading an executor through the whole sync call stack.
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -160,42 +157,31 @@ fn runtime() -> &'static tokio::runtime::Runtime {
             .worker_threads(2)
             .enable_all()
             .build()
-            .expect("failed to build the tokio runtime backing the OpenAI SDK bridge")
+            .expect("failed to build the tokio runtime backing the http chat bridge")
     })
 }
 
-/// Sync bridge: our JSON request `body` (the same `{model, messages, tools, temperature}` shape
-/// `lmstudio_chat` has always built) -> a typed `async-openai` `CreateChatCompletionRequest` -> a
-/// real SDK call -> the assistant `message` object as a `Value`, matching what callers got from the
-/// old hand-rolled ureq path (`choices[0].message`).
+/// Sync HTTP bridge: POST our JSON request `body` (the `{model, messages, tools, temperature}` shape
+/// `lmstudio_chat`/`chat_once` build) to an OpenAI-compatible `/v1/chat/completions` endpoint via
+/// `reqwest` and return the assistant `message` object (`choices[0].message`) as a raw `Value`.
 ///
-/// `endpoint` is the bare host (NOT ending in `/v1` or `/v1/chat/completions` — e.g.
-/// `http://localhost:1234`); `async-openai` appends `/chat/completions` to the configured
-/// `api_base` itself, so we hand it `{endpoint}/v1` and let the SDK do the rest.
-fn chat_via_sdk(
+/// Deliberately RAW `Value` in and out — no typed OpenAI SDK structs — so provider-specific fields
+/// survive the round-trip. In particular reasoning models (MiMo on OpenCode Zen) return
+/// `reasoning_content` on assistant tool-call turns and require it echoed back on the next request;
+/// typed message structs drop it and the provider then rejects the follow-up with HTTP 400.
+///
+/// `endpoint` is the bare host (NOT ending in `/v1`, e.g. `http://localhost:1234`); this function
+/// appends `/v1/chat/completions`.
+fn chat_http(
     endpoint: &str,
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let base = format!("{}/v1", endpoint.trim_end_matches('/'));
-    let mut cfg = OpenAIConfig::new().with_api_base(base);
-    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        cfg = cfg.with_api_key(key);
-    }
-    // Wire the caller-supplied timeout through a dedicated reqwest client — async-openai has no
-    // timeout knob of its own, only `with_http_client`/`with_http_service` to swap the transport.
-    let http_client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .context("build reqwest client for the openai sdk bridge")?;
-    let client = OpenAiSdkClient::with_config(cfg).with_http_client(http_client);
+    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
-    // Normalize message content: trim trailing whitespace from every message. Some strict
-    // OpenAI-compatible providers (OpenCode Zen / mimo) return HTTP 400 when the last message in
-    // the conversation ends in a newline — and in the multi-turn agent loop that trailing message
-    // can be a user prompt, a tool result, or an assistant turn. Trimming here (the single send
-    // choke-point) fixes it for all of them without changing content semantics.
+    // Trim trailing whitespace from every message: some strict providers (OpenCode Zen / mimo)
+    // return HTTP 400 when a message ends in a newline. Harmless to content semantics.
     let mut body = body.clone();
     if let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) {
         for m in msgs {
@@ -205,20 +191,40 @@ fn chat_via_sdk(
             }
         }
     }
-    let req: CreateChatCompletionRequest =
-        serde_json::from_value(body).context("deserialize chat request for the openai sdk")?;
 
-    // Retry transient/flaky failures (the SDK owns transport, so we restore the resilience the old
-    // ureq path had). Large multi-turn requests to some providers (OpenCode Zen / mimo) return a
-    // non-deterministic HTTP 400 that usually succeeds on a resend, plus real connection drops.
+    // RAW JSON round-trip via reqwest — deliberately NOT async-openai's typed message structs.
+    // Reasoning models like MiMo (OpenCode Zen) return `reasoning_content` on assistant tool-call
+    // turns and REQUIRE it echoed back on the next request; the SDK's typed structs silently drop
+    // that field, causing HTTP 400 mid-loop. Passing raw `Value` messages preserves it end-to-end.
+    // reqwest still gives robust transport/TLS; we keep an explicit retry for transient drops.
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build reqwest client")?;
+
     let mut last_err = None;
-    let mut resp = None;
     for attempt in 1..=4u32 {
-        match runtime().block_on(client.chat().create(req.clone())) {
-            Ok(r) => {
-                resp = Some(r);
-                break;
+        let outcome: anyhow::Result<Value> = runtime().block_on(async {
+            let mut rb = http.post(&url).json(&body);
+            if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+                rb = rb.bearer_auth(key);
             }
+            let resp = rb.send().await.context("send chat request")?;
+            let status = resp.status();
+            let text = resp.text().await.context("read chat response body")?;
+            if !status.is_success() {
+                bail!(
+                    "chat endpoint returned {status}: {}",
+                    text.chars().take(400).collect::<String>()
+                );
+            }
+            let v: Value = serde_json::from_str(&text).context("parse chat response json")?;
+            v.pointer("/choices/0/message")
+                .cloned()
+                .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
+        });
+        match outcome {
+            Ok(msg) => return Ok(msg),
             Err(e) => {
                 last_err = Some(e);
                 if attempt < 4 {
@@ -227,19 +233,11 @@ fn chat_via_sdk(
             }
         }
     }
-    let resp = match resp {
-        Some(r) => r,
-        None => bail!("openai sdk chat failed after 4 attempts: {}", last_err.unwrap()),
-    };
-
-    let Some(choice) = resp.choices.into_iter().next() else {
-        bail!("openai sdk response had no choices");
-    };
-    serde_json::to_value(choice.message).context("serialize response message")
+    Err(last_err.unwrap())
 }
 
 /// One OpenAI-compatible `/v1/chat/completions` call to an LM Studio-style endpoint, driven through
-/// `async-openai` (see `chat_via_sdk`). Returns the assistant `message` object (already extracted
+/// the raw `reqwest` bridge (see `chat_http`). Returns the assistant `message` object (already extracted
 /// from `choices[0].message`). Samples at `temperature: 0.8` — temp 0 is not a reliable greedy mode
 /// on this reasoning model/backend (unstable outputs), so runs are stochastic and must be averaged
 /// over N. Shared by the eval backend and the graph GEPA optimizer so both drive the same server
@@ -276,7 +274,7 @@ pub(crate) fn lmstudio_chat(
         .trim_end_matches("/chat/completions")
         .trim_end_matches("/v1")
         .trim_end_matches('/');
-    chat_via_sdk(endpoint, api_key, &body, timeout)
+    chat_http(endpoint, api_key, &body, timeout)
 }
 
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
