@@ -25,3 +25,4 @@ pub mod score;
 pub mod sop;
 pub mod trace_read;
 pub mod tz;
+pub mod workspace;
