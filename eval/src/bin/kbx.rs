@@ -5,16 +5,18 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use kb_eval::backend::openai::OpenAiBackend;
 use kb_eval::backend::AgentBackend;
 use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::LabConfig;
-use kb_eval::report::{write_run, CaseResult, RunMeta};
+use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +65,13 @@ enum Cmd {
         /// Skip LLM judging even if lab.toml has a [judge] endpoint configured.
         #[arg(long = "no-judge")]
         no_judge: bool,
+        /// Skip cases whose id already has a persisted result under runs/<tag>/cases/, then merge
+        /// the old + newly-run cases into the final report.
+        #[arg(long)]
+        resume: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
     },
 }
 
@@ -84,6 +93,8 @@ fn main() -> Result<()> {
             limit,
             tag_filter,
             no_judge,
+            resume,
+            no_progress,
         } => run_eval(EvalArgs {
             workspace,
             tag,
@@ -94,6 +105,8 @@ fn main() -> Result<()> {
             limit,
             tag_filter,
             no_judge,
+            resume,
+            no_progress,
         }),
     }
 }
@@ -108,6 +121,8 @@ struct EvalArgs {
     limit: Option<usize>,
     tag_filter: Option<String>,
     no_judge: bool,
+    resume: bool,
+    no_progress: bool,
 }
 
 fn run_eval(args: EvalArgs) -> Result<()> {
@@ -141,6 +156,26 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         cases.truncate(n);
     }
 
+    let tag = args
+        .tag
+        .clone()
+        .unwrap_or_else(|| default_tag(&workspace, &paths.dataset));
+    let runs_dir = workspace.join("runs");
+    let cases_dir = runs_dir.join(&tag).join("cases");
+
+    // --resume: whatever already has a persisted `<id>.json` under cases_dir is done — skip it and
+    // only run the rest. The full report at the end still merges old + new (see below).
+    let previously_done = if args.resume {
+        load_cases(&cases_dir)
+            .with_context(|| format!("loading prior cases from {}", cases_dir.display()))?
+    } else {
+        Vec::new()
+    };
+    if args.resume {
+        let done_ids: HashSet<&str> = previously_done.iter().map(|c| c.id.as_str()).collect();
+        cases.retain(|q| !done_ids.contains(q.id.as_str()));
+    }
+
     let use_judge = !args.no_judge && lab.judge.is_some();
     let judge_md = if use_judge {
         Some(
@@ -154,8 +189,25 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
 
+    // indicatif draws to stderr by default; also check stdout since some shells redirect one but
+    // not the other and either being non-interactive is a good signal this run isn't at a console.
+    let show_progress = !args.no_progress
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal();
+    let pb = if show_progress {
+        let pb = ProgressBar::new(cases.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
+        pb.set_message(q.id.clone());
         let before = list_trace_files(&paths.corpus);
 
         let backend = OpenAiBackend {
@@ -198,7 +250,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
         println!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id);
 
-        results.push(CaseResult {
+        let r = CaseResult {
             id: q.id.clone(),
             verdict,
             reason,
@@ -208,12 +260,21 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             answer,
             transcript,
             judge_raw,
-        });
+        };
+        write_case(&cases_dir, &r)
+            .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
+        results.push(r);
+        pb.inc(1);
     }
+    pb.finish_and_clear();
 
-    let tag = args
-        .tag
-        .unwrap_or_else(|| default_tag(&workspace, &paths.dataset));
+    // Merge prior (resumed) cases with the ones just run. Dedup by id — a case just re-run wins
+    // over its stale, previously-persisted copy.
+    let mut all_results = previously_done;
+    let new_ids: HashSet<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    all_results.retain(|c| !new_ids.contains(c.id.as_str()));
+    all_results.extend(results);
+
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -227,10 +288,11 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .map(|j| j.model.clone())
             .unwrap_or_default(),
         corpus: paths.corpus.display().to_string(),
-        n: results.len(),
+        n: all_results.len(),
         timestamp,
     };
-    let report_path = write_run(&workspace.join("runs"), &tag, &meta, &results)?;
+    let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
+    println!("{}", summary_text(&all_results));
     println!("wrote {}", report_path.display());
     Ok(())
 }

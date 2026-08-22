@@ -4,10 +4,13 @@
 
 use crate::judge::Verdict;
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// One judged case, ready to render into the report table + its own trace file.
+/// One judged case, ready to render into the report table + its own trace file. Also the unit of
+/// incremental persistence (`write_case`/`load_cases`) that backs `--resume`.
+#[derive(Serialize, Deserialize)]
 pub struct CaseResult {
     pub id: String,
     pub verdict: Verdict,
@@ -52,16 +55,10 @@ fn verdict_label(v: Verdict) -> &'static str {
     }
 }
 
-/// Write `runs/<tag>/report.md` + one `<id>.trace.md` per case. Returns the `report.md` path.
-pub fn write_run(
-    runs_dir: &Path,
-    tag: &str,
-    meta: &RunMeta,
-    results: &[CaseResult],
-) -> anyhow::Result<PathBuf> {
-    let dir = runs_dir.join(tag);
-    fs::create_dir_all(&dir).with_context(|| format!("create run dir {}", dir.display()))?;
-
+/// Aggregate headline stats — counts/percentages per verdict + EM/F1 means — rendered as plain
+/// text. Shared by `write_run` (the report.md `## Counts` section) and the CLI's post-run stdout
+/// print, so the two never drift apart.
+pub fn summary_text(results: &[CaseResult]) -> String {
     let total = results.len();
     let mut correct = 0usize;
     let mut partial = 0usize;
@@ -89,6 +86,70 @@ pub fn write_run(
     let f1_mean = if total == 0 { 0.0 } else { f1_sum / total as f32 };
     let em_mean = if total == 0 { 0.0 } else { em_sum / total as f32 };
 
+    format!(
+        "correct  {correct} ({:.1}%)\npartial  {partial} ({:.1}%)\nwrong {wrong} ({:.1}%)\nunscored {unscored} ({:.1}%)\ntotal {total}\nEM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n",
+        pct(correct), pct(partial), pct(wrong), pct(unscored)
+    )
+}
+
+/// Sanitize a case id into a filesystem-safe filename stem: path separators and any non
+/// alphanumeric byte become `_`. Used by `write_case` so ids containing `/` (or other punctuation)
+/// don't escape `cases_dir` or collide with reserved characters.
+fn sanitize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// Persist a single case as `<cases_dir>/<sanitized-id>.json` (pretty JSON). Creates `cases_dir`
+/// if needed. Called after each case finishes so a mid-run crash keeps every completed case on
+/// disk — the foundation for `--resume`.
+pub fn write_case(cases_dir: &Path, r: &CaseResult) -> anyhow::Result<()> {
+    fs::create_dir_all(cases_dir)
+        .with_context(|| format!("create cases dir {}", cases_dir.display()))?;
+    let path = cases_dir.join(format!("{}.json", sanitize_id(&r.id)));
+    let json = serde_json::to_string_pretty(r).context("serialize CaseResult")?;
+    fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Load every `<cases_dir>/*.json` back into `CaseResult`s. Returns an empty vec if `cases_dir`
+/// doesn't exist (a fresh, non-resumed run). Order is whatever `read_dir` yields — callers that
+/// care about order (report tables) should sort/dedup as needed.
+pub fn load_cases(cases_dir: &Path) -> anyhow::Result<Vec<CaseResult>> {
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(cases_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => {
+            return Err(e).with_context(|| format!("read cases dir {}", cases_dir.display()))
+        }
+    };
+    for ent in rd {
+        let ent = ent.with_context(|| format!("read entry in {}", cases_dir.display()))?;
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let case: CaseResult = serde_json::from_str(&text)
+            .with_context(|| format!("parse {}", path.display()))?;
+        out.push(case);
+    }
+    Ok(out)
+}
+
+/// Write `runs/<tag>/report.md` + one `<id>.trace.md` per case. Returns the `report.md` path.
+pub fn write_run(
+    runs_dir: &Path,
+    tag: &str,
+    meta: &RunMeta,
+    results: &[CaseResult],
+) -> anyhow::Result<PathBuf> {
+    let dir = runs_dir.join(tag);
+    fs::create_dir_all(&dir).with_context(|| format!("create run dir {}", dir.display()))?;
+
     let mut out = String::new();
     out.push_str(&format!("# Run `{tag}`\n\n"));
     out.push_str(&format!("- model: {}\n", meta.model));
@@ -98,11 +159,8 @@ pub fn write_run(
     out.push_str(&format!("- timestamp: {}\n\n", meta.timestamp));
 
     out.push_str("## Counts\n\n");
-    out.push_str(&format!(
-        "correct  {correct} ({:.1}%)\npartial  {partial} ({:.1}%)\nwrong {wrong} ({:.1}%)\nunscored {unscored} ({:.1}%)\ntotal {total}\n\n",
-        pct(correct), pct(partial), pct(wrong), pct(unscored)
-    ));
-    out.push_str(&format!("EM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n\n"));
+    out.push_str(&summary_text(results));
+    out.push('\n');
 
     out.push_str("## Cases\n\n");
     out.push_str("| id | verdict | f1 | tools | reason |\n");
@@ -170,5 +228,76 @@ mod tests {
         assert!(report.contains("correct  1") && report.contains("wrong 1"));
         assert!(report.contains("| q1 |") && report.contains("| q2 |"));
         assert!(dir.path().join("t1/q1.trace.md").exists());
+    }
+
+    fn case(id: &str, verdict: Verdict) -> CaseResult {
+        CaseResult {
+            id: id.into(),
+            verdict,
+            f1: 0.0,
+            tools: vec![],
+            answer: "A".into(),
+            transcript: "T".into(),
+            reason: "r".into(),
+            em: 0.0,
+            judge_raw: String::new(),
+        }
+    }
+
+    #[test]
+    fn write_case_and_load_cases_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases_dir = dir.path().join("cases");
+        let rs = vec![case("q1", Verdict::Correct), case("q2", Verdict::Wrong)];
+        for r in &rs {
+            write_case(&cases_dir, r).unwrap();
+        }
+
+        let loaded = load_cases(&cases_dir).unwrap();
+        assert_eq!(loaded.len(), 2);
+        let mut ids: Vec<&str> = loaded.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["q1", "q2"]);
+    }
+
+    #[test]
+    fn load_cases_empty_when_dir_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load_cases(&dir.path().join("nonexistent")).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn write_case_sanitizes_id_with_path_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases_dir = dir.path().join("cases");
+        write_case(&cases_dir, &case("a/b:c", Verdict::Partial)).unwrap();
+        let loaded = load_cases(&cases_dir).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "a/b:c");
+    }
+
+    #[test]
+    fn summary_text_reports_counts_and_means() {
+        let rs = vec![
+            {
+                let mut c = case("q1", Verdict::Correct);
+                c.f1 = 1.0;
+                c.em = 1.0;
+                c
+            },
+            {
+                let mut c = case("q2", Verdict::Wrong);
+                c.f1 = 0.0;
+                c.em = 0.0;
+                c
+            },
+        ];
+        let s = summary_text(&rs);
+        assert!(s.contains("correct  1 (50.0%)"));
+        assert!(s.contains("wrong 1 (50.0%)"));
+        assert!(s.contains("total 2"));
+        assert!(s.contains("EM mean: 0.500"));
+        assert!(s.contains("F1 mean: 0.500"));
     }
 }

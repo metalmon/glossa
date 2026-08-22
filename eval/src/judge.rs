@@ -6,9 +6,10 @@
 use crate::backend::openai::chat_once;
 use crate::lab::Endpoint;
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
     Correct,
     Partial,
