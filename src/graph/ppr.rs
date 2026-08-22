@@ -33,6 +33,11 @@ pub(crate) fn edge_tier_weight(edge_type: &str) -> f32 {
     }
 }
 
+/// On-disk shape version of `.glossa/ppr_transition.json`. Bump whenever the persisted `adj` shape
+/// changes (e.g. unweighted `Vec<Vec<usize>>` -> weighted `Vec<Vec<(usize, f32)>>` at version 2) so a
+/// stale cache from an older binary is invalidated & rebuilt instead of silently misparsed.
+pub const TRANSITION_CACHE_VERSION: u32 = 2;
+
 /// A symmetric transition structure built once from the graph's nodes + edges. Ontology-blind:
 /// every stored edge becomes a bidirectional transition of equal weight (confidence-weighting is a
 /// future knob, deliberately not wired here).
