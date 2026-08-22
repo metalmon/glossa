@@ -3,22 +3,10 @@
 //! kb-style PATH resolution (`glossa::root::resolve_root` via `kb_eval::workspace::resolve`),
 //! exactly like `kb` itself.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn d120() -> u64 {
     120
-}
-
-fn default_prompt() -> String {
-    "answer.md".to_string()
-}
-
-fn default_judge_prompt() -> String {
-    "judge.md".to_string()
-}
-
-fn default_dataset() -> String {
-    "dataset.toml".to_string()
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -63,45 +51,6 @@ pub struct LabConfig {
     /// Strong-model endpoint for `kbx distil` (grounded synthesis, a later plan).
     #[serde(default)]
     pub distil: Option<Endpoint>,
-    #[serde(default)]
-    pub defaults: Defaults,
-}
-
-#[derive(serde::Deserialize, Clone)]
-pub struct Defaults {
-    #[serde(default = "default_prompt")]
-    pub prompt: String,
-    #[serde(default = "default_judge_prompt")]
-    pub judge_prompt: String,
-    #[serde(default = "default_dataset")]
-    pub dataset: String,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Defaults {
-            prompt: default_prompt(),
-            judge_prompt: default_judge_prompt(),
-            dataset: default_dataset(),
-        }
-    }
-}
-
-/// Workspace-relative paths from `LabConfig`, resolved against the workspace dir.
-/// Absolute paths in `lab.toml` are left as-is.
-pub struct ResolvedPaths {
-    pub prompt: PathBuf,
-    pub judge_prompt: PathBuf,
-    pub dataset: PathBuf,
-}
-
-fn resolve_one(workspace: &Path, value: &str) -> PathBuf {
-    let p = Path::new(value);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        workspace.join(p)
-    }
 }
 
 impl LabConfig {
@@ -118,16 +67,6 @@ impl LabConfig {
             .map_err(|e| anyhow::anyhow!("parsing {}: {e}", lab_path.display()))?;
         Ok(config)
     }
-
-    /// Resolve the workspace-relative prompt/judge_prompt/dataset fields into
-    /// absolute-or-workspace-joined paths.
-    pub fn resolve(&self, workspace: &Path) -> ResolvedPaths {
-        ResolvedPaths {
-            prompt: resolve_one(workspace, &self.defaults.prompt),
-            judge_prompt: resolve_one(workspace, &self.defaults.judge_prompt),
-            dataset: resolve_one(workspace, &self.defaults.dataset),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -143,10 +82,10 @@ mod tests {
         )
         .unwrap();
         let c = LabConfig::load(dir.path()).unwrap();
-        assert_eq!(c.defaults.dataset, "dataset.toml"); // default
         assert!(c.judge.is_none());
+        assert!(c.reflect.is_none());
         assert!(c.distil.is_none());
-        assert_eq!(c.model.timeout_secs, 120);
+        assert_eq!(c.model.timeout_secs, 120); // d120 default
     }
 
     #[test]
