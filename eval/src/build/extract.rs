@@ -2,20 +2,25 @@
 //!
 //! Reuses `backend::openai::run_agent_loop` for the tool-calling loop (the SAME substrate the
 //! eval reader drives) with a build-specific tool set: doc-scoped `search`/`read`/`grep` plus a
-//! `graph_upsert` tool. `graph_upsert` parses the model's call into `NodeSpec`/`EdgeSpec`
-//! (`parse_and_validate_upsert`) and rejects the WHOLE call if any node's type is not declared
-//! by the ontology, naming the bad type so the model can fix and resend — then writes through
-//! `glossa::graph::agent::apply_upsert` (strict, provenance-stamped, dedup-by-label).
+//! `graph_upsert` tool. `graph_upsert` parses the model's call via the CANONICAL
+//! `glossa::graph::ops::parse_upsert_payload` (label-based `UpsertNode`/`UpsertEdge` — no
+//! agent-assigned ids) into label-referenced upserts, drops any node whose type the ontology
+//! doesn't declare (partial — siblings still write; extraction is pinned to `Fact`, so this only
+//! fires on a model mistake), and writes the rest through `glossa::graph::ops::graph_upsert` — the
+//! SAME write path the MCP server uses (validates, resolves edge endpoints by label, auto-grounds
+//! from a `<path>#n` source_path, provenance-stamped, dedup-by-label).
 //!
-//! `parse_and_validate_upsert` is the one piece testable without a live model; `extract_doc`
-//! drives the full loop and is exercised by a live-endpoint smoke run, not a unit test.
+//! `extract_doc` drives the full agent loop and is exercised by a live-endpoint smoke run, not a
+//! unit test; the `graph_upsert` exec arm's parse/filter/write behavior is unit-testable and
+//! covered below without a live model.
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::lab::LabConfig;
 use anyhow::anyhow;
-use glossa::graph::agent::{apply_upsert, EdgeSpec, NodeSpec};
+use glossa::graph::agent::{EdgeSpec, NodeSpec};
 use glossa::graph::ontology::Ontology;
+use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
 use glossa::grep::path_to_glob;
 use glossa::index::store::DocIndex;
@@ -39,9 +44,14 @@ pub struct ExtractStats {
 /// Parse a model `graph_upsert` tool-call JSON (`{"nodes":[...], "edges":[...]}`, each item
 /// shaped like [`NodeSpec`]/[`EdgeSpec`] — the agent assigns its own `id`, unlike the label-only
 /// `UpsertNode`/`UpsertEdge` the MCP-facing `graph_upsert` tool uses) into specs ready for
-/// [`apply_upsert`]. Rejects the WHOLE call — before anything is written — if any node's
-/// `node_type` is not declared by `ont` (strict), naming the offending type in the error so the
-/// model can fix and resend instead of silently losing the bad item.
+/// `glossa::graph::agent::apply_upsert`. Rejects the WHOLE call — before anything is written — if
+/// any node's `node_type` is not declared by `ont` (strict), naming the offending type in the
+/// error so the model can fix and resend instead of silently losing the bad item.
+///
+/// NOTE: `extract_doc` (`kbx build`) no longer calls this — it routes through the canonical
+/// [`ops::parse_upsert_payload`]/[`ops::graph_upsert`] instead (see [`parse_and_filter_upsert`]
+/// below). This id-based path is kept only because `kbx distil`'s `chain_one_gold` still uses it
+/// pending its own reroute (single-write-source plan, Task 3).
 pub fn parse_and_validate_upsert(
     call: &Value,
     ont: &Ontology,
@@ -64,15 +74,63 @@ pub fn parse_and_validate_upsert(
     Ok((nodes, edges))
 }
 
-/// The `graph_upsert` tool description `extract_doc` (`kbx build`) uses: pinned to `Fact`. Kept
-/// as a named constant so the call site can pass it explicitly to [`build_tools_schema`],
-/// guaranteeing `kbx build`'s tool schema stays byte-identical now that the description is a
-/// parameter (see `build_tools_schema`'s doc comment for why: `kbx distil` needs the same
-/// schema shape but a different description advertising the ontology's own entity types).
+/// Parse a model `graph_upsert` tool-call JSON via the canonical
+/// [`ops::parse_upsert_payload`], then drop (partial — not reject-the-whole-call) any node whose
+/// `node_type` `ont` doesn't declare, naming the offending type in a reason string so the model
+/// can fix and resend just that item. Extraction is pinned to a single flat type (`Fact`, always
+/// declared — see `extract_doc`), so this only fires when the model emits some other type by
+/// mistake; every well-typed sibling node (and every edge — `ops::graph_upsert` resolves edges by
+/// label, so an edge naming a dropped node simply fails to resolve on its own, with its own
+/// actionable reason) still reaches the write path.
+///
+/// Returns `(nodes, edges, notes)`: `notes` carries `ops::parse_upsert_payload`'s own parse notes
+/// (tolerant node/edge-shape fixups) plus one line per dropped-for-type node.
+fn parse_and_filter_upsert(
+    call: &Value,
+    ont: &Ontology,
+) -> (Vec<ops::UpsertNode>, Vec<ops::UpsertEdge>, Vec<String>) {
+    let (mut nodes, edges, mut notes) = ops::parse_upsert_payload(call);
+    nodes.retain(|n| match ont.validate_node(&n.node_type) {
+        Ok(()) => true,
+        Err(e) => {
+            notes.push(format!("node \"{}\" dropped: {e}", n.label));
+            false
+        }
+    });
+    (nodes, edges, notes)
+}
+
+/// Node ids `graph_upsert` actually wrote or merged into, read back from an
+/// [`ops::UpsertOutcome`] — for the unproductive-streak novelty tracker (see `extract_doc`'s exec
+/// closure). `dump` lines for a written node are `"node <id> [<type>] <label>..."`; `merged` holds
+/// `(requested_id, canonical_id)` pairs for nodes that deduped into an existing one. Empty when
+/// the call was rejected (nothing was written) — `dump`/`merged` are only populated on success.
+fn upserted_node_ids(out: &ops::UpsertOutcome) -> Vec<String> {
+    if out.rejected {
+        return Vec::new();
+    }
+    let mut ids: Vec<String> = out
+        .dump
+        .iter()
+        .filter_map(|line| line.strip_prefix("node "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(|s| s.to_string())
+        .collect();
+    ids.extend(out.merged.iter().map(|(_, canonical)| canonical.clone()));
+    ids
+}
+
+/// The `graph_upsert` tool description `extract_doc` (`kbx build`) uses: pinned to `Fact`, and
+/// LABEL-based (mirrors the canonical `ops::UpsertNode`/`ops::UpsertEdge` — no agent-assigned
+/// `id`; a bad `node_type` drops just that node, not the whole call). Kept as a named constant so
+/// the call site can pass it explicitly to [`extract_tools_schema`].
 const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this document STATES. \
-     Each node needs a unique `id` (your choice), `node_type` MUST be `Fact` (any other value \
-     rejects the WHOLE call), a `label`, and `aliases` listing the entities it mentions. Ground \
-     every node with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`).";
+     Each node needs `node_type` (MUST be `Fact` — any other value drops just that node, not the \
+     whole call), a `label`, an indexed `source_path`, and `aliases` listing the entities it \
+     mentions. Reference edge endpoints by LABEL (nodes have no id here), or as a document \
+     section `<path>#<n>`. Ground every Fact with a MENTIONS edge from it to the section you \
+     read it from (`to`: `<path>#n`) — or simply give the node itself a `source_path` of \
+     `<path>#n` and grounding is derived automatically.";
 
 /// OpenAI-function tool schema for a graph-writing agent: `search`/`read`/`grep` descriptors
 /// come straight from the shared registry (`glossa::tools::registry`) so their name/description/
@@ -82,10 +140,14 @@ const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this docu
 /// `graph_upsert`'s JSON Schema itself never hardcoded `Fact` — `node_type` has always been a
 /// free string, since `Ontology::validate_node` (not this schema) is what enforces which types
 /// are legal. Only the tool's `description` TEXT was build-specific ("node_type MUST be `Fact`").
-/// So this takes that description as a parameter: `kbx build`'s `extract_doc` passes
-/// [`FACT_ONLY_GRAPH_UPSERT_DESC`] (byte-identical to the old hardcoded text — build's tool
-/// schema is unchanged), while `kbx distil`'s `chain_one_gold` passes its own text advertising
-/// the ontology's declared entity types instead.
+/// So this takes that description as a parameter.
+///
+/// NOTE: `kbx build`'s `extract_doc` no longer calls this — it moved to the canonical label-based
+/// shape in [`extract_tools_schema`] below. This id-based function is kept, UNCHANGED, only
+/// because `kbx distil`'s `chain_one_gold` still calls it (`build_tools_schema(DISTIL_GRAPH_UPSERT_DESC)`
+/// in `distil/chain.rs`) pending its own reroute to the canonical write path (single-write-source
+/// plan, Task 3) — changing its shape here would silently break distil's live `graph_upsert` calls
+/// (its parse path still requires an `id` per node) before that reroute lands.
 pub fn build_tools_schema(graph_upsert_description: &str) -> Value {
     let mut tools: Vec<Value> = glossa::tools::registry::registry()
         .into_iter()
@@ -138,6 +200,70 @@ pub fn build_tools_schema(graph_upsert_description: &str) -> Value {
                                 "source_path": { "type": "string" },
                                 "range": { "type": ["string", "null"] },
                                 "confidence": { "type": ["number", "null"] }
+                            },
+                            "required": ["from", "to", "edge_type", "source_path"]
+                        }
+                    }
+                },
+                "required": []
+            }
+        }
+    }));
+    Value::Array(tools)
+}
+
+/// OpenAI-function tool schema for `extract_doc`'s graph-writing agent — the CANONICAL
+/// label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
+/// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
+/// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
+/// registry (`glossa::tools::registry`), same as [`build_tools_schema`].
+fn extract_tools_schema(graph_upsert_description: &str) -> Value {
+    let mut tools: Vec<Value> = glossa::tools::registry::registry()
+        .into_iter()
+        .filter(|d| matches!(d.name, "search" | "read" | "grep"))
+        .map(|d| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.params_schema,
+                }
+            })
+        })
+        .collect();
+    tools.push(json!({
+        "type": "function",
+        "function": {
+            "name": "graph_upsert",
+            "description": graph_upsert_description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nodes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_type": { "type": "string" },
+                                "label": { "type": "string" },
+                                "aliases": { "type": "array", "items": { "type": "string" } },
+                                "source_path": { "type": "string" },
+                                "valid_from": { "type": ["string", "null"], "description": "Start of this fact's validity interval, if the document states or implies one (any ISO-8601 granularity, e.g. \"2020\", \"2020-06\", \"2020-06-15\")." },
+                                "valid_to": { "type": ["string", "null"], "description": "End of this fact's validity interval, if the document states or implies one (same granularity as valid_from)." }
+                            },
+                            "required": ["node_type", "label", "source_path"]
+                        }
+                    },
+                    "edges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": { "type": "string" },
+                                "to": { "type": "string" },
+                                "edge_type": { "type": "string" },
+                                "source_path": { "type": "string" }
                             },
                             "required": ["from", "to", "edge_type", "source_path"]
                         }
@@ -208,7 +334,7 @@ pub fn extract_doc(
     let model = lab.model.model.clone();
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
-    let tools = build_tools_schema(FACT_ONLY_GRAPH_UPSERT_DESC);
+    let tools = extract_tools_schema(FACT_ONLY_GRAPH_UPSERT_DESC);
 
     let chat = |messages: &[Value]| {
         lmstudio_chat(
@@ -229,38 +355,44 @@ pub fn extract_doc(
 
     let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
         if name == "graph_upsert" {
-            match parse_and_validate_upsert(args, ontology) {
-                Ok((nodes, edges)) => {
-                    // Surfaced ids for the unproductive-streak novelty tracker: the requested node
-                    // ids. A batch of distinct nodes must register as "new" progress even though
-                    // graph_upsert's own reply is a short confirmation/rejection string with no
-                    // `path#ord` anchors of its own (`extract_node_ids` would find nothing in it).
-                    // Without this, 3+ consecutive distinct graph_upsert calls — very plausible
-                    // (several facts from one read, or retries after a rejection) — would each
-                    // surface zero ids and, at UNPRODUCTIVE_STREAK_K, have their real result
-                    // (confirmation OR rejection text) replaced by the generic steer.
-                    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-                    let mentions = edges
-                        .iter()
-                        .filter(|e| e.edge_type == glossa::graph::MENTIONS)
-                        .count();
-                    match apply_upsert(&g, ontology, nodes, edges, now, root) {
-                        Ok(r) => {
-                            stats.nodes += r.nodes_written;
-                            stats.mentions += mentions;
-                            (
-                                format!(
-                                    "upserted {} node(s), {} edge(s)",
-                                    r.nodes_written, r.edges_written
-                                ),
-                                ids,
-                            )
-                        }
-                        Err(e) => (format!("graph_upsert REJECTED: {e}"), ids),
-                    }
-                }
-                Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
+            // parse_and_filter_upsert: canonical label-based parse (ops::parse_upsert_payload)
+            // plus a partial-apply type filter — a node whose node_type the ontology doesn't
+            // declare (extraction is pinned to Fact, so this only fires on a model mistake) is
+            // dropped with a reason; every well-typed sibling still reaches ops::graph_upsert,
+            // the SAME write path the MCP server uses.
+            let (nodes, edges, notes) = parse_and_filter_upsert(args, ontology);
+            let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now);
+            if !out.rejected {
+                stats.nodes += out.nodes;
+                // Count MENTIONS edges actually written (explicit ones the model sent, plus any
+                // ops::graph_upsert auto-derived from a node's `<path>#n` source_path) — read back
+                // from the outcome's dump rather than the pre-write request, since a requested
+                // edge can still be dropped (e.g. an unresolvable endpoint).
+                let mentions_marker = format!("-{}->", glossa::graph::MENTIONS);
+                stats.mentions += out
+                    .dump
+                    .iter()
+                    .filter(|l| l.starts_with("edge ") && l.contains(&mentions_marker))
+                    .count();
             }
+            // Surfaced ids for the unproductive-streak novelty tracker: the ids of nodes this call
+            // actually wrote or merged into (see `upserted_node_ids`). A batch of distinct nodes
+            // must register as "new" progress even though graph_upsert's own reply is a short
+            // confirmation/rejection string with no `path#ord` anchors of its own (`extract_node_ids`
+            // would find nothing in it). Without this, 3+ consecutive distinct graph_upsert calls —
+            // very plausible (several facts from one read, or retries after a rejection) — would
+            // each surface zero ids and, at UNPRODUCTIVE_STREAK_K, have their real result
+            // (confirmation OR rejection text) replaced by the generic steer.
+            let ids = upserted_node_ids(&out);
+            // Feed drop reasons back to the model: parse_and_filter_upsert's own notes (parse
+            // fixups + type-dropped nodes) first, then ops::graph_upsert's formatted response
+            // (which already lists its own dropped/merged items — mirrors format_upsert_response).
+            let message = if notes.is_empty() {
+                out.message
+            } else {
+                format!("{}\n{}", notes.join("\n"), out.message)
+            };
+            (message, ids)
         } else {
             let scoped = scope_to_doc(name, args, doc_path);
             let (body, ids, _images) =
@@ -302,13 +434,106 @@ strict = true
         Ontology::parse(FLAT_ONT).expect("flat test ontology parses")
     }
 
-    /// Regression test for the ids-fix: mirrors `extract_doc`'s `graph_upsert` exec arm
-    /// (parse -> validate -> apply_upsert, returning the requested node ids as the surfaced
-    /// ids) directly against `run_agent_loop`, with no live model. Before the fix this arm
-    /// always returned `Vec::new()` for ids, so N+1 consecutive DISTINCT `graph_upsert` calls
-    /// (very plausible — several facts from one read) each looked "unproductive" to the
-    /// streak detector; by the (K+1)th call its real "upserted ..." confirmation would have
-    /// been replaced by the generic steer. Mirrors
+    /// Index a stub document so `source_path`/section refs against `path` resolve — mirrors
+    /// `glossa::graph::ops`'s own test helper of the same purpose.
+    fn write_doc(idx: &DocIndex, path: &str) {
+        idx.write_chunks(&[glossa::model::Chunk {
+            doc_path: path.into(),
+            location: "S1".into(),
+            file_type: "md".into(),
+            text: "stub content".into(),
+        }])
+        .unwrap();
+    }
+
+    /// Step 1 of the task: a valid `Fact` node writes through the canonical ops path AND is
+    /// grounded automatically from its `<path>#n` source_path (no explicit MENTIONS edge sent) —
+    /// `ops::graph_upsert`'s Task-1 auto-derive, now reached via `extract_doc`'s reroute.
+    #[test]
+    fn extract_writes_fact_and_grounds_from_source_path() {
+        use glossa::graph::store::GraphStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ont = flat_ontology();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        write_doc(&idx, "d.md");
+
+        let call = serde_json::json!({
+            "nodes": [{"node_type": "Fact", "label": "x", "source_path": "d.md#1"}],
+            "edges": []
+        });
+        let (nodes, edges, notes) = parse_and_filter_upsert(&call, &ont);
+        assert!(notes.is_empty(), "no node should be filtered: {notes:?}");
+        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1);
+        assert_eq!(
+            out.edges, 1,
+            "the auto-derived MENTIONS edge must be written: {}",
+            out.message
+        );
+
+        let id = ops::id_for(&ont, "Fact", "x");
+        let mentions: Vec<_> = g
+            .outgoing(&id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == glossa::graph::MENTIONS)
+            .collect();
+        assert_eq!(mentions.len(), 1, "grounded from source_path: {mentions:?}");
+        assert_eq!(mentions[0].to, "d.md#1");
+    }
+
+    /// Step 1 of the task: an undeclared-type node is DROPPED with a reason naming the bad type,
+    /// while a valid `Fact` sibling in the SAME batch still writes — partial-apply, not the old
+    /// all-or-nothing `parse_and_validate_upsert` behavior (which rejected the whole call).
+    #[test]
+    fn extract_drops_undeclared_type_keeps_valid_fact_sibling() {
+        use glossa::graph::store::GraphStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ont = flat_ontology();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        write_doc(&idx, "d.md");
+
+        let call = serde_json::json!({
+            "nodes": [
+                {"node_type": "Fact", "label": "good fact", "source_path": "d.md#1"},
+                {"node_type": "Bogus", "label": "bad node", "source_path": "d.md#1"}
+            ],
+            "edges": []
+        });
+        let (nodes, edges, notes) = parse_and_filter_upsert(&call, &ont);
+        assert_eq!(nodes.len(), 1, "only the Fact node survives the type filter");
+        assert_eq!(nodes[0].label, "good fact");
+        assert!(
+            notes.iter().any(|n| n.contains("Bogus")),
+            "the drop reason must name the offending type: {notes:?}"
+        );
+
+        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        assert!(
+            !out.rejected,
+            "the valid Fact sibling must still write: {}",
+            out.message
+        );
+        assert_eq!(out.nodes, 1);
+        let id = ops::id_for(&ont, "Fact", "good fact");
+        assert!(
+            g.get_node(&id).unwrap().is_some(),
+            "the good Fact must actually be in the graph"
+        );
+    }
+
+    /// Regression test for the ids-fix: mirrors `extract_doc`'s `graph_upsert` exec arm (parse +
+    /// filter -> `ops::graph_upsert`, returning the written node ids as the surfaced ids)
+    /// directly against `run_agent_loop`, with no live model. Before the fix (and before the
+    /// reroute) this arm could return `Vec::new()` for ids, so N+1 consecutive DISTINCT
+    /// `graph_upsert` calls (very plausible — several facts from one read) each looked
+    /// "unproductive" to the streak detector; by the (K+1)th call its real "upserted ..."
+    /// confirmation would have been replaced by the generic steer. Mirrors
     /// `openai::tests::loop_unproductive_streak_never_fires_when_calls_are_productive`.
     #[test]
     fn loop_distinct_graph_upsert_calls_never_trip_unproductive_streak() {
@@ -319,20 +544,16 @@ strict = true
         let dir = tempfile::tempdir().unwrap();
         let ont = flat_ontology();
         let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        write_doc(&idx, "d.md");
 
-        // Same shape as extract_doc's graph_upsert arm: parse -> validate -> apply_upsert,
-        // returning the requested node ids as the surfaced ids (the fix under test).
+        // Same shape as extract_doc's graph_upsert arm: parse + filter -> ops::graph_upsert,
+        // returning the written node ids as the surfaced ids (the fix under test).
         let exec = |_name: &str, args: &Value| -> (String, Vec<String>) {
-            match parse_and_validate_upsert(args, &ont) {
-                Ok((nodes, edges)) => {
-                    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-                    match apply_upsert(&g, &ont, nodes, edges, 1, dir.path()) {
-                        Ok(r) => (format!("upserted {} node(s)", r.nodes_written), ids),
-                        Err(e) => (format!("graph_upsert REJECTED: {e}"), ids),
-                    }
-                }
-                Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
-            }
+            let (nodes, edges, _notes) = parse_and_filter_upsert(args, &ont);
+            let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+            let ids = upserted_node_ids(&out);
+            (out.message, ids)
         };
 
         let n = UNPRODUCTIVE_STREAK_K + 1; // enough distinct calls to have tripped the old bug
@@ -381,6 +602,11 @@ strict = true
         let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
+
+    // ── `parse_and_validate_upsert` (id-based, all-or-nothing): `extract_doc` no longer calls
+    // this — see the ops-path tests above — but the function itself is still alive in
+    // production for `kbx distil`'s `chain_one_gold` (single-write-source plan, Task 3 reroutes
+    // that caller too). Kept here, unmigrated, as regression coverage for that still-live caller.
 
     #[test]
     fn parse_upsert_rejects_out_of_ontology_type() {
@@ -451,13 +677,17 @@ strict = true
     /// The pin's whole point: extraction is fixed to `Fact` regardless of what the corpus's
     /// ontology declares. Here the ontology is a STRICT typed one that doesn't even declare
     /// `Fact` (only `Symptom`) — `Fact` still validates because Task 1 made it always-permitted
-    /// by `Ontology::validate_node`, independent of `strict` or the declared entity set.
+    /// by `Ontology::validate_node`, independent of `strict` or the declared entity set. Through
+    /// the NEW ops path now (`parse_and_filter_upsert`'s type filter uses the same
+    /// `Ontology::validate_node` call): the Fact node must survive the filter, not be dropped.
     #[test]
     fn extract_accepts_fact_under_strict_typed_ontology() {
         let ont = Ontology::parse("[entities.Symptom]\n[validation]\nstrict=true\n").unwrap();
         let call = serde_json::json!({
-            "nodes":[{"id":"f1","node_type":"Fact","label":"x","source_path":"d.md"}],"edges":[]
+            "nodes":[{"node_type":"Fact","label":"x","source_path":"d.md"}],"edges":[]
         });
-        assert!(parse_and_validate_upsert(&call, &ont).is_ok());
+        let (nodes, _edges, notes) = parse_and_filter_upsert(&call, &ont);
+        assert_eq!(nodes.len(), 1, "Fact must survive the type filter: {notes:?}");
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }
