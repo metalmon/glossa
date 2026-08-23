@@ -14,7 +14,7 @@ pub mod judge;
 
 pub use candidates::{candidate_pairs, CandidatePair};
 pub use chunks::chunk_text;
-pub use extract::{extract_doc, parse_and_validate_upsert, ExtractStats};
+pub use extract::{extract_doc, ExtractStats};
 pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_pair, run_judge, JudgeStats};

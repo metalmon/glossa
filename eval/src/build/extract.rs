@@ -17,8 +17,6 @@
 use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::lab::LabConfig;
-use anyhow::anyhow;
-use glossa::graph::agent::{EdgeSpec, NodeSpec};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
@@ -39,39 +37,6 @@ const MAX_ROUNDS: usize = 30;
 pub struct ExtractStats {
     pub nodes: usize,
     pub mentions: usize,
-}
-
-/// Parse a model `graph_upsert` tool-call JSON (`{"nodes":[...], "edges":[...]}`, each item
-/// shaped like [`NodeSpec`]/[`EdgeSpec`] — the agent assigns its own `id`, unlike the label-only
-/// `UpsertNode`/`UpsertEdge` the MCP-facing `graph_upsert` tool uses) into specs ready for
-/// `glossa::graph::agent::apply_upsert`. Rejects the WHOLE call — before anything is written — if
-/// any node's `node_type` is not declared by `ont` (strict), naming the offending type in the
-/// error so the model can fix and resend instead of silently losing the bad item.
-///
-/// NOTE: `extract_doc` (`kbx build`) no longer calls this — it routes through the canonical
-/// [`ops::parse_upsert_payload`]/[`ops::graph_upsert`] instead (see [`parse_and_filter_upsert`]
-/// below). This id-based path is kept only because `kbx distil`'s `chain_one_gold` still uses it
-/// pending its own reroute (single-write-source plan, Task 3).
-pub fn parse_and_validate_upsert(
-    call: &Value,
-    ont: &Ontology,
-) -> anyhow::Result<(Vec<NodeSpec>, Vec<EdgeSpec>)> {
-    let nodes: Vec<NodeSpec> = match call.get("nodes") {
-        Some(v) => {
-            serde_json::from_value(v.clone()).map_err(|e| anyhow!("invalid nodes[]: {e}"))?
-        }
-        None => Vec::new(),
-    };
-    let edges: Vec<EdgeSpec> = match call.get("edges") {
-        Some(v) => {
-            serde_json::from_value(v.clone()).map_err(|e| anyhow!("invalid edges[]: {e}"))?
-        }
-        None => Vec::new(),
-    };
-    for n in &nodes {
-        ont.validate_node(&n.node_type).map_err(|e| anyhow!(e))?;
-    }
-    Ok((nodes, edges))
 }
 
 /// Parse a model `graph_upsert` tool-call JSON via the canonical
@@ -132,91 +97,11 @@ const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this docu
      read it from (`to`: `<path>#n`) — or simply give the node itself a `source_path` of \
      `<path>#n` and grounding is derived automatically.";
 
-/// OpenAI-function tool schema for a graph-writing agent: `search`/`read`/`grep` descriptors
-/// come straight from the shared registry (`glossa::tools::registry`) so their name/description/
-/// schema can't drift from the eval reader's; `graph_upsert` is agent-specific (it takes
-/// `NodeSpec`/`EdgeSpec` — agent-assigned ids — not the MCP surface's label-only upsert).
-///
-/// `graph_upsert`'s JSON Schema itself never hardcoded `Fact` — `node_type` has always been a
-/// free string, since `Ontology::validate_node` (not this schema) is what enforces which types
-/// are legal. Only the tool's `description` TEXT was build-specific ("node_type MUST be `Fact`").
-/// So this takes that description as a parameter.
-///
-/// NOTE: `kbx build`'s `extract_doc` no longer calls this — it moved to the canonical label-based
-/// shape in [`extract_tools_schema`] below. This id-based function is kept, UNCHANGED, only
-/// because `kbx distil`'s `chain_one_gold` still calls it (`build_tools_schema(DISTIL_GRAPH_UPSERT_DESC)`
-/// in `distil/chain.rs`) pending its own reroute to the canonical write path (single-write-source
-/// plan, Task 3) — changing its shape here would silently break distil's live `graph_upsert` calls
-/// (its parse path still requires an `id` per node) before that reroute lands.
-pub fn build_tools_schema(graph_upsert_description: &str) -> Value {
-    let mut tools: Vec<Value> = glossa::tools::registry::registry()
-        .into_iter()
-        .filter(|d| matches!(d.name, "search" | "read" | "grep"))
-        .map(|d| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
-                }
-            })
-        })
-        .collect();
-    tools.push(json!({
-        "type": "function",
-        "function": {
-            "name": "graph_upsert",
-            "description": graph_upsert_description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nodes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "node_type": { "type": "string" },
-                                "label": { "type": "string" },
-                                "aliases": { "type": "array", "items": { "type": "string" } },
-                                "source_path": { "type": "string" },
-                                "range": { "type": ["string", "null"] },
-                                "confidence": { "type": ["number", "null"] },
-                                "valid_from": { "type": ["string", "null"], "description": "Start of this fact's validity interval, if the document states or implies one (any ISO-8601 granularity, e.g. \"2020\", \"2020-06\", \"2020-06-15\")." },
-                                "valid_to": { "type": ["string", "null"], "description": "End of this fact's validity interval, if the document states or implies one (same granularity as valid_from)." }
-                            },
-                            "required": ["id", "node_type", "label", "source_path"]
-                        }
-                    },
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "from": { "type": "string" },
-                                "to": { "type": "string" },
-                                "edge_type": { "type": "string" },
-                                "source_path": { "type": "string" },
-                                "range": { "type": ["string", "null"] },
-                                "confidence": { "type": ["number", "null"] }
-                            },
-                            "required": ["from", "to", "edge_type", "source_path"]
-                        }
-                    }
-                },
-                "required": []
-            }
-        }
-    }));
-    Value::Array(tools)
-}
-
-/// OpenAI-function tool schema for `extract_doc`'s graph-writing agent — the CANONICAL
-/// label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
+/// OpenAI-function tool schema for `extract_doc`'s (and `kbx distil`'s) graph-writing agent — the
+/// CANONICAL label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
 /// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
 /// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
-/// registry (`glossa::tools::registry`), same as [`build_tools_schema`].
+/// registry (`glossa::tools::registry`).
 pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
     let mut tools: Vec<Value> = glossa::tools::registry::registry()
         .into_iter()
@@ -601,77 +486,6 @@ strict = true
         let nudge = |name: &str, _args: &Value| format!("(dup {name}) you already called this");
         let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
         assert_eq!(out, "ANSWER: done");
-    }
-
-    // ── `parse_and_validate_upsert` (id-based, all-or-nothing): `extract_doc` no longer calls
-    // this — see the ops-path tests above — but the function itself is still alive in
-    // production for `kbx distil`'s `chain_one_gold` (single-write-source plan, Task 3 reroutes
-    // that caller too). Kept here, unmigrated, as regression coverage for that still-live caller.
-
-    #[test]
-    fn parse_upsert_rejects_out_of_ontology_type() {
-        let ont = flat_ontology();
-        let call = serde_json::json!({
-            "nodes":[{"id":"f1","node_type":"Bogus","label":"x","source_path":"d.md"}],
-            "edges":[]
-        });
-        let err = parse_and_validate_upsert(&call, &ont).unwrap_err();
-        assert!(err.to_string().contains("Bogus"));
-    }
-
-    #[test]
-    fn parse_upsert_accepts_ontology_type_and_grounding_edge() {
-        let ont = flat_ontology();
-        let call = serde_json::json!({
-            "nodes":[{"id":"f1","node_type":"Fact","label":"x","source_path":"d.md"}],
-            "edges":[{"from":"f1","to":"d.md#1","edge_type":"MENTIONS","source_path":"d.md"}]
-        });
-        let (nodes, edges) = parse_and_validate_upsert(&call, &ont).unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_type, "Fact");
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].edge_type, "MENTIONS");
-    }
-
-    #[test]
-    fn parse_upsert_defaults_missing_arrays_to_empty() {
-        let ont = flat_ontology();
-        let (nodes, edges) = parse_and_validate_upsert(&serde_json::json!({}), &ont).unwrap();
-        assert!(nodes.is_empty());
-        assert!(edges.is_empty());
-    }
-
-    /// A `graph_upsert` node carrying `valid_from`/`valid_to` parses into a `NodeSpec` with those
-    /// fields set — the build path must not drop temporal validity the model authored.
-    #[test]
-    fn parse_upsert_carries_valid_from_and_valid_to() {
-        let ont = flat_ontology();
-        let call = serde_json::json!({
-            "nodes":[{
-                "id":"f1","node_type":"Fact","label":"x","source_path":"d.md",
-                "valid_from":"2020-01","valid_to":"2020-12"
-            }],
-            "edges":[]
-        });
-        let (nodes, _edges) = parse_and_validate_upsert(&call, &ont).unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].valid_from.as_deref(), Some("2020-01"));
-        assert_eq!(nodes[0].valid_to.as_deref(), Some("2020-12"));
-    }
-
-    /// A node that omits `valid_from`/`valid_to` still parses — the fields default to `None`
-    /// rather than making the call fail (most facts have no lifespan to record).
-    #[test]
-    fn parse_upsert_node_without_validity_defaults_to_none() {
-        let ont = flat_ontology();
-        let call = serde_json::json!({
-            "nodes":[{"id":"f1","node_type":"Fact","label":"x","source_path":"d.md"}],
-            "edges":[]
-        });
-        let (nodes, _edges) = parse_and_validate_upsert(&call, &ont).unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].valid_from.is_none());
-        assert!(nodes[0].valid_to.is_none());
     }
 
     /// The pin's whole point: extraction is fixed to `Fact` regardless of what the corpus's
