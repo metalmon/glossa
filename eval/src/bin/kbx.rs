@@ -11,6 +11,7 @@ use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
+use kb_eval::distil::{self, DistilArgs};
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::LabConfig;
 use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
@@ -145,6 +146,32 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
+    /// Distil a corpus's gold dataset into its reasoning graph: one `chain_one_gold` pass per
+    /// gold case, checkpointed for `--resume`, then finalize (hygiene/doctor + node-index rebuild).
+    Distil {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Override the workspace's default gold dataset (`paths.dataset`).
+        #[arg(long)]
+        gold: Option<PathBuf>,
+        /// `"split"` (train-only, holds out a deterministic test fraction) or `"kb"` (process
+        /// every gold case).
+        #[arg(long, default_value = "kb")]
+        mode: String,
+        /// Only process the first N (post-holdout, in sorted-id order) gold cases.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
+        #[arg(long)]
+        force: bool,
+        /// Skip gold ids already recorded done in the distil checkpoint.
+        #[arg(long)]
+        resume: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -235,6 +262,25 @@ fn main() -> Result<()> {
                 tag,
                 rng_seed,
                 no_apply,
+                no_progress,
+            },
+        ),
+        Cmd::Distil {
+            path,
+            gold,
+            mode,
+            limit,
+            force,
+            resume,
+            no_progress,
+        } => distil::run_distil(
+            path,
+            DistilArgs {
+                gold,
+                mode,
+                limit,
+                force,
+                resume,
                 no_progress,
             },
         ),

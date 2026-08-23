@@ -84,3 +84,15 @@ fn kbx_train_help_lists_budget_and_no_apply() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("--budget") && s.contains("--no-apply"));
 }
+
+/// `kbx distil --help` should expose the gold-dataset override and the split/kb mode knob — a
+/// regression here means the `Distil` clap variant lost a flag `run_distil`'s `DistilArgs` needs.
+#[test]
+fn kbx_distil_help_lists_gold_and_mode() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
+        .args(["distil", "--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--gold") && s.contains("--mode"));
+}
