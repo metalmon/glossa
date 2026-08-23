@@ -812,16 +812,41 @@ fn run_optimize_graph(
         }
     }
 
+    let episode_id = kb_eval::tz::backdated_episode_id(30);
+    let tags = Value::Object(tags);
+    let reflect = |instruction: &str| -> Result<String> {
+        println!(
+            "graph reflect payload: {} chars (~{} tok est)",
+            instruction.len(),
+            instruction.len() / 4,
+        );
+        let turn = kb_eval::tz::infer(
+            &gateway,
+            &reflect_function,
+            &episode_id,
+            &[json!({"role": "user", "content": instruction})],
+            &tags,
+            Duration::from_secs(180),
+            Some(variant.as_str()),
+            None,
+            None,
+        )
+        .context("gepa_reflect inference failed")?;
+        let text = turn.text().trim().to_string();
+        anyhow::ensure!(!text.is_empty(), "gepa_reflect returned an empty prompt");
+        anyhow::ensure!(
+            !kb_eval::gepa::output_likely_truncated(&text, turn.finish_reason.as_deref()),
+            "gepa_reflect output truncated (finish_reason={:?})",
+            turn.finish_reason,
+        );
+        Ok(text)
+    };
+
     let result = kb_eval::gepa_graph::run(
         kb_eval::gepa_graph::GepaGraphConfig {
             endpoint,
             model,
             api_key,
-            gateway,
-            reflect_function,
-            variant,
-            episode_id: kb_eval::tz::backdated_episode_id(30),
-            tags: Value::Object(tags),
             val_frac,
             budget,
             minibatch,
@@ -832,23 +857,18 @@ fn run_optimize_graph(
             candidate_selection,
         },
         qs,
+        &reflect,
     )?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
     println!(
-        "wrote best graph prompt -> {} (run={run_label}, episode={}, baseline_em={:.3}, best_em={:.3}, candidates={})",
+        "wrote best graph prompt -> {} (run={run_label}, baseline_em={:.3}, best_em={:.3}, candidates={})",
         out.display(),
-        result.episode_id,
         result.baseline_em,
         result.best_em,
         result.candidates,
-    );
-    println!(
-        "NOTE: the graph reader prompt is hardcoded as the `GRAPH_SYSTEM_PROMPT` const in \
-         eval/src/backend/prompt.rs — this optimized text is NOT auto-live. Paste it into that \
-         const to deploy."
     );
     Ok(())
 }

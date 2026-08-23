@@ -1191,7 +1191,7 @@ fn build_reflect_instruction(ctx: &ReflectContext, cfg: &GepaConfig) -> String {
     )
 }
 
-pub(crate) fn output_likely_truncated(_text: &str, finish_reason: Option<&str>) -> bool {
+pub fn output_likely_truncated(_text: &str, finish_reason: Option<&str>) -> bool {
     finish_reason
         .is_some_and(|r| r.eq_ignore_ascii_case("length") || r.eq_ignore_ascii_case("max_tokens"))
 }
