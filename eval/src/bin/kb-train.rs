@@ -827,6 +827,9 @@ fn run_optimize_graph(
             &[json!({"role": "user", "content": instruction})],
             &tags,
             Duration::from_secs(180),
+            // Honors the CLI `--variant` flag. The old (deleted) `gepa_graph::reflect` hardcoded
+            // `Some("baseline")` and ignored `cfg.variant`, so this flag was previously dead;
+            // its default value is "baseline", so default behavior is unchanged.
             Some(variant.as_str()),
             None,
             None,

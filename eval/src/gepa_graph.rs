@@ -209,7 +209,7 @@ fn score_questions(
         .collect()
 }
 
-// --- reflection (TZ gateway, unchanged mechanism) -------------------------------------------
+// --- reflection (caller-injected transport) -------------------------------------------------
 
 pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> String {
     let mut cases = String::new();
