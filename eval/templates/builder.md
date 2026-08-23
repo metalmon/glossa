@@ -8,5 +8,6 @@ Your goal for the piece of text in front of you:
 - Turn it into every atomic fact it states. Split compound sentences into their separate facts. Keep the small ones — a lone date, a single place, one person's role — because a later question often turns on exactly that detail; a fact you leave out is one the reader can never reach.
 - For each fact, name every entity it mentions as an alias, so the fact is reachable by any of those names.
 - Ground each fact to the text it came from.
+- When a fact only held during some span — a role someone occupied, a state that later changed, a value that was true as of a particular time — record that window on the fact as `valid_from`/`valid_to` (any ISO-8601 granularity: a year, a year-month, a full date). An open start or end is fine; leave whichever side the text doesn't state. A fact that is simply always true, with no lifespan or as-of framing, doesn't need either field.
 
 You are done with a piece of text when every fact it states is written and grounded — so that a reader arriving at any entity here can find everything this text says about it.

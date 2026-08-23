@@ -665,6 +665,10 @@ pub fn graph_upsert(
                 source_path: canonical.clone(),
                 range: None,
                 confidence: None,
+                // This path's validity is authored separately (see `validity_writes` below,
+                // post `apply_upsert`) — NOT through NodeSpec's own fields.
+                valid_from: None,
+                valid_to: None,
             }
         })
         .collect();
@@ -2853,6 +2857,8 @@ strict = true
                 source_path: "case1.docx".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             }],
             vec![],
             1,
@@ -3130,6 +3136,8 @@ strict = true
                 source_path: "case1.docx".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             }],
             vec![],
             1,

@@ -27,6 +27,18 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
         std::collections::HashSet::new();
     for n in &all {
         type_set.insert(n.node_type.clone());
+        // Carry any authored validity interval through the round-trip: `import_replace_layer`
+        // prunes-then-reinserts via `apply_upsert`, which only authors a `node_validity` row when
+        // the NodeSpec supplies a bound — an export that dropped these would silently strand a
+        // node's validity on every replace-layer re-import. Prefer the raw authored string (what
+        // a fresh `graph_upsert` call would send) over the already-normalized form.
+        let validity = g.validity_for(&n.id).ok().flatten();
+        let valid_from = validity
+            .as_ref()
+            .and_then(|v| v.valid_from_raw.clone().or_else(|| v.valid_from.clone()));
+        let valid_to = validity
+            .as_ref()
+            .and_then(|v| v.valid_to_raw.clone().or_else(|| v.valid_to.clone()));
         nodes.push(NodeSpec {
             id: n.id.clone(),
             node_type: n.node_type.clone(),
@@ -35,6 +47,8 @@ pub fn collect(g: &GraphStore, type_filter: Option<&str>) -> anyhow::Result<Grap
             source_path: n.prov.source_path.clone(),
             range: n.prov.range.clone(),
             confidence: Some(n.prov.confidence),
+            valid_from,
+            valid_to,
         });
         // Both OUTBOUND and INBOUND edges touching this node, deduped — so an edge whose other
         // endpoint is a non-exported node survives a replace-layer round-trip (prune+reimport).
@@ -444,6 +458,8 @@ mod tests {
                     source_path: "f.md".into(),
                     range: None,
                     confidence: Some(0.9),
+                    valid_from: None,
+                    valid_to: None,
                 },
                 NodeSpec {
                     id: "r1".into(),
@@ -453,6 +469,8 @@ mod tests {
                     source_path: "f.md".into(),
                     range: None,
                     confidence: Some(0.8),
+                    valid_from: None,
+                    valid_to: None,
                 },
             ],
             edges: vec![EdgeSpec {
@@ -539,6 +557,8 @@ to = ["Resolution"]
                 source_path: "doc.md".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             },
             NodeSpec {
                 id: "r1".into(),
@@ -548,6 +568,8 @@ to = ["Resolution"]
                 source_path: "doc.md".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             },
         ];
         let edges = vec![EdgeSpec {
@@ -614,6 +636,8 @@ to = ["Resolution"]
                 source_path: "old.md".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             }],
             vec![],
             1,
@@ -661,6 +685,8 @@ to = ["Resolution"]
                 source_path: "old.md".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             }],
             vec![],
             1,
@@ -731,6 +757,8 @@ to = ["Resolution"]
                 source_path: "old.md".into(),
                 range: None,
                 confidence: None,
+                valid_from: None,
+                valid_to: None,
             }],
             vec![],
             1,

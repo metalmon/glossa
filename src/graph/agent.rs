@@ -1,5 +1,6 @@
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{normalize_label, Edge, GraphStore, Node, Provenance};
+use crate::graph::store::{normalize_label, Edge, GraphStore, Node, NodeValidity, Provenance};
+use crate::graph::temporal;
 use crate::index::manifest::FileSig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,14 @@ pub struct NodeSpec {
     pub range: Option<String>,
     #[serde(default)]
     pub confidence: Option<f32>,
+    /// Start of this node's authored validity interval, any ISO-8601 granularity
+    /// (`"2020"`, `"2020-06"`, `"2020-06-15"`, or a full RFC3339 UTC instant).
+    /// `None` when the caller doesn't touch validity (mirrors `ops::UpsertNode`).
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    pub valid_from: Option<String>,
+    /// End of the authored validity interval, same granularity rules as `valid_from`.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    pub valid_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -110,6 +119,43 @@ pub fn apply_upsert(
         })
         .collect();
 
+    // Normalize any authored validity bounds up front (mirroring `ops::parse_and_validate_upsert`)
+    // so a malformed date aborts the WHOLE batch before anything is written, same strictness as
+    // the ontology-type check below. Only nodes that supplied at least one bound get an entry;
+    // the row is keyed by the node's CANONICAL id (post label+type dedup) — validity attaches to
+    // the merged node, not a pre-merge id that nothing ends up stored under.
+    let mut validity_writes: Vec<(String, NodeValidity)> = Vec::new();
+    for n in &nodes {
+        if n.valid_from.is_none() && n.valid_to.is_none() {
+            continue;
+        }
+        let valid_from = n
+            .valid_from
+            .as_deref()
+            .map(temporal::normalize_from)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("node \"{}\": invalid valid_from: {e}", n.label))?;
+        let valid_to = n
+            .valid_to
+            .as_deref()
+            .map(temporal::normalize_to)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("node \"{}\": invalid valid_to: {e}", n.label))?;
+        if valid_from.is_none() && valid_to.is_none() {
+            continue;
+        }
+        let canon_id = canonical.get(&n.id).cloned().unwrap_or_else(|| n.id.clone());
+        validity_writes.push((
+            canon_id,
+            NodeValidity {
+                valid_from,
+                valid_to,
+                valid_from_raw: n.valid_from.clone(),
+                valid_to_raw: n.valid_to.clone(),
+            },
+        ));
+    }
+
     // Only create nodes whose canonical id is their own id (genuinely new ones).
     let model_nodes: Vec<Node> = nodes
         .iter()
@@ -143,6 +189,9 @@ pub fn apply_upsert(
         .collect();
 
     g.upsert(ont, &model_nodes, &model_edges)?;
+    for (canon_id, v) in &validity_writes {
+        g.upsert_validity(canon_id, v)?;
+    }
     Ok(ApplyUpsertResult {
         nodes_written: model_nodes.len(),
         edges_written: model_edges.len(),
@@ -339,6 +388,23 @@ strict = true
             source_path: src.into(),
             range: None,
             confidence: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn node_with_validity(
+        id: &str,
+        ty: &str,
+        label: &str,
+        src: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+    ) -> NodeSpec {
+        NodeSpec {
+            valid_from: valid_from.map(String::from),
+            valid_to: valid_to.map(String::from),
+            ..node(id, ty, label, src)
         }
     }
 
@@ -576,5 +642,104 @@ strict = true
             "must name the close existing label: {}",
             notes[0]
         );
+    }
+
+    #[test]
+    fn apply_upsert_authors_node_validity_for_bounded_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        let nodes = vec![node_with_validity(
+            "sym:bounded",
+            "Symptom",
+            "Bounded symptom",
+            "test.docx",
+            Some("2020-01-01"),
+            Some("2020-12-31"),
+        )];
+        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).unwrap();
+
+        let v = g
+            .validity_for("sym:bounded")
+            .unwrap()
+            .expect("a node that supplied valid_from/valid_to gets a node_validity row");
+        assert_eq!(v.valid_from_raw.as_deref(), Some("2020-01-01"));
+        assert_eq!(v.valid_to_raw.as_deref(), Some("2020-12-31"));
+        assert!(v.valid_from.is_some(), "normalized valid_from is stored");
+        assert!(v.valid_to.is_some(), "normalized valid_to is stored");
+    }
+
+    #[test]
+    fn apply_upsert_no_validity_row_when_node_has_no_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        let nodes = vec![node("sym:unbounded", "Symptom", "Unbounded symptom", "test.docx")];
+        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).unwrap();
+
+        assert!(
+            g.validity_for("sym:unbounded").unwrap().is_none(),
+            "a node with no valid_from/valid_to must get no node_validity row"
+        );
+    }
+
+    #[test]
+    fn apply_upsert_validity_attaches_to_canonical_id_after_merge() {
+        // Two upserts, same label+type — dedup converges the SECOND node into the FIRST's id.
+        // Its validity must land on that canonical id (the id it's actually stored under), not
+        // its own pre-merge id (which nothing is stored at).
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        apply_upsert(
+            &g,
+            &ont,
+            vec![node("sym:first", "Symptom", "Recurring symptom", "case1.docx")],
+            vec![],
+            1,
+            dir.path(),
+        )
+        .unwrap();
+
+        // Second upsert reuses a DIFFERENT id but the SAME normalized label → merges into sym:first.
+        let nodes2 = vec![node_with_validity(
+            "sym:second",
+            "Symptom",
+            "recurring  symptom",
+            "case2.docx",
+            Some("2021-06"),
+            None,
+        )];
+        let r = apply_upsert(&g, &ont, nodes2, vec![], 2, dir.path()).unwrap();
+        assert_eq!(r.merged, vec![("sym:second".to_string(), "sym:first".to_string())]);
+
+        assert!(
+            g.validity_for("sym:second").unwrap().is_none(),
+            "no row under the pre-merge id"
+        );
+        let v = g
+            .validity_for("sym:first")
+            .unwrap()
+            .expect("validity lands on the canonical (merged-into) id");
+        assert_eq!(v.valid_from_raw.as_deref(), Some("2021-06"));
+        assert!(v.valid_to.is_none());
+    }
+
+    #[test]
+    fn apply_upsert_rejects_unparseable_validity_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        let nodes = vec![node_with_validity(
+            "sym:bad",
+            "Symptom",
+            "Bad date symptom",
+            "test.docx",
+            Some("not-a-date"),
+            None,
+        )];
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).is_err());
+        assert_eq!(g.node_count().unwrap(), 0, "the whole batch is dropped, nothing written");
     }
 }

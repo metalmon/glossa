@@ -102,7 +102,9 @@ fn build_tools_schema() -> Value {
                                 "aliases": { "type": "array", "items": { "type": "string" } },
                                 "source_path": { "type": "string" },
                                 "range": { "type": ["string", "null"] },
-                                "confidence": { "type": ["number", "null"] }
+                                "confidence": { "type": ["number", "null"] },
+                                "valid_from": { "type": ["string", "null"], "description": "Start of this fact's validity interval, if the document states or implies one (any ISO-8601 granularity, e.g. \"2020\", \"2020-06\", \"2020-06-15\")." },
+                                "valid_to": { "type": ["string", "null"], "description": "End of this fact's validity interval, if the document states or implies one (same granularity as valid_from)." }
                             },
                             "required": ["id", "node_type", "label", "source_path"]
                         }
@@ -393,6 +395,39 @@ strict = true
         let (nodes, edges) = parse_and_validate_upsert(&serde_json::json!({}), &ont).unwrap();
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+    }
+
+    /// A `graph_upsert` node carrying `valid_from`/`valid_to` parses into a `NodeSpec` with those
+    /// fields set — the build path must not drop temporal validity the model authored.
+    #[test]
+    fn parse_upsert_carries_valid_from_and_valid_to() {
+        let ont = flat_ontology();
+        let call = serde_json::json!({
+            "nodes":[{
+                "id":"f1","node_type":"Fact","label":"x","source_path":"d.md",
+                "valid_from":"2020-01","valid_to":"2020-12"
+            }],
+            "edges":[]
+        });
+        let (nodes, _edges) = parse_and_validate_upsert(&call, &ont).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].valid_from.as_deref(), Some("2020-01"));
+        assert_eq!(nodes[0].valid_to.as_deref(), Some("2020-12"));
+    }
+
+    /// A node that omits `valid_from`/`valid_to` still parses — the fields default to `None`
+    /// rather than making the call fail (most facts have no lifespan to record).
+    #[test]
+    fn parse_upsert_node_without_validity_defaults_to_none() {
+        let ont = flat_ontology();
+        let call = serde_json::json!({
+            "nodes":[{"id":"f1","node_type":"Fact","label":"x","source_path":"d.md"}],
+            "edges":[]
+        });
+        let (nodes, _edges) = parse_and_validate_upsert(&call, &ont).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].valid_from.is_none());
+        assert!(nodes[0].valid_to.is_none());
     }
 
     /// The pin's whole point: extraction is fixed to `Fact` regardless of what the corpus's
