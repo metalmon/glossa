@@ -554,6 +554,11 @@ pub fn graph_upsert(
         valid_from_norm: Option<String>,
         valid_to_raw: Option<String>,
         valid_to_norm: Option<String>,
+        /// The node's source_path exactly as the caller sent it (before
+        /// `canonical_document_path` strips any `#<n>` chunk anchor) — kept so the
+        /// grounding auto-derive (4a) can still resolve a `<path>#<n>` reference to
+        /// the real chunk it names.
+        source_path_raw: String,
     }
     let mut valid_nodes: Vec<(SanitizedNode, String)> = Vec::new();
     for nd in &nodes {
@@ -591,6 +596,7 @@ pub fn graph_upsert(
                         valid_from_norm,
                         valid_to_raw: nd.valid_to.clone(),
                         valid_to_norm,
+                        source_path_raw: nd.source_path.clone(),
                     },
                     canonical,
                 ));
@@ -879,6 +885,39 @@ pub fn graph_upsert(
                     confidence: None,
                 });
             }
+        }
+    }
+
+    // (4a) Grounding auto-derive — the ONE place every writer gets this for free. A node
+    // whose caller-supplied source_path names a real `<path>#<n>` chunk (resolved the same
+    // way a MENTIONS `to` endpoint is: `resolve_section_ref`, which also rejects an
+    // out-of-range chunk number) and which has no explicit MENTIONS edge from it — neither
+    // in this batch's edges nor already recorded in the graph — gets one synthesized here,
+    // node -> that chunk. A node that already emits its own MENTIONS is left alone (no
+    // duplicate edge). This runs for every node, not just `requires_grounding` types, so
+    // (4b) below becomes a fallback: it only fires when a `requires_grounding` node has
+    // NEITHER a resolvable chunk source_path NOR an explicit MENTIONS.
+    for (nd, canonical) in &valid_nodes {
+        let id = norm_to_id[&(normalize_label(&nd.label), nd.node_type.clone())].clone();
+        let already_grounded = edgespecs
+            .iter()
+            .any(|e| e.edge_type == crate::graph::MENTIONS && e.from == id)
+            || g
+                .outgoing(&id)
+                .map(|es| es.iter().any(|e| e.edge_type == crate::graph::MENTIONS))
+                .unwrap_or(false);
+        if already_grounded {
+            continue;
+        }
+        if let Ok(Some(section_id)) = resolve_section_ref(idx, &nd.source_path_raw) {
+            edgespecs.push(EdgeSpec {
+                from: id,
+                to: section_id,
+                edge_type: crate::graph::MENTIONS.to_string(),
+                source_path: canonical.clone(),
+                range: None,
+                confidence: None,
+            });
         }
     }
 
@@ -2977,6 +3016,78 @@ strict = true
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
         assert_eq!(out.edges, 1);
+    }
+
+    /// (4a) auto-derive: a node whose source_path is a real indexed `<doc>#<n>` chunk and
+    /// which supplies NO explicit MENTIONS gets one synthesized by `graph_upsert` itself —
+    /// this is what turns the (4b) requires_grounding check into a fallback.
+    #[test]
+    fn grounding_auto_derived_from_indexed_chunk_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx#1")],
+            vec![],
+            1_000_000,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1);
+        assert_eq!(
+            out.edges, 1,
+            "the auto-derived MENTIONS edge must be written: {}",
+            out.message
+        );
+
+        let id = id_for(&ont, "Resolution", "Module restart");
+        let mentions: Vec<_> = g
+            .outgoing(&id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == crate::graph::MENTIONS)
+            .collect();
+        assert_eq!(mentions.len(), 1, "exactly one live MENTIONS edge: {:?}", mentions);
+        assert_eq!(mentions[0].to, "case1.docx#1");
+    }
+
+    /// (4a) auto-derive must NOT double-ground a node that already supplied its own explicit
+    /// MENTIONS edge in the same batch.
+    #[test]
+    fn grounding_explicit_mentions_not_duplicated_by_auto_derive() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx#1")],
+            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")],
+            1_000_000,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1);
+        assert_eq!(
+            out.edges, 1,
+            "the explicit MENTIONS must not be duplicated by auto-derive: {}",
+            out.message
+        );
+
+        let id = id_for(&ont, "Resolution", "Module restart");
+        let mentions: Vec<_> = g
+            .outgoing(&id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == crate::graph::MENTIONS)
+            .collect();
+        assert_eq!(mentions.len(), 1, "no duplicate MENTIONS edge: {:?}", mentions);
     }
 
     #[test]
