@@ -10,7 +10,9 @@
 use glossa::graph::ontology::Ontology;
 
 mod chain;
+mod run;
 pub use chain::{chain_one_gold, DistilStats};
+pub use run::{run_distil, DistilArgs};
 
 /// Render the ontology's schema-graph (entity types + typed relations) as a compact text
 /// block suitable for injecting into a prompt. Lists every `entity_type`, marking those that
