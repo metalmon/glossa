@@ -11,6 +11,7 @@ pub mod constraint_synthetic;
 pub mod corpus;
 pub mod dataset;
 pub mod dataset_toml;
+pub mod distil;
 pub mod enrich;
 pub mod export_tz;
 pub mod export_tz_constraint;
