@@ -1,51 +1,55 @@
-//! `kbx init` scaffolding: writes a fresh eval workspace — `lab.toml` + the editable
-//! `answer.md`/`judge.md` prompt files + a starter `dataset.toml`, plus an empty `runs/` dir —
-//! from the embedded templates in `eval/templates/`. Refuses to clobber an existing workspace
-//! unless `--force` is passed, so re-running `kbx init` on a live workspace is a deliberate act.
+//! `kbx init` scaffolding: writes a fresh `<root>/.glossa/kbx/` eval workspace — `lab.toml`
+//! (endpoints only, no corpus) + the editable `answer.md`/`builder.md`/`bridge.md`/`judge.md`
+//! prompt files + `reflect.md`/`distil.md` stubs + a starter `dataset.toml`, plus an empty
+//! `runs/` dir — from the embedded templates in `eval/templates/`. Without `--force`, an
+//! existing file is left untouched (skip-existing) so re-running `kbx init` on a live workspace
+//! never clobbers edits by accident.
 
+use crate::workspace::KbxPaths;
 use anyhow::Context;
 use std::path::Path;
 
 const LAB_TOML: &str = include_str!("../templates/lab.toml");
 const ANSWER_MD: &str = include_str!("../templates/answer.md");
+const BUILDER_MD: &str = include_str!("../templates/builder.md");
+const BRIDGE_MD: &str = include_str!("../templates/bridge.md");
 const JUDGE_MD: &str = include_str!("../templates/judge.md");
+const REFLECT_MD: &str = include_str!("../templates/reflect.md");
+const DISTIL_MD: &str = include_str!("../templates/distil.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
 
-/// Write a fresh `kbx` workspace at `dir`: `lab.toml`, `answer.md`, `judge.md`, `dataset.toml`
-/// (embedded templates) plus an empty `runs/` dir. Without `force`, refuses (errors) if ANY of
-/// the four template files already exists — `runs/` itself is always fine to already be there.
-pub fn scaffold_init(dir: &Path, force: bool) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create workspace dir {}", dir.display()))?;
+/// Write a fresh `kbx` workspace at `<root>/.glossa/kbx/`: `lab.toml`, `answer.md`, `builder.md`,
+/// `bridge.md`, `judge.md`, `reflect.md`, `distil.md`, `dataset.toml` (embedded templates) plus an
+/// empty `runs/` dir. Without `force`, a file that already exists is left as-is (skip-existing);
+/// with `force`, every template file is rewritten. Returns the `KbxPaths` for the scaffolded
+/// workspace so callers don't have to re-derive them.
+pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
+    let paths = KbxPaths::for_root(root.to_path_buf());
 
-    let files: [(&str, &str); 4] = [
-        ("lab.toml", LAB_TOML),
-        ("answer.md", ANSWER_MD),
-        ("judge.md", JUDGE_MD),
-        ("dataset.toml", DATASET_TOML),
+    std::fs::create_dir_all(&paths.kbx_dir)
+        .with_context(|| format!("create workspace dir {}", paths.kbx_dir.display()))?;
+    std::fs::create_dir_all(&paths.runs)
+        .with_context(|| format!("create {}", paths.runs.display()))?;
+
+    let files: [(&Path, &str); 8] = [
+        (&paths.lab, LAB_TOML),
+        (&paths.answer, ANSWER_MD),
+        (&paths.builder, BUILDER_MD),
+        (&paths.bridge, BRIDGE_MD),
+        (&paths.judge, JUDGE_MD),
+        (&paths.reflect, REFLECT_MD),
+        (&paths.distil, DISTIL_MD),
+        (&paths.dataset, DATASET_TOML),
     ];
 
-    if !force {
-        for (name, _) in &files {
-            let p = dir.join(name);
-            if p.exists() {
-                anyhow::bail!(
-                    "{} already exists — pass --force to overwrite",
-                    p.display()
-                );
-            }
+    for (p, content) in &files {
+        if !force && p.exists() {
+            continue;
         }
+        std::fs::write(p, content).with_context(|| format!("write {}", p.display()))?;
     }
 
-    for (name, content) in &files {
-        let p = dir.join(name);
-        std::fs::write(&p, content).with_context(|| format!("write {}", p.display()))?;
-    }
-
-    std::fs::create_dir_all(dir.join("runs"))
-        .with_context(|| format!("create {}", dir.join("runs").display()))?;
-
-    Ok(())
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -53,17 +57,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn init_writes_workspace_and_refuses_overwrite() {
+    fn init_creates_glossa_kbx_with_prompts() {
         let dir = tempfile::tempdir().unwrap();
-        scaffold_init(dir.path(), false).unwrap();
-        for f in ["lab.toml", "answer.md", "judge.md", "dataset.toml"] {
-            assert!(dir.path().join(f).exists());
+        let p = scaffold_init(dir.path(), false).unwrap();
+        for f in [&p.lab, &p.answer, &p.builder, &p.bridge, &p.judge, &p.dataset] {
+            assert!(f.exists(), "missing {}", f.display());
         }
-        assert!(dir.path().join("runs").is_dir());
-        assert!(
-            scaffold_init(dir.path(), false).is_err(),
-            "must refuse without --force"
+        // prompts must NOT be indexable corpus content: they live under .glossa
+        assert!(p.builder.starts_with(dir.path().join(".glossa")));
+        // no corpus= leaked into lab.toml
+        let lab = std::fs::read_to_string(&p.lab).unwrap();
+        assert!(!lab.contains("corpus"));
+    }
+
+    #[test]
+    fn init_creates_runs_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = scaffold_init(dir.path(), false).unwrap();
+        assert!(p.runs.is_dir());
+    }
+
+    #[test]
+    fn init_skips_existing_without_force_and_overwrites_with_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = scaffold_init(dir.path(), false).unwrap();
+        std::fs::write(&p.answer, "custom content").unwrap();
+
+        // Re-running without --force must not clobber the edit.
+        scaffold_init(dir.path(), false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p.answer).unwrap(),
+            "custom content"
         );
-        scaffold_init(dir.path(), true).unwrap(); // --force ok
+
+        // --force overwrites.
+        scaffold_init(dir.path(), true).unwrap();
+        assert_ne!(
+            std::fs::read_to_string(&p.answer).unwrap(),
+            "custom content"
+        );
     }
 }

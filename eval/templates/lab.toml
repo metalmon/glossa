@@ -1,24 +1,30 @@
-# kbx lab config — per-workspace settings for the file-first eval toolkit.
-# Relative paths below (corpus, and everything under [defaults]) resolve against this file's
-# own directory; absolute paths are used as-is.
-
-# Path to the glossa corpus this workspace evaluates against (must already be `kb index`ed).
-corpus = "../corpus"
+# kbx lab config — model/judge/reflect/distil endpoints for the file-first eval toolkit.
+# The target root is NOT configured here: it is resolved from kb-style PATH (the .glossa root),
+# the same way `kb` itself resolves it — pass a path explicitly, or run from inside
+# (or under) the workspace.
+#
+# `endpoint` is the FULL chat-completions URL, used verbatim (nothing is appended). For a local
+# LM Studio server that is `http://localhost:1234/v1/chat/completions`; for a hosted provider use
+# its complete `.../v1/chat/completions` URL.
 
 [model]
-endpoint = "http://localhost:1234"
+endpoint = "http://localhost:1234/v1/chat/completions"
 model = "qwen3.5-4b"
 # api_key = "sk-..."                 # inline key, OR:
 # api_key_env = "OPENAI_API_KEY"     # read the key from this env var (keeps the secret out of this file)
 timeout_secs = 120
 
-[judge]                              # may be a DIFFERENT endpoint / model / key / timeout
-endpoint = "http://localhost:1234"
-model = "qwen3.5-4b"
-# api_key = "..."
-timeout_secs = 60
+# [judge]                              # may be a DIFFERENT endpoint / model / key / timeout
+# endpoint = "http://localhost:1234/v1/chat/completions"
+# model = "qwen3.5-4b"
+# timeout_secs = 60
 
-[defaults]
-prompt = "answer.md"
-judge_prompt = "judge.md"
-dataset = "dataset.toml"
+# [reflect]                            # prompt-reflection endpoint for `kbx train`
+# endpoint = "http://localhost:1234/v1/chat/completions"
+# model = "qwen3.5-4b"
+# timeout_secs = 120
+
+# [distil]                             # strong-model endpoint for `kbx distil` (later plan)
+# endpoint = "http://localhost:1234/v1/chat/completions"
+# model = "big-model"
+# timeout_secs = 300

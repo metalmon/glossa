@@ -3,6 +3,8 @@
 
 pub mod backend;
 pub mod bridge_probe;
+pub mod build;
+pub mod checkpoint;
 pub mod constraint_gepa_sop;
 pub mod constraint_score;
 pub mod constraint_synthetic;
@@ -24,4 +26,6 @@ pub mod scaffold;
 pub mod score;
 pub mod sop;
 pub mod trace_read;
+pub mod train;
 pub mod tz;
+pub mod workspace;

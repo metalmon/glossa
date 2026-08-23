@@ -1,16 +1,3 @@
 # kbx dataset — one [[case]] per question. `answer` is the gold reference; `aliases` are
 # alternative acceptable surface forms (optional); `tags` let `kbx eval --tag-filter` run a subset.
-# Replace these two placeholder cases with your own before running `kbx eval`.
-
-[[case]]
-id = "case-1"
-question = "What is the placeholder question for the first smoke-test case?"
-answer = "placeholder answer one"
-aliases = ["alternate phrasing of answer one"]
-tags = ["smoke"]
-
-[[case]]
-id = "case-2"
-question = "What is the placeholder question for the second smoke-test case?"
-answer = "placeholder answer two"
-tags = ["smoke"]
+# Empty by default — add your own [[case]] blocks before running `kbx eval`.

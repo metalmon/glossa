@@ -5,16 +5,21 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use kb_eval::backend::openai::OpenAiBackend;
 use kb_eval::backend::AgentBackend;
+use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::LabConfig;
-use kb_eval::report::{write_run, CaseResult, RunMeta};
+use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
+use kb_eval::train::{self, TrainArgs};
+use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,31 +32,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold a fresh eval workspace: lab.toml + answer.md/judge.md + dataset.toml + runs/.
+    /// Scaffold a fresh eval workspace at `<path>/.glossa/kbx/`: lab.toml + prompts + dataset.toml + runs/.
     Init {
-        /// Workspace directory to create/populate (created if missing).
-        dir: PathBuf,
-        /// Overwrite existing template files instead of refusing.
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Overwrite existing template files instead of skipping them.
         #[arg(long)]
         force: bool,
     },
-    /// Run a workspace's dataset.toml against its corpus and write a run report.
+    /// Run a corpus's `.glossa/kbx/dataset.toml` against it and write a run report.
     Eval {
-        /// Workspace directory (must contain lab.toml, or all pieces given via flags).
-        workspace: PathBuf,
-        /// Run tag (report dir name under runs/). Default: slug(workspace)-slug(dataset).
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Run tag (report dir name under runs/). Default: slug(root)-slug(dataset).
         #[arg(long)]
         tag: Option<String>,
-        /// Override lab.toml's `corpus`.
-        #[arg(long)]
-        corpus: Option<PathBuf>,
-        /// Override lab.toml's `defaults.dataset`.
+        /// Override the workspace's default `dataset.toml`.
         #[arg(long)]
         dataset: Option<PathBuf>,
-        /// Override lab.toml's `defaults.prompt` (the answer-agent system prompt file).
+        /// Override the workspace's default `answer.md` (the answer-agent system prompt file).
         #[arg(long)]
         prompt: Option<PathBuf>,
-        /// Override lab.toml's `defaults.judge_prompt`.
+        /// Override the workspace's default `judge.md`.
         #[arg(long)]
         judge: Option<PathBuf>,
         /// Only run the first N cases (after --tag-filter).
@@ -63,70 +67,227 @@ enum Cmd {
         /// Skip LLM judging even if lab.toml has a [judge] endpoint configured.
         #[arg(long = "no-judge")]
         no_judge: bool,
+        /// Skip cases whose id already has a persisted result under runs/<tag>/cases/, then merge
+        /// the old + newly-run cases into the final report.
+        #[arg(long)]
+        resume: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
+    /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
+    Build {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Which stage(s) of the pipeline to run.
+        #[arg(long, value_enum, default_value = "all")]
+        stage: BuildStage,
+        /// Restrict extraction to a single document (its corpus-relative path).
+        #[arg(long)]
+        doc: Option<String>,
+        /// Only extract the first N enumerated documents.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Bypass the incremental delta (which by default extracts only new/changed docs) for a
+        /// full rebuild: extract every document and re-judge every candidate pair.
+        #[arg(long)]
+        force: bool,
+        /// Skip units already recorded done in the build checkpoint.
+        #[arg(long)]
+        resume: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
+    /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
+    /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
+    /// the seed prompt's full-val EM.
+    Train {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Number of GEPA candidates to explore.
+        #[arg(long, default_value_t = 12)]
+        budget: usize,
+        /// Minibatch size for per-candidate rollouts.
+        #[arg(long, default_value_t = 6)]
+        minibatch: usize,
+        /// Fraction of the dataset held out as the full-validation split.
+        #[arg(long = "val-frac", default_value_t = 0.3)]
+        val_frac: f64,
+        /// Max size of the Pareto frontier retained across candidates.
+        #[arg(long = "pareto-size", default_value_t = 12)]
+        pareto_size: usize,
+        /// Candidate-selection strategy (e.g. "pareto").
+        #[arg(long = "candidate-selection", default_value = "pareto")]
+        candidate_selection: String,
+        /// Override the workspace's default `dataset.toml`.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Override the workspace's default `answer.md` (the seed prompt to optimize).
+        #[arg(long)]
+        prompt: Option<PathBuf>,
+        /// Override the workspace's default `reflect.md` (the reflector's system prompt).
+        #[arg(long = "reflect-prompt")]
+        reflect_prompt: Option<PathBuf>,
+        /// Run tag (report dir name under runs/). Default: a generated tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Seed the run's RNG explicitly (default: derived from the tag).
+        #[arg(long = "rng-seed")]
+        rng_seed: Option<u64>,
+        /// Never copy the winning prompt back onto the workspace's `answer.md` — dry-run/inspect
+        /// only, still writes `runs/<tag>/answer.md`.
+        #[arg(long = "no-apply")]
+        no_apply: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Init { dir, force } => {
-            scaffold_init(&dir, force)?;
-            println!("initialized kbx workspace at {}", dir.display());
+        Cmd::Init { path, force } => {
+            let root = workspace::resolve(path).root;
+            let paths = scaffold_init(&root, force)?;
+            println!("initialized kbx workspace at {}", paths.kbx_dir.display());
             Ok(())
         }
         Cmd::Eval {
-            workspace,
+            path,
             tag,
-            corpus,
             dataset,
             prompt,
             judge: judge_path,
             limit,
             tag_filter,
             no_judge,
+            resume,
+            no_progress,
         } => run_eval(EvalArgs {
-            workspace,
+            path,
             tag,
-            corpus,
             dataset,
             prompt,
             judge: judge_path,
             limit,
             tag_filter,
             no_judge,
+            resume,
+            no_progress,
         }),
+        Cmd::Build {
+            path,
+            stage,
+            doc,
+            limit,
+            force,
+            resume,
+            no_progress,
+        } => {
+            let paths = workspace::resolve(path);
+            let report = run_build(
+                paths,
+                BuildOpts {
+                    stage,
+                    doc,
+                    limit,
+                    force,
+                    resume,
+                    no_progress,
+                },
+            )?;
+            println!(
+                "build report: {} doc(s) extracted, {} pair(s) judged",
+                report.docs_extracted.len(),
+                report.pairs_judged
+            );
+            Ok(())
+        }
+        Cmd::Train {
+            path,
+            budget,
+            minibatch,
+            val_frac,
+            pareto_size,
+            candidate_selection,
+            dataset,
+            prompt,
+            reflect_prompt,
+            tag,
+            rng_seed,
+            no_apply,
+            no_progress,
+        } => train::run_train(
+            path,
+            TrainArgs {
+                budget,
+                minibatch,
+                val_frac,
+                pareto_size,
+                candidate_selection,
+                dataset,
+                prompt,
+                reflect_prompt,
+                tag,
+                rng_seed,
+                no_apply,
+                no_progress,
+            },
+        ),
     }
 }
 
 struct EvalArgs {
-    workspace: PathBuf,
+    path: Option<PathBuf>,
     tag: Option<String>,
-    corpus: Option<PathBuf>,
     dataset: Option<PathBuf>,
     prompt: Option<PathBuf>,
     judge: Option<PathBuf>,
     limit: Option<usize>,
     tag_filter: Option<String>,
     no_judge: bool,
+    resume: bool,
+    no_progress: bool,
+}
+
+/// The concrete files/dirs an `eval` run reads from and writes to, after folding the workspace's
+/// `KbxPaths` defaults with any `--dataset`/`--prompt`/`--judge` CLI overrides. `root` doubles as
+/// the corpus dir passed to the agent backend and recorded in `RunMeta`.
+struct EvalPaths {
+    root: PathBuf,
+    dataset: PathBuf,
+    prompt: PathBuf,
+    judge_prompt: PathBuf,
+    runs: PathBuf,
+}
+
+/// Fold `KbxPaths` (the `.glossa/kbx/` layout) with CLI overrides into the paths an `eval` run
+/// actually uses. `root` (the corpus) is never overridable — it IS the kb-style PATH the whole
+/// workspace resolved against.
+fn resolve_eval_paths(
+    paths: &KbxPaths,
+    dataset: Option<PathBuf>,
+    prompt: Option<PathBuf>,
+    judge: Option<PathBuf>,
+) -> EvalPaths {
+    EvalPaths {
+        root: paths.root.clone(),
+        dataset: dataset.unwrap_or_else(|| paths.dataset.clone()),
+        prompt: prompt.unwrap_or_else(|| paths.answer.clone()),
+        judge_prompt: judge.unwrap_or_else(|| paths.judge.clone()),
+        runs: paths.runs.clone(),
+    }
 }
 
 fn run_eval(args: EvalArgs) -> Result<()> {
-    let workspace = args.workspace;
-    let lab = LabConfig::load(&workspace)
-        .with_context(|| format!("loading lab.toml under {}", workspace.display()))?;
-    let mut paths = lab.resolve(&workspace);
-    if let Some(c) = args.corpus {
-        paths.corpus = c;
-    }
-    if let Some(d) = args.dataset {
-        paths.dataset = d;
-    }
-    if let Some(p) = args.prompt {
-        paths.prompt = p;
-    }
-    if let Some(j) = args.judge {
-        paths.judge_prompt = j;
-    }
+    let kbx_paths = workspace::resolve(args.path);
+    let lab = LabConfig::load_at(&kbx_paths.lab)
+        .with_context(|| format!("loading {}", kbx_paths.lab.display()))?;
+    let paths = resolve_eval_paths(&kbx_paths, args.dataset, args.prompt, args.judge);
 
     let answer_md = std::fs::read_to_string(&paths.prompt)
         .with_context(|| format!("reading prompt {}", paths.prompt.display()))?;
@@ -139,6 +300,26 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     }
     if let Some(n) = args.limit {
         cases.truncate(n);
+    }
+
+    let tag = args
+        .tag
+        .clone()
+        .unwrap_or_else(|| default_tag(&paths.root, &paths.dataset));
+    let runs_dir = paths.runs.clone();
+    let cases_dir = runs_dir.join(&tag).join("cases");
+
+    // --resume: whatever already has a persisted `<id>.json` under cases_dir is done — skip it and
+    // only run the rest. The full report at the end still merges old + new (see below).
+    let previously_done = if args.resume {
+        load_cases(&cases_dir)
+            .with_context(|| format!("loading prior cases from {}", cases_dir.display()))?
+    } else {
+        Vec::new()
+    };
+    if args.resume {
+        let done_ids: HashSet<&str> = previously_done.iter().map(|c| c.id.as_str()).collect();
+        cases.retain(|q| !done_ids.contains(q.id.as_str()));
     }
 
     let use_judge = !args.no_judge && lab.judge.is_some();
@@ -154,9 +335,26 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
 
+    // indicatif draws to stderr by default; also check stdout since some shells redirect one but
+    // not the other and either being non-interactive is a good signal this run isn't at a console.
+    let show_progress = !args.no_progress
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal();
+    let pb = if show_progress {
+        let pb = ProgressBar::new(cases.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
-        let before = list_trace_files(&paths.corpus);
+        pb.set_message(q.id.clone());
+        let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
             endpoint: lab.model.endpoint.clone(),
@@ -166,7 +364,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             use_graph: true,
             system_prompt: Some(answer_md.clone()),
         };
-        let answer = match backend.answer(&paths.corpus, q) {
+        let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("case {}: agent error: {e}", q.id);
@@ -174,7 +372,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             }
         };
 
-        let (tools, transcript) = read_new_trace(&paths.corpus, &before);
+        let (tools, transcript) = read_new_trace(&paths.root, &before);
 
         let golds = gold_forms(q);
         let em = if relaxed_match_any(&answer, &golds) {
@@ -198,7 +396,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
         println!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id);
 
-        results.push(CaseResult {
+        let r = CaseResult {
             id: q.id.clone(),
             verdict,
             reason,
@@ -208,12 +406,21 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             answer,
             transcript,
             judge_raw,
-        });
+        };
+        write_case(&cases_dir, &r)
+            .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
+        results.push(r);
+        pb.inc(1);
     }
+    pb.finish_and_clear();
 
-    let tag = args
-        .tag
-        .unwrap_or_else(|| default_tag(&workspace, &paths.dataset));
+    // Merge prior (resumed) cases with the ones just run. Dedup by id — a case just re-run wins
+    // over its stale, previously-persisted copy.
+    let mut all_results = previously_done;
+    let new_ids: HashSet<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    all_results.retain(|c| !new_ids.contains(c.id.as_str()));
+    all_results.extend(results);
+
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -226,11 +433,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .as_ref()
             .map(|j| j.model.clone())
             .unwrap_or_default(),
-        corpus: paths.corpus.display().to_string(),
-        n: results.len(),
+        corpus: paths.root.display().to_string(),
+        n: all_results.len(),
         timestamp,
     };
-    let report_path = write_run(&workspace.join("runs"), &tag, &meta, &results)?;
+    let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
+    println!("{}", summary_text(&all_results));
     println!("wrote {}", report_path.display());
     Ok(())
 }
@@ -298,11 +506,11 @@ fn read_new_trace(corpus: &Path, before: &HashSet<String>) -> (Vec<String>, Stri
     (tools, text)
 }
 
-/// Stable slug: `slug(workspace basename)-slug(dataset stem)` — no clock in it, so repeat runs
-/// against the same workspace/dataset land in the same `runs/<tag>/` unless the caller passes
-/// `--tag` (the run's own timestamp still lives in `RunMeta`/the report body).
-fn default_tag(workspace: &Path, dataset: &Path) -> String {
-    let ws = workspace
+/// Stable slug: `slug(root basename)-slug(dataset stem)` — no clock in it, so repeat runs against
+/// the same corpus/dataset land in the same `runs/<tag>/` unless the caller passes `--tag` (the
+/// run's own timestamp still lives in `RunMeta`/the report body).
+fn default_tag(root: &Path, dataset: &Path) -> String {
+    let root_name = root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
@@ -310,7 +518,7 @@ fn default_tag(workspace: &Path, dataset: &Path) -> String {
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("dataset");
-    format!("{}-{}", slugify(ws), slugify(ds))
+    format!("{}-{}", slugify(root_name), slugify(ds))
 }
 
 fn slugify(s: &str) -> String {
@@ -358,6 +566,40 @@ mod tests {
         assert_eq!(gold_forms(&q), vec!["Bob".to_string(), "Robert".to_string()]);
     }
 
+    /// `kbx eval`'s path resolver: given a scaffolded `.glossa/kbx/` workspace, the corpus is
+    /// `paths.root` (the workspace root itself, not the kbx subdir) and the dataset defaults to
+    /// the one under `.glossa/kbx/` — unless a CLI override is given.
+    #[test]
+    fn eval_path_resolver_uses_root_as_corpus_and_kbx_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let scaffolded = scaffold_init(dir.path(), false).unwrap();
+
+        let kbx_paths = workspace::resolve(Some(dir.path().to_path_buf()));
+        let resolved = resolve_eval_paths(&kbx_paths, None, None, None);
+
+        assert_eq!(resolved.root, dir.path());
+        assert_eq!(resolved.dataset, scaffolded.dataset);
+        assert!(resolved
+            .dataset
+            .starts_with(dir.path().join(".glossa").join("kbx")));
+        assert_eq!(resolved.prompt, scaffolded.answer);
+        assert_eq!(resolved.judge_prompt, scaffolded.judge);
+        assert_eq!(resolved.runs, scaffolded.runs);
+    }
+
+    #[test]
+    fn eval_path_resolver_honors_cli_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_init(dir.path(), false).unwrap();
+        let kbx_paths = workspace::resolve(Some(dir.path().to_path_buf()));
+
+        let custom_dataset = dir.path().join("custom-dataset.toml");
+        let resolved = resolve_eval_paths(&kbx_paths, Some(custom_dataset.clone()), None, None);
+
+        assert_eq!(resolved.dataset, custom_dataset);
+        assert_eq!(resolved.root, dir.path());
+    }
+
     #[test]
     fn read_new_trace_is_empty_when_no_trace_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -392,5 +634,69 @@ mod tests {
         let (tools, transcript) = read_new_trace(dir.path(), &before);
         assert_eq!(tools, vec!["read".to_string(), "search".to_string()]);
         assert!(transcript.contains("read") && transcript.contains("search"));
+    }
+
+    #[test]
+    fn build_cmd_defaults_stage_to_all() {
+        let cli = Cli::try_parse_from(["kbx", "build"]).unwrap();
+        match cli.cmd {
+            Cmd::Build {
+                stage,
+                doc,
+                limit,
+                force,
+                resume,
+                no_progress,
+                path,
+            } => {
+                assert_eq!(stage, BuildStage::All);
+                assert!(doc.is_none());
+                assert!(limit.is_none());
+                assert!(!force);
+                assert!(!resume);
+                assert!(!no_progress);
+                assert!(path.is_none());
+            }
+            _ => panic!("expected Cmd::Build"),
+        }
+    }
+
+    #[test]
+    fn build_cmd_parses_stage_and_flags() {
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "build",
+            "/corpus",
+            "--stage",
+            "judge",
+            "--doc",
+            "a.md",
+            "--limit",
+            "3",
+            "--force",
+            "--resume",
+            "--no-progress",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Build {
+                path,
+                stage,
+                doc,
+                limit,
+                force,
+                resume,
+                no_progress,
+            } => {
+                assert_eq!(path, Some(PathBuf::from("/corpus")));
+                assert_eq!(stage, BuildStage::Judge);
+                assert_eq!(doc, Some("a.md".to_string()));
+                assert_eq!(limit, Some(3));
+                assert!(force);
+                assert!(resume);
+                assert!(no_progress);
+            }
+            _ => panic!("expected Cmd::Build"),
+        }
     }
 }

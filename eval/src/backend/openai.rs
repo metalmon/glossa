@@ -16,7 +16,7 @@ use std::time::Duration;
 /// makes retrieval unobservable.) Every tool call is logged to `work/.glossa/traces` in the same
 /// JSONL format the MCP server uses, so `run::eval_one` measures retrieval-recall unchanged.
 pub struct OpenAiBackend {
-    pub endpoint: String, // base url, e.g. "http://localhost:1234"
+    pub endpoint: String, // full chat-completions URL, e.g. "http://localhost:1234/v1/chat/completions"
     pub model: String,
     pub api_key: Option<String>,
     pub timeout: Duration,
@@ -38,10 +38,8 @@ impl AgentBackend for OpenAiBackend {
     }
 
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.endpoint.trim_end_matches('/')
-        );
+        // The endpoint is the full chat-completions URL, used verbatim (no path is appended).
+        let url = self.endpoint.clone();
         let graph = if self.use_graph {
             glossa::graph::store::GraphStore::open(work).ok()
         } else {
@@ -177,15 +175,17 @@ fn http_client() -> &'static reqwest::Client {
 /// `reasoning_content` on assistant tool-call turns and require it echoed back on the next request;
 /// typed message structs drop it and the provider then rejects the follow-up with HTTP 400.
 ///
-/// `endpoint` is the bare host (NOT ending in `/v1`, e.g. `http://localhost:1234`); this function
-/// appends `/v1/chat/completions`.
+/// `endpoint` is the FULL chat-completions URL (e.g. `http://localhost:1234/v1/chat/completions`),
+/// POSTed verbatim — this function appends nothing. Callers configure the complete URL in
+/// `lab.toml`'s `endpoint`, so the reader/judge/build/reflect paths all hit the URL as given with
+/// no hidden path-rewriting (which previously double-appended `/v1` on the non-normalizing path).
 fn chat_http(
     endpoint: &str,
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+    let url = endpoint.to_string();
 
     // Trim trailing whitespace from every message: some strict providers (OpenCode Zen / mimo)
     // return HTTP 400 when a message ends in a newline. Harmless to content semantics.
@@ -273,9 +273,7 @@ fn chat_http(
 /// over N. Shared by the eval backend and the graph GEPA optimizer so both drive the same server
 /// the same way.
 ///
-/// `url` is accepted in its historical form (ending in `/v1/chat/completions`, as `answer()` builds
-/// it) and stripped back down to the bare endpoint here before `chat_http` re-appends the suffix, so
-/// this stayed a drop-in replacement — the reader call site did not change how it builds `url`.
+/// `url` is the FULL chat-completions URL and is passed through to `chat_http` verbatim.
 pub(crate) fn lmstudio_chat(
     url: &str,
     model: &str,
@@ -300,11 +298,7 @@ pub(crate) fn lmstudio_chat(
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
         let _ = std::fs::write(&p, serde_json::to_string(&body)?);
     }
-    let endpoint = url
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches("/v1")
-        .trim_end_matches('/');
-    chat_http(endpoint, api_key, &body, timeout)
+    chat_http(url, api_key, &body, timeout)
 }
 
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
@@ -333,8 +327,10 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
 /// each surface zero new identifiers trips the steer. Named so the TDD tests and the loop agree on
-/// one number instead of a magic literal in two places.
-const UNPRODUCTIVE_STREAK_K: usize = 3;
+/// one number instead of a magic literal in two places. `pub(crate)` so callers outside this module
+/// (e.g. `build::extract`'s regression test for the graph_upsert ids fix) can size their fixtures
+/// off the real threshold instead of duplicating the literal.
+pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 
 /// Drive a tool-calling chat to a final textual answer.
 ///
@@ -510,6 +506,44 @@ mod tests {
         assert!(msgs[0]["content"].as_str().unwrap().contains("SYS-MARKER-123"));
         assert_eq!(msgs[1]["role"], "user");
         assert!(msgs[1]["content"].as_str().unwrap().contains("hi"));
+    }
+
+    /// The configured `endpoint` is POSTed VERBATIM — nothing is appended (no `/v1/chat/completions`)
+    /// and nothing is stripped. A distinctive path that any rewriting would corrupt proves it, and
+    /// guards the old footgun where a `.../v1` endpoint got a second `/v1` on the chat_once path.
+    #[test]
+    fn chat_once_posts_endpoint_url_verbatim() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+            req
+        });
+
+        // A path any append (/v1/chat/completions) or strip (/v1) would mangle.
+        let endpoint = format!("http://127.0.0.1:{port}/custom/v1/chat/completions");
+        let out = chat_once(&endpoint, "m", &[json!({"role": "user", "content": "hi"})], None, 5).unwrap();
+        assert_eq!(out["content"], "ok");
+
+        let req = server.join().unwrap();
+        let request_line = req.lines().next().unwrap_or("");
+        assert_eq!(
+            request_line, "POST /custom/v1/chat/completions HTTP/1.1",
+            "endpoint must be POSTed verbatim; got: {request_line}"
+        );
     }
 
     #[test]

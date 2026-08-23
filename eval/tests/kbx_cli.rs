@@ -4,13 +4,12 @@
 //! Hermetic: `kbx init` touches no network, no corpus, no LLM — just the filesystem.
 
 use assert_cmd::Command;
-use predicates::prelude::*;
 
 #[test]
-fn kbx_init_scaffolds_workspace_and_refuses_to_overwrite_without_force() {
+fn kbx_init_scaffolds_glossa_kbx_workspace_and_skips_existing_without_force() {
     let dir = tempfile::tempdir().expect("create tempdir");
 
-    // First `kbx init <dir>`: should succeed and scaffold all workspace files.
+    // First `kbx init <path>`: should succeed and scaffold `.glossa/kbx/` under the given root.
     Command::cargo_bin("kbx")
         .expect("find kbx binary")
         .arg("init")
@@ -18,28 +17,48 @@ fn kbx_init_scaffolds_workspace_and_refuses_to_overwrite_without_force() {
         .assert()
         .success();
 
-    for name in ["lab.toml", "answer.md", "judge.md", "dataset.toml"] {
+    let kbx_dir = dir.path().join(".glossa").join("kbx");
+    for name in [
+        "lab.toml",
+        "answer.md",
+        "builder.md",
+        "bridge.md",
+        "judge.md",
+        "reflect.md",
+        "distil.md",
+        "dataset.toml",
+    ] {
         assert!(
-            dir.path().join(name).is_file(),
-            "expected {name} to be created by `kbx init`"
+            kbx_dir.join(name).is_file(),
+            "expected .glossa/kbx/{name} to be created by `kbx init`"
         );
     }
     assert!(
-        dir.path().join("runs").is_dir(),
-        "expected runs/ dir to be created by `kbx init`"
+        kbx_dir.join("runs").is_dir(),
+        "expected .glossa/kbx/runs/ dir to be created by `kbx init`"
     );
 
-    // Second `kbx init <dir>` without --force: should refuse (non-zero exit), since the
-    // template files already exist.
+    let lab_text = std::fs::read_to_string(kbx_dir.join("lab.toml")).unwrap();
+    assert!(
+        !lab_text.contains("corpus"),
+        "lab.toml must not configure a corpus — it comes from kb-style PATH"
+    );
+
+    // Second `kbx init <path>` without --force: skips existing files rather than refusing.
+    std::fs::write(kbx_dir.join("answer.md"), "custom edit").unwrap();
     Command::cargo_bin("kbx")
         .expect("find kbx binary")
         .arg("init")
         .arg(dir.path())
         .assert()
-        .failure()
-        .stderr(predicate::str::is_empty().not());
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(kbx_dir.join("answer.md")).unwrap(),
+        "custom edit",
+        "without --force, an existing file must be left untouched"
+    );
 
-    // Third `kbx init <dir> --force`: should succeed again, overwriting the existing files.
+    // Third `kbx init <path> --force`: overwrites the existing (edited) file.
     Command::cargo_bin("kbx")
         .expect("find kbx binary")
         .arg("init")
@@ -47,4 +66,21 @@ fn kbx_init_scaffolds_workspace_and_refuses_to_overwrite_without_force() {
         .arg("--force")
         .assert()
         .success();
+    assert_ne!(
+        std::fs::read_to_string(kbx_dir.join("answer.md")).unwrap(),
+        "custom edit",
+        "--force must overwrite existing files"
+    );
+}
+
+/// `kbx train --help` should expose the GEPA budget knob and the apply-gate escape hatch — a
+/// regression here means the `Train` clap variant lost a flag `run_train`'s `TrainArgs` needs.
+#[test]
+fn kbx_train_help_lists_budget_and_no_apply() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
+        .args(["train", "--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--budget") && s.contains("--no-apply"));
 }

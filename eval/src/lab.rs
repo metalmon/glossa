@@ -1,22 +1,12 @@
-//! `lab.toml` workspace config — the file-first `kbx` eval toolkit's per-workspace
-//! settings (corpus location, model/judge endpoints, default filenames, timeout).
+//! `lab.toml` — the file-first `kbx` eval toolkit's endpoint config (model/judge/reflect/distil
+//! endpoints, default filenames, timeout). The corpus is NOT configured here: it comes from
+//! kb-style PATH resolution (`glossa::root::resolve_root` via `kb_eval::workspace::resolve`),
+//! exactly like `kb` itself.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn d120() -> u64 {
     120
-}
-
-fn default_prompt() -> String {
-    "answer.md".to_string()
-}
-
-fn default_judge_prompt() -> String {
-    "judge.md".to_string()
-}
-
-fn default_dataset() -> String {
-    "dataset.toml".to_string()
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -52,72 +42,30 @@ impl Endpoint {
 
 #[derive(serde::Deserialize, Clone)]
 pub struct LabConfig {
-    pub corpus: String,
     pub model: Endpoint,
     #[serde(default)]
     pub judge: Option<Endpoint>,
+    /// Endpoint used to reflect on/rewrite prompts (`kbx train`, a later plan).
     #[serde(default)]
-    pub defaults: Defaults,
-}
-
-#[derive(serde::Deserialize, Clone)]
-pub struct Defaults {
-    #[serde(default = "default_prompt")]
-    pub prompt: String,
-    #[serde(default = "default_judge_prompt")]
-    pub judge_prompt: String,
-    #[serde(default = "default_dataset")]
-    pub dataset: String,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Defaults {
-            prompt: default_prompt(),
-            judge_prompt: default_judge_prompt(),
-            dataset: default_dataset(),
-        }
-    }
-}
-
-/// Workspace-relative paths from `LabConfig`, resolved against the workspace dir.
-/// Absolute paths in `lab.toml` are left as-is.
-pub struct ResolvedPaths {
-    pub corpus: PathBuf,
-    pub prompt: PathBuf,
-    pub judge_prompt: PathBuf,
-    pub dataset: PathBuf,
-}
-
-fn resolve_one(workspace: &Path, value: &str) -> PathBuf {
-    let p = Path::new(value);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        workspace.join(p)
-    }
+    pub reflect: Option<Endpoint>,
+    /// Strong-model endpoint for `kbx distil` (grounded synthesis, a later plan).
+    #[serde(default)]
+    pub distil: Option<Endpoint>,
 }
 
 impl LabConfig {
     /// Read and parse `<workspace>/lab.toml`.
     pub fn load(workspace: &Path) -> anyhow::Result<Self> {
-        let path = workspace.join("lab.toml");
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let config: LabConfig = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
-        Ok(config)
+        Self::load_at(&workspace.join("lab.toml"))
     }
 
-    /// Resolve the workspace-relative `corpus`/prompt/judge_prompt/dataset fields
-    /// into absolute-or-workspace-joined paths.
-    pub fn resolve(&self, workspace: &Path) -> ResolvedPaths {
-        ResolvedPaths {
-            corpus: resolve_one(workspace, &self.corpus),
-            prompt: resolve_one(workspace, &self.defaults.prompt),
-            judge_prompt: resolve_one(workspace, &self.defaults.judge_prompt),
-            dataset: resolve_one(workspace, &self.defaults.dataset),
-        }
+    /// Read and parse an explicit `lab.toml` path.
+    pub fn load_at(lab_path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(lab_path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", lab_path.display()))?;
+        let config: LabConfig = toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", lab_path.display()))?;
+        Ok(config)
     }
 }
 
@@ -130,13 +78,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("lab.toml"),
-            "corpus=\"../kb-abac\"\n[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n",
+            "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n",
         )
         .unwrap();
         let c = LabConfig::load(dir.path()).unwrap();
-        assert_eq!(c.corpus, "../kb-abac");
-        assert_eq!(c.defaults.dataset, "dataset.toml"); // default
         assert!(c.judge.is_none());
-        assert_eq!(c.model.timeout_secs, 120);
+        assert!(c.reflect.is_none());
+        assert!(c.distil.is_none());
+        assert_eq!(c.model.timeout_secs, 120); // d120 default
+    }
+
+    #[test]
+    fn lab_loads_without_corpus_and_reads_distil() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [distil]
+            endpoint = "http://y"
+            model = "big"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert!(lab.distil.is_some());
+        assert_eq!(lab.distil.as_ref().unwrap().model, "big");
+    }
+
+    #[test]
+    fn load_at_reads_an_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let lab_path = dir.path().join("custom-lab.toml");
+        std::fs::write(&lab_path, "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n").unwrap();
+        let c = LabConfig::load_at(&lab_path).unwrap();
+        assert_eq!(c.model.model, "m");
     }
 }
