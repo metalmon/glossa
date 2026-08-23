@@ -229,7 +229,7 @@ enum Cmd {
         questions: PathBuf,
         #[arg(long)]
         work: PathBuf,
-        #[arg(long, default_value = "http://localhost:1234")]
+        #[arg(long, default_value = "http://localhost:1234/v1/chat/completions")]
         endpoint: String,
         #[arg(long, default_value = "qwen3.5-4b")]
         model: String,

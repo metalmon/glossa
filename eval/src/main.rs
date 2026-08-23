@@ -39,8 +39,8 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "hotpot")]
         format: DatasetFormatArg,
         // --- openai backend ---
-        /// OpenAI-compatible base URL (LM Studio default).
-        #[arg(long, default_value = "http://localhost:1234")]
+        /// OpenAI-compatible chat-completions URL, used verbatim (LM Studio default).
+        #[arg(long, default_value = "http://localhost:1234/v1/chat/completions")]
         endpoint: String,
         /// Model id sent to the endpoint.
         #[arg(long, default_value = "local-model")]

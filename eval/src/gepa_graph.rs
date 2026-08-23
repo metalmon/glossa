@@ -515,7 +515,8 @@ pub fn run(cfg: GepaGraphConfig, questions: Vec<Question>) -> Result<GepaGraphRe
     let graph = GraphStore::open(&cfg.work).ok();
     let spec = ChainSpec::from_ontology(&Ontology::load_or_default(&cfg.work));
     let tools = crate::backend::openai::tools_schema(graph.is_some());
-    let url = format!("{}/v1/chat/completions", cfg.endpoint.trim_end_matches('/'));
+    // Full chat-completions URL, used verbatim (no suffix appended).
+    let url = cfg.endpoint.clone();
 
     let (train, val) = crate::gepa::split_by_episode(&questions, |q| q.id.as_str(), cfg.val_frac);
     println!(
