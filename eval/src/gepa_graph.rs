@@ -185,7 +185,10 @@ fn rollout_one(
         }
     };
     let pred = crate::backend::prompt::parse_answer(&raw);
-    let em = crate::score::relaxed_match_any(&pred, &golds_of(q));
+    // GEPA optimizes STRICT exact-match: an ungameable target (relaxed/substring EM would reward a
+    // verbose prompt that merely embeds the gold). Since strict ⊆ relaxed, improving strict also
+    // lifts the relaxed EM that `kbx eval` reports; the two just serve different roles.
+    let em = crate::score::exact_match_any(&pred, &golds_of(q));
     RolloutOutcome {
         em,
         pred,
