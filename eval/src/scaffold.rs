@@ -71,6 +71,21 @@ mod tests {
     }
 
     #[test]
+    fn init_writes_distil_md_with_backward_chain_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = scaffold_init(dir.path(), false).unwrap();
+        let distil = std::fs::read_to_string(&p.distil).unwrap();
+        assert!(
+            distil.contains("BACKWARD"),
+            "distil.md must instruct backward-chain construction"
+        );
+        assert!(
+            distil.contains("=== CHAIN ==="),
+            "distil.md must end turns with the === CHAIN === marker Task 3 parses"
+        );
+    }
+
+    #[test]
     fn init_creates_runs_dir() {
         let dir = tempfile::tempdir().unwrap();
         let p = scaffold_init(dir.path(), false).unwrap();
