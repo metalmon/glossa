@@ -1802,6 +1802,17 @@ pub fn load_seed_prompt(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("read seed prompt {}", path.display()))
 }
 
+/// Trim a reflector reply down to the text after the LAST occurrence of `marker` (e.g. `kbx
+/// train`'s `=== NEW SYSTEM PROMPT ===`) — reflectors sometimes preface the actual rewrite with
+/// reasoning or a restated critique, and the marker is where the real prompt starts. Falls back to
+/// the whole trimmed reply when the marker isn't present.
+pub(crate) fn after_marker(s: &str, marker: &str) -> String {
+    match s.rfind(marker) {
+        Some(idx) => s[idx + marker.len()..].trim().to_string(),
+        None => s.trim().to_string(),
+    }
+}
+
 /// Split examples by episode_id so train/val don't leak the same question.
 pub(crate) fn split_by_episode<T: Clone>(
     items: &[T],
@@ -2440,6 +2451,20 @@ mod tests {
         }
         assert_eq!(rejected.len(), REJECTED_HISTORY_CAP);
         assert_eq!(rejected[0].iter, 2);
+    }
+
+    #[test]
+    fn after_marker_takes_text_after_last_occurrence_or_falls_back() {
+        let s = "some reasoning\n=== NEW SYSTEM PROMPT ===\nfirst draft\n\
+                 === NEW SYSTEM PROMPT ===\nfinal prompt text";
+        assert_eq!(
+            after_marker(s, "=== NEW SYSTEM PROMPT ==="),
+            "final prompt text"
+        );
+        assert_eq!(
+            after_marker("  no marker here  ", "=== NEW SYSTEM PROMPT ==="),
+            "no marker here"
+        );
     }
 
     #[test]
