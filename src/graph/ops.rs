@@ -665,10 +665,16 @@ pub fn graph_upsert(
                 source_path: canonical.clone(),
                 range: None,
                 confidence: None,
-                // This path's validity is authored separately (see `validity_writes` below,
-                // post `apply_upsert`) — NOT through NodeSpec's own fields.
-                valid_from: None,
-                valid_to: None,
+                // This path authors the actual `node_validity` row separately (see
+                // `validity_writes` below, post `apply_upsert` — it needs the FINAL merged id,
+                // known only from `apply_upsert`'s return value). But `apply_upsert` now ALSO
+                // enforces the ontology's `requires_validity` guarantee (4c) internally, checked
+                // BEFORE that post-write step runs — so the raw bound has to ride along on the
+                // NodeSpec too, or a `requires_validity` node would be rejected here despite
+                // having just supplied one. `None` (untouched) passes through unchanged, so this
+                // does not affect the "leave existing validity alone" contract.
+                valid_from: nd.valid_from_raw.clone(),
+                valid_to: nd.valid_to_raw.clone(),
             }
         })
         .collect();

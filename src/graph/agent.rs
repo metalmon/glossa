@@ -156,6 +156,42 @@ pub fn apply_upsert(
         ));
     }
 
+    // (4c) Validity guarantee, mirroring `ops::apply_upsert`'s MCP-path check: a node whose type
+    // the ontology marks `requires_validity` must carry a `valid_from` — supplied in THIS batch
+    // (post-normalize) or already recorded in the graph for its canonical id. A batch that would
+    // leave one untimed aborts WHOLE, nothing written — same contract as the malformed-date and
+    // undeclared-type checks above/below.
+    let supplied_valid_from: std::collections::HashSet<&str> = validity_writes
+        .iter()
+        .filter(|(_, v)| v.valid_from.is_some())
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let mut validity_missing: Vec<String> = Vec::new();
+    for n in &nodes {
+        if !ont.requires_validity(&n.node_type) {
+            continue;
+        }
+        let canon_id = canonical.get(&n.id).cloned().unwrap_or_else(|| n.id.clone());
+        if supplied_valid_from.contains(canon_id.as_str()) {
+            continue;
+        }
+        let in_graph = g
+            .validity_for(&canon_id)
+            .ok()
+            .flatten()
+            .map(|v| v.valid_from.is_some())
+            .unwrap_or(false);
+        if !in_graph {
+            validity_missing.push(format!(
+                "node \"{}\" (type {}) requires a validity interval — add valid_from (and optionally valid_to)",
+                n.label, n.node_type
+            ));
+        }
+    }
+    if !validity_missing.is_empty() {
+        return Err(anyhow::anyhow!(validity_missing.join("; ")));
+    }
+
     // Only create nodes whose canonical id is their own id (genuinely new ones).
     let model_nodes: Vec<Node> = nodes
         .iter()
@@ -375,6 +411,16 @@ props = []
 [relations.RESOLVED_BY]
 from = ["Symptom"]
 to = ["Resolution"]
+[validation]
+strict = true
+"#;
+
+    const VALIDITY_ONT: &str = r#"
+[entities.Record]
+props = []
+requires_validity = true
+[entities.Note]
+props = []
 [validation]
 strict = true
 "#;
@@ -741,5 +787,93 @@ strict = true
         )];
         assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).is_err());
         assert_eq!(g.node_count().unwrap(), 0, "the whole batch is dropped, nothing written");
+    }
+
+    /// (4c) mirror of `ops::apply_upsert`'s MCP-path validity guarantee: a `requires_validity`
+    /// node with no `valid_from` — neither supplied in this batch nor already in the graph — is
+    /// rejected whole (nothing written), just like an undeclared node type.
+    #[test]
+    fn apply_upsert_requires_validity_rejects_untimed_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+
+        let untimed = node("rec:x", "Record", "Untimed record", "a.md");
+        let result = apply_upsert(&g, &ont, vec![untimed], vec![], 1, dir.path());
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected an untimed requires_validity node to be rejected"),
+        };
+        assert!(
+            err.to_string().contains("requires a validity interval"),
+            "{err}"
+        );
+        assert_eq!(g.node_count().unwrap(), 0, "whole batch dropped, nothing written");
+    }
+
+    /// A `requires_validity` node that supplies its OWN `valid_from` in this batch is accepted.
+    #[test]
+    fn apply_upsert_requires_validity_accepts_node_with_supplied_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+
+        let timed = node_with_validity(
+            "rec:y",
+            "Record",
+            "Timed record",
+            "a.md",
+            Some("2024-01-01"),
+            None,
+        );
+        let r = apply_upsert(&g, &ont, vec![timed], vec![], 1, dir.path()).unwrap();
+        assert_eq!(r.nodes_written, 1);
+        assert!(g.validity_for("rec:y").unwrap().unwrap().valid_from.is_some());
+    }
+
+    /// A `requires_validity` node with no bound in THIS batch, but whose canonical id already
+    /// carries a `valid_from` from an earlier upsert, is accepted — the guarantee is about the
+    /// node's timed state overall, not about re-supplying the bound on every touch.
+    #[test]
+    fn apply_upsert_requires_validity_accepts_node_already_timed_in_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+
+        // First upsert: times the record.
+        apply_upsert(
+            &g,
+            &ont,
+            vec![node_with_validity(
+                "rec:z",
+                "Record",
+                "Already-timed record",
+                "a.md",
+                Some("2022-06-01"),
+                None,
+            )],
+            vec![],
+            1,
+            dir.path(),
+        )
+        .unwrap();
+
+        // Second upsert: SAME node (re-sent, e.g. to touch its label/source), no valid_from this
+        // time — must still be accepted because the graph already has one for this canonical id.
+        let retouch = node("rec:z", "Record", "Already-timed record", "a.md");
+        let r = apply_upsert(&g, &ont, vec![retouch], vec![], 2, dir.path()).unwrap();
+        assert_eq!(r.nodes_written, 1);
+    }
+
+    /// `requires_validity` doesn't affect OTHER types — a plain `Note` with no bound writes fine.
+    #[test]
+    fn apply_upsert_requires_validity_does_not_affect_other_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(VALIDITY_ONT).unwrap();
+
+        let note = node("note:a", "Note", "A note", "a.md");
+        let r = apply_upsert(&g, &ont, vec![note], vec![], 1, dir.path()).unwrap();
+        assert_eq!(r.nodes_written, 1);
     }
 }
