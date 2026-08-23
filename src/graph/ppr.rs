@@ -1,6 +1,10 @@
 //! Ontology-agnostic Personalized PageRank (random walk with restart) over the reasoning graph.
 //!
-//! The graph is treated as a generic weighted digraph: `edge_type` and `node_type` are NEVER read.
+//! The graph is treated as a generic weighted digraph: `node_type` and domain relations are NEVER
+//! read. `edge_type` IS read, but only for a fixed system-level tier check (mechanical-similarity
+//! edges like `SIMILAR`, derived by `generalize` from token/embedding overlap, are down-weighted
+//! relative to authored/structural edges) — the ontology-blind contract holds at the node level and
+//! for domain-specific relations, never at the SIMILAR-vs-everything-else tier.
 //! Mass starts on the question's lexical seed nodes and flows across edges, ranking every node by
 //! CONNECTIVITY to the question's neighborhood. This floats the terminal node of a multi-hop chain
 //! even when it shares no tokens with the question — the thing lexical ranking cannot do — and it
@@ -9,13 +13,47 @@
 use crate::graph::store::GraphStore;
 use std::collections::HashMap;
 
+/// Mechanical-similarity edge types: derived by `generalize` from token/embedding overlap, NOT
+/// authored reasoning. A SYSTEM-level tier (like STRUCTURAL_NODES), not a domain-ontology choice.
+/// NOTE: Keep in sync with the sibling definitions: `SOFT_EDGE_TYPES` in `src/graph/io.rs` (line 200)
+/// and `SOFT_EDGES` in `src/graph/ontology.rs` (line 9). If a soft-edge type is added, update all three.
+const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
+
+/// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
+/// Env-tunable so the killer sweep re-runs without recompiling. Default 0.1.
+fn sim_weight() -> f32 {
+    std::env::var("GLOSSA_PPR_SIM_WEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|w| *w >= 0.0 && w.is_finite())
+        .unwrap_or(0.1)
+}
+
+/// System-level tier weight for an edge in the PPR walk. Reads only `edge_type` membership in a
+/// fixed set — never node_type or domain relations (the ontology-blind contract holds).
+/// `w_sim` is the weight for similarity edges; reasoning edges always return 1.0.
+pub(crate) fn edge_tier_weight(edge_type: &str, w_sim: f32) -> f32 {
+    if SIMILARITY_EDGES.contains(&edge_type) {
+        w_sim
+    } else {
+        1.0
+    }
+}
+
+/// On-disk shape version of `.glossa/ppr_transition.json`. Bump whenever the persisted `adj` shape
+/// changes (e.g. unweighted `Vec<Vec<usize>>` -> weighted `Vec<Vec<(usize, f32)>>` at version 2) so a
+/// stale cache from an older binary is invalidated & rebuilt instead of silently misparsed.
+pub const TRANSITION_CACHE_VERSION: u32 = 2;
+
 /// A symmetric transition structure built once from the graph's nodes + edges. Ontology-blind:
-/// every stored edge becomes a bidirectional transition of equal weight (confidence-weighting is a
-/// future knob, deliberately not wired here).
+/// every stored edge becomes a bidirectional transition weighted by its system-level tier (see
+/// `edge_tier_weight`) — mechanical-similarity edges carry less mass than authored/structural ones,
+/// no longer "equal weight" (confidence-weighting is a separate future knob, deliberately not wired
+/// here).
 pub struct Transition {
-    ids: Vec<String>,            // idx -> node id
-    idx: HashMap<String, usize>, // node id -> idx
-    adj: Vec<Vec<usize>>,        // undirected adjacency (idx -> neighbor idxs, with multiplicity)
+    ids: Vec<String>,                 // idx -> node id
+    idx: HashMap<String, usize>,      // node id -> idx
+    adj: Vec<Vec<(usize, f32)>>,      // undirected weighted adjacency (neighbor idx, tier weight)
 }
 
 impl Transition {
@@ -32,12 +70,12 @@ impl Transition {
     pub fn ids(&self) -> &[String] {
         &self.ids
     }
-    /// Undirected adjacency in walk order (for persistence).
-    pub fn adj(&self) -> &[Vec<usize>] {
+    /// Undirected weighted adjacency in walk order (for persistence).
+    pub fn adj(&self) -> &[Vec<(usize, f32)>] {
         &self.adj
     }
     /// Reassemble from persisted `(ids, adj)`; the id->index map is derived, not stored.
-    pub fn from_parts(ids: Vec<String>, adj: Vec<Vec<usize>>) -> Transition {
+    pub fn from_parts(ids: Vec<String>, adj: Vec<Vec<(usize, f32)>>) -> Transition {
         let idx = ids.iter().cloned().enumerate().map(|(i, s)| (s, i)).collect();
         Transition { ids, idx, adj }
     }
@@ -55,12 +93,17 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
             ids.len() - 1
         });
     }
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+    let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ids.len()];
+    let w_sim = sim_weight();
     for e in g.all_edges()? {
         if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
             if a != b {
-                adj[a].push(b);
-                adj[b].push(a); // symmetric — a multi-hop answer may need to walk "backward"
+                // Guard confidence: treat 0 or negative as 1.0 (default) so legacy graphs are unchanged.
+                // Clamp to [0,1] — guards a future >1.0 edge from over-weighting past the reasoning tier.
+                let confidence = if e.prov.confidence > 0.0 { e.prov.confidence.min(1.0) } else { 1.0 };
+                let w = edge_tier_weight(&e.edge_type, w_sim) * confidence;
+                adj[a].push((b, w));
+                adj[b].push((a, w)); // symmetric — a multi-hop answer may need to walk "backward"
             }
         }
     }
@@ -105,13 +148,12 @@ pub fn ppr(
         let mut next = vec![0.0f32; n];
         let mut dangling = 0.0f32;
         for i in 0..n {
-            let deg = trans.adj[i].len();
-            if deg == 0 {
+            let wdeg: f32 = trans.adj[i].iter().map(|(_, w)| *w).sum();
+            if wdeg <= 0.0 {
                 dangling += r[i];
             } else {
-                let share = r[i] / deg as f32;
-                for &j in &trans.adj[i] {
-                    next[j] += share;
+                for &(j, w) in &trans.adj[i] {
+                    next[j] += r[i] * w / wdeg;
                 }
             }
         }
@@ -257,5 +299,101 @@ mod tests {
         node(&g, "a");
         let t = build_transition(&g).unwrap();
         assert!(ppr(&t, &seed(&[("nonexistent", 1.0)]), 0.15, 50, 1e-6).is_empty());
+    }
+
+    #[test]
+    fn similarity_edges_weigh_below_reasoning() {
+        // default w_sim = 0.1 (no env set in test)
+        let w_sim = sim_weight();
+        assert_eq!(edge_tier_weight("LEADS_TO", w_sim), 1.0);
+        assert_eq!(edge_tier_weight("MENTIONS", w_sim), 1.0);
+        assert_eq!(edge_tier_weight("CONTAINS", w_sim), 1.0); // structural still carries cross-doc mass
+        assert_eq!(edge_tier_weight("NEXT", w_sim), 1.0);
+        assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
+        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
+        assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
+    }
+
+    #[test]
+    fn transition_roundtrips_weighted_adjacency() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        let adj = vec![vec![(1usize, 0.1f32)], vec![(0usize, 0.1f32)]];
+        let t = Transition::from_parts(ids.clone(), adj.clone());
+        assert_eq!(t.ids(), &ids[..]);
+        assert_eq!(t.adj(), &adj[..]);
+    }
+
+    #[test]
+    fn build_transition_weights_similar_below_reasoning() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for x in ["a", "b", "c"] {
+            node(&g, x);
+        }
+        // a -LEADS_TO- b  (weight 1.0),  a -SIMILAR- c  (weight w_sim)
+        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "LEADS_TO".into(), prov: prov() })
+            .unwrap();
+        g.put_edge(&Edge { from: "a".into(), to: "c".into(), edge_type: "SIMILAR".into(), prov: prov() })
+            .unwrap();
+        let t = build_transition(&g).unwrap();
+        let ai = t.ids().iter().position(|s| s == "a").unwrap();
+        let w: std::collections::HashMap<_, _> =
+            t.adj()[ai].iter().map(|(j, w)| (t.ids()[*j].clone(), *w)).collect();
+        assert_eq!(w["b"], 1.0);
+        assert_eq!(w["c"], 0.1); // SIMILAR down-weighted
+    }
+
+    #[test]
+    fn reasoning_terminal_outranks_similar_sibling() {
+        // seed -LEADS_TO- terminal (the real bridge)
+        // seed -SIMILAR- sibling, and give the sibling extra SIMILAR mass so at EQUAL weight it
+        // would win.
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for x in ["seed", "terminal", "sibling"] {
+            node(&g, x);
+        }
+        g.put_edge(&Edge {
+            from: "seed".into(),
+            to: "terminal".into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        for x in ["s1", "s2", "s3"] {
+            node(&g, x);
+            g.put_edge(&Edge {
+                from: "sibling".into(),
+                to: x.into(),
+                edge_type: "SIMILAR".into(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        g.put_edge(&Edge {
+            from: "seed".into(),
+            to: "sibling".into(),
+            edge_type: "SIMILAR".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        let t = build_transition(&g).unwrap();
+        let out = ppr(&t, &seed(&[("seed", 1.0)]), 0.15, 50, 1e-6);
+        assert!(
+            rank_of(&out, "terminal") < rank_of(&out, "sibling"),
+            "reasoning terminal must outrank the SIMILAR-clustered sibling: {out:?}"
+        );
+    }
+
+    #[test]
+    fn low_confidence_edge_carries_less_mass() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for x in ["a", "b"] { node(&g, x); }
+        let mut p = prov(); p.confidence = 0.5;
+        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "LEADS_TO".into(), prov: p }).unwrap();
+        let t = build_transition(&g).unwrap();
+        let ai = t.ids().iter().position(|s| s == "a").unwrap();
+        assert_eq!(t.adj()[ai][0].1, 0.5); // 1.0 (tier) * 0.5 (confidence)
     }
 }

@@ -275,14 +275,22 @@ impl GraphStore {
         self.gdir.join("ppr_transition.json")
     }
 
+    /// Load the persisted transition, but ONLY if it is both the current cache-shape `version` and
+    /// the current content `sig`. A missing/mismatched `version` (old binary's cache, or the bogus
+    /// probe in tests) or a weighted-shape parse failure returns `None` so the caller rebuilds —
+    /// never silently misparsed into garbage weights.
     fn load_ppr_transition(&self, sig: u64) -> Option<crate::graph::ppr::Transition> {
         let bytes = std::fs::read(self.ppr_cache_path()).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let version = v.get("version").and_then(|x| x.as_u64())?;
+        if version != crate::graph::ppr::TRANSITION_CACHE_VERSION as u64 {
+            return None; // shape changed since this cache was written — rebuild
+        }
         if v.get("sig")?.as_u64()? != sig {
-            return None; // stale — a rebuild will overwrite it
+            return None; // stale content — a rebuild will overwrite it
         }
         let ids: Vec<String> = serde_json::from_value(v.get("ids")?.clone()).ok()?;
-        let adj: Vec<Vec<usize>> = serde_json::from_value(v.get("adj")?.clone()).ok()?;
+        let adj: Vec<Vec<(usize, f32)>> = serde_json::from_value(v.get("adj")?.clone()).ok()?;
         Some(crate::graph::ppr::Transition::from_parts(ids, adj))
     }
 
@@ -291,7 +299,12 @@ impl GraphStore {
         sig: u64,
         t: &crate::graph::ppr::Transition,
     ) -> anyhow::Result<()> {
-        let v = serde_json::json!({ "sig": sig, "ids": t.ids(), "adj": t.adj() });
+        let v = serde_json::json!({
+            "version": crate::graph::ppr::TRANSITION_CACHE_VERSION,
+            "sig": sig,
+            "ids": t.ids(),
+            "adj": t.adj(),
+        });
         std::fs::write(self.ppr_cache_path(), serde_json::to_vec(&v)?)?;
         Ok(())
     }
@@ -2267,6 +2280,42 @@ mod tests {
                 .unwrap()
                 .contains(&"b.md".to_string()),
             "A->B gone"
+        );
+    }
+
+    fn fact(g: &GraphStore, id: &str, label: &str, aliases: &[&str]) {
+        g.put_node(&Node {
+            id: id.into(),
+            node_type: "Fact".into(),
+            label: label.into(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            prov: prov(),
+        })
+        .unwrap();
+    }
+
+    fn link(g: &GraphStore, a: &str, b: &str) {
+        g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
+            .unwrap();
+    }
+
+    #[test]
+    fn stale_transition_cache_is_rebuilt_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        fact(&g, "a", "A", &[]);
+        fact(&g, "b", "B", &[]);
+        link(&g, "a", "b");
+        // write a bogus/old cache: an int-adjacency shape (or a wrong version tag)
+        let p = d.path().join(".glossa/ppr_transition.json");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, r#"{"version":0,"ids":["a","b"],"adj":[[1],[0]]}"#).unwrap();
+        // reading must NOT panic/deserialize-into-garbage; it must rebuild the weighted transition.
+        let t = g.ppr_transition().unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(
+            t.adj().iter().all(|row| row.iter().all(|(_, w)| *w > 0.0)),
+            "rebuilt cache has weights, not the stale int shape"
         );
     }
 }
