@@ -15,6 +15,8 @@ use std::collections::HashMap;
 
 /// Mechanical-similarity edge types: derived by `generalize` from token/embedding overlap, NOT
 /// authored reasoning. A SYSTEM-level tier (like STRUCTURAL_NODES), not a domain-ontology choice.
+/// NOTE: Keep in sync with the sibling definitions: `SOFT_EDGE_TYPES` in `src/graph/io.rs` (line 200)
+/// and `SOFT_EDGES` in `src/graph/ontology.rs` (line 9). If a soft-edge type is added, update all three.
 const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
 
 /// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
@@ -29,9 +31,10 @@ fn sim_weight() -> f32 {
 
 /// System-level tier weight for an edge in the PPR walk. Reads only `edge_type` membership in a
 /// fixed set — never node_type or domain relations (the ontology-blind contract holds).
-pub(crate) fn edge_tier_weight(edge_type: &str) -> f32 {
+/// `w_sim` is the weight for similarity edges; reasoning edges always return 1.0.
+pub(crate) fn edge_tier_weight(edge_type: &str, w_sim: f32) -> f32 {
     if SIMILARITY_EDGES.contains(&edge_type) {
-        sim_weight()
+        w_sim
     } else {
         1.0
     }
@@ -50,7 +53,7 @@ pub const TRANSITION_CACHE_VERSION: u32 = 2;
 pub struct Transition {
     ids: Vec<String>,                 // idx -> node id
     idx: HashMap<String, usize>,      // node id -> idx
-    adj: Vec<Vec<(usize, f32)>>, // undirected weighted adjacency (neighbor idx, tier weight)
+    adj: Vec<Vec<(usize, f32)>>,      // undirected weighted adjacency (neighbor idx, tier weight)
 }
 
 impl Transition {
@@ -91,12 +94,14 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
         });
     }
     let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ids.len()];
+    let w_sim = sim_weight();
     for e in g.all_edges()? {
         if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
             if a != b {
-                // Guard confidence: treat 0 or negative as 1.0 (default) so legacy graphs are unchanged
-                let confidence = if e.prov.confidence > 0.0 { e.prov.confidence } else { 1.0 };
-                let w = edge_tier_weight(&e.edge_type) * confidence;
+                // Guard confidence: treat 0 or negative as 1.0 (default) so legacy graphs are unchanged.
+                // Clamp to [0,1] — guards a future >1.0 edge from over-weighting past the reasoning tier.
+                let confidence = if e.prov.confidence > 0.0 { e.prov.confidence.min(1.0) } else { 1.0 };
+                let w = edge_tier_weight(&e.edge_type, w_sim) * confidence;
                 adj[a].push((b, w));
                 adj[b].push((a, w)); // symmetric — a multi-hop answer may need to walk "backward"
             }
@@ -299,13 +304,14 @@ mod tests {
     #[test]
     fn similarity_edges_weigh_below_reasoning() {
         // default w_sim = 0.1 (no env set in test)
-        assert_eq!(edge_tier_weight("LEADS_TO"), 1.0);
-        assert_eq!(edge_tier_weight("MENTIONS"), 1.0);
-        assert_eq!(edge_tier_weight("CONTAINS"), 1.0); // structural still carries cross-doc mass
-        assert_eq!(edge_tier_weight("NEXT"), 1.0);
-        assert!(edge_tier_weight("SIMILAR") < 1.0);
-        assert_eq!(edge_tier_weight("SIMILAR"), 0.1);
-        assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN"), 1.0); // default = reasoning tier
+        let w_sim = sim_weight();
+        assert_eq!(edge_tier_weight("LEADS_TO", w_sim), 1.0);
+        assert_eq!(edge_tier_weight("MENTIONS", w_sim), 1.0);
+        assert_eq!(edge_tier_weight("CONTAINS", w_sim), 1.0); // structural still carries cross-doc mass
+        assert_eq!(edge_tier_weight("NEXT", w_sim), 1.0);
+        assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
+        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
+        assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
     }
 
     #[test]
