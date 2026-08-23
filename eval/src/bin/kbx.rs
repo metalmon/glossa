@@ -16,6 +16,7 @@ use kb_eval::lab::LabConfig;
 use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
+use kb_eval::train::{self, TrainArgs};
 use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
 use std::io::IsTerminal;
@@ -99,6 +100,51 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
+    /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
+    /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
+    /// the seed prompt's full-val EM.
+    Train {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Number of GEPA candidates to explore.
+        #[arg(long, default_value_t = 12)]
+        budget: usize,
+        /// Minibatch size for per-candidate rollouts.
+        #[arg(long, default_value_t = 6)]
+        minibatch: usize,
+        /// Fraction of the dataset held out as the full-validation split.
+        #[arg(long = "val-frac", default_value_t = 0.3)]
+        val_frac: f64,
+        /// Max size of the Pareto frontier retained across candidates.
+        #[arg(long = "pareto-size", default_value_t = 12)]
+        pareto_size: usize,
+        /// Candidate-selection strategy (e.g. "pareto").
+        #[arg(long = "candidate-selection", default_value = "pareto")]
+        candidate_selection: String,
+        /// Override the workspace's default `dataset.toml`.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Override the workspace's default `answer.md` (the seed prompt to optimize).
+        #[arg(long)]
+        prompt: Option<PathBuf>,
+        /// Override the workspace's default `reflect.md` (the reflector's system prompt).
+        #[arg(long = "reflect-prompt")]
+        reflect_prompt: Option<PathBuf>,
+        /// Run tag (report dir name under runs/). Default: a generated tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Seed the run's RNG explicitly (default: derived from the tag).
+        #[arg(long = "rng-seed")]
+        rng_seed: Option<u64>,
+        /// Never copy the winning prompt back onto the workspace's `answer.md` — dry-run/inspect
+        /// only, still writes `runs/<tag>/answer.md`.
+        #[arg(long = "no-apply")]
+        no_apply: bool,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -161,6 +207,37 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Train {
+            path,
+            budget,
+            minibatch,
+            val_frac,
+            pareto_size,
+            candidate_selection,
+            dataset,
+            prompt,
+            reflect_prompt,
+            tag,
+            rng_seed,
+            no_apply,
+            no_progress,
+        } => train::run_train(
+            path,
+            TrainArgs {
+                budget,
+                minibatch,
+                val_frac,
+                pareto_size,
+                candidate_selection,
+                dataset,
+                prompt,
+                reflect_prompt,
+                tag,
+                rng_seed,
+                no_apply,
+                no_progress,
+            },
+        ),
     }
 }
 

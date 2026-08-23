@@ -72,3 +72,15 @@ fn kbx_init_scaffolds_glossa_kbx_workspace_and_skips_existing_without_force() {
         "--force must overwrite existing files"
     );
 }
+
+/// `kbx train --help` should expose the GEPA budget knob and the apply-gate escape hatch — a
+/// regression here means the `Train` clap variant lost a flag `run_train`'s `TrainArgs` needs.
+#[test]
+fn kbx_train_help_lists_budget_and_no_apply() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
+        .args(["train", "--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--budget") && s.contains("--no-apply"));
+}
