@@ -120,9 +120,12 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             .unwrap_or("")
             .trim()
             .to_string();
-        anyhow::ensure!(!text.is_empty(), "reflector returned empty output");
-        // Take text after the last marker if present, else the whole reply.
-        Ok(gepa::after_marker(&text, "=== NEW SYSTEM PROMPT ==="))
+        // Take text after the last marker if present, else the whole reply, THEN check
+        // emptiness — checking before extraction would let an all-preamble reply with only a
+        // bare trailing marker pass the guard while still yielding an empty child prompt.
+        let child = gepa::after_marker(&text, "=== NEW SYSTEM PROMPT ===");
+        anyhow::ensure!(!child.trim().is_empty(), "reflector returned empty output");
+        Ok(child)
     };
 
     let result = gepa_graph::run(cfg, dataset, &reflect)?;
