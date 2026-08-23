@@ -85,7 +85,7 @@ pub fn parse_and_validate_upsert(
 ///
 /// Returns `(nodes, edges, notes)`: `notes` carries `ops::parse_upsert_payload`'s own parse notes
 /// (tolerant node/edge-shape fixups) plus one line per dropped-for-type node.
-fn parse_and_filter_upsert(
+pub(crate) fn parse_and_filter_upsert(
     call: &Value,
     ont: &Ontology,
 ) -> (Vec<ops::UpsertNode>, Vec<ops::UpsertEdge>, Vec<String>) {
@@ -105,7 +105,7 @@ fn parse_and_filter_upsert(
 /// closure). `dump` lines for a written node are `"node <id> [<type>] <label>..."`; `merged` holds
 /// `(requested_id, canonical_id)` pairs for nodes that deduped into an existing one. Empty when
 /// the call was rejected (nothing was written) — `dump`/`merged` are only populated on success.
-fn upserted_node_ids(out: &ops::UpsertOutcome) -> Vec<String> {
+pub(crate) fn upserted_node_ids(out: &ops::UpsertOutcome) -> Vec<String> {
     if out.rejected {
         return Vec::new();
     }
@@ -217,7 +217,7 @@ pub fn build_tools_schema(graph_upsert_description: &str) -> Value {
 /// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
 /// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
 /// registry (`glossa::tools::registry`), same as [`build_tools_schema`].
-fn extract_tools_schema(graph_upsert_description: &str) -> Value {
+pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
     let mut tools: Vec<Value> = glossa::tools::registry::registry()
         .into_iter()
         .filter(|d| matches!(d.name, "search" | "read" | "grep"))

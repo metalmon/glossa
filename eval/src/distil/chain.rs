@@ -7,26 +7,29 @@
 //! types and lets the model type each node per the ontology's schema-graph, backward-chaining
 //! from a gold answer to a reified question entry node.
 //!
-//! `parse_and_validate_upsert` already permits any declared ontology `entity_type` under a
-//! strict ontology — `Ontology::validate_node` accepts `CORE_NODES`, the flat `Fact` type, AND
-//! any declared `entity_types`/`constraint_types`. The `Fact`-only restriction `extract_doc` uses
-//! lives solely in ITS prompt text (and, before this task, in `build_tools_schema`'s hardcoded
-//! tool description), never in the shared parse/validate helper. So distil reuses
-//! `parse_and_validate_upsert` and `build_tools_schema` unchanged in shape, passing only a
-//! different description string (see `build_tools_schema`'s doc comment).
+//! Routed through the CANONICAL write path (single-write-source plan, Task 3): the SAME
+//! `extract_tools_schema` / `parse_and_filter_upsert` / `ops::graph_upsert` triad
+//! `build::extract::extract_doc` uses (Task 2) — label-based `ops::UpsertNode`/`ops::UpsertEdge`
+//! (no agent-assigned `id`), a partial-apply type filter via `Ontology::validate_node` (which
+//! permits any DECLARED ontology entity type under a strict ontology, not just `Fact` — see
+//! `parse_and_filter_upsert`'s doc comment in `build/extract.rs`), then `ops::graph_upsert`
+//! itself, which auto-derives a MENTIONS edge from a node's `<doc>#n` source_path (Task 1). THIS
+//! is what fixes the distil grounding gap: a typed node (e.g. `Symptom`) carrying a source_path
+//! is now grounded automatically, which it was NOT under the old `agent::apply_upsert` path (no
+//! such auto-derive existed there).
 //!
 //! Corpus tools (`search`/`read`/`grep`) are left doc-UNSCOPED here (unlike `extract_doc`'s
 //! `scope_to_doc`): a gold `(Q, A)` pair may be grounded anywhere in the corpus, not one document.
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
-use crate::build::extract::{build_tools_schema, parse_and_validate_upsert};
+use crate::build::extract::{extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::distil::schema_graph_block;
 use crate::lab::LabConfig;
 use crate::workspace::KbxPaths;
 use anyhow::anyhow;
-use glossa::graph::agent::apply_upsert;
 use glossa::graph::ontology::Ontology;
+use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
@@ -51,27 +54,33 @@ pub struct DistilStats {
 /// this tells the model it may use any of the ontology's declared entity types (per the
 /// schema-graph block already in the system prompt) and to honor each type's
 /// `requires_grounding`/`requires_validity` flags — nothing Fact-specific, nothing hardcoded to
-/// a domain's type names.
+/// a domain's type names. LABEL-based (matches `extract_tools_schema`'s canonical shape): nodes
+/// have no `id`, a bad `node_type` drops just that node (not the whole call), and edges reference
+/// endpoints by label or a `<path>#<n>` section ref.
 const DISTIL_GRAPH_UPSERT_DESC: &str =
     "Write reasoning nodes/edges for this gold's backward-anchored chain. Each node needs a \
-     unique `id` (your choice), a `node_type` matching one of the ontology's declared entity \
-     types listed above (any other value rejects the WHOLE call), a `label`, and `aliases` \
-     listing the entities it mentions. Ground every node whose type is marked \
-     `[requires_grounding]` with a MENTIONS edge from it to the section you read it from (`to`: \
-     `<path>#n`); the question's reified entry node is usually left UNgrounded (the corpus holds \
-     general knowledge, not this specific question) unless its type requires grounding. For a \
-     node whose type is marked `[requires_validity]`, set `valid_from`/`valid_to` from what the \
-     corpus states or implies. Connect nodes with edges typed as one of the ontology's declared \
-     relations, respecting each relation's declared from/to types.";
+     `node_type` matching one of the ontology's declared entity types listed above (any other \
+     value drops just that node, not the whole call), a `label`, and `aliases` listing the \
+     entities it mentions. Reference edge endpoints by LABEL (nodes have no id here), or as a \
+     document section `<path>#<n>`. Ground every node whose type is marked `[requires_grounding]` \
+     with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`) — or simply \
+     give the node itself a `source_path` of `<path>#n` and grounding is derived automatically; \
+     the question's reified entry node is usually left UNgrounded (the corpus holds general \
+     knowledge, not this specific question) unless its type requires grounding. For a node whose \
+     type is marked `[requires_validity]`, set `valid_from`/`valid_to` from what the corpus states \
+     or implies. Connect nodes with edges typed as one of the ontology's declared relations, \
+     respecting each relation's declared from/to types.";
 
 /// Run the agentic backward-chain pass for ONE gold `(q, a)`: a strong model (the `lab.distil`
 /// endpoint) reads the corpus (unscoped `search`/`read`/`grep`) and calls `graph_upsert` to
 /// ground the answer as a terminal node, backward-chain the intermediate typed nodes/relations,
 /// and reify the question as an entry node — per the corpus's own ontology schema-graph
-/// (`schema_graph_block`). Each `graph_upsert` call is parsed/validated
-/// (`parse_and_validate_upsert`, ontology-permitting — NOT `Fact`-pinned) then applied
-/// (`apply_upsert`, temporality-aware, provenance-stamped). Returns how many nodes/edges/
-/// groundings were written; errors clearly if `lab.distil` is unset.
+/// (`schema_graph_block`). Each `graph_upsert` call is parsed/filtered
+/// (`parse_and_filter_upsert`, ontology-permitting — NOT `Fact`-pinned, partial-apply on a
+/// bad type) then written through the CANONICAL `ops::graph_upsert` (the same write path the
+/// MCP server uses: resolves edges by label, auto-grounds from a `<path>#n` source_path,
+/// provenance-stamped). Returns how many nodes/edges/groundings were written; errors clearly if
+/// `lab.distil` is unset.
 pub fn chain_one_gold(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -106,7 +115,7 @@ pub fn chain_one_gold(
     let model = distil_ep.model.clone();
     let api_key = distil_ep.resolve_key();
     let timeout = Duration::from_secs(distil_ep.timeout_secs);
-    let tools = build_tools_schema(DISTIL_GRAPH_UPSERT_DESC);
+    let tools = extract_tools_schema(DISTIL_GRAPH_UPSERT_DESC);
 
     let chat = |messages: &[Value]| {
         lmstudio_chat(
@@ -127,31 +136,38 @@ pub fn chain_one_gold(
 
     let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
         if name == "graph_upsert" {
-            match parse_and_validate_upsert(args, ont) {
-                Ok((nodes, edges)) => {
-                    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-                    let grounded = edges
-                        .iter()
-                        .filter(|e| e.edge_type == glossa::graph::MENTIONS)
-                        .count();
-                    match apply_upsert(&g, ont, nodes, edges, now, root) {
-                        Ok(r) => {
-                            stats.nodes += r.nodes_written;
-                            stats.edges += r.edges_written;
-                            stats.grounded += grounded;
-                            (
-                                format!(
-                                    "upserted {} node(s), {} edge(s)",
-                                    r.nodes_written, r.edges_written
-                                ),
-                                ids,
-                            )
-                        }
-                        Err(e) => (format!("graph_upsert REJECTED: {e}"), ids),
-                    }
-                }
-                Err(e) => (format!("graph_upsert REJECTED: {e}"), Vec::new()),
+            // parse_and_filter_upsert: canonical label-based parse (ops::parse_upsert_payload)
+            // plus a partial-apply type filter — a node whose node_type the ontology doesn't
+            // declare is dropped with a reason; every well-typed sibling (any of the ontology's
+            // declared entity types, not just Fact — distil is NOT Fact-pinned) still reaches
+            // ops::graph_upsert, the SAME write path the MCP server uses.
+            let (nodes, edges, notes) = parse_and_filter_upsert(args, ont);
+            let out = ops::graph_upsert(&idx, &g, ont, nodes, edges, now);
+            if !out.rejected {
+                stats.nodes += out.nodes;
+                stats.edges += out.edges;
+                // Groundings actually written (explicit MENTIONS the model sent, plus any
+                // ops::graph_upsert auto-derived from a node's `<path>#n` source_path per Task 1)
+                // — read back from the outcome's dump, not the pre-write request.
+                let mentions_marker = format!("-{}->", glossa::graph::MENTIONS);
+                stats.grounded += out
+                    .dump
+                    .iter()
+                    .filter(|l| l.starts_with("edge ") && l.contains(&mentions_marker))
+                    .count();
             }
+            // Surfaced ids for the unproductive-streak novelty tracker (see extract_doc's exec
+            // arm for the full rationale): the ids of nodes this call actually wrote or merged
+            // into.
+            let ids = upserted_node_ids(&out);
+            // Feed drop reasons back to the model: parse_and_filter_upsert's own notes (parse
+            // fixups + type-dropped nodes) first, then ops::graph_upsert's formatted response.
+            let message = if notes.is_empty() {
+                out.message
+            } else {
+                format!("{}\n{}", notes.join("\n"), out.message)
+            };
+            (message, ids)
         } else {
             let (body, ids, _images) =
                 glossa_tools::exec(name, args, root, &idx, None, &spec, &trace);
@@ -175,8 +191,8 @@ mod tests {
     use super::*;
 
     /// Strict typed ontology declaring one non-`Fact` entity type — guards that distil is not
-    /// `Fact`-pinned: `parse_and_validate_upsert` must accept a declared ontology type here and
-    /// reject an undeclared one, exactly as it does for `Fact` under `build::extract`'s tests.
+    /// `Fact`-pinned: `parse_and_filter_upsert` (the canonical ops-path filter, reused from
+    /// `build::extract`) must accept a declared ontology type here and drop an undeclared one.
     const TYPED_ONT: &str = r#"
 [entities.Symptom]
 props = []
@@ -191,26 +207,72 @@ strict = true
         Ontology::parse(TYPED_ONT).expect("typed test ontology parses")
     }
 
-    #[test]
-    fn parse_upsert_accepts_declared_non_fact_type_under_strict_ontology() {
-        let ont = typed_ontology();
-        let call = serde_json::json!({
-            "nodes": [{"id": "s1", "node_type": "Symptom", "label": "x", "source_path": "d.md"}],
-            "edges": []
-        });
-        let (nodes, _edges) = parse_and_validate_upsert(&call, &ont).unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_type, "Symptom");
+    /// Index a stub document so `source_path`/section refs against `path` resolve — mirrors
+    /// `build::extract`'s own test helper of the same purpose.
+    fn write_doc(idx: &DocIndex, path: &str) {
+        idx.write_chunks(&[glossa::model::Chunk {
+            doc_path: path.into(),
+            location: "S1".into(),
+            file_type: "md".into(),
+            text: "stub content".into(),
+        }])
+        .unwrap();
     }
 
+    /// The reroute's whole point (single-write-source plan, Task 3): a declared non-`Fact` typed
+    /// node (`Symptom`) carrying a `<doc>#n` source_path, upserted via the distil path
+    /// (`parse_and_filter_upsert` -> `ops::graph_upsert`), writes AND is grounded automatically —
+    /// a MENTIONS edge appears from it, with no explicit MENTIONS sent. This is the auto-derive
+    /// (Task 1) reached through the reroute; it did NOT happen under the old `agent::apply_upsert`
+    /// path (no such auto-derive existed there), which was the distil grounding gap.
     #[test]
-    fn parse_upsert_rejects_undeclared_type_under_strict_ontology() {
+    fn distil_writes_typed_node_and_grounds_from_source_path() {
+        let dir = tempfile::tempdir().unwrap();
         let ont = typed_ontology();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        write_doc(&idx, "d.md");
+
         let call = serde_json::json!({
-            "nodes": [{"id": "s1", "node_type": "Bogus", "label": "x", "source_path": "d.md"}],
+            "nodes": [{"node_type": "Symptom", "label": "x", "source_path": "d.md#1"}],
             "edges": []
         });
-        let err = parse_and_validate_upsert(&call, &ont).unwrap_err();
-        assert!(err.to_string().contains("Bogus"));
+        let (nodes, edges, notes) = parse_and_filter_upsert(&call, &ont);
+        assert!(notes.is_empty(), "no node should be filtered: {notes:?}");
+        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1, "the Symptom node must be written, not dropped");
+        assert_eq!(
+            out.edges, 1,
+            "the auto-derived MENTIONS edge must be written: {}",
+            out.message
+        );
+
+        let id = ops::id_for(&ont, "Symptom", "x");
+        let mentions: Vec<_> = g
+            .outgoing(&id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == glossa::graph::MENTIONS)
+            .collect();
+        assert_eq!(mentions.len(), 1, "grounded from source_path: {mentions:?}");
+        assert_eq!(mentions[0].to, "d.md#1");
+    }
+
+    /// An undeclared type is DROPPED with a reason naming it (partial-apply), not rejecting the
+    /// whole call — matches `build::extract`'s partial-apply behavior on the same shared filter.
+    #[test]
+    fn distil_drops_undeclared_type_with_reason() {
+        let ont = typed_ontology();
+        let call = serde_json::json!({
+            "nodes": [{"node_type": "Bogus", "label": "x", "source_path": "d.md#1"}],
+            "edges": []
+        });
+        let (nodes, _edges, notes) = parse_and_filter_upsert(&call, &ont);
+        assert!(nodes.is_empty(), "the undeclared-type node must be dropped");
+        assert!(
+            notes.iter().any(|n| n.contains("Bogus")),
+            "the drop reason must name the offending type: {notes:?}"
+        );
     }
 }
