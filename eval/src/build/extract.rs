@@ -64,11 +64,29 @@ pub fn parse_and_validate_upsert(
     Ok((nodes, edges))
 }
 
-/// OpenAI-function tool schema for the build agent: `search`/`read`/`grep` descriptors come
-/// straight from the shared registry (`glossa::tools::registry`) so their name/description/
-/// schema can't drift from the eval reader's; `graph_upsert` is build-specific (it takes
+/// The `graph_upsert` tool description `extract_doc` (`kbx build`) uses: pinned to `Fact`. Kept
+/// as a named constant so the call site can pass it explicitly to [`build_tools_schema`],
+/// guaranteeing `kbx build`'s tool schema stays byte-identical now that the description is a
+/// parameter (see `build_tools_schema`'s doc comment for why: `kbx distil` needs the same
+/// schema shape but a different description advertising the ontology's own entity types).
+const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this document STATES. \
+     Each node needs a unique `id` (your choice), `node_type` MUST be `Fact` (any other value \
+     rejects the WHOLE call), a `label`, and `aliases` listing the entities it mentions. Ground \
+     every node with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`).";
+
+/// OpenAI-function tool schema for a graph-writing agent: `search`/`read`/`grep` descriptors
+/// come straight from the shared registry (`glossa::tools::registry`) so their name/description/
+/// schema can't drift from the eval reader's; `graph_upsert` is agent-specific (it takes
 /// `NodeSpec`/`EdgeSpec` — agent-assigned ids — not the MCP surface's label-only upsert).
-fn build_tools_schema() -> Value {
+///
+/// `graph_upsert`'s JSON Schema itself never hardcoded `Fact` — `node_type` has always been a
+/// free string, since `Ontology::validate_node` (not this schema) is what enforces which types
+/// are legal. Only the tool's `description` TEXT was build-specific ("node_type MUST be `Fact`").
+/// So this takes that description as a parameter: `kbx build`'s `extract_doc` passes
+/// [`FACT_ONLY_GRAPH_UPSERT_DESC`] (byte-identical to the old hardcoded text — build's tool
+/// schema is unchanged), while `kbx distil`'s `chain_one_gold` passes its own text advertising
+/// the ontology's declared entity types instead.
+pub fn build_tools_schema(graph_upsert_description: &str) -> Value {
     let mut tools: Vec<Value> = glossa::tools::registry::registry()
         .into_iter()
         .filter(|d| matches!(d.name, "search" | "read" | "grep"))
@@ -87,7 +105,7 @@ fn build_tools_schema() -> Value {
         "type": "function",
         "function": {
             "name": "graph_upsert",
-            "description": "Write reasoning nodes/edges this document STATES. Each node needs a unique `id` (your choice), `node_type` MUST be `Fact` (any other value rejects the WHOLE call), a `label`, and `aliases` listing the entities it mentions. Ground every node with a MENTIONS edge from it to the section you read it from (`to`: `<path>#n`).",
+            "description": graph_upsert_description,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -190,7 +208,7 @@ pub fn extract_doc(
     let model = lab.model.model.clone();
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
-    let tools = build_tools_schema();
+    let tools = build_tools_schema(FACT_ONLY_GRAPH_UPSERT_DESC);
 
     let chat = |messages: &[Value]| {
         lmstudio_chat(

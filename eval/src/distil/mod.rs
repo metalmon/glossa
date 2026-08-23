@@ -9,6 +9,9 @@
 
 use glossa::graph::ontology::Ontology;
 
+mod chain;
+pub use chain::{chain_one_gold, DistilStats};
+
 /// Render the ontology's schema-graph (entity types + typed relations) as a compact text
 /// block suitable for injecting into a prompt. Lists every `entity_type`, marking those that
 /// `requires_grounding` and/or `requires_validity`, followed by every declared relation as
