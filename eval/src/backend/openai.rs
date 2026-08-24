@@ -170,6 +170,32 @@ fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// True when an error body reflects a transient UPSTREAM failure of the gateway's own backend (its
+/// fetch/predict to the model dropped, timed out, or was overloaded) rather than a fault in OUR
+/// request. Some OpenAI-compatible gateways (e.g. opencode zen) surface these with a client-error
+/// status (400) or an HTTP-200 `{"error"}` body, so status code alone misclassifies them as fatal.
+/// A genuine bad-request — bad key, malformed payload, unknown model — matches none of these and
+/// still fails fast, so a real config bug isn't hidden behind seconds of backoff.
+fn is_transient_upstream(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    [
+        "fetch failed",
+        "predict request failed",
+        "engine protocol",
+        "upstream",
+        "timed out",
+        "timeout",
+        "temporarily",
+        "overloaded",
+        "connection reset",
+        "bad gateway",
+        "service unavailable",
+        "try again",
+    ]
+    .iter()
+    .any(|needle| b.contains(needle))
+}
+
 /// Sync HTTP bridge: POST our JSON request `body` (the `{model, messages, tools, temperature}` shape
 /// `lmstudio_chat`/`chat_once` build) to an OpenAI-compatible `/v1/chat/completions` endpoint via
 /// `reqwest` and return the assistant `message` object (`choices[0].message`) as a raw `Value`.
@@ -227,7 +253,13 @@ fn chat_http(
                 Err(e) => return (true, Err(anyhow!("read chat response body: {e}"))),
             };
             if !status.is_success() {
-                let retryable = status.as_u16() == 429 || status.is_server_error();
+                // 429 / 5xx are transient; so is a 4xx (often 400) whose BODY is an UPSTREAM
+                // failure the gateway surfaced with a client-error status (e.g. opencode zen's
+                // "Engine protocol predict request failed: fetch failed"). A genuine bad-request
+                // (bad key, malformed payload, unknown model) does NOT match and still fails fast.
+                let retryable = status.as_u16() == 429
+                    || status.is_server_error()
+                    || is_transient_upstream(&text);
                 return (
                     retryable,
                     Err(anyhow!(
@@ -242,7 +274,10 @@ fn chat_http(
                     // `{"error": …}` body instead of a non-2xx status — surface it, don't discard
                     // it behind a vague "no choices" message.
                     if let Some(err) = v.get("error") {
-                        (false, Err(anyhow!("chat endpoint returned an error: {err}")))
+                        // Some gateways return HTTP 200 with an `{"error": …}` body; if that error
+                        // is an upstream transient (same wording as the non-2xx path), retry it too.
+                        let retryable = is_transient_upstream(&err.to_string());
+                        (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
                     } else {
                         match v.pointer("/choices/0/message").cloned() {
                             Some(m) => (false, Ok(m)),
@@ -548,6 +583,28 @@ fn execute_tool(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn transient_upstream_retries_but_real_bad_request_fails_fast() {
+        // Upstream failures a gateway surfaces with a 400 / 200-error body — retry these.
+        for transient in [
+            r#"{"error":"Engine protocol predict request failed: fetch failed"}"#,
+            "upstream connect error",
+            "The service is temporarily overloaded, try again",
+            "502 Bad Gateway",
+            "read timed out",
+        ] {
+            assert!(is_transient_upstream(transient), "should retry: {transient}");
+        }
+        // Genuine client faults — must fail fast, never retry.
+        for fatal in [
+            r#"{"error":{"message":"Invalid API key provided"}}"#,
+            r#"{"error":{"message":"model 'foo' does not exist"}}"#,
+            r#"{"error":{"message":"invalid 'messages': malformed request"}}"#,
+        ] {
+            assert!(!is_transient_upstream(fatal), "should fail fast: {fatal}");
+        }
+    }
 
     /// Default `on_repeat` for tests that don't exercise NBA: a static nudge.
     fn nudge(name: &str, _args: &Value) -> String {
