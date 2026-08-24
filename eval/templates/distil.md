@@ -30,6 +30,9 @@ early link) and asks about something only reachable by walking forward through t
 something answerable from the seed's own text in isolation. Phrase it the way a person unfamiliar
 with the chain's shortcuts would ask it, and give the answer as the grounded terminal fact itself —
 concise, in the corpus's own words where possible, not a summary or paraphrase you constructed.
+Write BOTH the question and the answer in the same language as the corpus's source text — the words
+you read while walking the chain — not in the language of these instructions. If the grounded text
+is in one language, a question or answer in another language is wrong even when its meaning is right.
 
 Before you emit anything, judge your own work honestly. Ask: could someone answer this question
 correctly just from the seed, or from general knowledge, without ever needing the intermediate
