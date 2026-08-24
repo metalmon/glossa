@@ -101,11 +101,12 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
-        /// Size guard (stage 3, prompt-fit not recall): cap the number of facts fed to a single
-        /// entity-group bridge-judge model call. A group whose entity has more member facts than
-        /// this is judged on only the first N (deterministic order), with the truncation logged.
-        /// 0 disables the cap. Default 40.
-        #[arg(long = "bridge-max-facts", default_value_t = 40)]
+        /// Optional size guard (stage 3): cap the facts fed to one entity-group bridge-judge call.
+        /// DEFAULT 0 = NO CAP — judge every group whole and trust the model to return no links for a
+        /// generic/co-mention-only entity (that is the whole point of the group judge); the model's
+        /// large context fits realistic groups. Set a positive N only as an escape hatch for a
+        /// pathologically huge group, where it judges the first N (deterministic) and logs the drop.
+        #[arg(long = "bridge-max-facts", default_value_t = 0)]
         bridge_max_facts: usize,
         /// Feed images the `read` tool returns (page rasters / embedded figures) to the
         /// extraction model as vision input, so scanned/image-only content can still yield
