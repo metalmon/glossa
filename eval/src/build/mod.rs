@@ -62,6 +62,10 @@ pub struct BuildOpts {
     pub resume: bool,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
+    /// Candidate frequency prune (stage 2): an alias grounded across more than this many documents
+    /// is too generic to anchor a cross-doc reasoning link and is skipped, so the judge doesn't burn
+    /// a model call per noise pair. `0` disables the prune. See `candidates::candidate_pairs`.
+    pub bridge_max_docs: usize,
     /// Feed the images `read` returns (page rasters / embedded figures) to the extraction model
     /// as vision input, so scanned/image-only content can still yield grounded facts. OFF by
     /// default: the text-only extraction path stays byte-identical to today, and images are large
@@ -314,7 +318,8 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
     if run_candidates_stage || run_judge_stage {
         // Re-open fresh: extraction (if it ran above) wrote through its own connections.
         let g = GraphStore::open(&paths.root).context("open graph store for candidates/judge")?;
-        let pairs = candidate_pairs(&g).context("computing cross-doc candidates")?;
+        let pairs = candidate_pairs(&g, opts.bridge_max_docs)
+            .context("computing cross-doc candidates")?;
         if run_candidates_stage {
             println!("candidates: {} cross-doc pair(s)", pairs.len());
         }
@@ -406,6 +411,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         run_build(paths, opts).unwrap();
@@ -471,6 +477,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         run_build(paths, opts).unwrap();
@@ -478,7 +485,7 @@ mod tests {
         // The stage itself only prints; verify the underlying mechanical pairing it drives
         // directly, over the same fixture.
         let g = GraphStore::open(root).unwrap();
-        let pairs = candidate_pairs(&g).unwrap();
+        let pairs = candidate_pairs(&g, 0).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].entity, "shared");
     }
@@ -696,6 +703,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         let report = run_build(paths, opts).unwrap();
@@ -724,6 +732,7 @@ mod tests {
             force: true,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         let report = run_build(paths, opts).unwrap();
@@ -749,6 +758,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         run_build(paths, opts).unwrap();
@@ -819,6 +829,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            bridge_max_docs: 0,
             vision: false,
         };
         run_build(paths, opts).unwrap();

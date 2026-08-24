@@ -138,7 +138,7 @@ pub fn run_judge(
         let b_chunk = chunk_text(root, idx, &pair.b, g);
 
         let yes = judge_pair(
-            &lab.model,
+            lab.bridge.as_ref().unwrap_or(&lab.model),
             bridge_md,
             &node_a.label,
             &a_chunk,

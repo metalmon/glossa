@@ -52,6 +52,11 @@ pub struct LabConfig {
     /// (grounded synthetic-gold generation).
     #[serde(default)]
     pub distil: Option<Endpoint>,
+    /// Endpoint for `kbx build`'s stage-3 bridge judge (a binary "is this a real cross-doc link?"
+    /// per candidate pair). A cheap/fast model suffices — falls back to `model` when unset. Point it
+    /// at a small local model to keep a large candidate set from costing a strong-model call each.
+    #[serde(default)]
+    pub bridge: Option<Endpoint>,
 }
 
 impl LabConfig {

@@ -42,7 +42,12 @@ fn grounding_doc(g: &GraphStore, node_id: &str) -> Result<Option<String>> {
 /// excluded from the key — see module docs), keeping only entities whose nodes span ≥2 distinct
 /// grounding documents, and emit each cross-doc node pair once (deduped by unordered id pair,
 /// even when two nodes share more than one alias).
-pub fn candidate_pairs(g: &GraphStore) -> Result<Vec<CandidatePair>> {
+/// `max_alias_docs`: an alias grounded across MORE than this many distinct documents is too generic
+/// to anchor a real cross-doc reasoning link (a common term like a product family or a unit name
+/// recurs everywhere and would emit C(n,2) noise pairs the judge then burns a model call on each).
+/// Such aliases are skipped. `0` disables the cap (every cross-doc alias anchors pairs — the old
+/// behavior). A specific entity that genuinely bridges a few documents stays under the cap.
+pub fn candidate_pairs(g: &GraphStore, max_alias_docs: usize) -> Result<Vec<CandidatePair>> {
     // key -> [(node_id, doc)], in a BTreeMap so iteration (and emission) order is deterministic
     // regardless of sqlite row order.
     let mut by_key: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
@@ -72,6 +77,11 @@ pub fn candidate_pairs(g: &GraphStore) -> Result<Vec<CandidatePair>> {
         members.dedup();
         let distinct_docs: HashSet<&str> = members.iter().map(|(_, d)| d.as_str()).collect();
         if distinct_docs.len() < 2 {
+            continue;
+        }
+        // Frequency prune: skip aliases spread across too many documents — generic terms whose
+        // cross-doc pairs are almost all noise. `max_alias_docs == 0` disables the cap.
+        if max_alias_docs != 0 && distinct_docs.len() > max_alias_docs {
             continue;
         }
         for i in 0..members.len() {
@@ -152,11 +162,26 @@ mod tests {
         put_fact(&g, "f1", "n1", ["X"], "a.md#1");
         put_fact(&g, "f2", "n2", ["X"], "b.md#1");
         put_fact(&g, "f3", "n3", ["Y"], "b.md#1");
-        let pairs = candidate_pairs(&g).unwrap();
+        let pairs = candidate_pairs(&g, 0).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].entity, "x");
         let ids: HashSet<&str> = [pairs[0].a.as_str(), pairs[0].b.as_str()].into_iter().collect();
         assert_eq!(ids, ["f1", "f2"].into_iter().collect());
+    }
+
+    #[test]
+    fn max_alias_docs_prunes_over_frequent_aliases() {
+        // Alias "X" spans 3 docs (generic); alias "Y" spans exactly 2 (specific).
+        let g = mem_graph();
+        put_fact(&g, "f1", "n1", ["X", "Y"], "a.md#1");
+        put_fact(&g, "f2", "n2", ["X", "Y"], "b.md#1");
+        put_fact(&g, "f3", "n3", ["X"], "c.md#1");
+        // Unlimited: X emits its cross-doc pairs, Y emits its pair.
+        assert!(candidate_pairs(&g, 0).unwrap().iter().any(|p| p.entity == "x"));
+        // Cap at 2 docs: X (3 docs) is pruned; Y (2 docs) survives.
+        let capped = candidate_pairs(&g, 2).unwrap();
+        assert!(capped.iter().all(|p| p.entity != "x"), "over-frequent alias must be pruned");
+        assert!(capped.iter().any(|p| p.entity == "y"), "specific alias must survive");
     }
 
     #[test]
@@ -165,7 +190,7 @@ mod tests {
         let g = mem_graph();
         put_fact(&g, "f1", "n1", ["X"], "a.md#1");
         put_fact(&g, "f2", "n2", ["X"], "a.md#2");
-        let pairs = candidate_pairs(&g).unwrap();
+        let pairs = candidate_pairs(&g, 0).unwrap();
         assert!(pairs.is_empty());
     }
 
@@ -176,7 +201,7 @@ mod tests {
         let g = mem_graph();
         put_fact(&g, "f1", "shared", ["X"], "a.md#1");
         put_fact(&g, "f2", "shared", ["Y"], "b.md#1");
-        let pairs = candidate_pairs(&g).unwrap();
+        let pairs = candidate_pairs(&g, 0).unwrap();
         assert!(pairs.is_empty());
     }
 
@@ -202,7 +227,7 @@ mod tests {
             },
         })
         .unwrap();
-        let pairs = candidate_pairs(&g).unwrap();
+        let pairs = candidate_pairs(&g, 0).unwrap();
         assert_eq!(pairs.len(), 1);
         assert!(!pairs.iter().any(|p| p.a == "doc:c" || p.b == "doc:c"));
     }

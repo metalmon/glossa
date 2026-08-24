@@ -101,6 +101,11 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Candidate frequency prune (stage 2): skip an alias grounded across more than N documents
+        /// — a generic term whose cross-doc pairs are mostly noise the judge would burn a model call
+        /// on. 0 disables the prune. Default 5.
+        #[arg(long = "bridge-max-docs", default_value_t = 5)]
+        bridge_max_docs: usize,
         /// Feed images the `read` tool returns (page rasters / embedded figures) to the
         /// extraction model as vision input, so scanned/image-only content can still yield
         /// grounded facts. OFF by default: the text-only extraction path stays byte-identical to
@@ -250,6 +255,7 @@ fn main() -> Result<()> {
             force,
             resume,
             no_progress,
+            bridge_max_docs,
             vision,
         } => {
             let paths = workspace::resolve(path);
@@ -262,6 +268,7 @@ fn main() -> Result<()> {
                     force,
                     resume,
                     no_progress,
+                    bridge_max_docs,
                     vision,
                 },
             )?;
@@ -750,6 +757,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
+                bridge_max_docs: _,
                 vision,
                 path,
             } => {
@@ -793,6 +801,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
+                bridge_max_docs: _,
                 vision,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
