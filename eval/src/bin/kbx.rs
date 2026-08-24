@@ -101,11 +101,12 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
-        /// Candidate frequency prune (stage 2): skip an alias grounded across more than N documents
-        /// — a generic term whose cross-doc pairs are mostly noise the judge would burn a model call
-        /// on. 0 disables the prune. Default 5.
-        #[arg(long = "bridge-max-docs", default_value_t = 5)]
-        bridge_max_docs: usize,
+        /// Size guard (stage 3, prompt-fit not recall): cap the number of facts fed to a single
+        /// entity-group bridge-judge model call. A group whose entity has more member facts than
+        /// this is judged on only the first N (deterministic order), with the truncation logged.
+        /// 0 disables the cap. Default 40.
+        #[arg(long = "bridge-max-facts", default_value_t = 40)]
+        bridge_max_facts: usize,
         /// Feed images the `read` tool returns (page rasters / embedded figures) to the
         /// extraction model as vision input, so scanned/image-only content can still yield
         /// grounded facts. OFF by default: the text-only extraction path stays byte-identical to
@@ -255,7 +256,7 @@ fn main() -> Result<()> {
             force,
             resume,
             no_progress,
-            bridge_max_docs,
+            bridge_max_facts,
             vision,
         } => {
             let paths = workspace::resolve(path);
@@ -268,14 +269,14 @@ fn main() -> Result<()> {
                     force,
                     resume,
                     no_progress,
-                    bridge_max_docs,
+                    bridge_max_facts,
                     vision,
                 },
             )?;
             println!(
-                "build report: {} doc(s) extracted, {} pair(s) judged",
+                "build report: {} doc(s) extracted, {} group(s) judged",
                 report.docs_extracted.len(),
-                report.pairs_judged
+                report.groups_judged
             );
             Ok(())
         }
@@ -757,7 +758,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
-                bridge_max_docs: _,
+                bridge_max_facts: _,
                 vision,
                 path,
             } => {
@@ -801,7 +802,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
-                bridge_max_docs: _,
+                bridge_max_facts: _,
                 vision,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));

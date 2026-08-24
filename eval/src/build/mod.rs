@@ -12,12 +12,12 @@ pub mod finalize;
 pub mod incremental;
 pub mod judge;
 
-pub use candidates::{candidate_pairs, CandidatePair};
+pub use candidates::{candidate_groups, CandidateGroup};
 pub use chunks::chunk_text;
 pub use extract::{extract_doc, ExtractStats};
 pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
-pub use judge::{judge_pair, run_judge, JudgeStats};
+pub use judge::{judge_group, run_judge, JudgeStats};
 
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
@@ -62,10 +62,11 @@ pub struct BuildOpts {
     pub resume: bool,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
-    /// Candidate frequency prune (stage 2): an alias grounded across more than this many documents
-    /// is too generic to anchor a cross-doc reasoning link and is skipped, so the judge doesn't burn
-    /// a model call per noise pair. `0` disables the prune. See `candidates::candidate_pairs`.
-    pub bridge_max_docs: usize,
+    /// Size guard (stage 3, prompt-fit not recall): cap the number of facts fed to a single
+    /// group-judge model call. A group whose entity has more member facts than this is judged on
+    /// only the first `bridge_max_facts` (deterministic order), with the truncation logged — see
+    /// `judge::cap_facts`. `0` is treated as "no cap".
+    pub bridge_max_facts: usize,
     /// Feed the images `read` returns (page rasters / embedded figures) to the extraction model
     /// as vision input, so scanned/image-only content can still yield grounded facts. OFF by
     /// default: the text-only extraction path stays byte-identical to today, and images are large
@@ -110,10 +111,10 @@ pub struct BuildReport {
     /// Corpus-relative paths of every document `extract_doc` actually ran over this pass, in
     /// enumeration order. Empty when the Extract stage didn't run at all (e.g. `--stage judge`).
     pub docs_extracted: Vec<String>,
-    /// Candidate pairs the Judge stage actually sent to the model this pass (mirrors
-    /// `JudgeStats::judged`; a pair already checkpointed from a prior run doesn't count). Zero
+    /// Candidate groups the Judge stage actually sent to the model this pass (mirrors
+    /// `JudgeStats::judged`; a group already checkpointed from a prior run doesn't count). Zero
     /// when the Judge stage didn't run at all.
-    pub pairs_judged: usize,
+    pub groups_judged: usize,
 }
 
 /// Model-free selection of which docs `run_build`'s extract stage processes this pass:
@@ -159,11 +160,17 @@ fn fold_for_match(s: &str) -> String {
 
 /// Invalidate the checkpoint marks that a `doc`'s dropped reasoning nodes made stale: `doc`'s own
 /// `extract:{doc}` mark (so a `--resume` run re-extracts it instead of silently skipping it and
-/// leaving it with ZERO reasoning nodes), plus every `judge:{a}#{b}` mark whose sanitized filename
-/// contains one of `dropped_ids`' folded form (its bridge edge, if any, was cascade-deleted along
-/// with the node it referenced — the checkpoint mark is the only stale trace of that judgment
-/// left, and leaving it would suppress a re-judge the dropped node needs). File-system-only, no
-/// model/network — safe to call unconditionally, whether or not either mark actually existed.
+/// leaving it with ZERO reasoning nodes), plus every stale `judge:*` mark. Group-judge checkpoint
+/// marks are keyed by ENTITY (`judge:group:<entity>`, sanitized to `judge_group_...`), not by
+/// member node id, so — unlike the retired pairwise marks (`judge:{a}#{b}`, whose filename embeds
+/// both ids) — a dropped node id can't be matched back to the group mark that covered it. Rather
+/// than track which entities a dropped node belonged to, every `judge_group_*` mark is invalidated
+/// whenever ANY node was dropped for this doc: coarser than strictly necessary (some unaffected
+/// groups get re-judged too), but safe — it never UNDER-invalidates, only over-invalidates, and a
+/// re-judged group with no real change still ends up with the same "no links"/linked outcome.
+/// (The `judge_` id-substring match below is kept for defense in depth in case any legacy pairwise
+/// marks are still on disk from a build checkpoint that predates this redesign.) File-system-only,
+/// no model/network — safe to call unconditionally, whether or not any mark actually existed.
 fn invalidate_marks_for(cp: &Checkpoint, doc: &str, dropped_ids: &[String]) -> Result<()> {
     cp.remove(&format!("extract:{doc}"))
         .with_context(|| format!("removing extract:{doc} checkpoint mark"))?;
@@ -172,7 +179,10 @@ fn invalidate_marks_for(cp: &Checkpoint, doc: &str, dropped_ids: &[String]) -> R
     }
     let folded: Vec<String> = dropped_ids.iter().map(|id| fold_for_match(id)).collect();
     for name in cp.done_ids() {
-        if name.starts_with("judge_") && folded.iter().any(|f| name.contains(f.as_str())) {
+        let legacy_pair_match =
+            name.starts_with("judge_") && folded.iter().any(|f| name.contains(f.as_str()));
+        let group_match = name.starts_with("judge_group_");
+        if legacy_pair_match || group_match {
             cp.remove_raw(&name)
                 .with_context(|| format!("removing stale judge checkpoint mark {name}"))?;
         }
@@ -318,10 +328,14 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
     if run_candidates_stage || run_judge_stage {
         // Re-open fresh: extraction (if it ran above) wrote through its own connections.
         let g = GraphStore::open(&paths.root).context("open graph store for candidates/judge")?;
-        let pairs = candidate_pairs(&g, opts.bridge_max_docs)
-            .context("computing cross-doc candidates")?;
+        let groups = candidate_groups(&g).context("computing cross-doc candidate groups")?;
         if run_candidates_stage {
-            println!("candidates: {} cross-doc pair(s)", pairs.len());
+            let total_facts: usize = groups.iter().map(|gr| gr.members.len()).sum();
+            println!(
+                "candidates: {} cross-doc group(s), {} fact(s)",
+                groups.len(),
+                total_facts
+            );
         }
 
         if run_judge_stage {
@@ -331,13 +345,23 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 .with_context(|| format!("reading {}", paths.bridge.display()))?;
 
             let idx = DocIndex::open_or_create(&paths.root).context("open doc index")?;
-            let pb = progress_bar(pairs.len(), opts.no_progress);
+            let pb = progress_bar(groups.len(), opts.no_progress);
             pb.set_message("judge");
-            let stats = run_judge(&paths.root, &lab, &bridge_md, &g, &idx, &pairs, &cp, &pb)
-                .context("judging candidate pairs")?;
+            let stats = run_judge(
+                &paths.root,
+                &lab,
+                &bridge_md,
+                &g,
+                &idx,
+                &groups,
+                &cp,
+                &pb,
+                opts.bridge_max_facts,
+            )
+            .context("judging candidate groups")?;
             pb.finish_and_clear();
-            println!("judge: {} judged, {} linked", stats.judged, stats.linked);
-            report.pairs_judged = stats.judged;
+            println!("judge: {} group(s) judged, {} link(s)", stats.judged, stats.linked);
+            report.groups_judged = stats.judged;
         }
     }
 
@@ -411,14 +435,14 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         run_build(paths, opts).unwrap();
     }
 
     #[test]
-    fn run_build_candidates_stage_computes_cross_doc_pairs() {
+    fn run_build_candidates_stage_computes_cross_doc_groups() {
         // No `.glossa/kbx/` here either — Candidates must not touch lab.toml/builder.md/
         // bridge.md, so this run must succeed with none of them present.
         let dir = tempfile::tempdir().unwrap();
@@ -477,17 +501,17 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         run_build(paths, opts).unwrap();
 
-        // The stage itself only prints; verify the underlying mechanical pairing it drives
+        // The stage itself only prints; verify the underlying mechanical grouping it drives
         // directly, over the same fixture.
         let g = GraphStore::open(root).unwrap();
-        let pairs = candidate_pairs(&g, 0).unwrap();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].entity, "shared");
+        let groups = candidate_groups(&g).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].entity, "shared");
     }
 
     /// `--stage extract` calls a live model, so `run_build` itself can't be unit-tested for the
@@ -703,7 +727,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         let report = run_build(paths, opts).unwrap();
@@ -732,7 +756,7 @@ mod tests {
             force: true,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         let report = run_build(paths, opts).unwrap();
@@ -758,7 +782,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         run_build(paths, opts).unwrap();
@@ -829,7 +853,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
-            bridge_max_docs: 0,
+            bridge_max_facts: 40,
             vision: false,
         };
         run_build(paths, opts).unwrap();
