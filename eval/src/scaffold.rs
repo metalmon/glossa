@@ -1,6 +1,6 @@
 //! `kbx init` scaffolding: writes a fresh `<root>/.glossa/kbx/` eval workspace — `lab.toml`
 //! (endpoints only, no corpus) + the editable `answer.md`/`builder.md`/`bridge.md`/`judge.md`
-//! prompt files + `reflect.md`/`distil.md` stubs + a starter `dataset.toml`, plus an empty
+//! prompt files + `reflect.md`/`reason.md` stubs + a starter `dataset.toml`, plus an empty
 //! `runs/` dir — from the embedded templates in `eval/templates/`. Without `--force`, an
 //! existing file is left untouched (skip-existing) so re-running `kbx init` on a live workspace
 //! never clobbers edits by accident.
@@ -15,12 +15,12 @@ const BUILDER_MD: &str = include_str!("../templates/builder.md");
 const BRIDGE_MD: &str = include_str!("../templates/bridge.md");
 const JUDGE_MD: &str = include_str!("../templates/judge.md");
 const REFLECT_MD: &str = include_str!("../templates/reflect.md");
+const REASON_MD: &str = include_str!("../templates/reason.md");
 const DISTIL_MD: &str = include_str!("../templates/distil.md");
-const SYNTH_MD: &str = include_str!("../templates/synth.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
 
 /// Write a fresh `kbx` workspace at `<root>/.glossa/kbx/`: `lab.toml`, `answer.md`, `builder.md`,
-/// `bridge.md`, `judge.md`, `reflect.md`, `distil.md`, `dataset.toml` (embedded templates) plus an
+/// `bridge.md`, `judge.md`, `reflect.md`, `reason.md`, `dataset.toml` (embedded templates) plus an
 /// empty `runs/` dir. Without `force`, a file that already exists is left as-is (skip-existing);
 /// with `force`, every template file is rewritten. Returns the `KbxPaths` for the scaffolded
 /// workspace so callers don't have to re-derive them.
@@ -39,8 +39,8 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
         (&paths.bridge, BRIDGE_MD),
         (&paths.judge, JUDGE_MD),
         (&paths.reflect, REFLECT_MD),
+        (&paths.reason, REASON_MD),
         (&paths.distil, DISTIL_MD),
-        (&paths.synth, SYNTH_MD),
         (&paths.dataset, DATASET_TOML),
     ];
 
@@ -73,17 +73,32 @@ mod tests {
     }
 
     #[test]
-    fn init_writes_distil_md_with_backward_chain_markers() {
+    fn init_writes_reason_md_with_backward_chain_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = scaffold_init(dir.path(), false).unwrap();
+        let reason = std::fs::read_to_string(&p.reason).unwrap();
+        assert!(
+            reason.contains("BACKWARD"),
+            "reason.md must instruct backward-chain construction"
+        );
+        assert!(
+            reason.contains("=== CHAIN ==="),
+            "reason.md must end turns with the === CHAIN === marker Task 3 parses"
+        );
+    }
+
+    #[test]
+    fn init_writes_distil_md_with_seed_generation_markers() {
         let dir = tempfile::tempdir().unwrap();
         let p = scaffold_init(dir.path(), false).unwrap();
         let distil = std::fs::read_to_string(&p.distil).unwrap();
         assert!(
-            distil.contains("BACKWARD"),
-            "distil.md must instruct backward-chain construction"
+            distil.contains("propose_gold"),
+            "distil.md must instruct the model to call propose_gold"
         );
         assert!(
-            distil.contains("=== CHAIN ==="),
-            "distil.md must end turns with the === CHAIN === marker Task 3 parses"
+            distil.contains("gate_ok"),
+            "distil.md must instruct the model to self-gate via gate_ok"
         );
     }
 

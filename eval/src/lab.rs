@@ -48,7 +48,8 @@ pub struct LabConfig {
     /// Endpoint used to reflect on/rewrite prompts (`kbx train`, a later plan).
     #[serde(default)]
     pub reflect: Option<Endpoint>,
-    /// Strong-model endpoint for `kbx distil` (grounded synthesis, a later plan).
+    /// Strong-model endpoint shared by `kbx reason` (grounded backward-chaining) and `kbx distil`
+    /// (grounded synthetic-gold generation).
     #[serde(default)]
     pub distil: Option<Endpoint>,
 }

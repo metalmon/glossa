@@ -25,6 +25,7 @@ fn kbx_init_scaffolds_glossa_kbx_workspace_and_skips_existing_without_force() {
         "bridge.md",
         "judge.md",
         "reflect.md",
+        "reason.md",
         "distil.md",
         "dataset.toml",
     ] {
@@ -85,14 +86,26 @@ fn kbx_train_help_lists_budget_and_no_apply() {
     assert!(s.contains("--budget") && s.contains("--no-apply"));
 }
 
-/// `kbx distil --help` should expose the gold-dataset override and the split/kb mode knob — a
-/// regression here means the `Distil` clap variant lost a flag `run_distil`'s `DistilArgs` needs.
+/// `kbx reason --help` should expose the gold-dataset override and the split/kb mode knob — a
+/// regression here means the `Reason` clap variant lost a flag `run_reason`'s `ReasonArgs` needs.
 #[test]
-fn kbx_distil_help_lists_gold_and_mode() {
+fn kbx_reason_help_lists_gold_and_mode() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
+        .args(["reason", "--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--gold") && s.contains("--mode"));
+}
+
+/// `kbx distil --help` should expose the attempt-count and seed-type knobs — a regression here
+/// means the `Distil` clap variant lost a flag `run_distil`'s `DistilArgs` needs.
+#[test]
+fn kbx_distil_help_lists_count_and_seed_type() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
         .args(["distil", "--help"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("--gold") && s.contains("--mode"));
+    assert!(s.contains("--count") && s.contains("--seed-type"));
 }

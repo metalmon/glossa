@@ -97,7 +97,7 @@ const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this docu
      read it from (`to`: `<path>#n`) — or simply give the node itself a `source_path` of \
      `<path>#n` and grounding is derived automatically.";
 
-/// OpenAI-function tool schema for `extract_doc`'s (and `kbx distil`'s) graph-writing agent — the
+/// OpenAI-function tool schema for `extract_doc`'s (and `kbx reason`'s) graph-writing agent — the
 /// CANONICAL label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
 /// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
 /// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared

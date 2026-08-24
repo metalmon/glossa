@@ -15,7 +15,7 @@
 //! type), so the spine edge's `edge_type` is hardcoded to `glossa::graph::LEADS_TO` via
 //! `spine_edge_for_build` rather than resolved from the ontology by role/endpoint types — the
 //! ontology-general resolution this module used to do (picking a declared `RelationRole::Chaining`
-//! relation whose `from`/`to` fit the pair) is left to a later `distil` stage that re-types the
+//! relation whose `from`/`to` fit the pair) is left to a later `reason` stage that re-types the
 //! flat build graph against a real ontology. `apply_upsert` still validates the write; `LEADS_TO`
 //! is always-permitted by `Ontology::validate_edge` regardless of what's declared (Task 1).
 

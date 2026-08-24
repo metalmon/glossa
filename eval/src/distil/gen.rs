@@ -1,5 +1,5 @@
-//! `kbx synth`'s per-seed generator: an agentic pass over ONE grounded seed node, reusing the
-//! SAME agent-loop substrate as `distil::chain_one_gold` (`run_agent_loop` + `lmstudio_chat` +
+//! `kbx distil`'s per-seed generator: an agentic pass over ONE grounded seed node, reusing the
+//! SAME agent-loop substrate as `reason::chain_one_gold` (`run_agent_loop` + `lmstudio_chat` +
 //! `schema_graph_block(ont)`) but READ-ONLY — the model gets the reader tools
 //! (`search`/`read`/`grep`/`glob`/`glossary`/`reach`/`sql`) and a `propose_gold` tool, and NEVER
 //! `graph_upsert`. The only thing this pass produces is an in-memory `GoldProposal`; nothing is
@@ -12,7 +12,7 @@
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::{chat_once, lmstudio_chat, run_agent_loop};
-use crate::distil::schema_graph_block;
+use crate::reason::schema_graph_block;
 use crate::lab::LabConfig;
 use crate::score::contains_match;
 use crate::workspace::KbxPaths;
@@ -117,11 +117,11 @@ pub fn parse_propose_gold(args: &Value) -> Option<GoldProposal> {
     })
 }
 
-/// OpenAI-function tool schema for the synth generator: the full read-only reader registry
+/// OpenAI-function tool schema for the distil generator: the full read-only reader registry
 /// (`search`/`read`/`grep`/`glob`/`glossary`/`reach`/`sql` — glossa's registry order, unfiltered;
-/// synth always has a graph open, so nothing is gated here) plus `propose_gold`. Deliberately NO
+/// distil always has a graph open, so nothing is gated here) plus `propose_gold`. Deliberately NO
 /// `graph_upsert` — this pass never writes to the graph.
-fn synth_tools_schema() -> Value {
+fn distil_tools_schema() -> Value {
     let mut tools: Vec<Value> = glossa::tools::registry::registry()
         .iter()
         .map(|d| {
@@ -198,13 +198,13 @@ pub fn generate_one(
     paths: &KbxPaths,
     ont: &Ontology,
     lab: &LabConfig,
-    synth_md: &str,
+    distil_md: &str,
     seed: &Seed,
 ) -> anyhow::Result<GenOutcome> {
     let distil_ep = lab
         .distil
         .as_ref()
-        .ok_or_else(|| anyhow!("kbx synth needs a [distil] endpoint in lab.toml"))?;
+        .ok_or_else(|| anyhow!("kbx distil needs a [distil] endpoint in lab.toml"))?;
 
     let root = paths.root.as_path();
     let g = GraphStore::open(root)?;
@@ -213,7 +213,7 @@ pub fn generate_one(
     let spec = glossa::tools::ChainSpec::from_ontology(ont);
 
     let source_text = seed_source_text(root, &idx, &g, &seed.id);
-    let system = format!("{}\n\n{synth_md}", schema_graph_block(ont));
+    let system = format!("{}\n\n{distil_md}", schema_graph_block(ont));
     let user = format!(
         "Seed node: {} [{}] \"{}\"\nGrounded source text:\n{}\n\nExplore from this seed, trace a \
          real chain along the ontology's relations, and call `propose_gold` with one question \
@@ -237,7 +237,7 @@ pub fn generate_one(
     let model = distil_ep.model.clone();
     let api_key = distil_ep.resolve_key();
     let timeout = Duration::from_secs(distil_ep.timeout_secs);
-    let tools = synth_tools_schema();
+    let tools = distil_tools_schema();
 
     let chat = |messages: &[Value]| {
         lmstudio_chat(
@@ -353,8 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn synth_tools_schema_advertises_reader_tools_and_propose_gold_but_never_graph_upsert() {
-        let tools = synth_tools_schema();
+    fn distil_tools_schema_advertises_reader_tools_and_propose_gold_but_never_graph_upsert() {
+        let tools = distil_tools_schema();
         let names: Vec<String> = tools
             .as_array()
             .unwrap()
@@ -367,7 +367,7 @@ mod tests {
         }
         assert!(
             !names.contains(&"graph_upsert".to_string()),
-            "synth must NEVER advertise graph_upsert (read-only): {names:?}"
+            "distil must NEVER advertise graph_upsert (read-only): {names:?}"
         );
     }
 }

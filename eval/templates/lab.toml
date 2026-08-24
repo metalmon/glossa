@@ -24,7 +24,7 @@ timeout_secs = 120
 # model = "qwen3.5-4b"
 # timeout_secs = 120
 
-# [distil]                             # strong-model endpoint for `kbx distil` (later plan)
+# [distil]                             # strong-model endpoint shared by `kbx reason` and `kbx distil`
 # endpoint = "http://localhost:1234/v1/chat/completions"
 # model = "big-model"
 # timeout_secs = 300

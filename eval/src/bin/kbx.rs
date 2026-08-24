@@ -14,10 +14,10 @@ use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::distil::{self, DistilArgs};
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::LabConfig;
+use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
-use kb_eval::synth::{self, SynthArgs};
 use kb_eval::train::{self, TrainArgs};
 use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
@@ -147,9 +147,9 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
-    /// Distil a corpus's gold dataset into its reasoning graph: one `chain_one_gold` pass per
+    /// Reason over a corpus's gold dataset into its reasoning graph: one `chain_one_gold` pass per
     /// gold case, checkpointed for `--resume`, then finalize (hygiene/doctor + node-index rebuild).
-    Distil {
+    Reason {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
@@ -166,17 +166,17 @@ enum Cmd {
         /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
         #[arg(long)]
         force: bool,
-        /// Skip gold ids already recorded done in the distil checkpoint.
+        /// Skip gold ids already recorded done in the reason checkpoint.
         #[arg(long)]
         resume: bool,
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
-    /// Generate synthetic `(question, answer)` golds by re-packaging the existing grounded graph
-    /// into new questions (the inverse of `distil`): seed from a grounded node, explore the
+    /// Distil synthetic `(question, answer)` golds by re-packaging the existing grounded graph
+    /// into new questions (the inverse of `reason`): seed from a grounded node, explore the
     /// corpus read-only, propose one gated gold per attempt, and write the kept ones to `--out`.
-    Synth {
+    Distil {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
@@ -287,7 +287,7 @@ fn main() -> Result<()> {
                 no_progress,
             },
         ),
-        Cmd::Distil {
+        Cmd::Reason {
             path,
             gold,
             mode,
@@ -295,9 +295,9 @@ fn main() -> Result<()> {
             force,
             resume,
             no_progress,
-        } => distil::run_distil(
+        } => reason::run_reason(
             path,
-            DistilArgs {
+            ReasonArgs {
                 gold,
                 mode,
                 limit,
@@ -306,15 +306,15 @@ fn main() -> Result<()> {
                 no_progress,
             },
         ),
-        Cmd::Synth {
+        Cmd::Distil {
             path,
             count,
             out,
             seed_type,
             no_progress,
-        } => synth::run_synth(
+        } => distil::run_distil(
             path,
-            SynthArgs {
+            DistilArgs {
                 count,
                 out,
                 seed_type,

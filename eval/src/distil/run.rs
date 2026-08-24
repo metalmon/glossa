@@ -1,53 +1,41 @@
-//! `kbx distil` pipeline orchestrator (Task 4): resolve the workspace, load the gold dataset,
-//! run `chain_one_gold` once per gold `(question, answer)` pair, checkpoint per-gold for
-//! `--resume`, then `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s
-//! shape (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
+//! `kbx distil` pipeline orchestrator: resolve the workspace, build the seed pool from grounded
+//! non-structural graph nodes, run `gen::generate_one` (generate + verify-gate) once per attempt,
+//! and write the kept synthetic golds as `[[case]]` rows to `--out` — the SAME `dataset.toml`
+//! shape `dataset_toml::parse_dataset_toml` reads back, so `kbx reason --gold <out>` and
+//! `kbx eval --dataset <out>` consume it unchanged.
 //!
-//! `--mode split` wires the contamination guard from the design doc's "two frames": a
-//! deterministic train/test split of the gold ids, holding the test ids OUT of this run's
-//! `chain_one_gold` loop entirely and recording them to a run file under `paths.runs/distil/` so
-//! a later held-out-eval task (Task 6) can read them back. `--mode kb` (the default) processes
-//! every gold — the "domain-KB from all solved cases" frame, where question-contamination is a
-//! non-issue.
+//! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
+//! `kbx distil` is the `--out` dataset file.
 
-use crate::checkpoint::Checkpoint;
-use crate::dataset::Question;
-use crate::dataset_toml::parse_dataset_toml;
-use crate::distil::chain_one_gold;
 use crate::lab::LabConfig;
+use crate::distil::gen::{generate_one, GenOutcome, Seed};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
 use glossa::graph::ontology::Ontology;
+use glossa::graph::store::GraphStore;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::Serialize;
+use std::collections::{BTreeSet, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-/// Deterministic held-out fraction of gold ids under `--mode split`. Not yet CLI-configurable
-/// (the brief's `DistilArgs` carries no `test_frac` field) — a fixed, documented default until a
-/// later task exposes it.
-const DEFAULT_TEST_FRAC: f64 = 0.2;
-
 /// CLI-level options for `kbx distil`, folded from the `kbx` binary's clap fields (mirrors
-/// `crate::build::BuildOpts`'s shape).
+/// `reason::ReasonArgs`'s shape).
 #[derive(Debug, Clone)]
 pub struct DistilArgs {
-    /// Override the workspace's default gold dataset (`paths.dataset`).
-    pub gold: Option<PathBuf>,
-    /// `"split"` (train-only, holds out a deterministic test fraction — never ingested) or
-    /// `"kb"` (process every gold; default).
-    pub mode: String,
-    /// Only process the first N (post-holdout, in sorted-id order) gold cases.
-    pub limit: Option<usize>,
-    /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
-    pub force: bool,
-    /// Skip gold ids already recorded done in the distil checkpoint.
-    pub resume: bool,
+    /// Number of synthetic golds to ATTEMPT — the gate may drop some; kept/dropped are reported.
+    pub count: usize,
+    /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`). Always overwritten whole.
+    pub out: Option<PathBuf>,
+    /// Restrict seeds to this node_type (default: the ontology's grounding-required types, or
+    /// every non-structural declared type when none are marked `requires_grounding`).
+    pub seed_type: Option<String>,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `build::progress_bar`/`kbx eval`'s `show_progress` gate).
+/// isn't a TTY (mirrors `reason::progress_bar`).
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     if !show {
@@ -61,198 +49,344 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     pb
 }
 
-/// Clear a distil run's persistent checkpoint (`run_dir/done/`) — `--force`'s full-rebuild half,
-/// mirroring `build::clear_checkpoint`. A no-op when the checkpoint dir doesn't exist yet.
-fn clear_checkpoint(run_dir: &std::path::Path) -> Result<()> {
-    let done_dir = run_dir.join("done");
-    if done_dir.exists() {
-        std::fs::remove_dir_all(&done_dir)
-            .with_context(|| format!("clearing checkpoint {}", done_dir.display()))?;
+/// The node types eligible to seed from. An explicit `--seed-type` restricts to exactly that one
+/// type (the caller's call — no further filtering). Otherwise: the ontology's types marked
+/// `requires_grounding` (its "KNOWLEDGE" types, per the design doc), excluding anything the
+/// ontology also declares structural; if none are marked, every declared type that isn't
+/// structural. Structural (Document/Section) types are excluded either way as a safety net — the
+/// seed pool itself does the real MENTIONS-groundedness filtering, but a structural node is never
+/// eligible even if it happened to satisfy that.
+pub fn eligible_seed_types(ont: &Ontology, seed_type: Option<&str>) -> BTreeSet<String> {
+    if let Some(t) = seed_type {
+        return std::iter::once(t.to_string()).collect();
     }
+    let structural: HashSet<String> = ont.structural().into_iter().collect();
+    let grounded: BTreeSet<String> = ont
+        .entity_types()
+        .iter()
+        .filter(|t| ont.requires_grounding(t) && !structural.contains(*t))
+        .cloned()
+        .collect();
+    if !grounded.is_empty() {
+        return grounded;
+    }
+    ont.entity_types()
+        .iter()
+        .filter(|t| !structural.contains(*t))
+        .cloned()
+        .collect()
+}
+
+/// The seed pool: every node of an eligible type (see [`eligible_seed_types`]) carrying at least
+/// one outgoing `MENTIONS` edge (grounded), sorted deterministically by id — so `--count` attempts
+/// are reproducible run-to-run for the same graph, no RNG/wallclock involved.
+pub fn seed_pool(g: &GraphStore, ont: &Ontology, seed_type: Option<&str>) -> Result<Vec<Seed>> {
+    let types = eligible_seed_types(ont, seed_type);
+    let mut seeds: Vec<Seed> = g
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| types.contains(&n.node_type))
+        .filter(|n| {
+            g.outgoing(&n.id)
+                .map(|edges| edges.iter().any(|e| e.edge_type == glossa::graph::MENTIONS))
+                .unwrap_or(false)
+        })
+        .map(|n| Seed {
+            id: n.id,
+            node_type: n.node_type,
+            label: n.label,
+        })
+        .collect();
+    seeds.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(seeds)
+}
+
+/// One kept synthetic gold, in the exact `[[case]]` shape `dataset_toml::parse_dataset_toml`
+/// reads back (`id`/`question`/`answer`; `aliases`/`tags` are optional there and simply omitted
+/// here — they default to empty on read-back).
+#[derive(Debug, Serialize)]
+struct OutCase {
+    id: String,
+    question: String,
+    answer: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OutFile {
+    case: Vec<OutCase>,
+}
+
+/// Serialize `kept` as `[[case]]` blocks and write them to `out_path` (created/truncated).
+fn write_dataset_toml(out_path: &std::path::Path, kept: &[OutCase]) -> Result<()> {
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let file = OutFile {
+        case: kept.iter().map(|c| OutCase {
+            id: c.id.clone(),
+            question: c.question.clone(),
+            answer: c.answer.clone(),
+        }).collect(),
+    };
+    let text = toml::to_string_pretty(&file).context("serializing synthetic dataset.toml")?;
+    std::fs::write(out_path, text)
+        .with_context(|| format!("writing {}", out_path.display()))?;
     Ok(())
 }
 
-/// The checkpoint unit id for one gold case — `distil:{id}`, matching `run_build`'s
-/// `extract:{doc}` naming convention.
-fn unit_id(gold_id: &str) -> String {
-    format!("distil:{gold_id}")
-}
-
-/// A gold id is skipped this pass iff `--resume` is set AND the checkpoint already recorded it
-/// done. Pure and model-free — the piece Step 1's TDD unit exercises directly.
-pub fn should_skip(cp: &Checkpoint, gold_id: &str, resume: bool) -> bool {
-    resume && cp.is_done(&unit_id(gold_id))
-}
-
-/// Deterministically split `questions` into (kept, held_out) by sorted id, holding out the last
-/// `frac` fraction — same split-by-id shape as `crate::gepa::split_by_episode`, kept local here
-/// since that helper is generic over an externally-owned `episode_id` closure and gepa's own
-/// item types, whereas this just needs the ids themselves recorded to a run file.
-fn split_gold_by_id(questions: Vec<Question>, frac: f64) -> (Vec<Question>, Vec<String>) {
-    let mut ids: Vec<String> = questions.iter().map(|q| q.id.clone()).collect();
-    ids.sort();
-    let n_held = if ids.len() <= 1 {
-        0
-    } else {
-        ((ids.len() as f64 * frac).round() as usize).clamp(1, ids.len() - 1)
-    };
-    let held: std::collections::HashSet<String> = ids.iter().rev().take(n_held).cloned().collect();
-    let mut held_sorted: Vec<String> = held.iter().cloned().collect();
-    held_sorted.sort();
-    let kept: Vec<Question> = questions.into_iter().filter(|q| !held.contains(&q.id)).collect();
-    (kept, held_sorted)
-}
-
-/// Orchestrate the `kbx distil` pipeline over the corpus at `path` (kb-style PATH resolution via
-/// `workspace::resolve`): load `lab.toml` + ontology + `distil.md` + gold dataset, ensure the
-/// corpus is indexed, run `chain_one_gold` once per (non-held-out, non-`--limit`-excluded,
-/// non-`--resume`-skipped) gold case, checkpoint each as it completes, then `finalize`.
+/// Orchestrate `kbx distil` over the corpus at `path` (kb-style PATH resolution via
+/// `workspace::resolve`): load `lab.toml` + ontology + `distil.md`, build the seed pool, attempt
+/// `args.count` generate+gate passes (`gen::generate_one`), and write the kept golds to
+/// `args.out` (default `<kbx>/dataset.synthetic.toml`).
 pub fn run_distil(path: Option<PathBuf>, args: DistilArgs) -> Result<()> {
     let paths = workspace::resolve(path);
     run_distil_at(paths, args)
 }
 
-/// `run_distil`'s body, taking already-resolved `KbxPaths` — split out so tests (and any future
-/// caller that already has `paths`, e.g. after scaffolding a temp workspace) don't need to fight
-/// `workspace::resolve`'s PATH-walking discovery.
+/// `run_distil`'s body, taking already-resolved `KbxPaths` — split out so tests can exercise it
+/// without fighting `workspace::resolve`'s PATH-walking discovery (mirrors `reason::run_reason_at`).
 fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
-    if args.mode != "split" && args.mode != "kb" {
-        bail!("kbx distil --mode must be \"split\" or \"kb\", got {:?}", args.mode);
-    }
-
     let lab = LabConfig::load_at(&paths.lab)
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
-    // Ensure the corpus is indexed (structural Document/Section nodes + chunks) — mirrors
-    // `run_build`'s own first step; a no-op if already indexed.
+    // Ensure the corpus is indexed — mirrors `run_distil`'s own first step; a no-op if already
+    // indexed. Needed so `read` calls the generator makes resolve real chunks.
     glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
 
     let distil_md = std::fs::read_to_string(&paths.distil)
         .with_context(|| format!("reading {}", paths.distil.display()))?;
 
-    let gold_path = args.gold.clone().unwrap_or_else(|| paths.dataset.clone());
-    let gold_text = std::fs::read_to_string(&gold_path)
-        .with_context(|| format!("reading gold dataset {}", gold_path.display()))?;
-    let questions = parse_dataset_toml(&gold_text)
-        .with_context(|| format!("parsing gold dataset {}", gold_path.display()))?;
-
-    let run_dir = paths.runs.join("distil");
-    let mut questions = questions;
-    if args.mode == "split" {
-        let (kept, held_out) = split_gold_by_id(questions, DEFAULT_TEST_FRAC);
-        questions = kept;
-        std::fs::create_dir_all(&run_dir)
-            .with_context(|| format!("creating {}", run_dir.display()))?;
-        let holdout_path = run_dir.join("holdout.txt");
-        std::fs::write(&holdout_path, held_out.join("\n"))
-            .with_context(|| format!("writing {}", holdout_path.display()))?;
-        println!(
-            "distil: --mode split held out {} gold id(s) (recorded to {})",
-            held_out.len(),
-            holdout_path.display()
+    let g = GraphStore::open(&paths.root)?;
+    let seeds = seed_pool(&g, &ontology, args.seed_type.as_deref())?;
+    if seeds.is_empty() {
+        bail!(
+            "kbx distil: no grounded seed nodes found (need a node of an eligible type carrying \
+             an outgoing MENTIONS edge) — build the graph first (`kbx build`)"
         );
     }
-    // Deterministic processing order regardless of dataset.toml's on-disk case order.
-    questions.sort_by(|a, b| a.id.cmp(&b.id));
 
-    if let Some(n) = args.limit {
-        questions.truncate(n);
-    }
+    let out_path = args
+        .out
+        .clone()
+        .unwrap_or_else(|| paths.kbx_dir.join("dataset.synthetic.toml"));
 
-    if args.force {
-        clear_checkpoint(&run_dir).context("clearing distil checkpoint for --force")?;
-    }
-    let cp = Checkpoint::open(&run_dir).context("open distil checkpoint")?;
-
-    let pb = progress_bar(questions.len(), args.no_progress);
+    let pb = progress_bar(args.count, args.no_progress);
     pb.set_message("distil");
-    let mut total_nodes = 0usize;
-    let mut total_edges = 0usize;
-    let mut total_grounded = 0usize;
-    let mut processed = 0usize;
-    for q in &questions {
-        if should_skip(&cp, &q.id, args.resume) {
-            pb.inc(1);
-            continue;
+
+    let mut kept: Vec<OutCase> = Vec::new();
+    let mut n_dropped = 0usize;
+
+    for i in 0..args.count {
+        // Deterministic-ish: sorted-by-id pool, varied by attempt index — no RNG/wallclock, and
+        // an attempt count larger than the pool cycles back through it rather than erroring.
+        let seed = &seeds[i % seeds.len()];
+        pb.set_message(format!("distil {i} (seed {})", seed.id));
+        match generate_one(&paths, &ontology, &lab, &distil_md, seed)
+            .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
+        {
+            GenOutcome::Kept(p) => {
+                println!("distil {i}: kept \"{}\" (seed {})", p.question, seed.id);
+                kept.push(OutCase {
+                    id: format!("synth-{i}"),
+                    question: p.question,
+                    answer: p.answer,
+                });
+            }
+            GenOutcome::Dropped(reason) => {
+                println!(
+                    "distil {i}: dropped ({}) (seed {})",
+                    reason.describe(),
+                    seed.id
+                );
+                n_dropped += 1;
+            }
         }
-        let stats = chain_one_gold(&paths, &ontology, &lab, &distil_md, &q.question, &q.answer)
-            .with_context(|| format!("distilling gold {}", q.id))?;
-        total_nodes += stats.nodes;
-        total_edges += stats.edges;
-        total_grounded += stats.grounded;
-        processed += 1;
-        cp.mark(&unit_id(&q.id), "done")
-            .with_context(|| format!("marking gold {} done", q.id))?;
-        println!(
-            "distil {}: {} node(s), {} edge(s), {} grounded",
-            q.id, stats.nodes, stats.edges, stats.grounded
-        );
         pb.inc(1);
     }
     pb.finish_and_clear();
+
+    write_dataset_toml(&out_path, &kept)?;
+
     println!(
-        "distil: {} gold case(s) processed, {} node(s), {} edge(s), {} grounded",
-        processed, total_nodes, total_edges, total_grounded
+        "distil: {} attempted, {} kept, {} dropped -> {}",
+        args.count,
+        kept.len(),
+        n_dropped,
+        out_path.display()
     );
-
-    let summary = crate::build::finalize(&paths.root).context("finalizing distil")?;
-    println!("{summary}");
-
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glossa::graph::store::{Edge, Node, Provenance};
 
-    /// Step 1's TDD unit (per the brief): a gold id already recorded done in the checkpoint is
-    /// skipped under `--resume`; a fresh id is not. Pure, tempdir-only — no model involved.
+    fn prov() -> Provenance {
+        Provenance {
+            source_path: "doc.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
+    }
+
+    const GROUNDING_ONT: &str = r#"
+[entities.Fact]
+requires_grounding = true
+[entities.Document]
+[entities.Section]
+
+[relations.LEADS_TO]
+from = ["Fact"]
+to = ["Fact"]
+"#;
+
+    const UNGROUNDED_ONT: &str = r#"
+[entities.Fact]
+[entities.Document]
+[entities.Section]
+
+[relations.LEADS_TO]
+from = ["Fact"]
+to = ["Fact"]
+"#;
+
     #[test]
-    fn should_skip_marks_done_id_under_resume_and_not_a_fresh_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let cp = Checkpoint::open(&dir.path().join("runs").join("distil")).unwrap();
-        cp.mark(&unit_id("gold-1"), "done").unwrap();
-
-        assert!(
-            should_skip(&cp, "gold-1", true),
-            "an already-done gold id must be skipped under --resume"
-        );
-        assert!(
-            !should_skip(&cp, "gold-2", true),
-            "a fresh gold id must not be skipped even under --resume"
-        );
-        assert!(
-            !should_skip(&cp, "gold-1", false),
-            "a done gold id must NOT be skipped when --resume isn't set"
-        );
+    fn eligible_seed_types_prefers_grounding_required_types() {
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let types = eligible_seed_types(&ont, None);
+        assert!(types.contains("Fact"));
+        assert!(!types.contains("Document"), "structural type must never be eligible");
+        assert!(!types.contains("Section"), "structural type must never be eligible");
     }
 
     #[test]
-    fn split_gold_by_id_holds_out_a_deterministic_fraction_and_never_returns_a_held_out_kept_id() {
-        let questions: Vec<Question> = (0..10)
-            .map(|i| Question {
-                id: format!("q{i:02}"),
-                question: "q".into(),
-                answer: "a".into(),
-                ..Default::default()
+    fn eligible_seed_types_falls_back_to_all_non_structural_when_none_require_grounding() {
+        let ont = Ontology::parse(UNGROUNDED_ONT).unwrap();
+        let types = eligible_seed_types(&ont, None);
+        assert!(types.contains("Fact"));
+        assert!(!types.contains("Document"));
+        assert!(!types.contains("Section"));
+    }
+
+    #[test]
+    fn eligible_seed_types_explicit_seed_type_wins_outright() {
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let types = eligible_seed_types(&ont, Some("Section"));
+        assert_eq!(types, std::iter::once("Section".to_string()).collect());
+    }
+
+    #[test]
+    fn seed_pool_excludes_structural_and_requires_a_mentions_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // A grounded Fact: eligible.
+        g.put_node(&Node {
+            id: "fact-grounded".into(),
+            node_type: "Fact".into(),
+            label: "grounded fact".into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "fact-grounded".into(),
+            to: "doc.md#1".into(),
+            edge_type: glossa::graph::MENTIONS.to_string(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        // An UNgrounded Fact (no MENTIONS edge): excluded.
+        g.put_node(&Node {
+            id: "fact-ungrounded".into(),
+            node_type: "Fact".into(),
+            label: "ungrounded fact".into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        // A structural Document node, even if (hypothetically) grounded: excluded by type.
+        g.put_node(&Node {
+            id: "doc.md".into(),
+            node_type: "Document".into(),
+            label: "doc.md".into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "doc.md".into(),
+            to: "doc.md#1".into(),
+            edge_type: glossa::graph::MENTIONS.to_string(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        let seeds = seed_pool(&g, &ont, None).unwrap();
+        let ids: Vec<&str> = seeds.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["fact-grounded"], "seed pool must be exactly the grounded Fact: {ids:?}");
+    }
+
+    #[test]
+    fn seed_pool_is_sorted_deterministically_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        for id in ["fact-c", "fact-a", "fact-b"] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: Vec::new(),
+                prov: prov(),
             })
-            .collect();
-
-        let (kept1, held1) = split_gold_by_id(questions.clone(), 0.2);
-        let (kept2, held2) = split_gold_by_id(questions.clone(), 0.2);
-
-        assert_eq!(held1, held2, "split must be deterministic across calls");
-        assert_eq!(held1.len(), 2, "20% of 10 ids => 2 held out");
-        let kept_ids: std::collections::HashSet<&str> =
-            kept1.iter().map(|q| q.id.as_str()).collect();
-        for h in &held1 {
-            assert!(
-                !kept_ids.contains(h.as_str()),
-                "a held-out id must never also appear in kept: {h}"
-            );
+            .unwrap();
+            g.put_edge(&Edge {
+                from: id.into(),
+                to: "doc.md#1".into(),
+                edge_type: glossa::graph::MENTIONS.to_string(),
+                prov: prov(),
+            })
+            .unwrap();
         }
-        assert_eq!(kept1.len() + held1.len(), questions.len());
-        assert_eq!(kept2.len(), kept1.len());
+        let seeds = seed_pool(&g, &ont, None).unwrap();
+        let ids: Vec<&str> = seeds.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["fact-a", "fact-b", "fact-c"]);
+    }
+
+    #[test]
+    fn write_dataset_toml_round_trips_through_the_real_parser() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("dataset.synthetic.toml");
+        let kept = vec![
+            OutCase {
+                id: "synth-0".into(),
+                question: "what follows the seed?".into(),
+                answer: "the terminal fact".into(),
+            },
+            OutCase {
+                id: "synth-1".into(),
+                question: "second question?".into(),
+                answer: "second answer".into(),
+            },
+        ];
+        write_dataset_toml(&out_path, &kept).unwrap();
+
+        let text = std::fs::read_to_string(&out_path).unwrap();
+        let parsed = crate::dataset_toml::parse_dataset_toml(&text).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "synth-0");
+        assert_eq!(parsed[0].question, "what follows the seed?");
+        assert_eq!(parsed[0].answer, "the terminal fact");
+        assert_eq!(parsed[1].id, "synth-1");
     }
 }

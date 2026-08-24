@@ -11,8 +11,8 @@ pub struct KbxPaths {
     pub bridge: PathBuf,
     pub judge: PathBuf,
     pub reflect: PathBuf,
+    pub reason: PathBuf,
     pub distil: PathBuf,
-    pub synth: PathBuf,
 }
 
 impl KbxPaths {
@@ -28,8 +28,8 @@ impl KbxPaths {
             bridge: f("bridge.md"),
             judge: f("judge.md"),
             reflect: f("reflect.md"),
+            reason: f("reason.md"),
             distil: f("distil.md"),
-            synth: f("synth.md"),
             kbx_dir: kbx,
             root,
         }
