@@ -37,7 +37,7 @@ glossa-constraint = { path = "../constraint" }
 anyhow = "1"
 regex = "1"
 toml = "1.1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }

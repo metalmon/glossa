@@ -134,7 +134,7 @@ pub fn chain_one_gold(
         .unwrap_or(0);
     let mut stats = ReasonStats::default();
 
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name == "graph_upsert" {
             // parse_and_filter_upsert: canonical label-based parse (ops::parse_upsert_payload)
             // plus a partial-apply type filter — a node whose node_type the ontology doesn't
@@ -167,11 +167,12 @@ pub fn chain_one_gold(
             } else {
                 format!("{}\n{}", notes.join("\n"), out.message)
             };
-            (message, ids)
+            (message, ids, Vec::new())
         } else {
+            // `kbx reason` never feeds vision input (only `kbx build --vision` does) — discard.
             let (body, ids, _images) =
                 glossa_tools::exec(name, args, root, &idx, None, &spec, &trace);
-            (body, ids)
+            (body, ids, Vec::new())
         }
     };
 

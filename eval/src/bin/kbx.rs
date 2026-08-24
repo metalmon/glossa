@@ -101,6 +101,12 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Feed images the `read` tool returns (page rasters / embedded figures) to the
+        /// extraction model as vision input, so scanned/image-only content can still yield
+        /// grounded facts. OFF by default: the text-only extraction path stays byte-identical to
+        /// today, and images are large on the wire.
+        #[arg(long = "vision", env = "GLOSSA_VISION")]
+        vision: bool,
     },
     /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
     /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
@@ -244,6 +250,7 @@ fn main() -> Result<()> {
             force,
             resume,
             no_progress,
+            vision,
         } => {
             let paths = workspace::resolve(path);
             let report = run_build(
@@ -255,6 +262,7 @@ fn main() -> Result<()> {
                     force,
                     resume,
                     no_progress,
+                    vision,
                 },
             )?;
             println!(
@@ -742,6 +750,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
+                vision,
                 path,
             } => {
                 assert_eq!(stage, BuildStage::All);
@@ -750,6 +759,7 @@ mod tests {
                 assert!(!force);
                 assert!(!resume);
                 assert!(!no_progress);
+                assert!(!vision, "--vision must default OFF");
                 assert!(path.is_none());
             }
             _ => panic!("expected Cmd::Build"),
@@ -771,6 +781,7 @@ mod tests {
             "--force",
             "--resume",
             "--no-progress",
+            "--vision",
         ])
         .unwrap();
         match cli.cmd {
@@ -782,6 +793,7 @@ mod tests {
                 force,
                 resume,
                 no_progress,
+                vision,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
                 assert_eq!(stage, BuildStage::Judge);
@@ -790,6 +802,7 @@ mod tests {
                 assert!(force);
                 assert!(resume);
                 assert!(no_progress);
+                assert!(vision);
             }
             _ => panic!("expected Cmd::Build"),
         }

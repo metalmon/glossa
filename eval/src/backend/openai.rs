@@ -1,6 +1,7 @@
 use super::{prompt, AgentBackend};
 use crate::dataset::Question;
 use anyhow::anyhow;
+use glossa::read::DocImage;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -73,7 +74,10 @@ impl AgentBackend for OpenAiBackend {
                 let snippet: String = body.chars().take(500).collect();
                 eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
             }
-            (body, ids)
+            // The reader path never feeds vision input — `execute_tool` already discards
+            // whatever images `glossa_tools::exec` surfaced (e.g. from `read`). Only
+            // `build::extract::extract_doc`'s `--vision` path populates this slot.
+            (body, ids, Vec::<DocImage>::new())
         };
 
         let messages = self.build_messages(q);
@@ -332,6 +336,54 @@ pub(crate) fn tools_schema(graph_on: bool) -> Value {
 /// off the real threshold instead of duplicating the literal.
 pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 
+/// Cap on how many images one `exec` call's tool result feeds the model in a single vision
+/// user-message, per Task-spec guard against a context flood (a figure-heavy scanned page can
+/// return many images; `to_jpeg` bounds each one's SIZE but not the COUNT). Extras are dropped
+/// with a logged note — never a silent truncation.
+pub(crate) const MAX_IMAGES_PER_TURN: usize = 4;
+
+/// Build the vision-input user message for a set of images returned by a tool call this round, or
+/// `None` when there are none. `--vision`-only mechanism (see `run_agent_loop`): the OpenAI-
+/// compatible `/v1/chat/completions` shape has no image slot on a `role:"tool"` message, so images
+/// ride in a FOLLOW-UP `role:"user"` message whose `content` is an array — one leading text part
+/// plus one `image_url` part per image, each a `data:image/jpeg;base64,<payload>` URI.
+///
+/// Every image is normalized through [`glossa::read::to_jpeg`] first (JPEG passes through
+/// untouched; anything else is decoded and re-encoded) and base64-encoded with the STANDARD
+/// (padded, unwrapped) alphabet — canonical, no embedded whitespace/newlines, since a malformed
+/// `image_url.url` 400s on our opencode-zen endpoint.
+///
+/// Caps the images fed to [`MAX_IMAGES_PER_TURN`]; when the tool call returned more, the extras
+/// are dropped and a note is printed to stderr (no silent truncation — see the constraint above).
+fn vision_user_message(images: &[DocImage]) -> Option<Value> {
+    if images.is_empty() {
+        return None;
+    }
+    use base64::Engine as _;
+    let total = images.len();
+    let capped: Vec<&DocImage> = images.iter().take(MAX_IMAGES_PER_TURN).collect();
+    if total > MAX_IMAGES_PER_TURN {
+        eprintln!(
+            "[vision] {total} image(s) returned this turn; feeding only the first \
+             {MAX_IMAGES_PER_TURN} (dropping {})",
+            total - MAX_IMAGES_PER_TURN
+        );
+    }
+    let mut content = vec![json!({
+        "type": "text",
+        "text": format!("Images from that read ({}):", capped.len())
+    })];
+    for img in capped {
+        let jpeg = glossa::read::to_jpeg(img.clone());
+        let payload = base64::engine::general_purpose::STANDARD.encode(&jpeg.bytes);
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:image/jpeg;base64,{payload}") }
+        }));
+    }
+    Some(json!({ "role": "user", "content": Value::Array(content) }))
+}
+
 /// Drive a tool-calling chat to a final textual answer.
 ///
 /// `chat(messages)` returns the assistant `message` object (already extracted from
@@ -360,7 +412,7 @@ pub(crate) fn run_agent_loop<C, F, N>(
 ) -> anyhow::Result<String>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
-    F: FnMut(&str, &Value) -> (String, Vec<String>),
+    F: FnMut(&str, &Value) -> (String, Vec<String>, Vec<DocImage>),
     N: FnMut(&str, &Value) -> String,
 {
     // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
@@ -389,13 +441,13 @@ where
                 .unwrap_or("");
             let args = parse_tool_args(call);
             let key = format!("{name}\u{1}{}", serde_json::to_string(&args).unwrap_or_default());
-            let result = if last_key.as_deref() == Some(key.as_str()) {
-                on_repeat(name, &args)
+            let (result, images) = if last_key.as_deref() == Some(key.as_str()) {
+                (on_repeat(name, &args), Vec::new())
             } else {
-                let (body, ids) = exec(name, &args);
+                let (body, ids, images) = exec(name, &args);
                 last_key = Some(key);
                 let has_new = ids.into_iter().fold(false, |acc, i| seen.insert(i) || acc);
-                if has_new {
+                let text = if has_new {
                     unproductive = 0;
                     body
                 } else {
@@ -406,9 +458,16 @@ where
                     } else {
                         body
                     }
-                }
+                };
+                (text, images)
             };
             messages.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
+            // Vision (build --vision only; every other caller's exec always returns empty here):
+            // a tool-role message can't carry image content on this endpoint, so any images the
+            // call surfaced ride in ONE follow-up user message right after it.
+            if let Some(img_msg) = vision_user_message(&images) {
+                messages.push(img_msg);
+            }
         }
     }
     // Out of rounds: nudge for a final answer (the model often keeps requesting tools otherwise)
@@ -559,7 +618,7 @@ mod tests {
     #[test]
     fn loop_returns_direct_answer_when_no_tool_calls() {
         let chat = |_: &[Value]| Ok(json!({ "role": "assistant", "content": "ANSWER: Bob" }));
-        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
         let out = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
@@ -598,6 +657,7 @@ mod tests {
             (
                 "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string(),
                 vec!["Meet_Corliss_Archer.md:p.1".to_string()],
+                Vec::new(),
             )
         };
         let out =
@@ -637,7 +697,7 @@ mod tests {
         };
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
-            ("hit".to_string(), vec!["hit-id".to_string()])
+            ("hit".to_string(), vec!["hit-id".to_string()], Vec::new())
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, 5).unwrap();
         assert_eq!(out, "looping");
@@ -661,7 +721,7 @@ mod tests {
         // Novelty tracking isn't under test here; empty ids keep it a no-op for the streak detector.
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
-            ("hit".to_string(), Vec::new())
+            ("hit".to_string(), Vec::new(), Vec::new())
         };
         let _ = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
         assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
@@ -678,7 +738,7 @@ mod tests {
                 "tool_calls": [{ "id": "c", "function": { "name": "search", "arguments": "{\"query\":\"x\"}" } }]
             }))
         };
-        let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
+        let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new(), Vec::new());
         let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
         assert_eq!(out, "giving up");
         assert_eq!(*calls.borrow(), 4); // 3 rounds + 1 final
@@ -718,7 +778,7 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
             // Always the same id, regardless of the (varied) query -> never novel after the first.
-            ("same old snippet".to_string(), vec!["doc.md:p.1".to_string()])
+            ("same old snippet".to_string(), vec!["doc.md:p.1".to_string()], Vec::new())
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -760,7 +820,7 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             let mut c = counter.borrow_mut();
             *c += 1;
-            (format!("hit {}", *c), vec![format!("doc-{}.md", *c)]) // new id every call
+            (format!("hit {}", *c), vec![format!("doc-{}.md", *c)], Vec::new()) // new id every call
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2).unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -869,7 +929,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            (body, ids, Vec::new())
         };
 
         let round = RefCell::new(0usize);
@@ -914,7 +975,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            (body, ids, Vec::new())
         };
 
         // Distinct argument objects that all resolve to the SAME single hub->fact-0 edge.
@@ -1029,7 +1091,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            (body, ids, Vec::new())
         };
 
         let round = RefCell::new(0usize);
@@ -1073,7 +1136,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace)
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            (body, ids, Vec::new())
         };
 
         let variants = [
@@ -1113,6 +1177,149 @@ mod tests {
             }))
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
+
+    // --- vision: `--vision`-only image threading (Task: kbx build --vision) ------------------
+    //
+    // `vision_user_message` is the pure builder (images -> the OpenAI-compatible content-array
+    // user message); these tests exercise it directly (on/off/cap) plus `run_agent_loop` end to
+    // end, proving the loop actually appends the message right after the tool result when `exec`
+    // surfaces images, and appends NOTHING when it doesn't — which is what keeps every non-vision
+    // caller (the reader, `kbx reason`, `kbx distil`, the GEPA rollout) byte-identical to today.
+
+    fn stub_image(tag: u8) -> DocImage {
+        // mime "image/jpeg" short-circuits `to_jpeg` (returns the bytes unchanged, no real JPEG
+        // decode needed) — exactly what a stubbed unit test wants: no fixture image file, no
+        // `image` crate round-trip, just distinct bytes per stub so multiple images are
+        // distinguishable in the encoded output.
+        DocImage {
+            mime: "image/jpeg".to_string(),
+            bytes: vec![0xFF, 0xD8, 0xFF, tag], // fake JPEG-ish bytes, tag makes each stub unique
+        }
+    }
+
+    #[test]
+    fn vision_message_none_when_no_images() {
+        assert!(vision_user_message(&[]).is_none());
+    }
+
+    #[test]
+    fn vision_message_builds_canonical_data_uri_content_array() {
+        let img = stub_image(1);
+        let msg = vision_user_message(&[img.clone()]).expect("one image -> Some(message)");
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_array().expect("content must be an array");
+        assert_eq!(content.len(), 2, "one text part + one image_url part: {content:?}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().expect("image_url.url string");
+        assert!(
+            url.starts_with("data:image/jpeg;base64,"),
+            "must be a JPEG data URI, got: {url}"
+        );
+        let payload = url.strip_prefix("data:image/jpeg;base64,").unwrap();
+        assert!(
+            !payload.contains('\n') && !payload.contains(' '),
+            "base64 payload must be canonical (no embedded whitespace/newlines): {payload:?}"
+        );
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("payload must be valid standard base64");
+        assert_eq!(decoded, img.bytes, "decoded payload must round-trip the original JPEG bytes");
+    }
+
+    #[test]
+    fn vision_message_caps_at_max_images_per_turn() {
+        let images: Vec<DocImage> = (0..(MAX_IMAGES_PER_TURN as u8 + 2)).map(stub_image).collect();
+        assert!(images.len() > MAX_IMAGES_PER_TURN, "test must exceed the cap");
+        let msg = vision_user_message(&images).expect("non-empty -> Some(message)");
+        let content = msg["content"].as_array().unwrap();
+        let image_parts = content.iter().filter(|p| p["type"] == "image_url").count();
+        assert_eq!(
+            image_parts, MAX_IMAGES_PER_TURN,
+            "extras must be dropped, not fed: {content:?}"
+        );
+    }
+
+    #[test]
+    fn loop_vision_on_appends_image_user_message_after_tool_result() {
+        // exec surfaces one image on its (only) call; the loop must push a role:"user"
+        // content-array message with a data:image/jpeg;base64,... image_url part right after the
+        // role:"tool" message, before the model is asked again.
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                return Ok(json!({
+                    "role": "assistant", "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "function": { "name": "read", "arguments": "{\"path\":\"scan.pdf\"}" }
+                    }]
+                }));
+            }
+            // Round 2: the transcript from round 1's tool call must already carry the image
+            // message, positioned right after the tool result.
+            let tool_pos = msgs.iter().position(|m| m["role"] == "tool");
+            let img_pos = msgs.iter().position(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|p| p["type"] == "image_url"))
+            });
+            assert!(tool_pos.is_some(), "tool result missing: {msgs:?}");
+            assert_eq!(
+                img_pos,
+                tool_pos.map(|p| p + 1),
+                "image message must come right after the tool result: {msgs:?}"
+            );
+            let url = msgs[img_pos.unwrap()]["content"][1]["image_url"]["url"]
+                .as_str()
+                .unwrap_or("");
+            assert!(url.starts_with("data:image/jpeg;base64,"), "got: {url}");
+            Ok(json!({ "role": "assistant", "content": "ANSWER: done" }))
+        };
+        let exec = |_: &str, _: &Value| {
+            ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], vec![stub_image(9)])
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
+        assert_eq!(out, "ANSWER: done");
+    }
+
+    #[test]
+    fn loop_vision_off_appends_no_image_message() {
+        // Mirrors every non-vision caller (reader, reason, distil, GEPA): exec always surfaces an
+        // empty image vec, so the loop must push ONLY the tool message — byte-identical to the
+        // pre-vision transcript shape.
+        let round = RefCell::new(0usize);
+        let chat = |msgs: &[Value]| {
+            let mut r = round.borrow_mut();
+            *r += 1;
+            if *r == 1 {
+                return Ok(json!({
+                    "role": "assistant", "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "function": { "name": "read", "arguments": "{\"path\":\"scan.pdf\"}" }
+                    }]
+                }));
+            }
+            let has_image_msg = msgs.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|p| p["type"] == "image_url"))
+            });
+            assert!(!has_image_msg, "vision-off must never append an image message: {msgs:?}");
+            Ok(json!({ "role": "assistant", "content": "ANSWER: done" }))
+        };
+        let exec = |_: &str, _: &Value| {
+            ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], Vec::new())
+        };
+        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 }

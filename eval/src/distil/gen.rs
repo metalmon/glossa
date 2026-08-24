@@ -251,7 +251,7 @@ pub fn generate_one(
     };
 
     let proposal: RefCell<Option<GoldProposal>> = RefCell::new(None);
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name == "propose_gold" {
             match parse_propose_gold(args) {
                 Some(p) => {
@@ -261,19 +261,22 @@ pub fn generate_one(
                         p.gate_ok, p.question, p.answer
                     );
                     *proposal.borrow_mut() = Some(p);
-                    (msg, ids)
+                    (msg, ids, Vec::new())
                 }
                 None => (
                     "propose_gold rejected: `question` and `answer` are required and must be \
                      non-empty"
                         .to_string(),
                     Vec::new(),
+                    Vec::new(),
                 ),
             }
         } else {
+            // Distil's exploratory read never feeds vision input — discard, mirroring the reader
+            // and reason paths (only `kbx build --vision` populates this).
             let (body, ids, _images) =
                 glossa_tools::exec(name, args, root, &idx, Some(&g), &spec, &trace);
-            (body, ids)
+            (body, ids, Vec::new())
         }
     };
 

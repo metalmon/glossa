@@ -62,6 +62,11 @@ pub struct BuildOpts {
     pub resume: bool,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
+    /// Feed the images `read` returns (page rasters / embedded figures) to the extraction model
+    /// as vision input, so scanned/image-only content can still yield grounded facts. OFF by
+    /// default: the text-only extraction path stays byte-identical to today, and images are large
+    /// on the wire. Threaded straight into `extract_doc`.
+    pub vision: bool,
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -289,7 +294,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 pb.inc(1);
                 continue;
             }
-            let stats = extract_doc(&paths.root, &lab, &builder_md, &ontology, doc)
+            let stats = extract_doc(&paths.root, &lab, &builder_md, &ontology, doc, opts.vision)
                 .with_context(|| format!("extracting {doc}"))?;
             total.nodes += stats.nodes;
             total.mentions += stats.mentions;
@@ -401,6 +406,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         run_build(paths, opts).unwrap();
     }
@@ -465,6 +471,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         run_build(paths, opts).unwrap();
 
@@ -689,6 +696,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -716,6 +724,7 @@ mod tests {
             force: true,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -740,6 +749,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         run_build(paths, opts).unwrap();
 
@@ -809,6 +819,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            vision: false,
         };
         run_build(paths, opts).unwrap();
 

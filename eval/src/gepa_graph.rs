@@ -147,7 +147,7 @@ fn rollout_one(
             Duration::from_secs(240),
         )
     };
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         let (body, ids, _images) =
             crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace);
         // Mirror openai::execute_tool: `read`'s surfaced id is its `path` arg (glossa_tools::exec
@@ -166,7 +166,9 @@ fn rollout_one(
             args: args.clone(),
             result: truncate_chars(&body, STEP_RESULT_CHARS),
         });
-        (body, ids)
+        // GEPA graph rollouts don't feed vision input (not `kbx build --vision`) — discard, same
+        // as `_images` above.
+        (body, ids, Vec::new())
     };
     let messages = vec![
         json!({ "role": "system", "content": prompt }),

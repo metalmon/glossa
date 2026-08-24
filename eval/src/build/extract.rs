@@ -22,6 +22,7 @@ use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
 use glossa::grep::path_to_glob;
 use glossa::index::store::DocIndex;
+use glossa::read::DocImage;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -161,6 +162,19 @@ pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
     Value::Array(tools)
 }
 
+/// Gate a tool call's returned images by the `--vision` flag: `Vec::new()` (discarded) when
+/// `vision` is off — preserving today's text-only extraction byte-for-byte — or `images`
+/// unchanged when on, so `extract_doc`'s agent loop can feed them to the model (see
+/// `run_agent_loop`'s vision-message threading in `backend::openai`). Only `read` ever returns a
+/// non-empty `images`; gating here (rather than per-tool) keeps the call site a one-liner.
+fn gate_images(vision: bool, images: Vec<DocImage>) -> Vec<DocImage> {
+    if vision {
+        images
+    } else {
+        Vec::new()
+    }
+}
+
 /// Force a `search`/`grep`/`read` call's path scope onto `doc_path`, overriding whatever the
 /// model passed — a STATED-extraction pass over ONE document must never wander into another
 /// document's text.
@@ -179,12 +193,19 @@ fn scope_to_doc(name: &str, args: &Value, doc_path: &str) -> Value {
 /// it finds explicitly stated in the text. `builder_md` is the system prompt verbatim, with the
 /// ontology's allowed node types appended; the user turn asks for STATED-only nodes grounded by
 /// a MENTIONS edge to `<doc_path>#n`. Returns how many nodes/MENTIONS edges were written.
+///
+/// `vision`: `kbx build --vision` (default OFF). When on, images `read` returns (page rasters /
+/// embedded figures — see `glossa::read::DocImage`) are fed to the extraction model as vision
+/// input via `run_agent_loop`'s shared image-threading mechanism, so scanned/image-only content
+/// can still yield grounded facts. When off, `gate_images` discards them and this pass is
+/// byte-identical to the pre-vision text-only extraction.
 pub fn extract_doc(
     root: &Path,
     lab: &LabConfig,
     builder_md: &str,
     ontology: &Ontology,
     doc_path: &str,
+    vision: bool,
 ) -> anyhow::Result<ExtractStats> {
     let g = GraphStore::open(root)?;
     let idx = DocIndex::open_or_create(root)?;
@@ -238,7 +259,7 @@ pub fn extract_doc(
         .unwrap_or(0);
     let mut stats = ExtractStats::default();
 
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>) {
+    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
         if name == "graph_upsert" {
             // parse_and_filter_upsert: canonical label-based parse (ops::parse_upsert_payload)
             // plus a partial-apply type filter — a node whose node_type the ontology doesn't
@@ -277,12 +298,12 @@ pub fn extract_doc(
             } else {
                 format!("{}\n{}", notes.join("\n"), out.message)
             };
-            (message, ids)
+            (message, ids, Vec::new())
         } else {
             let scoped = scope_to_doc(name, args, doc_path);
-            let (body, ids, _images) =
+            let (body, ids, images) =
                 glossa_tools::exec(name, &scoped, root, &idx, None, &spec, &trace);
-            (body, ids)
+            (body, ids, gate_images(vision, images))
         }
     };
 
@@ -434,11 +455,11 @@ strict = true
 
         // Same shape as extract_doc's graph_upsert arm: parse + filter -> ops::graph_upsert,
         // returning the written node ids as the surfaced ids (the fix under test).
-        let exec = |_name: &str, args: &Value| -> (String, Vec<String>) {
+        let exec = |_name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
             let (nodes, edges, _notes) = parse_and_filter_upsert(args, &ont);
             let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
             let ids = upserted_node_ids(&out);
-            (out.message, ids)
+            (out.message, ids, Vec::new())
         };
 
         let n = UNPRODUCTIVE_STREAK_K + 1; // enough distinct calls to have tripped the old bug
@@ -503,5 +524,31 @@ strict = true
         let (nodes, _edges, notes) = parse_and_filter_upsert(&call, &ont);
         assert_eq!(nodes.len(), 1, "Fact must survive the type filter: {notes:?}");
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // --- vision: `--vision` gates images out of (or into) `extract_doc`'s exec closure ---------
+
+    fn stub_image() -> DocImage {
+        DocImage {
+            mime: "image/jpeg".to_string(),
+            bytes: vec![1, 2, 3],
+        }
+    }
+
+    /// `--vision` off (the default): a tool call's images are discarded — same as today, before
+    /// this task, when `extract_doc`'s exec arm always dropped `glossa_tools::exec`'s `_images`.
+    #[test]
+    fn gate_images_vision_off_discards() {
+        let out = gate_images(false, vec![stub_image()]);
+        assert!(out.is_empty(), "vision off must discard images: {out:?}");
+    }
+
+    /// `--vision` on: images pass through unchanged, for `run_agent_loop` to thread into a vision
+    /// user message (see `openai::vision_user_message`).
+    #[test]
+    fn gate_images_vision_on_passes_through() {
+        let img = stub_image();
+        let out = gate_images(true, vec![img.clone()]);
+        assert_eq!(out, vec![img], "vision on must pass images through unchanged");
     }
 }
