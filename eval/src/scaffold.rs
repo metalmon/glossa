@@ -16,6 +16,7 @@ const BRIDGE_MD: &str = include_str!("../templates/bridge.md");
 const JUDGE_MD: &str = include_str!("../templates/judge.md");
 const REFLECT_MD: &str = include_str!("../templates/reflect.md");
 const DISTIL_MD: &str = include_str!("../templates/distil.md");
+const SYNTH_MD: &str = include_str!("../templates/synth.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
 
 /// Write a fresh `kbx` workspace at `<root>/.glossa/kbx/`: `lab.toml`, `answer.md`, `builder.md`,
@@ -31,7 +32,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
     std::fs::create_dir_all(&paths.runs)
         .with_context(|| format!("create {}", paths.runs.display()))?;
 
-    let files: [(&Path, &str); 8] = [
+    let files: [(&Path, &str); 9] = [
         (&paths.lab, LAB_TOML),
         (&paths.answer, ANSWER_MD),
         (&paths.builder, BUILDER_MD),
@@ -39,6 +40,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
         (&paths.judge, JUDGE_MD),
         (&paths.reflect, REFLECT_MD),
         (&paths.distil, DISTIL_MD),
+        (&paths.synth, SYNTH_MD),
         (&paths.dataset, DATASET_TOML),
     ];
 

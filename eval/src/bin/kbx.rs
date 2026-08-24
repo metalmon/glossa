@@ -17,6 +17,7 @@ use kb_eval::lab::LabConfig;
 use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
+use kb_eval::synth::{self, SynthArgs};
 use kb_eval::train::{self, TrainArgs};
 use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
@@ -172,6 +173,27 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
+    /// Generate synthetic `(question, answer)` golds by re-packaging the existing grounded graph
+    /// into new questions (the inverse of `distil`): seed from a grounded node, explore the
+    /// corpus read-only, propose one gated gold per attempt, and write the kept ones to `--out`.
+    Synth {
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory).
+        path: Option<PathBuf>,
+        /// Number of synthetic golds to ATTEMPT (the gate may drop some).
+        #[arg(long)]
+        count: usize,
+        /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`). Always overwritten.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Restrict seeds to this node_type (default: the ontology's grounding-required types,
+        /// or every non-structural declared type when none are marked `requires_grounding`).
+        #[arg(long = "seed-type")]
+        seed_type: Option<String>,
+        /// Never draw the progress bar, even on a TTY.
+        #[arg(long = "no-progress")]
+        no_progress: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -281,6 +303,21 @@ fn main() -> Result<()> {
                 limit,
                 force,
                 resume,
+                no_progress,
+            },
+        ),
+        Cmd::Synth {
+            path,
+            count,
+            out,
+            seed_type,
+            no_progress,
+        } => synth::run_synth(
+            path,
+            SynthArgs {
+                count,
+                out,
+                seed_type,
                 no_progress,
             },
         ),

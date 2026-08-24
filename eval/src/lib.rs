@@ -26,6 +26,7 @@ pub mod run;
 pub mod scaffold;
 pub mod score;
 pub mod sop;
+pub mod synth;
 pub mod trace_read;
 pub mod train;
 pub mod tz;
