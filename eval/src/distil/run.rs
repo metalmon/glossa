@@ -24,7 +24,13 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct DistilArgs {
     /// Number of synthetic golds to ATTEMPT — the gate may drop some; kept/dropped are reported.
-    pub count: usize,
+    /// `None` when `--target` is used instead. When both are `None`, defaults to 1 attempt.
+    pub count: Option<usize>,
+    /// Keep generating until this many golds are KEPT, bounded by `max_attempts`. Takes precedence
+    /// over `count` when set.
+    pub target: Option<usize>,
+    /// Attempt ceiling when `target` is set (default: `target * 4`, floored at `target`).
+    pub max_attempts: Option<usize>,
     /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`). Always overwritten whole.
     pub out: Option<PathBuf>,
     /// Restrict seeds to this node_type (default: the ontology's grounding-required types, or
@@ -172,15 +178,28 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| paths.kbx_dir.join("dataset.synthetic.toml"));
 
-    let pb = progress_bar(args.count, args.no_progress);
+    // Attempt budget: `--target N` keeps generating until N are KEPT, bounded by `max_attempts`
+    // (default N*4, floored at N) so a stubborn gate can't loop forever; otherwise a fixed `--count`
+    // attempts (default 1). Both share the sorted-by-id pool cycled by attempt index — no
+    // RNG/wallclock, so a given (graph, budget) is reproducible.
+    let target = args.target;
+    let cap = match target {
+        Some(t) => args.max_attempts.unwrap_or(t.saturating_mul(4)).max(t),
+        None => args.count.unwrap_or(1),
+    };
+
+    let pb = progress_bar(cap, args.no_progress);
     pb.set_message("distil");
 
     let mut kept: Vec<OutCase> = Vec::new();
     let mut n_dropped = 0usize;
+    let mut attempts = 0usize;
 
-    for i in 0..args.count {
-        // Deterministic-ish: sorted-by-id pool, varied by attempt index — no RNG/wallclock, and
-        // an attempt count larger than the pool cycles back through it rather than erroring.
+    while attempts < cap {
+        if target.is_some_and(|t| kept.len() >= t) {
+            break;
+        }
+        let i = attempts;
         let seed = &seeds[i % seeds.len()];
         pb.set_message(format!("distil {i} (seed {})", seed.id));
         match generate_one(&paths, &ontology, &lab, &distil_md, seed)
@@ -188,8 +207,9 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         {
             GenOutcome::Kept(p) => {
                 println!("distil {i}: kept \"{}\" (seed {})", p.question, seed.id);
+                // Sequential id over KEPT golds (no gaps from dropped attempts).
                 kept.push(OutCase {
-                    id: format!("synth-{i}"),
+                    id: format!("synth-{}", kept.len()),
                     question: p.question,
                     answer: p.answer,
                 });
@@ -203,6 +223,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
                 n_dropped += 1;
             }
         }
+        attempts += 1;
         pb.inc(1);
     }
     pb.finish_and_clear();
@@ -211,11 +232,22 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
 
     println!(
         "distil: {} attempted, {} kept, {} dropped -> {}",
-        args.count,
+        attempts,
         kept.len(),
         n_dropped,
         out_path.display()
     );
+    if let Some(t) = target {
+        if kept.len() < t {
+            println!(
+                "distil: target {} NOT reached — kept {} in {} attempts (cap {}); raise --max-attempts or loosen seeds",
+                t,
+                kept.len(),
+                attempts,
+                cap
+            );
+        }
+    }
     Ok(())
 }
 

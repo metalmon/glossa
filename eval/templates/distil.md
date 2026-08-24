@@ -16,6 +16,13 @@ of one hop makes for a thin question; two or more genuine hops make for a better
 the moment you can no longer point to and quote the text that grounds the next link — an invented
 or merely plausible step is worse than no step at all.
 
+Aim the chain at a terminal whose grounding lives in a DIFFERENT chunk or document than the seed's.
+When the answer you would give is quoted in the seed's own source text — or sits in the very same
+chunk that grounds the seed — the reader never had to walk anywhere, and the question tests nothing;
+that is the most common way an attempt turns out hollow. So before you commit, glance at where your
+candidate answer is grounded: if it shares the seed's chunk, either keep stepping until the chain
+lands somewhere genuinely further, or start from a different seed rather than spend the attempt.
+
 Once you have a real chain of two or more grounded facts (or, failing that, whatever the corpus
 genuinely supports), design a question whose answer is the chain's terminal fact but whose PATH to
 that answer requires the intermediate steps — a question that names or describes the seed (or an

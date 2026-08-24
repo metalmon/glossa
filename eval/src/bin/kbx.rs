@@ -180,9 +180,17 @@ enum Cmd {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
-        /// Number of synthetic golds to ATTEMPT (the gate may drop some).
+        /// Number of synthetic golds to ATTEMPT (the gate may drop some). Use this OR `--target`.
         #[arg(long)]
-        count: usize,
+        count: Option<usize>,
+        /// Keep generating until this many golds are KEPT (accumulate to a target), instead of a
+        /// fixed attempt count. Bounded by `--max-attempts` so a stubborn gate can't loop forever.
+        #[arg(long)]
+        target: Option<usize>,
+        /// Attempt ceiling when `--target` is set (default: target x 4). Stops and reports the
+        /// shortfall honestly if the target isn't reached within this many attempts.
+        #[arg(long = "max-attempts")]
+        max_attempts: Option<usize>,
         /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`). Always overwritten.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -309,6 +317,8 @@ fn main() -> Result<()> {
         Cmd::Distil {
             path,
             count,
+            target,
+            max_attempts,
             out,
             seed_type,
             no_progress,
@@ -316,6 +326,8 @@ fn main() -> Result<()> {
             path,
             DistilArgs {
                 count,
+                target,
+                max_attempts,
                 out,
                 seed_type,
                 no_progress,
