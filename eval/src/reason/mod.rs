@@ -39,6 +39,9 @@ pub fn schema_graph_block(ont: &Ontology) -> String {
         } else {
             out.push_str(&format!("  - {t} [{}]\n", flags.join(", ")));
         }
+        if let Some(d) = ont.description(t) {
+            out.push_str(&format!("      {d}\n"));
+        }
     }
 
     out.push_str("Relations:\n");
@@ -46,21 +49,45 @@ pub fn schema_graph_block(ont: &Ontology) -> String {
         let role = format!("{:?}", rel.role);
         if rel.from.is_empty() && rel.to.is_empty() {
             out.push_str(&format!("  - {name} ({role})\n"));
+            if let Some(d) = ont.description(name) {
+                out.push_str(&format!("      {d}\n"));
+            }
             continue;
         }
         for from_ty in &rel.from {
             if rel.to.is_empty() {
                 out.push_str(&format!("  - {from_ty} --{name}--> ? ({role})\n"));
+                if let Some(d) = ont.description(name) {
+                    out.push_str(&format!("      {d}\n"));
+                }
                 continue;
             }
             for to_ty in &rel.to {
                 out.push_str(&format!(
                     "  - {from_ty} --{name}--> {to_ty} ({role})\n"
                 ));
+                if let Some(d) = ont.description(name) {
+                    out.push_str(&format!("      {d}\n"));
+                }
             }
         }
     }
 
+    out
+}
+
+/// Compact block listing ONLY the ontology's requires_grounding entity types with their
+/// descriptions — the node types the build harvest may create. No relations (harvest writes
+/// nodes, not the reasoning spine).
+pub fn grounding_schema_block(ont: &Ontology) -> String {
+    let mut out = String::from("Node types you create (each grounded to the section it is read from):\n");
+    for t in ont.entity_types() {
+        if !ont.requires_grounding(t) { continue; }
+        out.push_str(&format!("  - {t}\n"));
+        if let Some(d) = ont.description(t) {
+            out.push_str(&format!("      {d}\n"));
+        }
+    }
     out
 }
 
@@ -101,5 +128,43 @@ role = "chaining"
             block.contains("A [requires_grounding]"),
             "block missing requires_grounding marker on A:\n{block}"
         );
+    }
+
+    #[test]
+    fn schema_graph_block_prints_descriptions() {
+        let ont = Ontology::parse(r#"
+[entities.A]
+requires_grounding = true
+description = "a thing that prescribes an action"
+[entities.B]
+[relations.REL]
+from = ["A"]
+to = ["B"]
+role = "chaining"
+description = "links A to B"
+"#).unwrap();
+        let s = schema_graph_block(&ont);
+        assert!(s.contains("a thing that prescribes an action"), "entity desc missing:\n{s}");
+        assert!(s.contains("links A to B"), "relation desc missing:\n{s}");
+    }
+
+    #[test]
+    fn grounding_schema_block_only_grounding_types() {
+        let ont = Ontology::parse(r#"
+[entities.Res]
+requires_grounding = true
+description = "prescribed action"
+[entities.Sym]
+description = "a reported problem"
+[relations.R]
+from=["Sym"]
+to=["Res"]
+role="chaining"
+"#).unwrap();
+        let s = grounding_schema_block(&ont);
+        assert!(s.contains("Res"), "grounding type missing:\n{s}");
+        assert!(s.contains("prescribed action"));
+        assert!(!s.contains("Sym"), "non-grounding type leaked:\n{s}");
+        assert!(!s.contains("--R-->"), "relations leaked into grounding block:\n{s}");
     }
 }
