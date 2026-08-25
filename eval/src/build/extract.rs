@@ -1,12 +1,14 @@
 //! Task 5 — agentic STATED fact-extraction over a single document.
 //!
-//! Reuses `backend::openai::run_agent_loop` for the tool-calling loop (the SAME substrate the
-//! eval reader drives) with a build-specific tool set: doc-scoped `search`/`read`/`grep` plus a
-//! `graph_upsert` tool. `graph_upsert` parses the model's call via the CANONICAL
+//! `extract_doc` drives an orchestrated, bounded-round builder: each round starts at the first
+//! uncovered chunk ordinal and reads a document's sections sequentially with `read` +
+//! `graph_upsert` ONLY (no `search`/`grep` — the pass is a coverage walk, not a free-form search).
+//! `graph_upsert` parses the model's call via the CANONICAL
 //! `glossa::graph::ops::parse_upsert_payload` (label-based `UpsertNode`/`UpsertEdge` — no
 //! agent-assigned ids) into label-referenced upserts, drops any node whose type the ontology
-//! doesn't declare (partial — siblings still write; extraction is pinned to `Fact`, so this only
-//! fires on a model mistake), and writes the rest through `glossa::graph::ops::graph_upsert` — the
+//! doesn't declare (partial — siblings still write), keeps ONLY the ontology's
+//! `requires_grounding` node types via `filter_grounding_only` (ontology-typed harvest, not pinned
+//! to a single `Fact` type), and writes the rest through `glossa::graph::ops::graph_upsert` — the
 //! SAME write path the MCP server uses (validates, resolves edge endpoints by label, auto-grounds
 //! from a `<path>#n` source_path, provenance-stamped, dedup-by-label).
 //!
@@ -43,11 +45,12 @@ pub struct ExtractStats {
 /// Parse a model `graph_upsert` tool-call JSON via the canonical
 /// [`ops::parse_upsert_payload`], then drop (partial — not reject-the-whole-call) any node whose
 /// `node_type` `ont` doesn't declare, naming the offending type in a reason string so the model
-/// can fix and resend just that item. Extraction is pinned to a single flat type (`Fact`, always
-/// declared — see `extract_doc`), so this only fires when the model emits some other type by
-/// mistake; every well-typed sibling node (and every edge — `ops::graph_upsert` resolves edges by
-/// label, so an edge naming a dropped node simply fails to resolve on its own, with its own
-/// actionable reason) still reaches the write path.
+/// can fix and resend just that item. The build harvest is ontology-typed (the model may use any
+/// of the ontology's declared entity types, per `BUILD_GRAPH_UPSERT_DESC`), so this only fires on
+/// a genuine model mistake (an undeclared type); every well-typed sibling node (and every edge —
+/// `ops::graph_upsert` resolves edges by label, so an edge naming a dropped node simply fails to
+/// resolve on its own, with its own actionable reason) still reaches the write path. The narrower
+/// grounding-required-types-only rule is enforced separately by `filter_grounding_only`.
 ///
 /// Returns `(nodes, edges, notes)`: `notes` carries `ops::parse_upsert_payload`'s own parse notes
 /// (tolerant node/edge-shape fixups) plus one line per dropped-for-type node.
@@ -129,8 +132,7 @@ const BUILD_GRAPH_UPSERT_DESC: &str =
      Reference edge endpoints by LABEL (nodes have no id here), or as a document section \
      `<path>#<n>`. Ground every node whose type is marked `[requires_grounding]` with a MENTIONS \
      edge from it to the section you read it from (`to`: `<path>#n`) — or simply give the node a \
-     `source_path` of `<path>#n` and grounding is derived automatically. Connect nodes with edges \
-     typed as one of the ontology's declared relations, respecting each relation's from/to types.";
+     `source_path` of `<path>#n` and grounding is derived automatically.";
 
 /// The `graph_upsert` function-schema shape (reusable across all tool schemas that need it).
 /// Returns the OpenAI-function tool object with name/description/parameters set per the caller's
@@ -416,14 +418,13 @@ pub fn extract_doc(
 
         run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
 
-        // Advance coverage by what this round actually read. Loop guard: a round that read nothing
-        // still consumes `start`, otherwise the coverage loop would spin forever on it.
-        let round_reads: Vec<u64> = reads.borrow().iter().copied().collect();
-        if round_reads.is_empty() {
-            covered.insert(start);
-        } else {
-            covered.extend(round_reads);
-        }
+        // Advance coverage monotonically: `start` is unconditionally marked covered after its
+        // round (regardless of what the round actually read), plus whatever ordinals the round
+        // read. This guarantees strict progress even if the model reads zero sections, or reads
+        // only already-covered ordinals but never `start` itself — either way the coverage loop
+        // can't spin forever on the same `start`.
+        covered.insert(start);
+        covered.extend(reads.borrow().iter().copied());
     }
 
     Ok(stats.into_inner())
