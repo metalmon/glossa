@@ -49,27 +49,23 @@ pub fn schema_graph_block(ont: &Ontology) -> String {
         let role = format!("{:?}", rel.role);
         if rel.from.is_empty() && rel.to.is_empty() {
             out.push_str(&format!("  - {name} ({role})\n"));
-            if let Some(d) = ont.description(name) {
-                out.push_str(&format!("      {d}\n"));
+        } else {
+            for from_ty in &rel.from {
+                if rel.to.is_empty() {
+                    out.push_str(&format!("  - {from_ty} --{name}--> ? ({role})\n"));
+                    continue;
+                }
+                for to_ty in &rel.to {
+                    out.push_str(&format!(
+                        "  - {from_ty} --{name}--> {to_ty} ({role})\n"
+                    ));
+                }
             }
-            continue;
         }
-        for from_ty in &rel.from {
-            if rel.to.is_empty() {
-                out.push_str(&format!("  - {from_ty} --{name}--> ? ({role})\n"));
-                if let Some(d) = ont.description(name) {
-                    out.push_str(&format!("      {d}\n"));
-                }
-                continue;
-            }
-            for to_ty in &rel.to {
-                out.push_str(&format!(
-                    "  - {from_ty} --{name}--> {to_ty} ({role})\n"
-                ));
-                if let Some(d) = ont.description(name) {
-                    out.push_str(&format!("      {d}\n"));
-                }
-            }
+        // Description printed ONCE per relation, after all its edge lines — not once per
+        // from x to pair (a relation with multiple from/to types would otherwise repeat it).
+        if let Some(d) = ont.description(name) {
+            out.push_str(&format!("      {d}\n"));
         }
     }
 
@@ -146,6 +142,30 @@ description = "links A to B"
         let s = schema_graph_block(&ont);
         assert!(s.contains("a thing that prescribes an action"), "entity desc missing:\n{s}");
         assert!(s.contains("links A to B"), "relation desc missing:\n{s}");
+    }
+
+    #[test]
+    fn schema_graph_block_relation_description_printed_once_per_relation() {
+        // REL has TWO `to` types, so it renders two edge lines (A --REL--> B, A --REL--> C).
+        // The description must appear exactly once for the relation, not once per edge line.
+        let ont = Ontology::parse(r#"
+[entities.A]
+[entities.B]
+[entities.C]
+[relations.REL]
+from = ["A"]
+to = ["B", "C"]
+role = "chaining"
+description = "links A to B"
+"#).unwrap();
+        let s = schema_graph_block(&ont);
+        assert!(s.contains("A --REL--> B"), "missing edge A->B:\n{s}");
+        assert!(s.contains("A --REL--> C"), "missing edge A->C:\n{s}");
+        assert_eq!(
+            s.matches("links A to B").count(),
+            1,
+            "relation description should print exactly once, not once per edge line:\n{s}"
+        );
     }
 
     #[test]

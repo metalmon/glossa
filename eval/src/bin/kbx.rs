@@ -771,8 +771,8 @@ mod tests {
                 no_progress,
                 bridge_max_facts: _,
                 vision,
-                build_temp: _,
-                chunks_per_round: _,
+                build_temp,
+                chunks_per_round,
                 path,
             } => {
                 assert_eq!(stage, BuildStage::All);
@@ -782,6 +782,11 @@ mod tests {
                 assert!(!resume);
                 assert!(!no_progress);
                 assert!(!vision, "--vision must default OFF");
+                assert!(
+                    (build_temp - 0.8).abs() < f64::EPSILON,
+                    "build_temp default should be 0.8, got {build_temp}"
+                );
+                assert_eq!(chunks_per_round, 3);
                 assert!(path.is_none());
             }
             _ => panic!("expected Cmd::Build"),
@@ -804,6 +809,10 @@ mod tests {
             "--resume",
             "--no-progress",
             "--vision",
+            "--build-temp",
+            "0.5",
+            "--chunks-per-round",
+            "7",
         ])
         .unwrap();
         match cli.cmd {
@@ -817,8 +826,8 @@ mod tests {
                 no_progress,
                 bridge_max_facts: _,
                 vision,
-                build_temp: _,
-                chunks_per_round: _,
+                build_temp,
+                chunks_per_round,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
                 assert_eq!(stage, BuildStage::Judge);
@@ -828,6 +837,11 @@ mod tests {
                 assert!(resume);
                 assert!(no_progress);
                 assert!(vision);
+                assert!(
+                    (build_temp - 0.5).abs() < f64::EPSILON,
+                    "build_temp should parse to 0.5, got {build_temp}"
+                );
+                assert_eq!(chunks_per_round, 7);
             }
             _ => panic!("expected Cmd::Build"),
         }

@@ -361,6 +361,9 @@ pub fn extract_doc(
         };
 
         let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
+            if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
+                eprintln!("[TOOL] {name} {args}");
+            }
             if name == "graph_upsert" {
                 // Canonical label-based parse (ops::parse_upsert_payload) + partial-apply type
                 // filter, then keep ONLY grounding-required types (the document-harvest side of the
