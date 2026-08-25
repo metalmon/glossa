@@ -67,6 +67,24 @@ pub(crate) fn parse_and_filter_upsert(
     (nodes, edges, notes)
 }
 
+/// Harvest keeps ONLY `requires_grounding` node types (Symptom/Cause/Task are query/chain side,
+/// not harvested from documents). Non-grounding types are dropped with a reason.
+pub(crate) fn filter_grounding_only(
+    nodes: Vec<ops::UpsertNode>,
+    ont: &Ontology,
+) -> (Vec<ops::UpsertNode>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut notes = Vec::new();
+    for n in nodes {
+        if ont.requires_grounding(&n.node_type) {
+            kept.push(n);
+        } else {
+            notes.push(format!("dropped node type `{}` — harvest creates only grounding-required types", n.node_type));
+        }
+    }
+    (kept, notes)
+}
+
 /// Node ids `graph_upsert` actually wrote or merged into, read back from an
 /// [`ops::UpsertOutcome`] — for the unproductive-streak novelty tracker (see `extract_doc`'s exec
 /// closure). `dump` lines for a written node are `"node <id> [<type>] <label>..."`; `merged` holds
@@ -562,6 +580,41 @@ strict = true
         let (nodes, _edges, notes) = parse_and_filter_upsert(&call, &ont);
         assert_eq!(nodes.len(), 1, "Fact must survive the type filter: {notes:?}");
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // --- harvest filter: keeps only grounding-required types --------
+
+    /// Test helper: construct a minimal `ops::UpsertNode` for testing.
+    fn mk_node(ty: &str, label: &str, src: &str) -> ops::UpsertNode {
+        ops::UpsertNode {
+            node_type: ty.into(),
+            label: label.into(),
+            source_path: src.into(),
+            aliases: vec![],
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    /// Task 3: harvest keeps ONLY `requires_grounding` node types; non-grounding types
+    /// are dropped with a reason naming the type.
+    #[test]
+    fn harvest_keeps_only_grounding_types() {
+        let ont = Ontology::parse(r#"
+[entities.Res]
+requires_grounding = true
+[entities.Sym]
+[validation]
+strict = true
+"#).unwrap();
+        let nodes = vec![
+            mk_node("Res", "r1", "doc#0"),
+            mk_node("Sym", "s1", "doc#1"),
+        ];
+        let (kept, notes) = filter_grounding_only(nodes, &ont);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].node_type, "Res");
+        assert!(notes.iter().any(|n| n.contains("Sym")), "dropped-type note missing");
     }
 
     // --- vision: `--vision` gates images out of (or into) `extract_doc`'s exec closure ---------
