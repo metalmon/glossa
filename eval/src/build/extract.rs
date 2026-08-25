@@ -251,6 +251,45 @@ fn scope_to_doc(name: &str, args: &Value, doc_path: &str) -> Value {
     a
 }
 
+/// Ordered list of a document's existing chunk ordinals (chunks are sparse — follow `.next`).
+fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u64>> {
+    let mut ords = Vec::new();
+    // find the first existing ord at or after 0
+    let mut cur = match idx.read_chunk_by_ord(doc, 0)? {
+        Some(c) => {
+            ords.push(0);
+            c.next
+        }
+        None => {
+            // scan forward a bounded window for the first chunk if 0 is absent
+            let mut first = None;
+            for n in 1..1000u64 {
+                if let Some(c) = idx.read_chunk_by_ord(doc, n)? {
+                    first = Some((n, c));
+                    break;
+                }
+            }
+            match first {
+                Some((n, c)) => {
+                    ords.push(n);
+                    c.next
+                }
+                None => return Ok(ords),
+            }
+        }
+    };
+    while let Some(n) = cur {
+        match idx.read_chunk_by_ord(doc, n)? {
+            Some(c) => {
+                ords.push(n);
+                cur = c.next;
+            }
+            None => break,
+        }
+    }
+    Ok(ords)
+}
+
 /// Run the agentic STATED-extraction loop over ONE document: the model reads what it needs
 /// (`search`/`read`/`grep`, all doc-scoped) and calls `graph_upsert` to ground reasoning nodes
 /// it finds explicitly stated in the text. `builder_md` is the system prompt verbatim, with the
@@ -641,6 +680,43 @@ strict = true
         let img = stub_image();
         let out = gate_images(true, vec![img.clone()]);
         assert_eq!(out, vec![img], "vision on must pass images through unchanged");
+    }
+
+    // --- doc_chunk_ords: ordered enumeration of a document's existing (sparse) chunk ordinals ---
+
+    /// Task 4: `write_chunks` assigns 1-based ordinals (see `index::store::write_chunks`'s
+    /// `(i + 1) as u64`) — ord 0 never exists. Mirrors the fixture-building style of
+    /// `backend::glossa_tools`'s tests (`DocIndex::open_or_create` + `write_chunks`).
+    #[test]
+    fn doc_chunk_ords_returns_ordinals_in_order() {
+        use glossa::model::Chunk;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "A".into(),
+                file_type: "md".into(),
+                text: "alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "B".into(),
+                file_type: "md".into(),
+                text: "bravo".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "C".into(),
+                file_type: "md".into(),
+                text: "charlie".into(),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(doc_chunk_ords(&idx, "d.md").unwrap(), vec![1, 2, 3]);
     }
 
     /// Task 2: build-path tool schema has only `read` + `graph_upsert`, no search/grep.
