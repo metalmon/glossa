@@ -33,6 +33,15 @@ corpus states about a specific case, so leave it ungrounded unless you actually 
 describing that same situation — do not force a quote onto it. Connect the entry node to the rest
 of the chain with an ontology-legal relation, the same way as any other step.
 
+Give this entry node GENEROUS aliases — this is what lets a future question that is worded
+differently still find the chain. A later user will describe the same problem in their own words,
+not the corpus's: so alias the entry node with the varied ways someone would phrase THIS situation
+— its paraphrases, the same symptom said plainly, the shorthand or partial description a user would
+actually type, the synonyms for the thing that is wrong. The grounded nodes further down the chain
+keep the corpus's own terms; it is the entry node that must reach toward the user's vocabulary.
+Keep every alias a genuine restatement of THIS specific problem, though — not a broad category or a
+loose keyword that would pull in unrelated questions; over-wide aliases anchor the wrong chain.
+
 Honesty is the one place this task is strict. Ground a node only when you can point to and quote
 the exact text that states it. If a value the chain seems to need — the terminal, an intermediate,
 or anything else — is not something you can find and quote in the corpus, say so plainly and leave

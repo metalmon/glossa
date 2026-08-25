@@ -1,16 +1,15 @@
 # Support-domain ontology overlay for glossa (technical-support knowledge base).
 #
-# Core node types (Document, Section, Term, Topic) and core edges
-# (CONTAINS, MENTIONS, CO_OCCURS, NEXT, PREV) are BUILT IN — the structural
-# indexer writes them directly. This overlay declares the support-specific
-# entities + relations that the reasoning enricher agent populates via
-# `graph_upsert` (validated against this file). `MENTIONS` (any node → Section)
-# stays core, so every reasoning node can point at a readable (path,#n) chunk.
-#
-# Deploy: copy this to <corpus-root>/.glossa/ontology.toml (e.g. kb-test/.glossa/ontology.toml).
+# THIN troubleshooting skeleton, matching the baked `support` preset
+# (templates/ontologies/support.toml): the graph holds ONLY the reasoning path
+# (Symptom→Cause→Resolution and Task→Resolution). Entities/context (products,
+# modules, parameters, versions, media, standards) live in the file-first docs,
+# NOT as node types — reifying them over-models and adds noise without lifting
+# reader answers. Core node types (Document, Section) and core edges
+# (CONTAINS, MENTIONS, NEXT, PREV) are BUILT IN by the structural indexer.
 
-# ── Entities (the support domain's nouns) ──
-[entities.Symptom]    # an observed problem / question class (kept BROAD for transfer)
+# ── Entities (the reasoning nodes — nothing else) ──
+[entities.Symptom]    # an observed problem / question class (keep BROAD)
 id_prefix = "sym"
 props = []
 [entities.Cause]      # a root cause
@@ -20,70 +19,27 @@ props = []
 id_prefix = "res"
 props = []
 requires_grounding = true
-[entities.Task]       # a how-to intent (a procedure the user wants to perform)
+[entities.Task]       # a how-to intent
 id_prefix = "tsk"
-props = []
-[entities.Parameter]  # a configurable setting (maxTsdr, watchdog, calculation method, …)
-props = []
-[entities.Product]    # a product line: a PLC family, a metering unit, reporting/SCADA software, …
-props = []
-[entities.Module]     # a hardware module: frequency-input board, CPU, I/O boards, a hardware variant, …
-props = []
-[entities.Medium]     # the operating medium (gas, liquid, petroleum products, …)
-props = []
-[entities.Standard]   # a cited standard or procedure: national standards, metrology procedures, NAMUR, HART, …
-props = []
-[entities.Version]    # a build / firmware version (5.7.2, image-5.7.4, …)
 props = []
 
 # ── Relations (the reasoning spine) ──
-# Troubleshooting: symptom → cause → resolution → parameter.
 [relations.CAUSED_BY]
 from = ["Symptom"]
 to = ["Cause"]
-
+role = "chaining"
 [relations.RESOLVED_BY]
-from = ["Symptom", "Cause", "Task"]   # Task→Resolution = the informational / how-to shape
+from = ["Cause", "Task"]
 to = ["Resolution"]
+role = "chaining"
 
-[relations.SETS]
-from = ["Resolution"]
-to = ["Parameter"]
-
-# the operating-medium bridge the operator assumes but no document states plainly
-[relations.HANDLED_AS]
-from = ["Medium"]
-to = ["Medium"]
-
-[relations.FIXES]
-from = ["Version"]
-to = ["Symptom"]
-
-[relations.OF]
-from = ["Parameter"]
-to = ["Module", "Product"]
-
-[relations.OCCURS_IN]
-from = ["Symptom"]
-to = ["Product", "Module"]
-
-# Strict: graph_upsert rejects any node/edge type not declared here, so the 4B
-# enricher can't pollute the graph with invented types. The structural layer
-# (Document/Section/CONTAINS/…) bypasses validation, so it is unaffected.
 [validation]
 strict = true
 
-# ── Reasoning rules (consumed by the generalize + hygiene passes) ──
-# Domain rules live HERE, never in Rust, so the engine stays domain-agnostic.
-#   spines   — the valid reasoning SHAPES (each = an anchor node type + ordered relations from it).
-#              A node survives the hygiene prune if it lies on a COMPLETE instance of ANY spine, so
-#              distinct case kinds coexist: causal troubleshooting AND informational how-to.
-#   closure  — transitive-closure composition rules [a, b, result]: x-a->y, y-b->z ⇒ x-result->z.
-#   mentions — the anchor edge from a reasoning node to the structural layer (a readable chunk).
 [reasoning]
 spines = [
-  { anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] },  # troubleshooting: Symptom→Cause→Resolution
-  { anchor = "Task",    relations = ["RESOLVED_BY"] },               # how-to / reference: Task→Resolution
+  { anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] },
+  { anchor = "Task",    relations = ["RESOLVED_BY"] },
 ]
 closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 mentions = "MENTIONS"

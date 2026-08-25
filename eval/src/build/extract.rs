@@ -17,6 +17,7 @@
 use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::lab::LabConfig;
+use crate::reason::schema_graph_block;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
@@ -90,6 +91,7 @@ pub(crate) fn upserted_node_ids(out: &ops::UpsertOutcome) -> Vec<String> {
 /// LABEL-based (mirrors the canonical `ops::UpsertNode`/`ops::UpsertEdge` — no agent-assigned
 /// `id`; a bad `node_type` drops just that node, not the whole call). Kept as a named constant so
 /// the call site can pass it explicitly to [`extract_tools_schema`].
+#[allow(dead_code)] // superseded by BUILD_GRAPH_UPSERT_DESC (ontology-typed harvest spike); kept for the ontology-free path
 const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this document STATES. \
      Each node needs `node_type` (MUST be `Fact` — any other value drops just that node, not the \
      whole call), a `label`, an indexed `source_path`, and `aliases` listing the entities it \
@@ -97,6 +99,21 @@ const FACT_ONLY_GRAPH_UPSERT_DESC: &str = "Write reasoning nodes/edges this docu
      section `<path>#<n>`. Ground every Fact with a MENTIONS edge from it to the section you \
      read it from (`to`: `<path>#n`) — or simply give the node itself a `source_path` of \
      `<path>#n` and grounding is derived automatically.";
+
+/// The `graph_upsert` tool description for the ontology-TYPED build harvest (spike): unlike the
+/// Fact-pinned `FACT_ONLY_GRAPH_UPSERT_DESC`, the model may use ANY of the ontology's declared
+/// entity types (listed in the schema-graph block in the system prompt) and grounds each node to
+/// the section it read it from. LABEL-based, partial-apply on a bad type — same as reason's.
+const BUILD_GRAPH_UPSERT_DESC: &str =
+    "Write the reasoning nodes this document STATES. Each node needs a `node_type` matching one \
+     of the ontology's declared entity types listed above (any other value drops just that node, \
+     not the whole call), a `label` — the node as ONE short phrase, with concrete values left in \
+     the source, not copied into the label — and `aliases` listing the entities it mentions. \
+     Reference edge endpoints by LABEL (nodes have no id here), or as a document section \
+     `<path>#<n>`. Ground every node whose type is marked `[requires_grounding]` with a MENTIONS \
+     edge from it to the section you read it from (`to`: `<path>#n`) — or simply give the node a \
+     `source_path` of `<path>#n` and grounding is derived automatically. Connect nodes with edges \
+     typed as one of the ontology's declared relations, respecting each relation's from/to types.";
 
 /// OpenAI-function tool schema for `extract_doc`'s (and `kbx reason`'s) graph-writing agent — the
 /// CANONICAL label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
@@ -212,24 +229,17 @@ pub fn extract_doc(
     let trace = TraceLog::disabled();
     let spec = glossa::tools::ChainSpec::from_ontology(ontology);
 
-    // Build no longer offers the ontology's declared entity types: extraction is pinned to a
-    // single flat node type (`Fact`), always-permitted by `Ontology::validate_node` regardless
-    // of what the corpus's ontology declares (Task 1). The model still names the entities each
-    // Fact mentions, but as `aliases` on the Fact node — not as separate typed entity nodes —
-    // since stage 2's candidate grouping (mechanical, not model-judged) needs them to find
-    // cross-doc bridge candidates.
-    let system = format!(
-        "{builder_md}\n\nThe ONLY node type you may emit is `Fact`. Do not emit any other \
-         node_type, even if one seems to fit better — every reasoning node this pass writes is \
-         a `Fact`. Ground every Fact with a MENTIONS edge to the section you read it from (`to`: \
-         `<path>#n`). List the entities each Fact mentions in its `aliases` array — this is how \
-         later stages find facts that share an entity across documents, so name them precisely \
-         (e.g. the exact term the document uses), not a paraphrase."
-    );
+    // Ontology-TYPED harvest (spike): drop the `Fact` pin — the model reads the doc and creates
+    // nodes typed per the corpus's OWN ontology (schema-graph block for the type list/relations +
+    // per-type descriptions carried in `builder_md`, mirroring reason's `schema_graph_block +
+    // reason_md`), or nothing. `parse_and_filter_upsert` already permits any declared type.
+    let system = format!("{}\n\n{builder_md}", schema_graph_block(ontology));
     let user = format!(
-        "Extract the reasoning facts this document STATES. Read what you need; ground each \
-         Fact with a MENTIONS edge to its `{doc_path}#n`, and list the entities it mentions as \
-         `aliases`.\n\nDocument: {doc_path}"
+        "Read this document. Wherever a section STATES or PRESCRIBES something that matches one of \
+         the node types above, create it with `graph_upsert`, grounded to that section's \
+         `{doc_path}#n`. A section that states no such node — a heading, boilerplate, or a bare \
+         list of values — gets nothing. Do not invent nodes the text does not state.\n\n\
+         Document: {doc_path}"
     );
     let messages = vec![
         json!({ "role": "system", "content": system }),
@@ -240,7 +250,7 @@ pub fn extract_doc(
     let model = lab.model.model.clone();
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
-    let tools = extract_tools_schema(FACT_ONLY_GRAPH_UPSERT_DESC);
+    let tools = extract_tools_schema(BUILD_GRAPH_UPSERT_DESC);
 
     let chat = |messages: &[Value]| {
         lmstudio_chat(
