@@ -14,18 +14,17 @@
 //! unit test; the `graph_upsert` exec arm's parse/filter/write behavior is unit-testable and
 //! covered below without a live model.
 
-use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::lab::LabConfig;
-use crate::reason::schema_graph_block;
+use crate::reason::grounding_schema_block;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
-use glossa::grep::path_to_glob;
 use glossa::index::store::DocIndex;
 use glossa::read::DocImage;
-use glossa::trace::TraceLog;
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -238,19 +237,6 @@ fn gate_images(vision: bool, images: Vec<DocImage>) -> Vec<DocImage> {
     }
 }
 
-/// Force a `search`/`grep`/`read` call's path scope onto `doc_path`, overriding whatever the
-/// model passed — a STATED-extraction pass over ONE document must never wander into another
-/// document's text.
-fn scope_to_doc(name: &str, args: &Value, doc_path: &str) -> Value {
-    let mut a = args.clone();
-    match name {
-        "search" => a["glob"] = json!(path_to_glob(doc_path)),
-        "grep" | "read" => a["path"] = json!(doc_path),
-        _ => {}
-    }
-    a
-}
-
 /// Ordered list of a document's existing chunk ordinals (chunks are sparse — follow `.next`).
 fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u64>> {
     let mut ords = Vec::new();
@@ -290,127 +276,157 @@ fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u64>> {
     Ok(ords)
 }
 
-/// Run the agentic STATED-extraction loop over ONE document: the model reads what it needs
-/// (`search`/`read`/`grep`, all doc-scoped) and calls `graph_upsert` to ground reasoning nodes
-/// it finds explicitly stated in the text. `builder_md` is the system prompt verbatim, with the
-/// ontology's allowed node types appended; the user turn asks for STATED-only nodes grounded by
-/// a MENTIONS edge to `<doc_path>#n`. Returns how many nodes/MENTIONS edges were written.
+/// Run the orchestrated, bounded-round STATED-extraction pass over ONE document. Instead of a
+/// single open-ended agent loop, the builder walks the document in SEQUENTIAL coverage rounds: a
+/// round starts at the first not-yet-covered chunk ordinal and asks the model to `read` up to
+/// `chunks_per_round` sections, then harvest — via `graph_upsert` — every grounded node those
+/// sections STATE. `read` is the only navigation tool (no `search`/`grep` — the builder is pinned
+/// to this one document); the round's read-count is bounded so the model can't wander, and the
+/// coverage loop repeats until every ordinal has been visited.
 ///
-/// `vision`: `kbx build --vision` (default OFF). When on, images `read` returns (page rasters /
-/// embedded figures — see `glossa::read::DocImage`) are fed to the extraction model as vision
-/// input via `run_agent_loop`'s shared image-threading mechanism, so scanned/image-only content
-/// can still yield grounded facts. When off, `gate_images` discards them and this pass is
-/// byte-identical to the pre-vision text-only extraction.
+/// Harvest keeps ONLY `requires_grounding` node types (see `filter_grounding_only`) — the
+/// document side of the ontology (query/chain-side types are produced by `kbx reason`, not here).
+/// `builder_md` is the system prompt verbatim, prefixed with `grounding_schema_block` (the
+/// grounding-required node types + descriptions). Returns how many nodes/MENTIONS edges were
+/// written across all rounds.
+///
+/// `build_temp` sets the sampling temperature (via `KB_EVAL_TEMP`, read by `lmstudio_chat`).
+/// `vision`: `kbx build --vision` (default OFF) — `read` here surfaces text only, so images are
+/// gated out via `gate_images`; the flag is threaded through for parity with the vision path.
 pub fn extract_doc(
     root: &Path,
     lab: &LabConfig,
     builder_md: &str,
     ontology: &Ontology,
     doc_path: &str,
+    build_temp: f64,
+    chunks_per_round: usize,
     vision: bool,
 ) -> anyhow::Result<ExtractStats> {
+    // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP; set it once for this pass.
+    std::env::set_var("KB_EVAL_TEMP", build_temp.to_string());
+
     let g = GraphStore::open(root)?;
     let idx = DocIndex::open_or_create(root)?;
-    let trace = TraceLog::disabled();
-    let spec = glossa::tools::ChainSpec::from_ontology(ontology);
 
-    // Ontology-TYPED harvest (spike): drop the `Fact` pin — the model reads the doc and creates
-    // nodes typed per the corpus's OWN ontology (schema-graph block for the type list/relations +
-    // per-type descriptions carried in `builder_md`, mirroring reason's `schema_graph_block +
-    // reason_md`), or nothing. `parse_and_filter_upsert` already permits any declared type.
-    let system = format!("{}\n\n{builder_md}", schema_graph_block(ontology));
-    let user = format!(
-        "Read this document. Wherever a section STATES or PRESCRIBES something that matches one of \
-         the node types above, create it with `graph_upsert`, grounded to that section's \
-         `{doc_path}#n`. A section that states no such node — a heading, boilerplate, or a bare \
-         list of values — gets nothing. Do not invent nodes the text does not state.\n\n\
-         Document: {doc_path}"
-    );
-    let messages = vec![
-        json!({ "role": "system", "content": system }),
-        json!({ "role": "user", "content": user }),
-    ];
+    // Grounding-required node types + descriptions prepended to the builder prompt (the schema the
+    // harvest may create; `filter_grounding_only` enforces it on write).
+    let system = format!("{}\n\n{builder_md}", grounding_schema_block(ontology));
+    let tools = build_tools_schema(BUILD_GRAPH_UPSERT_DESC);
 
     let endpoint = lab.model.endpoint.clone();
     let model = lab.model.model.clone();
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
-    let tools = extract_tools_schema(BUILD_GRAPH_UPSERT_DESC);
-
-    let chat = |messages: &[Value]| {
-        lmstudio_chat(
-            &endpoint,
-            &model,
-            api_key.as_deref(),
-            &tools,
-            messages,
-            timeout,
-        )
-    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let mut stats = ExtractStats::default();
 
-    let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
-        if name == "graph_upsert" {
-            // parse_and_filter_upsert: canonical label-based parse (ops::parse_upsert_payload)
-            // plus a partial-apply type filter — a node whose node_type the ontology doesn't
-            // declare (extraction is pinned to Fact, so this only fires on a model mistake) is
-            // dropped with a reason; every well-typed sibling still reaches ops::graph_upsert,
-            // the SAME write path the MCP server uses.
-            let (nodes, edges, notes) = parse_and_filter_upsert(args, ontology);
-            let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now);
-            if !out.rejected {
-                stats.nodes += out.nodes;
-                // Count MENTIONS edges actually written (explicit ones the model sent, plus any
-                // ops::graph_upsert auto-derived from a node's `<path>#n` source_path) — read back
-                // from the outcome's dump rather than the pre-write request, since a requested
-                // edge can still be dropped (e.g. an unresolvable endpoint).
-                let mentions_marker = format!("-{}->", glossa::graph::MENTIONS);
-                stats.mentions += out
-                    .dump
-                    .iter()
-                    .filter(|l| l.starts_with("edge ") && l.contains(&mentions_marker))
-                    .count();
-            }
-            // Surfaced ids for the unproductive-streak novelty tracker: the ids of nodes this call
-            // actually wrote or merged into (see `upserted_node_ids`). A batch of distinct nodes
-            // must register as "new" progress even though graph_upsert's own reply is a short
-            // confirmation/rejection string with no `path#ord` anchors of its own (`extract_node_ids`
-            // would find nothing in it). Without this, 3+ consecutive distinct graph_upsert calls —
-            // very plausible (several facts from one read, or retries after a rejection) — would
-            // each surface zero ids and, at UNPRODUCTIVE_STREAK_K, have their real result
-            // (confirmation OR rejection text) replaced by the generic steer.
-            let ids = upserted_node_ids(&out);
-            // Feed drop reasons back to the model: parse_and_filter_upsert's own notes (parse
-            // fixups + type-dropped nodes) first, then ops::graph_upsert's formatted response
-            // (which already lists its own dropped/merged items — mirrors format_upsert_response).
-            let message = if notes.is_empty() {
-                out.message
+    let ords = doc_chunk_ords(&idx, doc_path)?;
+
+    // `stats` accumulates across rounds; `reads` tracks the ordinals a single round actually read
+    // (cleared per round). Both live in RefCell so the FnMut `exec` closure can mutate them without
+    // conflicting with `chat`/`on_repeat`'s borrows inside `run_agent_loop`.
+    let stats = RefCell::new(ExtractStats::default());
+    let reads = RefCell::new(Vec::<u64>::new());
+
+    // Coverage loop: one bounded round per pass, starting at the first uncovered ordinal, until
+    // every existing chunk ordinal has been visited.
+    let mut covered: BTreeSet<u64> = BTreeSet::new();
+    while let Some(&start) = ords.iter().find(|o| !covered.contains(o)) {
+        reads.borrow_mut().clear();
+
+        let user = format!(
+            "Extract grounded nodes from this document. Start at section {start}: call \
+             read(path=\"{doc_path}\", n={start}) first."
+        );
+        let messages = vec![
+            json!({ "role": "system", "content": system.clone() }),
+            json!({ "role": "user", "content": user }),
+        ];
+
+        let chat = |messages: &[Value]| {
+            lmstudio_chat(
+                &endpoint,
+                &model,
+                api_key.as_deref(),
+                &tools,
+                messages,
+                timeout,
+            )
+        };
+
+        let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
+            if name == "graph_upsert" {
+                // Canonical label-based parse (ops::parse_upsert_payload) + partial-apply type
+                // filter, then keep ONLY grounding-required types (the document-harvest side of the
+                // ontology), then write through the SAME ops::graph_upsert path the MCP server uses.
+                let (nodes, edges, _notes) = parse_and_filter_upsert(args, ontology);
+                let (nodes, _drop_notes) = filter_grounding_only(nodes, ontology);
+                let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now);
+                if !out.rejected {
+                    let mut s = stats.borrow_mut();
+                    s.nodes += out.nodes;
+                    // Count MENTIONS edges actually written (explicit + auto-derived from a node's
+                    // `<path>#n` source_path) — read back from the outcome's dump, not the request.
+                    let mentions_marker = format!("-{}->", glossa::graph::MENTIONS);
+                    s.mentions += out
+                        .dump
+                        .iter()
+                        .filter(|l| l.starts_with("edge ") && l.contains(&mentions_marker))
+                        .count();
+                }
+                // Surfaced ids for the unproductive-streak novelty tracker: the ids of nodes this
+                // call actually wrote or merged into (see `upserted_node_ids`), so a batch of
+                // distinct writes registers as progress.
+                let ids = upserted_node_ids(&out);
+                (out.message, ids, Vec::new())
             } else {
-                format!("{}\n{}", notes.join("\n"), out.message)
-            };
-            (message, ids, Vec::new())
+                // `read` — the only navigation tool. Bound the round to `chunks_per_round` reads,
+                // then steer the model to harvest and stop.
+                let n = args.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+                if reads.borrow().len() >= chunks_per_round {
+                    return (
+                        "(no more sections for this round — now call graph_upsert for every \
+                         prescribed node you read, then stop)"
+                            .into(),
+                        vec![],
+                        gate_images(vision, vec![]),
+                    );
+                }
+                match idx.read_chunk_by_ord(doc_path, n) {
+                    Ok(Some(c)) => {
+                        reads.borrow_mut().push(n);
+                        (c.body, vec![], gate_images(vision, vec![]))
+                    }
+                    Ok(None) => ("(no more sections)".into(), vec![], gate_images(vision, vec![])),
+                    Err(e) => (format!("(read error: {e})"), vec![], gate_images(vision, vec![])),
+                }
+            }
+        };
+
+        let on_repeat = |name: &str, _args: &Value| {
+            format!(
+                "(dup {name}) you already called this — try a different tool, a different query, \
+                 or move on to graph_upsert"
+            )
+        };
+
+        run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
+
+        // Advance coverage by what this round actually read. Loop guard: a round that read nothing
+        // still consumes `start`, otherwise the coverage loop would spin forever on it.
+        let round_reads: Vec<u64> = reads.borrow().iter().copied().collect();
+        if round_reads.is_empty() {
+            covered.insert(start);
         } else {
-            let scoped = scope_to_doc(name, args, doc_path);
-            let (body, ids, images) =
-                glossa_tools::exec(name, &scoped, root, &idx, None, &spec, &trace);
-            (body, ids, gate_images(vision, images))
+            covered.extend(round_reads);
         }
-    };
+    }
 
-    let on_repeat = |name: &str, _args: &Value| {
-        format!(
-            "(dup {name}) you already called this — try a different tool, a different query, \
-             or move on to graph_upsert"
-        )
-    };
-
-    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
-    Ok(stats)
+    Ok(stats.into_inner())
 }
 
 #[cfg(test)]

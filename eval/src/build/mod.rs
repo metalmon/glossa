@@ -331,8 +331,17 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 pb.inc(1);
                 continue;
             }
-            let stats = extract_doc(&paths.root, &lab, &builder_md, &ontology, doc, opts.vision)
-                .with_context(|| format!("extracting {doc}"))?;
+            let stats = extract_doc(
+                &paths.root,
+                &lab,
+                &builder_md,
+                &ontology,
+                doc,
+                opts.build_temp,
+                opts.chunks_per_round,
+                opts.vision,
+            )
+            .with_context(|| format!("extracting {doc}"))?;
             total.nodes += stats.nodes;
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
