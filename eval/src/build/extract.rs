@@ -115,31 +115,15 @@ const BUILD_GRAPH_UPSERT_DESC: &str =
      `source_path` of `<path>#n` and grounding is derived automatically. Connect nodes with edges \
      typed as one of the ontology's declared relations, respecting each relation's from/to types.";
 
-/// OpenAI-function tool schema for `extract_doc`'s (and `kbx reason`'s) graph-writing agent — the
-/// CANONICAL label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
-/// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
-/// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
-/// registry (`glossa::tools::registry`).
-pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
-    let mut tools: Vec<Value> = glossa::tools::registry::registry()
-        .into_iter()
-        .filter(|d| matches!(d.name, "search" | "read" | "grep"))
-        .map(|d| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
-                }
-            })
-        })
-        .collect();
-    tools.push(json!({
+/// The `graph_upsert` function-schema shape (reusable across all tool schemas that need it).
+/// Returns the OpenAI-function tool object with name/description/parameters set per the caller's
+/// description. DRY helper for `extract_tools_schema` and `build_tools_schema`.
+fn graph_upsert_tool_value(desc: &str) -> Value {
+    json!({
         "type": "function",
         "function": {
             "name": "graph_upsert",
-            "description": graph_upsert_description,
+            "description": desc,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -175,7 +159,51 @@ pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
                 "required": []
             }
         }
-    }));
+    })
+}
+
+/// OpenAI-function tool schema for `extract_doc`'s (and `kbx reason`'s) graph-writing agent — the
+/// CANONICAL label-based shape: `graph_upsert`'s `nodes[]`/`edges[]` mirror [`ops::UpsertNode`]/
+/// [`ops::UpsertEdge`] exactly (no agent-assigned `id`; edges reference endpoints by `label` or a
+/// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
+/// registry (`glossa::tools::registry`).
+pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
+    let mut tools: Vec<Value> = glossa::tools::registry::registry()
+        .into_iter()
+        .filter(|d| matches!(d.name, "search" | "read" | "grep"))
+        .map(|d| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.params_schema,
+                }
+            })
+        })
+        .collect();
+    tools.push(graph_upsert_tool_value(graph_upsert_description));
+    Value::Array(tools)
+}
+
+/// Build-path tool schema: only `read` for document access plus `graph_upsert` for writing the
+/// reasoning graph. No `search` or `grep` — the builder operates on a single document at a time.
+pub(crate) fn build_tools_schema(graph_upsert_description: &str) -> Value {
+    let mut tools: Vec<Value> = glossa::tools::registry::registry()
+        .into_iter()
+        .filter(|d| d.name == "read")
+        .map(|d| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.params_schema,
+                }
+            })
+        })
+        .collect();
+    tools.push(graph_upsert_tool_value(graph_upsert_description));
     Value::Array(tools)
 }
 
@@ -560,5 +588,17 @@ strict = true
         let img = stub_image();
         let out = gate_images(true, vec![img.clone()]);
         assert_eq!(out, vec![img], "vision on must pass images through unchanged");
+    }
+
+    /// Task 2: build-path tool schema has only `read` + `graph_upsert`, no search/grep.
+    #[test]
+    fn build_tools_schema_has_no_search_or_grep() {
+        let v = build_tools_schema("desc");
+        let names: Vec<String> = v.as_array().unwrap().iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"read".to_string()));
+        assert!(names.contains(&"graph_upsert".to_string()));
+        assert!(!names.contains(&"search".to_string()), "search must be off on build path");
+        assert!(!names.contains(&"grep".to_string()), "grep must be off on build path");
     }
 }
