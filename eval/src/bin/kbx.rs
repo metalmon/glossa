@@ -114,6 +114,12 @@ enum Cmd {
         /// today, and images are large on the wire.
         #[arg(long = "vision", env = "GLOSSA_VISION")]
         vision: bool,
+        /// Sampling temperature for the extract-stage model call.
+        #[arg(long = "build-temp", default_value_t = 0.8)]
+        build_temp: f64,
+        /// Number of chunks folded into a single extract-stage model call.
+        #[arg(long = "chunks-per-round", default_value_t = 3)]
+        chunks_per_round: usize,
     },
     /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
     /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
@@ -259,6 +265,8 @@ fn main() -> Result<()> {
             no_progress,
             bridge_max_facts,
             vision,
+            build_temp,
+            chunks_per_round,
         } => {
             let paths = workspace::resolve(path);
             let report = run_build(
@@ -272,6 +280,8 @@ fn main() -> Result<()> {
                     no_progress,
                     bridge_max_facts,
                     vision,
+                    build_temp,
+                    chunks_per_round,
                 },
             )?;
             println!(
@@ -761,6 +771,8 @@ mod tests {
                 no_progress,
                 bridge_max_facts: _,
                 vision,
+                build_temp: _,
+                chunks_per_round: _,
                 path,
             } => {
                 assert_eq!(stage, BuildStage::All);
@@ -805,6 +817,8 @@ mod tests {
                 no_progress,
                 bridge_max_facts: _,
                 vision,
+                build_temp: _,
+                chunks_per_round: _,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
                 assert_eq!(stage, BuildStage::Judge);

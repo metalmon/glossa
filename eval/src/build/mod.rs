@@ -72,6 +72,29 @@ pub struct BuildOpts {
     /// default: the text-only extraction path stays byte-identical to today, and images are large
     /// on the wire. Threaded straight into `extract_doc`.
     pub vision: bool,
+    /// Sampling temperature for the extract-stage model call. Higher values trade determinism for
+    /// recall breadth over ambiguous/underspecified passages.
+    pub build_temp: f64,
+    /// Number of chunks folded into a single extract-stage model call (prompt-fit knob, mirrors
+    /// `bridge_max_facts` for the judge stage).
+    pub chunks_per_round: usize,
+}
+
+impl Default for BuildOpts {
+    fn default() -> Self {
+        BuildOpts {
+            stage: BuildStage::All,
+            doc: None,
+            limit: None,
+            force: false,
+            resume: false,
+            no_progress: false,
+            bridge_max_facts: 0,
+            vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
+        }
+    }
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -424,6 +447,13 @@ mod tests {
     }
 
     #[test]
+    fn build_opts_defaults() {
+        let o = BuildOpts::default();
+        assert_eq!(o.chunks_per_round, 3);
+        assert!((o.build_temp - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
     fn run_build_finalize_stage_runs_without_error() {
         // No `.glossa/kbx/` at all (see `synthetic_corpus`) — Finalize must not touch lab.toml/
         // builder.md/bridge.md, so this run must succeed anyway.
@@ -437,6 +467,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         run_build(paths, opts).unwrap();
     }
@@ -503,6 +535,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         run_build(paths, opts).unwrap();
 
@@ -729,6 +763,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -758,6 +794,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -784,6 +822,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         run_build(paths, opts).unwrap();
 
@@ -855,6 +895,8 @@ mod tests {
             no_progress: true,
             bridge_max_facts: 40,
             vision: false,
+            build_temp: 0.8,
+            chunks_per_round: 3,
         };
         run_build(paths, opts).unwrap();
 
