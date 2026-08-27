@@ -43,7 +43,7 @@ const DEFAULT_MIN_P: f64 = 0.1;
 /// spew thousands of tokens before the server stops) while staying generous enough not to clip a
 /// legitimate multi-node `graph_upsert` batch or a normal reader answer. Overridable via
 /// `KB_EVAL_MAX_TOKENS`.
-const DEFAULT_MAX_TOKENS: u64 = 8192;
+const DEFAULT_MAX_TOKENS: u64 = 16384;
 
 /// How many times to resample a completion whose content is a degenerate repetition loop before
 /// giving up and returning the last (best-effort) result.
@@ -168,6 +168,7 @@ pub(crate) fn chat_once(
         "max_tokens": max_tokens,
     });
     chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
+        .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
 }
 
 /// Shared tokio runtime backing the sync bridge below: the agent loop (`run_agent_loop` and every
@@ -221,12 +222,19 @@ fn is_transient_upstream(body: &str) -> bool {
 
 /// Sync HTTP bridge: POST our JSON request `body` (the `{model, messages, tools, temperature}` shape
 /// `lmstudio_chat`/`chat_once` build) to an OpenAI-compatible `/v1/chat/completions` endpoint via
-/// `reqwest` and return the assistant `message` object (`choices[0].message`) as a raw `Value`.
+/// `reqwest` and return the FULL parsed response body as a raw `Value` (validated to have
+/// `choices[0].message`, but NOT reduced to just that field — see below).
 ///
 /// Deliberately RAW `Value` in and out — no typed OpenAI SDK structs — so provider-specific fields
 /// survive the round-trip. In particular reasoning models (MiMo on OpenCode Zen) return
 /// `reasoning_content` on assistant tool-call turns and require it echoed back on the next request;
 /// typed message structs drop it and the provider then rejects the follow-up with HTTP 400.
+///
+/// Returns the whole response (not just `choices[0].message`) so callers can also read
+/// `choices[0].finish_reason` (e.g. `lmstudio_chat`'s length-resample). Callers that only want the
+/// assistant message extract it themselves — `finish_reason` must NEVER be injected into the
+/// message object itself, since that object is echoed back into `messages` on the next request and
+/// a strict endpoint may 400 on an unrecognized field.
 ///
 /// `endpoint` is the FULL chat-completions URL (e.g. `http://localhost:1234/v1/chat/completions`),
 /// POSTed verbatim — this function appends nothing. Callers configure the complete URL in
@@ -301,13 +309,11 @@ fn chat_http(
                         // is an upstream transient (same wording as the non-2xx path), retry it too.
                         let retryable = is_transient_upstream(&err.to_string());
                         (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
+                    } else if v.pointer("/choices/0/message").is_some() {
+                        // Return the FULL response — see the doc comment above for why.
+                        (false, Ok(v))
                     } else {
-                        match v.pointer("/choices/0/message").cloned() {
-                            Some(m) => (false, Ok(m)),
-                            None => {
-                                (false, Err(anyhow!("chat response had no choices[0].message")))
-                            }
-                        }
+                        (false, Err(anyhow!("chat response had no choices[0].message")))
                     }
                 }
                 Err(e) => (false, Err(anyhow!("parse chat response json: {e}"))),
@@ -336,9 +342,13 @@ fn chat_http(
 /// low-probability tail at that temperature. Shared by the eval backend and the graph GEPA optimizer
 /// so both drive the same server the same way.
 ///
-/// If the returned completion looks like a degenerate generation loop (see `looks_looped`), this
-/// resamples up to `GEN_LOOP_RETRIES` times before giving up and returning the last (best-effort)
-/// result — sampling is stochastic, so a resample almost always breaks the loop.
+/// Resamples up to `GEN_LOOP_RETRIES` times before giving up and returning the last (best-effort)
+/// result — sampling is stochastic, so a resample almost always breaks the problem — when either:
+/// - the completion looks like a degenerate generation loop (see `looks_looped`), or
+/// - the completion hit the token cap (`finish_reason == "length"`): the model burned its budget on
+///   verbose content-reasoning and either never emitted the tool call or emitted a truncated one
+///   whose JSON args don't parse. A resample at the same (stochastic) temperature is often terser.
+/// See `should_resample` for the (unit-tested) decision predicate.
 ///
 /// `url` is the FULL chat-completions URL and is passed through to `chat_http` verbatim.
 pub(crate) fn lmstudio_chat(
@@ -375,16 +385,38 @@ pub(crate) fn lmstudio_chat(
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
         let _ = std::fs::write(&p, serde_json::to_string(&body)?);
     }
-    let mut resp = chat_http(url, api_key, &body, timeout)?;
+    let mut full = chat_http(url, api_key, &body, timeout)?;
     for _ in 0..GEN_LOOP_RETRIES {
-        let content = resp.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        if !looks_looped(content) {
+        let content = full
+            .pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        let finish = full
+            .pointer("/choices/0/finish_reason")
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
+        if !should_resample(finish, content) {
             break;
         }
-        eprintln!("[gen-loop] resampling: completion looked like a repetition loop");
-        resp = chat_http(url, api_key, &body, timeout)?;
+        if finish == "length" {
+            eprintln!("[max-tokens] resampling: completion hit the token cap (finish_reason=length)");
+        } else {
+            eprintln!("[gen-loop] resampling: completion looked like a repetition loop");
+        }
+        full = chat_http(url, api_key, &body, timeout)?;
     }
-    Ok(resp)
+    full.pointer("/choices/0/message")
+        .cloned()
+        .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
+}
+
+/// Decision predicate for `lmstudio_chat`'s resample loop: true when the completion should be
+/// resampled rather than accepted — either it hit the token cap (`finish_reason == "length"`, a
+/// truncated verbose turn that likely never emitted a valid tool call) or its content looks like a
+/// degenerate repetition loop (see `looks_looped`). Pure and separated from the loop so the decision
+/// itself is unit-testable without a mock HTTP server.
+fn should_resample(finish: &str, content: &str) -> bool {
+    finish == "length" || looks_looped(content)
 }
 
 /// Detect a degenerate generation loop: the tail of `text` is N identical consecutive blocks of some
@@ -1532,5 +1564,75 @@ mod schema_tests {
     #[test]
     fn looks_looped_short_text_is_false() {
         assert!(!looks_looped("too short"));
+    }
+
+    #[test]
+    fn should_resample_on_length_or_loop_but_not_normal() {
+        // Hit the token cap: resample regardless of content.
+        assert!(should_resample("length", "any content, even short"));
+        // Looked like a degenerate repetition loop, even though it finished "normally".
+        let looped = "prefix ".to_string() + &"ABABAB".repeat(20);
+        assert!(should_resample("stop", &looped));
+        // Normal, complete, non-looping content: accept it.
+        assert!(!should_resample("stop", "ANSWER: a short normal answer"));
+    }
+
+    /// Mirrors `chat_once_posts_endpoint_url_verbatim`'s mock-server pattern, but drives
+    /// `lmstudio_chat`'s resample loop: the first response hits the token cap
+    /// (`finish_reason:"length"`), so it must resample once; the second response is a normal
+    /// completion, so the loop stops there and returns it. Proves the length branch actually fires
+    /// end-to-end (not just the pure predicate) and that the returned message is the GOOD (second)
+    /// one, not the truncated first one.
+    #[test]
+    fn lmstudio_chat_resamples_once_on_length_then_returns_good_message() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_srv = requests.clone();
+        let server = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).unwrap();
+                requests_srv.fetch_add(1, Ordering::SeqCst);
+                let body = if i == 0 {
+                    // Truncated at the cap: no tool call, no finish content that matters — only
+                    // finish_reason drives the resample.
+                    r#"{"choices":[{"message":{"role":"assistant","content":"...truncated verbose reasoning"},"finish_reason":"length"}]}"#
+                } else {
+                    r#"{"choices":[{"message":{"role":"assistant","content":"ANSWER: ok"},"finish_reason":"stop"}]}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                sock.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let endpoint = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        let msg = lmstudio_chat(
+            &endpoint,
+            "m",
+            None,
+            &json!([]),
+            &[json!({"role": "user", "content": "hi"})],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "must resample exactly once after a finish_reason=length turn"
+        );
+        assert_eq!(msg["content"], "ANSWER: ok", "must return the second (good) message, not the truncated first one");
     }
 }
