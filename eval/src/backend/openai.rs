@@ -33,6 +33,16 @@ pub struct OpenAiBackend {
 
 const MAX_ROUNDS: usize = 50;
 
+/// Default `min_p` nucleus-sampling floor for every chat call this backend makes (`chat_once` and
+/// `lmstudio_chat`), overridable via `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that
+/// otherwise widen at high temperature, cutting down on degenerate generation loops without forcing
+/// low-temperature (deterministic) sampling.
+const DEFAULT_MIN_P: f64 = 0.1;
+
+/// How many times to resample a completion whose content is a degenerate repetition loop before
+/// giving up and returning the last (best-effort) result.
+const GEN_LOOP_RETRIES: usize = 2;
+
 impl AgentBackend for OpenAiBackend {
     fn needs_corpus(&self) -> bool {
         true
@@ -139,10 +149,15 @@ pub(crate) fn chat_once(
     // One-shot (the file-prompt judge): greedy sampling so grading is reproducible run-to-run
     // (NOT the reader's stochastic KB_EVAL_TEMP), and NO `tools` field at all — a strict provider
     // (the MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
+    let min_p: f64 = std::env::var("KB_EVAL_MIN_P")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MIN_P);
     let body = json!({
         "model": model,
         "messages": messages,
         "temperature": 0,
+        "min_p": min_p,
     });
     chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
 }
@@ -309,8 +324,13 @@ fn chat_http(
 /// the raw `reqwest` bridge (see `chat_http`). Returns the assistant `message` object (already extracted
 /// from `choices[0].message`). Samples at `temperature: 0.8` — temp 0 is not a reliable greedy mode
 /// on this reasoning model/backend (unstable outputs), so runs are stochastic and must be averaged
-/// over N. Shared by the eval backend and the graph GEPA optimizer so both drive the same server
-/// the same way.
+/// over N. Also sends `min_p` (default `DEFAULT_MIN_P`, overridable via `KB_EVAL_MIN_P`) to trim the
+/// low-probability tail at that temperature. Shared by the eval backend and the graph GEPA optimizer
+/// so both drive the same server the same way.
+///
+/// If the returned completion looks like a degenerate generation loop (see `looks_looped`), this
+/// resamples up to `GEN_LOOP_RETRIES` times before giving up and returning the last (best-effort)
+/// result — sampling is stochastic, so a resample almost always breaks the loop.
 ///
 /// `url` is the FULL chat-completions URL and is passed through to `chat_http` verbatim.
 pub(crate) fn lmstudio_chat(
@@ -326,18 +346,59 @@ pub(crate) fn lmstudio_chat(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.8);
+    let min_p: f64 = std::env::var("KB_EVAL_MIN_P")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MIN_P);
     let body = json!({
         "model": model,
         "messages": messages,
         "tools": tools,
-        "temperature": temperature
+        "temperature": temperature,
+        "min_p": min_p
     });
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
     // with descriptions) sent to the endpoint, to prove what the model actually receives.
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
         let _ = std::fs::write(&p, serde_json::to_string(&body)?);
     }
-    chat_http(url, api_key, &body, timeout)
+    let mut resp = chat_http(url, api_key, &body, timeout)?;
+    for _ in 0..GEN_LOOP_RETRIES {
+        let content = resp.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        if !looks_looped(content) {
+            break;
+        }
+        eprintln!("[gen-loop] resampling: completion looked like a repetition loop");
+        resp = chat_http(url, api_key, &body, timeout)?;
+    }
+    Ok(resp)
+}
+
+/// Detect a degenerate generation loop: the tail of `text` is N identical consecutive blocks of some
+/// short period (a phrase/line the model repeated until it ran out of tokens). Byte-level, so it also
+/// catches whitespace-y repeats; returns false for normal prose. Pure — unit-tested.
+fn looks_looped(text: &str) -> bool {
+    let t = text.trim_end();
+    let b = t.as_bytes();
+    let n = b.len();
+    if n < 60 {
+        return false;
+    } // too short to judge
+    let tail = 1200.min(n);
+    const REPS: usize = 4; // need >=4 identical consecutive blocks
+    for p in 4..=(tail / REPS) {
+        // period (block length) in bytes
+        let span = REPS * p;
+        if span > tail {
+            break;
+        }
+        let start = n - span;
+        let unit = &b[n - p..];
+        if (0..REPS).all(|k| &b[start + k * p..start + (k + 1) * p] == unit) {
+            return true;
+        }
+    }
+    false
 }
 
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
@@ -1433,5 +1494,30 @@ mod schema_tests {
                 "graph-OFF must advertise ungated tool {ungated}; got {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn looks_looped_detects_repeated_tail() {
+        let text = "Some normal preamble. ".to_string() + &"the same phrase over and over. ".repeat(10);
+        assert!(looks_looped(&text));
+    }
+
+    #[test]
+    fn looks_looped_detects_short_cycle() {
+        let text = "prefix ".to_string() + &"ABABAB".repeat(20);
+        assert!(looks_looped(&text));
+    }
+
+    #[test]
+    fn looks_looped_passes_normal_prose() {
+        let text = "The quick brown fox jumps over the lazy dog. It was a bright cold day in April, \
+                     and the clocks were striking thirteen. Meanwhile, a different sentence follows, \
+                     varying its wording and structure so no short block repeats consecutively.";
+        assert!(!looks_looped(text));
+    }
+
+    #[test]
+    fn looks_looped_short_text_is_false() {
+        assert!(!looks_looped("too short"));
     }
 }
