@@ -39,10 +39,13 @@ const SEED_GRAPH_UPSERT_DESC: &str =
      reach a count or because the schema-graph would allow it. Each node needs a `node_type` from \
      the ontology's declared entity types (any other value drops just that node), a `label` phrased \
      as a user would express it, and `aliases` listing alternate phrasings. Reference edge \
-     endpoints by LABEL. Ground a node only when the source text actually states it (give it a \
-     `source_path` of `<path>#n` and grounding is derived automatically) — entry/query nodes are \
-     normally left UNgrounded unless their type is marked `[requires_grounding]`. Emit a node only \
-     when the source genuinely supports it as a real reasoning step; do not invent filler.";
+     endpoints by LABEL. To ground a node, set its `source_path` to the copy-ready `path#n` token \
+     exactly as a search/read/grep result showed it — the same token you would pass to `read`. A \
+     node you are NOT grounding — any query-side or entry node whose type is not marked \
+     `[requires_grounding]` — must carry NO `source_path` at all: omit the field entirely, and \
+     never invent or borrow a path to fill it; an ungrounded entry node is the correct, expected \
+     outcome. Emit a node only when the source genuinely supports it as a real reasoning step; do \
+     not invent filler.";
 
 /// Build the per-seed user message: introduce the grounded terminal (id/type/label), give the model
 /// its FULL grounded source text, and instruct backward fan-out synthesis bounded by `fanout_max`.
