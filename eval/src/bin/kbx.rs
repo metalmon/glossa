@@ -166,20 +166,19 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
-    /// Reason over a corpus's gold dataset into its reasoning graph: one `chain_one_gold` pass per
-    /// gold case, checkpointed for `--resume`, then finalize (hygiene/doctor + node-index rebuild).
+    /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
+    /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
     Reason {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
-        /// Override the workspace's default gold dataset (`paths.dataset`).
-        #[arg(long)]
-        gold: Option<PathBuf>,
-        /// `"split"` (train-only, holds out a deterministic test fraction) or `"kb"` (process
-        /// every gold case).
-        #[arg(long, default_value = "kb")]
-        mode: String,
-        /// Only process the first N (post-holdout, in sorted-id order) gold cases.
+        /// Restrict seeds to this node_type (default: the ontology's grounding-required types).
+        #[arg(long = "seed-type")]
+        seed_type: Option<String>,
+        /// Soft cap on predecessors synthesized per backward step (default 3).
+        #[arg(long = "fanout-max")]
+        fanout_max: Option<usize>,
+        /// Only process the first N (in seed-pool order) grounded seeds.
         #[arg(long)]
         limit: Option<usize>,
         /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
@@ -324,8 +323,8 @@ fn main() -> Result<()> {
         ),
         Cmd::Reason {
             path,
-            gold,
-            mode,
+            seed_type,
+            fanout_max,
             limit,
             force,
             resume,
@@ -333,8 +332,8 @@ fn main() -> Result<()> {
         } => reason::run_reason(
             path,
             ReasonArgs {
-                gold,
-                mode,
+                seed_type,
+                fanout_max,
                 limit,
                 force,
                 resume,

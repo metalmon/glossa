@@ -86,16 +86,16 @@ fn kbx_train_help_lists_budget_and_no_apply() {
     assert!(s.contains("--budget") && s.contains("--no-apply"));
 }
 
-/// `kbx reason --help` should expose the gold-dataset override and the split/kb mode knob — a
+/// `kbx reason --help` should expose the seed-type restriction and the fan-out cap — a
 /// regression here means the `Reason` clap variant lost a flag `run_reason`'s `ReasonArgs` needs.
 #[test]
-fn kbx_reason_help_lists_gold_and_mode() {
+fn kbx_reason_help_lists_seed_type_and_fanout_max() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
         .args(["reason", "--help"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("--gold") && s.contains("--mode"));
+    assert!(s.contains("--seed-type") && s.contains("--fanout-max"));
 }
 
 /// `kbx distil --help` should expose the attempt-count and seed-type knobs — a regression here
