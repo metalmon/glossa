@@ -470,9 +470,9 @@ pub fn read(
             _ => Vec::new(),
         };
         let text = if images.is_empty() {
-            format!("page_image: failed to render {path} #{resolved_ord}")
+            format!("page_image: failed to render {path}#{resolved_ord}")
         } else {
-            format!("page_image {path} #{resolved_ord}")
+            format!("page_image {path}#{resolved_ord}")
         };
         return ReadOut { text, images };
     }
@@ -485,8 +485,11 @@ pub fn read(
     let images =
         crate::read::extract_images(&doc_path, resolved_ord, usize::MAX).unwrap_or_default();
     let body = format_chunk_body(resolved_ord, &chunk.body);
+    // Lead with THIS chunk's own copy-ready `path#n` — the token to reuse as a node's source_path
+    // or to `read` again. Without it a reader only sees the prev/next footer and has to infer the
+    // current ref (the number between them).
     ReadOut {
-        text: format!("{}{}", body, footer),
+        text: format!("── {path}#{resolved_ord} ──\n{}{}", body, footer),
         images,
     }
 }
@@ -669,7 +672,7 @@ impl Default for ChainSpec {
     }
 }
 
-/// Render the far node of an edge: its `(path #ord)` anchor for a section/document, else
+/// Render the far node of an edge: its `(path#ord)` anchor for a section/document, else
 /// `id  [type]  label`. Used by `related` to show related cases.
 fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) -> String {
     match g.get_node(nid) {
@@ -682,7 +685,7 @@ fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) 
 }
 
 /// The read anchor for a reasoning node: follow its `MENTIONS` edge (the fixed evidence contract)
-/// to a Section and render the section's `(path #ord · label)`, so the agent can `read(path, ord)`
+/// to a Section and render the section's `(path#ord · label)`, so the agent can `read(path, ord)`
 /// for the detail behind the node. Empty string when the node mentions no indexed section.
 pub(crate) fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> String {
     for e in g.outgoing(id).unwrap_or_default() {
@@ -756,7 +759,7 @@ fn chain_lines(
 }
 
 /// Resolve a name/term to graph nodes and render each with its full reasoning chain.
-/// Structural nodes (Section/Document) show their `(path #ord)` anchor. A reasoning node
+/// Structural nodes (Section/Document) show their `(path#ord)` anchor. A reasoning node
 /// (Symptom/Cause/Task/…) shows its `id [type] label` then, walked from it along the ontology's
 /// spine relations, the whole chain to the Resolution — so ONE `glossary` call surfaces the
 /// cause and the fix, each with a `read` anchor. SIMILAR/community links live in `related`.
@@ -1939,7 +1942,7 @@ mod tests {
             &TraceLog::disabled(),
         );
 
-        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert_eq!(out.text, "page_image sample.pdf#1");
         assert!(!out.text.contains("glossa sample"));
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
@@ -1989,7 +1992,7 @@ mod tests {
             &TraceLog::disabled(),
         );
 
-        assert_eq!(out.text, "page_image sample.pdf #1");
+        assert_eq!(out.text, "page_image sample.pdf#1");
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
     }

@@ -82,6 +82,8 @@ pub(crate) fn seed_source_text_all(
             Some((p, n)) => (p.to_string(), n.parse::<u64>().unwrap_or(0)),
             None => (target, 0),
         };
+        // `run_read` now leads each chunk with its own `── path#n ──` header (the copy-ready ref),
+        // so the concatenated source already carries the token the model reuses as source_path.
         let (text, _images) = glossa_tools::run_read(root, idx, None, &path, n, false, &trace);
         if !text.is_empty() {
             if !out.is_empty() {
