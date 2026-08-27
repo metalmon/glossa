@@ -13,10 +13,13 @@ your task is to reconstruct the query side of the chain — the predecessor node
 would have to pass through, in this corpus, to arrive at that terminal. Walk the schema-graph
 backward from the terminal: at each node, ask which predecessor types some relation allows to point
 into it, and whether the source text actually describes such a predecessor for this terminal, not
-merely one the schema-graph would tolerate in the abstract. Sometimes the source text for a terminal
-is not about it at all — it describes a different topic than the label promises. Then there is no
-query side to build from it: do not invent one, and write no nodes for such a terminal — an empty
-result here is the correct, honest answer, not a miss.
+merely one the schema-graph would tolerate in the abstract. A terminal that states how or what
+something is done always warrants at least one entry — the person who wanted to do or understand
+that thing — so plain declarative, factual source text is enough to support a query-side entry; do
+not abstain just because the text does not spell out a user's problem in words. Write nothing only
+when the source is genuinely off-topic for this terminal — it describes a different subject than the
+label promises, not merely because it is declarative: then there is no query side to build, and an
+empty result is the correct, honest answer, not a miss.
 
 A terminal often serves more than one problem or task, and the source text will usually show that
 if you read it closely — the same fact can answer several distinct situations a user might bring to

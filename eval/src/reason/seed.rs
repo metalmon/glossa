@@ -32,11 +32,15 @@ const SEED_GRAPH_UPSERT_DESC: &str =
      terminal node. Using the ontology's schema-graph above, synthesize the predecessor nodes \
      (the intermediate and entry types whose relations point toward this terminal's type) and \
      connect them with the ontology's declared relations, respecting each relation's from/to \
-     types. Let the source text decide how much there is: where it supports more than one distinct \
-     problem or task this terminal answers, give each its own predecessor; where it supports just \
-     one, one is right; and where the source does not describe any query-side situation for this \
-     terminal at all, writing nothing is the correct, honest outcome — never add a predecessor to \
-     reach a count or because the schema-graph would allow it. Each node needs a `node_type` from \
+     types. Let the source text decide how much there is. A terminal that states how or what \
+     something is done always warrants at least one query-side entry — the person who wanted to do \
+     or understand that thing — so plain declarative, factual source text still supports a Task; do \
+     not abstain just because the text does not spell out a user's problem in so many words. Where \
+     it genuinely supports more than one distinct problem or task this terminal answers, give each \
+     its own predecessor; where it supports one, one is right. Write nothing ONLY when the source \
+     is off-topic for this terminal — it describes a different subject than the terminal's label — \
+     not merely because the text is declarative; and never add a predecessor to reach a count or \
+     because the schema-graph would allow it. Each node needs a `node_type` from \
      the ontology's declared entity types (any other value drops just that node), a `label` phrased \
      as a user would express it, and `aliases` listing alternate phrasings. Reference an edge \
      endpoint either by the exact LABEL of a node you create in this same call, or by the node ID \
@@ -66,11 +70,13 @@ pub(crate) fn build_seed_user_message(seed: &Seed, source_text: &str, fanout_max
          BACKWARD, emitting the predecessor nodes and relations a new user question would traverse \
          to reach it. This terminal ALREADY exists as node id `{}` — do NOT create another node for \
          it; attach your chain to it by pointing your chaining edge(s) TO that id. Let the source \
-         text set the shape: where it describes more than one distinct situation a user could \
-         arrive from, give each its own path (at most {} per step); where it describes one, one is \
-         enough; where it does not describe the query side at all — first check whether the source \
-         even matches this terminal — it is correct to write nothing rather than invent. Call \
-         `graph_upsert` for each node and edge the source genuinely supports.",
+         text set the shape: a terminal that states how or what something is done always supports \
+         at least a Task — the person who wanted that thing — so declarative, factual text is \
+         enough; do not abstain just because it does not frame a user's problem. Where it genuinely \
+         describes more than one distinct situation, give each its own path (at most {} per step); \
+         one is fine. Write nothing ONLY if the source is off-topic — a different subject than this \
+         terminal's label — not merely because it is declarative. Call `graph_upsert` for each node \
+         and edge the source genuinely supports.",
         seed.id, seed.node_type, seed.label, body, seed.id, fanout_max
     )
 }
