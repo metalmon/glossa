@@ -103,6 +103,53 @@ pub fn ungrounded_nodes(
     out
 }
 
+/// Ids of query-side nodes (type NOT in `grounding_types`) that cannot reach ANY live grounded
+/// terminal by walking FORWARD along chaining edges. `id_types` = `(id, node_type)` for all nodes;
+/// `chaining_edges` = `(from, to)` pairs already filtered by the caller to relations the ontology
+/// declares `RelationRole::Chaining` (MENTIONS/structural/SIMILAR are `Grounding` and must be
+/// excluded before calling this — see `Ontology::relation_role`). `live_terminal_ids` = ids of
+/// `requires_grounding` nodes that are present in the graph and NOT themselves in the ungrounded
+/// or stale sets. A query-side node with no outgoing chaining edge at all — or whose whole reachable
+/// set misses every live terminal — is dangling. Cycle-guarded (visited set per search).
+/// Sorted, deterministic.
+pub fn dangling_nodes(
+    id_types: &[(String, String)],
+    chaining_edges: &[(String, String)],
+    grounding_types: &HashSet<String>,
+    live_terminal_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (f, t) in chaining_edges {
+        adj.entry(f.as_str()).or_default().push(t.as_str());
+    }
+    let reaches_live_terminal = |start: &str| -> bool {
+        let mut visited: HashSet<&str> = HashSet::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        visited.insert(start);
+        queue.push_back(start);
+        while let Some(n) = queue.pop_front() {
+            if live_terminal_ids.contains(n) {
+                return true;
+            }
+            for &m in adj.get(n).map(Vec::as_slice).unwrap_or(&[]) {
+                if visited.insert(m) {
+                    queue.push_back(m);
+                }
+            }
+        }
+        false
+    };
+    let mut out: Vec<String> = id_types
+        .iter()
+        .filter(|(_, ty)| !grounding_types.contains(ty))
+        .filter(|(id, _)| !reaches_live_terminal(id.as_str()))
+        .map(|(id, _)| id.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Node ids whose stored source signature no longer matches the file on disk.
 /// `nodes` = (id, source_path, stored_file_sig). A `None` stored sig, a missing
 /// or unreadable source, or an equal sig → not stale.
@@ -357,6 +404,42 @@ mod tests {
         assert_eq!(out, vec!["res:b".to_string(), "res:c".to_string()]);
         // Empty grounding_types → no-op.
         assert!(ungrounded_nodes(&nodes, &edges, &std::collections::HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn dangling_nodes_flags_unreachable_and_keeps_reachable() {
+        let ids = n(&[
+            ("sym:a", "Symptom"),
+            ("cau:a", "Cause"),
+            ("res:a", "Resolution"), // live terminal
+            ("sym:b", "Symptom"),
+            ("cau:b", "Cause"),
+            ("res:b", "Resolution"), // NOT live (e.g. ungrounded/stale)
+            ("sym:orphan", "Symptom"), // no outgoing chaining edge at all
+        ]);
+        let chaining = vec![
+            ("sym:a".to_string(), "cau:a".to_string()),
+            ("cau:a".to_string(), "res:a".to_string()),
+            ("sym:b".to_string(), "cau:b".to_string()),
+            ("cau:b".to_string(), "res:b".to_string()),
+        ];
+        let mut grounding_types = HashSet::new();
+        grounding_types.insert("Resolution".to_string());
+        let mut live = HashSet::new();
+        live.insert("res:a".to_string());
+        // res:b deliberately NOT live.
+
+        let out = dangling_nodes(&ids, &chaining, &grounding_types, &live);
+        assert_eq!(
+            out,
+            vec![
+                "cau:b".to_string(),
+                "sym:b".to_string(),
+                "sym:orphan".to_string(),
+            ]
+        );
+        // sym:a/cau:a reach the live res:a → not dangling; res:a/res:b are terminals, never
+        // checked for danglingness themselves.
     }
 
     #[test]

@@ -1281,6 +1281,9 @@ fn fmt_doubtful_line(d: &crate::graph::doctor::DoubtfulNode) -> String {
             fmt_sig(*stored),
             fmt_sig(*current)
         ),
+        Reason::Dangling => {
+            format!("{base}  dangling (reaches no live grounded terminal — its answer's source is gone)")
+        }
     }
 }
 
@@ -1307,11 +1310,12 @@ pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
     out.push_str(&fmt_bucket("ungrounded", &rep.ungrounded, LIMIT));
     out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
     out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT));
+    out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT));
     out.push_str(&format!("unverifiable: {}\n", rep.unverifiable));
     out
 }
 
-/// Diagnose graph health (the three doubts: ungrounded / stale / incomplete) and render the
+/// Diagnose graph health (the four doubts: ungrounded / stale / incomplete / dangling) and render the
 /// structured report as text so a healing agent (or a human running `kb graph doctor`) can act
 /// on it. Report-only: never mutates the store. Shared by the CLI `graph doctor` command and
 /// the MCP `graph_doctor` tool so both see identical output.

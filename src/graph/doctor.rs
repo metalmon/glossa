@@ -1,9 +1,9 @@
-//! Consolidated graph-health diagnosis: the three doubts (ungrounded / stale /
-//! incomplete) + opt-in prune. Reuses the generalize hygiene primitives; owns
-//! no derived-layer logic.
+//! Consolidated graph-health diagnosis: the four doubts (ungrounded / stale /
+//! incomplete / dangling) + opt-in prune. Reuses the generalize hygiene primitives; `dangling` is
+//! the one derived-layer doubt owned here (structural reachability over the other three).
 
 use crate::graph::generalize::hygiene;
-use crate::graph::ontology::Ontology;
+use crate::graph::ontology::{Ontology, RelationRole};
 use crate::graph::store::GraphStore;
 use crate::index::manifest::FileSig;
 use std::collections::HashSet;
@@ -17,6 +17,9 @@ pub enum Reason {
         current: Option<FileSig>,
     },
     Incomplete,
+    /// A query-side (non-`requires_grounding`) node that reaches no live grounded terminal by
+    /// walking forward along the ontology's chaining relations — its answer's source is gone.
+    Dangling,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +36,10 @@ pub struct DoctorReport {
     pub ungrounded: Vec<DoubtfulNode>,
     pub stale: Vec<DoubtfulNode>,
     pub incomplete: Vec<DoubtfulNode>,
+    /// Query-side nodes (type NOT `requires_grounding`) that reach no live grounded terminal —
+    /// derived/structural staleness. FLAGGED only, never auto-pruned by `prune()` (same policy as
+    /// `stale`: the terminal's source may return).
+    pub dangling: Vec<DoubtfulNode>,
     pub unverifiable: usize,
 }
 
@@ -42,11 +49,15 @@ pub struct PruneOpts {
     pub ungrounded: bool,
 }
 
-/// Run the three hygiene checks (ungrounded / incomplete / stale) over the live graph and return
-/// a report — never mutates the store. The edge `Triple` list and the ontology-derived
+/// Run the four hygiene checks (ungrounded / incomplete / stale / dangling) over the live graph
+/// and return a report — never mutates the store. The edge `Triple` list and the ontology-derived
 /// grounding/spine/structural sets are built exactly as `generalize::apply::Opts::from_ontology` +
 /// the hygiene block in `generalize::apply::generalize` do, so the ungrounded/incomplete buckets
-/// here are identical to what a `kb graph generalize` pass would compute.
+/// here are identical to what a `kb graph generalize` pass would compute. `dangling` is a fourth,
+/// DERIVED doubt: a query-side node whose chain (walked forward over `RelationRole::Chaining`
+/// edges) reaches no live grounded terminal — e.g. its terminal's source document was deleted, so
+/// the terminal itself went ungrounded/stale but the query-side nodes leading to it have no
+/// `file_sig` of their own and would otherwise look fresh forever.
 pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<DoctorReport> {
     let nodes = g.all_nodes()?; // Vec<Node> with full Provenance
     let edges = g.all_edges()?; // for hygiene fns
@@ -85,6 +96,30 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
         .map(|n| (n.id.clone(), n.prov.source_path.clone(), n.prov.file_sig))
         .collect();
     let stale_ids = hygiene::stale_nodes(root, &stale_input);
+
+    // ── Derived (structural) staleness: a query-side node is dangling if it reaches no LIVE
+    // grounded terminal — one whose type requires_grounding, is present, and is not itself
+    // ungrounded or stale. Chaining edges are the ontology's reasoning hops (role==Chaining);
+    // MENTIONS/SIMILAR/structural (role==Grounding) are excluded — same distinction traverse::reach
+    // uses to decide what advances the chain. ──
+    let ungrounded_set: HashSet<&str> = ungrounded_ids.iter().map(String::as_str).collect();
+    let stale_set: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
+    let live_terminal_ids: HashSet<String> = id_types
+        .iter()
+        .filter(|(id, ty)| {
+            grounding_types.contains(ty)
+                && !ungrounded_set.contains(id.as_str())
+                && !stale_set.contains(id.as_str())
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let chaining_edges: Vec<(String, String)> = triples
+        .iter()
+        .filter(|(_, et, _)| ont.relation_role(et) == RelationRole::Chaining)
+        .map(|(f, _, t)| (f.clone(), t.clone()))
+        .collect();
+    let dangling_ids =
+        hygiene::dangling_nodes(&id_types, &chaining_edges, &grounding_types, &live_terminal_ids);
 
     // index nodes by id for detail lookup
     let by_id: std::collections::HashMap<&str, &crate::graph::store::Node> =
@@ -125,6 +160,11 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
             });
         }
     }
+    for id in &dangling_ids {
+        if let Some(d) = mk(id, Reason::Dangling) {
+            rep.dangling.push(d);
+        }
+    }
     // Count nodes we SHOULD be able to verify but can't: agent-authored, of a type the
     // ontology declares `requires_grounding`, with no stored file_sig. Excludes
     // ungrounded-by-design reasoning node types (requires_grounding == false) — those never
@@ -141,9 +181,11 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
 }
 
 /// Delete the incomplete and/or ungrounded nodes from `report` (per `opts`). Returns
-/// `(incomplete_pruned, ungrounded_pruned)`. `report.stale` is intentionally NEVER pruned — a
-/// stale node is doubtful, not doomed, and deleting it would destroy reasoning work over a
-/// transient source edit.
+/// `(incomplete_pruned, ungrounded_pruned)`. `report.stale` AND `report.dangling` are
+/// intentionally NEVER pruned — both are doubtful, not doomed: a stale node's source may be
+/// re-synced, and a dangling node's terminal may come back live (its source restored, or a new
+/// MENTIONS re-grounding it), at which point the chain is fresh again. Deleting either would
+/// destroy reasoning work over what may be a transient state.
 pub fn prune(
     g: &GraphStore,
     report: &DoctorReport,
@@ -189,6 +231,7 @@ to = ["Resolution"]
 [relations.MENTIONS]
 from = ["Symptom", "Resolution"]
 to = ["Section"]
+role = "grounding"
 [validation]
 strict = false
 [reasoning]
@@ -289,5 +332,110 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         );
         assert!(g.get_node("cau:orphan").unwrap().is_none());
         assert!(g.get_node("res:b").unwrap().is_none());
+    }
+
+    #[test]
+    fn doctor_flags_query_side_node_dangling_when_its_terminal_is_stale() {
+        // Symptom -CAUSED_BY-> Cause -RESOLVED_BY-> Resolution(grounded), then the Resolution's
+        // source drifts → it lands in `stale`, and both query-side nodes leading to it — which
+        // have no file_sig of their own and so could never go stale directly — must be flagged
+        // `dangling`: their chain now reaches no LIVE grounded terminal.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let nodes = vec![
+            node("sym:1", "Symptom", "S", prov("doc.md", None)),
+            node("cau:1", "Cause", "C", prov("doc.md", None)),
+            node("res:1", "Resolution", "R", prov("doc.md", Some(sig0))),
+            node("sec:1", "Section", "Sec", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:1", "CAUSED_BY", "cau:1", prov("doc.md", None)),
+            edge("cau:1", "RESOLVED_BY", "res:1", prov("doc.md", None)),
+            edge("res:1", "MENTIONS", "sec:1", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        // The Resolution's source drifts → it goes stale.
+        std::fs::write(&doc, b"v2-longer").unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert_eq!(
+            rep.stale.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            vec!["res:1"]
+        );
+        let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
+        assert!(
+            dangling.contains(&"sym:1"),
+            "Symptom must dangle: its only terminal went stale"
+        );
+        assert!(
+            dangling.contains(&"cau:1"),
+            "Cause must dangle: its only terminal went stale"
+        );
+    }
+
+    #[test]
+    fn doctor_does_not_flag_query_side_node_when_terminal_is_live() {
+        // Same chain shape, but the Resolution's source has NOT drifted and it has a live
+        // MENTIONS — the chain reaches a live terminal, so Symptom/Cause must NOT be dangling.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let nodes = vec![
+            node("sym:1", "Symptom", "S", prov("doc.md", None)),
+            node("cau:1", "Cause", "C", prov("doc.md", None)),
+            node("res:1", "Resolution", "R", prov("doc.md", Some(sig0))),
+            node("sec:1", "Section", "Sec", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:1", "CAUSED_BY", "cau:1", prov("doc.md", None)),
+            edge("cau:1", "RESOLVED_BY", "res:1", prov("doc.md", None)),
+            edge("res:1", "MENTIONS", "sec:1", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+        // No drift, live MENTIONS: res:1 stays a live terminal.
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert!(rep.stale.is_empty());
+        assert!(rep.ungrounded.is_empty());
+        let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
+        assert!(!dangling.contains(&"sym:1"));
+        assert!(!dangling.contains(&"cau:1"));
+    }
+
+    #[test]
+    fn doctor_flags_query_side_node_with_no_path_to_any_terminal() {
+        // An orphan Symptom with no outgoing chaining edge at all reaches no terminal (live or
+        // otherwise) → dangling, independent of the stale/ungrounded machinery.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        std::fs::write(root.join("doc.md"), b"v1").unwrap();
+        let nodes = vec![node(
+            "sym:orphan",
+            "Symptom",
+            "Orphan",
+            prov("doc.md", None),
+        )];
+        g.upsert(&ont, &nodes, &[]).unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
+        assert!(dangling.contains(&"sym:orphan"));
     }
 }
