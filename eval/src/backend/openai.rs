@@ -38,6 +38,11 @@ const MAX_ROUNDS: usize = 50;
 /// otherwise widen at high temperature, cutting down on degenerate generation loops without forcing
 /// low-temperature (deterministic) sampling.
 const DEFAULT_MIN_P: f64 = 0.1;
+/// Cap on completion length per call. Bounds a runaway generation (a degenerate loop can otherwise
+/// spew thousands of tokens before the server stops) while staying generous enough not to clip a
+/// legitimate multi-node `graph_upsert` batch or a normal reader answer. Overridable via
+/// `KB_EVAL_MAX_TOKENS`.
+const DEFAULT_MAX_TOKENS: u64 = 4096;
 
 /// How many times to resample a completion whose content is a degenerate repetition loop before
 /// giving up and returning the last (best-effort) result.
@@ -153,11 +158,16 @@ pub(crate) fn chat_once(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MIN_P);
+    let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let body = json!({
         "model": model,
         "messages": messages,
         "temperature": 0,
         "min_p": min_p,
+        "max_tokens": max_tokens,
     });
     chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
 }
@@ -350,12 +360,17 @@ pub(crate) fn lmstudio_chat(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MIN_P);
+    let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let body = json!({
         "model": model,
         "messages": messages,
         "tools": tools,
         "temperature": temperature,
-        "min_p": min_p
+        "min_p": min_p,
+        "max_tokens": max_tokens
     });
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
     // with descriptions) sent to the endpoint, to prove what the model actually receives.
