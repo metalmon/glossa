@@ -38,8 +38,12 @@ const SEED_GRAPH_UPSERT_DESC: &str =
      terminal at all, writing nothing is the correct, honest outcome — never add a predecessor to \
      reach a count or because the schema-graph would allow it. Each node needs a `node_type` from \
      the ontology's declared entity types (any other value drops just that node), a `label` phrased \
-     as a user would express it, and `aliases` listing alternate phrasings. Reference edge \
-     endpoints by LABEL. To ground a node, set its `source_path` to the copy-ready `path#n` token \
+     as a user would express it, and `aliases` listing alternate phrasings. Reference an edge \
+     endpoint either by the exact LABEL of a node you create in this same call, or by the node ID \
+     of a node that already exists in the graph. In particular, the grounded terminal you were \
+     given ALREADY exists — do NOT create another node for it; point your chaining edges at it by \
+     ITS id (the `res:`/type-prefixed id shown for the terminal). To ground a node, set its \
+     `source_path` to the copy-ready `path#n` token \
      exactly as a search/read/grep result showed it — the same token you would pass to `read`. A \
      node you are NOT grounding — any query-side or entry node whose type is not marked \
      `[requires_grounding]` — must carry NO `source_path` at all: omit the field entirely, and \
@@ -60,13 +64,14 @@ pub(crate) fn build_seed_user_message(seed: &Seed, source_text: &str, fanout_max
         "Grounded terminal node: {} [{}] \"{}\"\nIts grounded source text:\n{}\n\nSynthesize the \
          query-side reasoning layer that leads to this terminal: walk the ontology's schema-graph \
          BACKWARD, emitting the predecessor nodes and relations a new user question would traverse \
-         to reach it. Let the source text set the shape: where it describes more than one distinct \
-         situation a user could arrive from, give each its own path (at most {} per step); where it \
-         describes one, one is enough; where it does not describe the query side at all — first \
-         check whether the source even matches this terminal — it is correct to write nothing \
-         rather than invent. Call `graph_upsert` for each node and edge the source genuinely \
-         supports.",
-        seed.id, seed.node_type, seed.label, body, fanout_max
+         to reach it. This terminal ALREADY exists as node id `{}` — do NOT create another node for \
+         it; attach your chain to it by pointing your chaining edge(s) TO that id. Let the source \
+         text set the shape: where it describes more than one distinct situation a user could \
+         arrive from, give each its own path (at most {} per step); where it describes one, one is \
+         enough; where it does not describe the query side at all — first check whether the source \
+         even matches this terminal — it is correct to write nothing rather than invent. Call \
+         `graph_upsert` for each node and edge the source genuinely supports.",
+        seed.id, seed.node_type, seed.label, body, seed.id, fanout_max
     )
 }
 
