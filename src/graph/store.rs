@@ -1326,7 +1326,13 @@ impl GraphStore {
 
         // Validate everything BEFORE writing anything.
         for n in nodes {
-            if n.prov.source_path.is_empty() {
+            // A node with empty provenance is normally the hallucination guard catching a
+            // caller that never resolved a real document — reject it. But a type the
+            // ontology does NOT mark `requires_grounding` (e.g. a query-side entry node)
+            // may be created truly ungrounded on purpose (`graph_upsert` already enforces
+            // the `requires_grounding` gate before nodes reach here) — don't re-reject that
+            // deliberate case at the store layer.
+            if n.prov.source_path.is_empty() && ont.requires_grounding(&n.node_type) {
                 anyhow::bail!("node {:?} has empty provenance", n.id);
             }
             ont.validate_node(&n.node_type)
@@ -1695,9 +1701,40 @@ strict = true
     }
 
     #[test]
-    fn upsert_rejects_empty_provenance() {
+    fn upsert_rejects_empty_provenance_for_grounding_required_type() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
+        // Task 11: the store-level guard now scopes to `requires_grounding` types only —
+        // a non-grounding type may legitimately have empty provenance (an ungrounded entry
+        // node), so this test must use a type the ontology DOES mark `requires_grounding`
+        // to still exercise the guard.
+        const GROUNDED_ONT: &str = r#"
+[entities.Resolution]
+props = []
+requires_grounding = true
+[validation]
+strict = true
+"#;
+        let ont = Ontology::parse(GROUNDED_ONT).unwrap();
+        let mut p = agent_prov();
+        p.source_path = String::new();
+        let n = Node {
+            id: "x".into(),
+            node_type: "Resolution".into(),
+            label: "x".into(),
+            aliases: vec![],
+            prov: p,
+        };
+        assert!(g.upsert(&ont, &[n], &[]).is_err());
+    }
+
+    #[test]
+    fn upsert_allows_empty_provenance_for_non_grounding_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        // Ontology::default() declares no `requires_grounding` types, so an ungrounded
+        // node of any type is accepted at the store layer (the model-facing gate in
+        // `graph_upsert` is what enforces requires_grounding before nodes reach here).
         let ont = Ontology::default();
         let mut p = agent_prov();
         p.source_path = String::new();
@@ -1708,7 +1745,7 @@ strict = true
             aliases: vec![],
             prov: p,
         };
-        assert!(g.upsert(&ont, &[n], &[]).is_err());
+        assert!(g.upsert(&ont, &[n], &[]).is_ok());
     }
 }
 

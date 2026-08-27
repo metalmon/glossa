@@ -158,7 +158,7 @@ fn graph_upsert_tool_value(desc: &str) -> Value {
                                 "valid_from": { "type": ["string", "null"], "description": "Start of this fact's validity interval, if the document states or implies one (any ISO-8601 granularity, e.g. \"2020\", \"2020-06\", \"2020-06-15\")." },
                                 "valid_to": { "type": ["string", "null"], "description": "End of this fact's validity interval, if the document states or implies one (same granularity as valid_from)." }
                             },
-                            "required": ["node_type", "label", "source_path"]
+                            "required": ["node_type", "label"]
                         }
                     },
                     "edges": {

@@ -20,6 +20,11 @@ use serde_json::Value;
 pub struct UpsertNode {
     pub node_type: String,
     pub label: String,
+    /// Document section this node is grounded in (`path#n`). Omit (or send blank) to
+    /// create the node UNGROUNDED — allowed only for node types that are not
+    /// `requires_grounding` per the ontology; a `requires_grounding` type with no
+    /// `source_path` is dropped with an actionable error instead.
+    #[serde(default)]
     pub source_path: String,
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -562,50 +567,66 @@ pub fn graph_upsert(
     }
     let mut valid_nodes: Vec<(SanitizedNode, String)> = Vec::new();
     for nd in &nodes {
-        match idx.canonical_document_path(&nd.source_path) {
-            Some(canonical) => {
-                let label = sanitize_label_for_upsert(ont, &nd.node_type, &nd.label);
-                let valid_from_norm = match nd.valid_from.as_deref().map(temporal::normalize_from).transpose() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        errs.push(format!(
-                            "node \"{}\" dropped: invalid valid_from \"{}\": {e}",
-                            nd.label,
-                            nd.valid_from.as_deref().unwrap_or_default()
-                        ));
-                        continue;
-                    }
-                };
-                let valid_to_norm = match nd.valid_to.as_deref().map(temporal::normalize_to).transpose() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        errs.push(format!(
-                            "node \"{}\" dropped: invalid valid_to \"{}\": {e}",
-                            nd.label,
-                            nd.valid_to.as_deref().unwrap_or_default()
-                        ));
-                        continue;
-                    }
-                };
-                valid_nodes.push((
-                    SanitizedNode {
-                        node_type: nd.node_type.clone(),
-                        label,
-                        aliases: nd.aliases.clone(),
-                        valid_from_raw: nd.valid_from.clone(),
-                        valid_from_norm,
-                        valid_to_raw: nd.valid_to.clone(),
-                        valid_to_norm,
-                        source_path_raw: nd.source_path.clone(),
-                    },
-                    canonical,
+        let sp = nd.source_path.trim();
+        let canonical: String = if sp.is_empty() {
+            if ont.requires_grounding(&nd.node_type) {
+                errs.push(format!(
+                    "node \"{}\" [{}] dropped: type requires grounding but no source_path was given — give it the `path#n` of the section it is grounded in",
+                    nd.label, nd.node_type
                 ));
+                continue;
             }
-            None => errs.push(format!(
-                "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result{}",
-                nd.label, nd.source_path, crate::tools::document_path_hints(idx, &nd.source_path)
-            )),
-        }
+            // Ungrounded by design: no document, no auto-MENTIONS (resolve_section_ref
+            // on an empty string returns None, so (4a) below derives nothing for it).
+            String::new()
+        } else {
+            match idx.canonical_document_path(sp) {
+                Some(canonical) => canonical,
+                None => {
+                    errs.push(format!(
+                        "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result, or omit source_path to leave it ungrounded{}",
+                        nd.label, nd.source_path, crate::tools::document_path_hints(idx, &nd.source_path)
+                    ));
+                    continue;
+                }
+            }
+        };
+        let label = sanitize_label_for_upsert(ont, &nd.node_type, &nd.label);
+        let valid_from_norm = match nd.valid_from.as_deref().map(temporal::normalize_from).transpose() {
+            Ok(v) => v,
+            Err(e) => {
+                errs.push(format!(
+                    "node \"{}\" dropped: invalid valid_from \"{}\": {e}",
+                    nd.label,
+                    nd.valid_from.as_deref().unwrap_or_default()
+                ));
+                continue;
+            }
+        };
+        let valid_to_norm = match nd.valid_to.as_deref().map(temporal::normalize_to).transpose() {
+            Ok(v) => v,
+            Err(e) => {
+                errs.push(format!(
+                    "node \"{}\" dropped: invalid valid_to \"{}\": {e}",
+                    nd.label,
+                    nd.valid_to.as_deref().unwrap_or_default()
+                ));
+                continue;
+            }
+        };
+        valid_nodes.push((
+            SanitizedNode {
+                node_type: nd.node_type.clone(),
+                label,
+                aliases: nd.aliases.clone(),
+                valid_from_raw: nd.valid_from.clone(),
+                valid_from_norm,
+                valid_to_raw: nd.valid_to.clone(),
+                valid_to_norm,
+                source_path_raw: nd.source_path.clone(),
+            },
+            canonical,
+        ));
     }
 
     // (2) Assign one canonical id per distinct (normalized) label, with a collision guard: the
@@ -3001,6 +3022,89 @@ strict = true
         assert!(out.message.contains("requires grounding"), "{}", out.message);
         assert!(out.message.contains("Module restart"), "{}", out.message);
         assert!(g.all_nodes().unwrap().is_empty());
+    }
+
+    /// Task 11: a node whose type is NOT `requires_grounding` (Symptom, per GROUNDING_ONT)
+    /// may be created with NO source_path at all — truly ungrounded, no document, no
+    /// auto-derived MENTIONS edge.
+    #[test]
+    fn graph_upsert_creates_ungrounded_node_when_source_path_blank_and_type_not_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Engine stalls", "")],
+            vec![],
+            1_000_000,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1, "{}", out.message);
+
+        let id = id_for(&ont, "Symptom", "Engine stalls");
+        let mentions: Vec<_> = g
+            .outgoing(&id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == crate::graph::MENTIONS)
+            .collect();
+        assert!(
+            mentions.is_empty(),
+            "an ungrounded node must have no auto-derived MENTIONS edge: {:?}",
+            mentions
+        );
+    }
+
+    /// Task 11: a node whose type IS `requires_grounding` (Resolution, per GROUNDING_ONT)
+    /// with a blank source_path must still be dropped — omitting source_path is only for
+    /// non-grounding types.
+    #[test]
+    fn graph_upsert_drops_grounding_required_node_with_blank_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Module restart", "")],
+            vec![],
+            1_000_000,
+        );
+        assert!(out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0, "{}", out.message);
+        assert!(
+            out.message.contains("requires grounding"),
+            "{}",
+            out.message
+        );
+        assert!(out.message.contains("Resolution"), "{}", out.message);
+        assert!(g.all_nodes().unwrap().is_empty());
+    }
+
+    /// Task 11: the hallucination guard is intact — a node with a NON-empty but
+    /// unresolvable source_path (a bare chunk anchor naming no document) is still dropped.
+    #[test]
+    fn graph_upsert_still_rejects_nonempty_unresolvable_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Engine stalls", "#162")],
+            vec![],
+            1_000_000,
+        );
+        assert!(out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 0, "{}", out.message);
+        assert!(out.message.contains("is not a document"), "{}", out.message);
     }
 
     #[test]
