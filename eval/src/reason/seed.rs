@@ -32,14 +32,17 @@ const SEED_GRAPH_UPSERT_DESC: &str =
      terminal node. Using the ontology's schema-graph above, synthesize the predecessor nodes \
      (the intermediate and entry types whose relations point toward this terminal's type) and \
      connect them with the ontology's declared relations, respecting each relation's from/to \
-     types. Fan-out: emit every distinct predecessor the terminal genuinely warrants (a terminal \
-     may be reached by several different problems or tasks), not just one. Each node needs a \
-     `node_type` from the ontology's declared entity types (any other value drops just that node), \
-     a `label` phrased as a user would express it, and `aliases` listing alternate phrasings. \
-     Reference edge endpoints by LABEL. Ground a node only when the source text actually states \
-     it (give it a `source_path` of `<path>#n` and grounding is derived automatically) — entry/query \
-     nodes are normally left UNgrounded unless their type is marked `[requires_grounding]`. Emit a \
-     node only if it is a genuine reasoning step; do not invent filler.";
+     types. Let the source text decide how much there is: where it supports more than one distinct \
+     problem or task this terminal answers, give each its own predecessor; where it supports just \
+     one, one is right; and where the source does not describe any query-side situation for this \
+     terminal at all, writing nothing is the correct, honest outcome — never add a predecessor to \
+     reach a count or because the schema-graph would allow it. Each node needs a `node_type` from \
+     the ontology's declared entity types (any other value drops just that node), a `label` phrased \
+     as a user would express it, and `aliases` listing alternate phrasings. Reference edge \
+     endpoints by LABEL. Ground a node only when the source text actually states it (give it a \
+     `source_path` of `<path>#n` and grounding is derived automatically) — entry/query nodes are \
+     normally left UNgrounded unless their type is marked `[requires_grounding]`. Emit a node only \
+     when the source genuinely supports it as a real reasoning step; do not invent filler.";
 
 /// Build the per-seed user message: introduce the grounded terminal (id/type/label), give the model
 /// its FULL grounded source text, and instruct backward fan-out synthesis bounded by `fanout_max`.
@@ -54,8 +57,12 @@ pub(crate) fn build_seed_user_message(seed: &Seed, source_text: &str, fanout_max
         "Grounded terminal node: {} [{}] \"{}\"\nIts grounded source text:\n{}\n\nSynthesize the \
          query-side reasoning layer that leads to this terminal: walk the ontology's schema-graph \
          BACKWARD, emitting the predecessor nodes and relations a new user question would traverse \
-         to reach it. Fan out up to {} distinct predecessor(s) per step where the terminal \
-         genuinely warrants them. Call `graph_upsert` to write them.",
+         to reach it. Let the source text set the shape: where it describes more than one distinct \
+         situation a user could arrive from, give each its own path (at most {} per step); where it \
+         describes one, one is enough; where it does not describe the query side at all — first \
+         check whether the source even matches this terminal — it is correct to write nothing \
+         rather than invent. Call `graph_upsert` for each node and edge the source genuinely \
+         supports.",
         seed.id, seed.node_type, seed.label, body, fanout_max
     )
 }

@@ -13,7 +13,10 @@ your task is to reconstruct the query side of the chain — the predecessor node
 would have to pass through, in this corpus, to arrive at that terminal. Walk the schema-graph
 backward from the terminal: at each node, ask which predecessor types some relation allows to point
 into it, and whether the source text actually describes such a predecessor for this terminal, not
-merely one the schema-graph would tolerate in the abstract.
+merely one the schema-graph would tolerate in the abstract. Sometimes the source text for a terminal
+is not about it at all — it describes a different topic than the label promises. Then there is no
+query side to build from it: do not invent one, and write no nodes for such a terminal — an empty
+result here is the correct, honest answer, not a miss.
 
 A terminal often serves more than one problem or task, and the source text will usually show that
 if you read it closely — the same fact can answer several distinct situations a user might bring to
@@ -60,9 +63,8 @@ validity.
 Emit every node and edge you find through `graph_upsert` as you go — nodes carrying their type,
 label, any aliases (generous ones for entry nodes, the corpus's own terms further down each path),
 the source grounding you quoted where a node is grounded, and a valid time span where the type
-calls for one; edges carrying the from node, the to node, and the relation joining them. When every
-path you can support is as complete as the source text allows — each one reaching back from the
-terminal through its genuine intermediates to an entry node true to how a person would actually ask
-— end your turn with this exact line, and nothing after it:
-
-=== CHAIN ===
+calls for one; edges carrying the from node, the to node, and the relation joining them. Emit exactly as much as
+the source supports — one step if it supports one, several if it supports several, none for the
+query side if it supports none. The work is done when the source no longer supplies groundable
+intermediates and each supported path has reached its entry node — at that point simply stop making
+tool calls, with no terminating line and no closing message.
