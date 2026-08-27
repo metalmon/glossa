@@ -181,10 +181,10 @@ enum Cmd {
         /// Only process the first N (in seed-pool order) grounded seeds.
         #[arg(long)]
         limit: Option<usize>,
-        /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
+        /// Clear this run's checkpoint first — a true full rebuild of the typed layer's seed marks.
         #[arg(long)]
         force: bool,
-        /// Skip gold ids already recorded done in the reason checkpoint.
+        /// Skip seeds already recorded done in the reason checkpoint.
         #[arg(long)]
         resume: bool,
         /// Never draw the progress bar, even on a TTY.

@@ -78,7 +78,12 @@ pub(crate) fn seed_source_text_all(
         .filter(|e| e.edge_type == glossa::graph::MENTIONS)
         .map(|e| e.to)
         .collect();
-    targets.sort();
+    // Sort by (path, numeric chunk n), NOT the raw `<path>#n` string — lexicographic order would
+    // put `d.md#10` before `d.md#2`, scrambling multi-chunk resolutions out of section order.
+    targets.sort_by_key(|t| match t.rsplit_once('#') {
+        Some((p, n)) => (p.to_string(), n.parse::<u64>().unwrap_or(0)),
+        None => (t.clone(), 0),
+    });
     targets.dedup();
 
     let trace = TraceLog::disabled();
@@ -240,6 +245,45 @@ mod tests {
         let text = seed_source_text_all(dir.path(), &idx, &g, "res-1");
         assert!(text.contains("FIRST chunk body"), "missing chunk 1: {text}");
         assert!(text.contains("SECOND chunk body"), "missing chunk 2: {text}");
+    }
+
+    /// Guards the fix for the numeric-sort bug: groundings at chunk `#2` and `#10` (both real,
+    /// distinct ordinals — the doc has 10 chunks) must concatenate in true section order (2 before
+    /// 10). A lexicographic `Vec<String>::sort()` on the raw `<path>#n` targets would instead put
+    /// `#10` before `#2` (`"...#10" < "...#2"` as strings), scrambling multi-chunk resolutions out
+    /// of order.
+    #[test]
+    fn seed_source_text_all_orders_chunks_numerically_not_lexicographically() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let chunks: Vec<glossa::model::Chunk> = (1..=10)
+            .map(|i| glossa::model::Chunk {
+                doc_path: "d.md".into(),
+                location: format!("S{i}"),
+                file_type: "md".into(),
+                text: if i == 2 {
+                    "CHUNK TWO body".to_string()
+                } else if i == 10 {
+                    "CHUNK TEN body".to_string()
+                } else {
+                    format!("filler chunk {i}")
+                },
+            })
+            .collect();
+        idx.write_chunks(&chunks).unwrap();
+
+        g.put_node(&Node { id: "res-1".into(), node_type: "Resolution".into(),
+            label: "r".into(), aliases: vec![], prov: prov() }).unwrap();
+        for n in [10u64, 2] {
+            g.put_edge(&Edge { from: "res-1".into(), to: format!("d.md#{n}"),
+                edge_type: glossa::graph::MENTIONS.to_string(), prov: prov() }).unwrap();
+        }
+
+        let text = seed_source_text_all(dir.path(), &idx, &g, "res-1");
+        let pos2 = text.find("CHUNK TWO body").expect("chunk 2 must appear");
+        let pos10 = text.find("CHUNK TEN body").expect("chunk 10 must appear");
+        assert!(pos2 < pos10, "chunk #2 must come before chunk #10 in true section order: {text}");
     }
 
     #[test]

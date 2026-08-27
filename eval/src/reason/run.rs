@@ -28,6 +28,11 @@ use crate::dataset_toml::parse_dataset_toml;
 #[allow(dead_code)]
 const DEFAULT_TEST_FRAC: f64 = 0.2;
 
+/// Soft cap on predecessors synthesized per backward step when `--fanout-max` isn't given —
+/// the single source of truth `run_reason_at` applies at its real call site AND the unit test
+/// below asserts against, so drift between the two can't happen silently.
+const DEFAULT_FANOUT_MAX: usize = 3;
+
 /// CLI-level options for `kbx reason`, folded from the `kbx` binary's clap fields (mirrors
 /// `crate::build::BuildOpts`'s shape).
 #[derive(Debug, Clone)]
@@ -38,9 +43,9 @@ pub struct ReasonArgs {
     pub fanout_max: Option<usize>,
     /// Only process the first N (in seed-pool order) grounded seeds.
     pub limit: Option<usize>,
-    /// Clear this run's checkpoint first — a true full rebuild of the typed layer's gold marks.
+    /// Clear this run's checkpoint first — a true full rebuild of the typed layer's seed marks.
     pub force: bool,
-    /// Skip gold ids already recorded done in the reason checkpoint.
+    /// Skip seeds already recorded done in the reason checkpoint.
     pub resume: bool,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
@@ -140,7 +145,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     }
     drop(g); // chain_one_seed opens its own store per call (mirrors chain_one_gold)
 
-    let fanout_max = args.fanout_max.unwrap_or(3);
+    let fanout_max = args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX);
     let run_dir = paths.runs.join("reason");
     if args.force {
         clear_checkpoint(&run_dir).context("clearing reason checkpoint for --force")?;
@@ -213,9 +218,14 @@ mod tests {
         );
     }
 
-    /// Documents the default the seed-loop applies; guards against silent drift.
+    /// Documents the default the seed-loop applies; guards against silent drift. Ties to the SAME
+    /// `DEFAULT_FANOUT_MAX` constant `run_reason_at` uses at its real `unwrap_or` call site, so
+    /// changing the real default (without also updating this test) fails the test — unlike
+    /// asserting against a literal `3` hardcoded only here, which would track nothing.
     #[test]
     fn default_fanout_is_three_when_unset() {
+        assert_eq!(DEFAULT_FANOUT_MAX, 3);
+
         let args = ReasonArgs {
             seed_type: None,
             fanout_max: None,
@@ -224,7 +234,7 @@ mod tests {
             resume: false,
             no_progress: true,
         };
-        assert_eq!(args.fanout_max.unwrap_or(3), 3);
+        assert_eq!(args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
     }
 
     #[test]
