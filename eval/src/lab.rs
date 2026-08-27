@@ -48,10 +48,15 @@ pub struct LabConfig {
     /// Endpoint used to reflect on/rewrite prompts (`kbx train`, a later plan).
     #[serde(default)]
     pub reflect: Option<Endpoint>,
-    /// Strong-model endpoint shared by `kbx reason` (grounded backward-chaining) and `kbx distil`
-    /// (grounded synthetic-gold generation).
+    /// Strong-model endpoint for `kbx distil` (graph densification). Also the fallback for
+    /// `kbx reason` when `[reason]` is unset.
     #[serde(default)]
     pub distil: Option<Endpoint>,
+    /// Phase-2 (`kbx reason`, seed-from-grounded backward synthesis) endpoint. Its own model,
+    /// separate from `build`'s harvest model and `distil`'s densify model. Falls back to `distil`
+    /// when unset (see `reason_endpoint`), for continuity while lab.toml is migrated.
+    #[serde(default)]
+    pub reason: Option<Endpoint>,
     /// Endpoint for `kbx build`'s stage-3 bridge judge (a binary "is this a real cross-doc link?"
     /// per candidate pair). A cheap/fast model suffices — falls back to `model` when unset. Point it
     /// at a small local model to keep a large candidate set from costing a strong-model call each.
@@ -72,6 +77,11 @@ impl LabConfig {
         let config: LabConfig = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parsing {}: {e}", lab_path.display()))?;
         Ok(config)
+    }
+
+    /// The endpoint `kbx reason` (phase-2) uses: `[reason]` if set, else `[distil]` as fallback.
+    pub fn reason_endpoint(&self) -> Option<&Endpoint> {
+        self.reason.as_ref().or(self.distil.as_ref())
     }
 }
 
@@ -116,5 +126,40 @@ mod tests {
         std::fs::write(&lab_path, "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n").unwrap();
         let c = LabConfig::load_at(&lab_path).unwrap();
         assert_eq!(c.model.model, "m");
+    }
+
+    #[test]
+    fn reason_endpoint_prefers_reason_then_falls_back_to_distil() {
+        // [reason] present -> used
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [distil]
+            endpoint = "http://d"
+            model = "big"
+            [reason]
+            endpoint = "http://r"
+            model = "phase2"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.reason_endpoint().unwrap().model, "phase2");
+
+        // [reason] absent, [distil] present -> falls back to distil
+        let toml2 = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [distil]
+            endpoint = "http://d"
+            model = "big"
+        "#;
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.reason_endpoint().unwrap().model, "big");
+
+        // neither -> None
+        let toml3 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab3: LabConfig = toml::from_str(toml3).unwrap();
+        assert!(lab3.reason_endpoint().is_none());
     }
 }
