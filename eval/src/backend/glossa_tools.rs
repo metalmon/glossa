@@ -31,8 +31,12 @@ use std::sync::OnceLock;
 /// calls in a burst to register progress, not every line.
 fn extract_node_ids(body: &str) -> Vec<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
+    // The ordinal branch tolerates ZERO or more spaces before `#n` — `tools::node_ref` now emits
+    // the unified tight `path#n` anchor (no gap), while some renderers still pad with two spaces;
+    // the bare `(document)` anchor is untouched by that unification and still requires the wider
+    // gap so a path token's own text doesn't false-positive into a document match.
     let re = RE.get_or_init(|| {
-        Regex::new(r"(\S+)\s{2,}(?:#(\d+)|\(document\))").expect("valid regex")
+        Regex::new(r"(\S+?)(?:\s*#(\d+)|\s{2,}\(document\))").expect("valid regex")
     });
     re.captures_iter(body)
         .map(|c| match c.get(2) {
@@ -599,7 +603,7 @@ mod tests {
         )
         .0;
         assert!(out.contains("maxTsdr"), "got: {out}");
-        assert!(out.contains(":#7:"), "carries #n read key: {out}");
+        assert!(out.contains("d.pdf#7:"), "carries path#n read key: {out}");
     }
 
     #[test]
