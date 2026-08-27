@@ -804,6 +804,10 @@ pub fn graph_upsert(
         // resolve from endpoint
         if batch_ids.contains(&from_ep) {
             from_resolved = Some(from_ep.clone());
+        } else if g.get_node(&from_ep).ok().flatten().is_some() {
+            // an existing graph node referenced by its id (e.g. a grounded terminal
+            // handed to the caller, which it wants to point its chain at)
+            from_resolved = Some(from_ep.clone());
         } else {
             match resolve_section_ref(idx, &from_ep) {
                 Err(m) => {
@@ -839,6 +843,10 @@ pub fn graph_upsert(
 
         // resolve to endpoint
         if batch_ids.contains(&to_ep) {
+            to_resolved = Some(to_ep.clone());
+        } else if g.get_node(&to_ep).ok().flatten().is_some() {
+            // an existing graph node referenced by its id (e.g. a grounded terminal
+            // handed to the caller, which it wants to point its chain at)
             to_resolved = Some(to_ep.clone());
         } else {
             match resolve_section_ref(idx, &to_ep) {
@@ -1548,6 +1556,27 @@ id_prefix = "sym"
 props = []
 [entities.Resolution]
 id_prefix = "res"
+props = []
+requires_grounding = true
+[relations.RESOLVED_BY]
+from = ["Symptom"]
+to = ["Resolution"]
+[validation]
+strict = true
+"#;
+
+    /// Same shape as `GROUNDING_ONT` but WITHOUT an explicit `id_prefix` on either entity —
+    /// `id_abbrev` then defaults to `node_type.to_lowercase()` ("resolution", "symptom"),
+    /// which collides case-insensitively with the entity's own declared type name. This is
+    /// the real-world condition (Task 12) under which a plain existing-node id handed back
+    /// to the caller (e.g. "resolution:<hash>") is misparsed by `resolve()`'s `Type:label`
+    /// qualifier heuristic as "Resolution:<hash>" and returns NoMatch before ever reaching
+    /// the id-based fallback inside `resolve()` — the outer `graph_upsert` id short-circuit
+    /// (checked before any label resolution is attempted) is what actually fixes this case.
+    const GROUNDING_DEFAULT_PREFIX_ONT: &str = r#"
+[entities.Symptom]
+props = []
+[entities.Resolution]
 props = []
 requires_grounding = true
 [relations.RESOLVED_BY]
@@ -3105,6 +3134,111 @@ strict = true
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "{}", out.message);
         assert!(out.message.contains("is not a document"), "{}", out.message);
+    }
+
+    /// Task 12: an edge endpoint may reference an EXISTING graph node by its id (not just
+    /// a same-batch id, a `path#n` section ref, or a label). This is the case where a
+    /// grounded terminal (e.g. a `Resolution` node written in an earlier upsert) is handed
+    /// back to the caller as its id, and a later upsert wants to point a new, ungrounded
+    /// query-side node's chain at it directly by that id.
+    #[test]
+    fn graph_upsert_edge_resolves_endpoint_by_existing_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        // Default id_prefix (no override): the node id is "resolution:<hash>", which is the
+        // shape that actually reproduces Task 12's bug (see GROUNDING_DEFAULT_PREFIX_ONT doc).
+        let ont = Ontology::parse(GROUNDING_DEFAULT_PREFIX_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        // First upsert: create the grounded terminal N (a Resolution node), grounded via
+        // an explicit MENTIONS edge (same pattern as `grounding_satisfied_by_mentions_in_same_batch`).
+        let out1 = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Module restart", "case1.docx")],
+            vec![uedge(
+                "Module restart",
+                "MENTIONS",
+                "case1.docx#1",
+                "case1.docx",
+            )],
+            1_000_000,
+        );
+        assert!(!out1.rejected, "should not be rejected: {}", out1.message);
+        assert_eq!(out1.nodes, 1, "{}", out1.message);
+        let n_id = id_for(&ont, "Resolution", "Module restart");
+        assert!(
+            g.get_node(&n_id).unwrap().is_some(),
+            "N must already exist in the graph before the second upsert"
+        );
+
+        // Second upsert: an ungrounded query-side node M (Symptom, no source_path) plus
+        // an edge from M's label to N's id string (not N's label).
+        let out2 = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Connection loss", "")],
+            vec![uedge("Connection loss", "RESOLVED_BY", &n_id, "case1.docx")],
+            1_000_000,
+        );
+        assert!(!out2.rejected, "should not be rejected: {}", out2.message);
+        assert_eq!(
+            out2.edges, 1,
+            "edge to an existing node id must not be dropped: {:?}",
+            out2.dropped
+        );
+
+        let m_id = id_for(&ont, "Symptom", "Connection loss");
+        let out_edges = g.outgoing(&m_id).unwrap();
+        assert!(
+            out_edges
+                .iter()
+                .any(|e| e.edge_type == "RESOLVED_BY" && e.to == n_id),
+            "M must have an outgoing RESOLVED_BY edge to N's id: {:?}",
+            out_edges
+        );
+    }
+
+    /// Task 12 regression guard: the new existing-node-id check must not accept arbitrary
+    /// strings — only real node ids. A string that looks like nothing the resolver knows
+    /// (not a same-batch id, not a `path#n` ref, not a label, not a real node id) is still
+    /// dropped with the usual "matches no node" error.
+    #[test]
+    fn graph_upsert_edge_by_unknown_id_still_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Connection loss", "")],
+            vec![uedge(
+                "Connection loss",
+                "RESOLVED_BY",
+                "res:does_not_exist_00000000",
+                "case1.docx",
+            )],
+            1_000_000,
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 1, "{}", out.message);
+        assert_eq!(
+            out.edges, 0,
+            "edge to an unknown, non-existent id string must still be dropped: {:?}",
+            out.dropped
+        );
+        assert!(
+            out.message.contains("matches no node"),
+            "{}",
+            out.message
+        );
     }
 
     #[test]
