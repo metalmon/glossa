@@ -23,37 +23,14 @@ use std::time::Duration;
 /// `MAX_ROUNDS` (generous for several reads + multiple fan-out `graph_upsert` writes, still bounded).
 const MAX_ROUNDS: usize = 30;
 
-/// `graph_upsert` description for phase-2 seed-from-grounded synthesis. Ontology-general (no domain
-/// type names): the model is handed a grounded TERMINAL and told to synthesize the query-side
-/// predecessors backward along the ontology's relations, fan-out. Grounding stays governed by each
-/// type's `requires_grounding` (soft-recommended otherwise) — same discipline as `chain_one_gold`.
+/// Thin, generic `graph_upsert` tool description for phase-2. The behavioural guidance lives in the
+/// system prompt (`reason.md`, loaded from disk and editable without a rebuild) and the field-level
+/// contracts (source_path = `path#n`/omit-for-ungrounded; edge endpoints by label or existing node
+/// id) live in the tool's parameter schema (`graph_upsert_tool_value`). This one line only names
+/// the tool's job so nothing behavioural is baked into the binary.
 const SEED_GRAPH_UPSERT_DESC: &str =
-    "Write the query-side reasoning nodes/edges that lead BACKWARD to this already-grounded \
-     terminal node. Using the ontology's schema-graph above, synthesize the predecessor nodes \
-     (the intermediate and entry types whose relations point toward this terminal's type) and \
-     connect them with the ontology's declared relations, respecting each relation's from/to \
-     types. Let the source text decide how much there is. A terminal that states how or what \
-     something is done always warrants at least one query-side entry — the person who wanted to do \
-     or understand that thing — so plain declarative, factual source text still supports a Task; do \
-     not abstain just because the text does not spell out a user's problem in so many words. Where \
-     it genuinely supports more than one distinct problem or task this terminal answers, give each \
-     its own predecessor; where it supports one, one is right. Write nothing ONLY when the source \
-     is off-topic for this terminal — it describes a different subject than the terminal's label — \
-     not merely because the text is declarative; and never add a predecessor to reach a count or \
-     because the schema-graph would allow it. Each node needs a `node_type` from \
-     the ontology's declared entity types (any other value drops just that node), a `label` phrased \
-     as a user would express it, and `aliases` listing alternate phrasings. Reference an edge \
-     endpoint either by the exact LABEL of a node you create in this same call, or by the node ID \
-     of a node that already exists in the graph. In particular, the grounded terminal you were \
-     given ALREADY exists — do NOT create another node for it; point your chaining edges at it by \
-     ITS id (the `res:`/type-prefixed id shown for the terminal). To ground a node, set its \
-     `source_path` to the copy-ready `path#n` token \
-     exactly as a search/read/grep result showed it — the same token you would pass to `read`. A \
-     node you are NOT grounding — any query-side or entry node whose type is not marked \
-     `[requires_grounding]` — must carry NO `source_path` at all: omit the field entirely, and \
-     never invent or borrow a path to fill it; an ungrounded entry node is the correct, expected \
-     outcome. Emit a node only when the source genuinely supports it as a real reasoning step; do \
-     not invent filler.";
+    "Write the query-side reasoning nodes and edges for this terminal, as instructed in the system \
+     prompt.";
 
 /// Build the per-seed user message: introduce the grounded terminal (id/type/label), give the model
 /// its FULL grounded source text, and instruct backward fan-out synthesis bounded by `fanout_max`.
@@ -65,19 +42,10 @@ pub(crate) fn build_seed_user_message(seed: &Seed, source_text: &str, fanout_max
         source_text.to_string()
     };
     format!(
-        "Grounded terminal node: {} [{}] \"{}\"\nIts grounded source text:\n{}\n\nSynthesize the \
-         query-side reasoning layer that leads to this terminal: walk the ontology's schema-graph \
-         BACKWARD, emitting the predecessor nodes and relations a new user question would traverse \
-         to reach it. This terminal ALREADY exists as node id `{}` — do NOT create another node for \
-         it; attach your chain to it by pointing your chaining edge(s) TO that id. Let the source \
-         text set the shape: a terminal that states how or what something is done always supports \
-         at least a Task — the person who wanted that thing — so declarative, factual text is \
-         enough; do not abstain just because it does not frame a user's problem. Where it genuinely \
-         describes more than one distinct situation, give each its own path (at most {} per step); \
-         one is fine. Write nothing ONLY if the source is off-topic — a different subject than this \
-         terminal's label — not merely because it is declarative. Call `graph_upsert` for each node \
-         and edge the source genuinely supports.",
-        seed.id, seed.node_type, seed.label, body, seed.id, fanout_max
+        "Grounded terminal node: {} [{}] \"{}\"\nIts grounded source text:\n{}\n\nBuild the \
+         query-side reasoning layer that leads to this terminal, following the system prompt. \
+         Branch to at most {} predecessor(s) per step.",
+        seed.id, seed.node_type, seed.label, body, fanout_max
     )
 }
 

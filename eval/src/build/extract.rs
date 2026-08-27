@@ -154,7 +154,7 @@ fn graph_upsert_tool_value(desc: &str) -> Value {
                                 "node_type": { "type": "string" },
                                 "label": { "type": "string" },
                                 "aliases": { "type": "array", "items": { "type": "string" } },
-                                "source_path": { "type": "string" },
+                                "source_path": { "type": "string", "description": "The `path#n` token from a search/read/grep result, to ground this node to that section. Leave empty for a query-side/entry node whose type is not marked [requires_grounding] — such a node stays ungrounded." },
                                 "valid_from": { "type": ["string", "null"], "description": "Start of this fact's validity interval, if the document states or implies one (any ISO-8601 granularity, e.g. \"2020\", \"2020-06\", \"2020-06-15\")." },
                                 "valid_to": { "type": ["string", "null"], "description": "End of this fact's validity interval, if the document states or implies one (same granularity as valid_from)." }
                             },
@@ -166,8 +166,8 @@ fn graph_upsert_tool_value(desc: &str) -> Value {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "from": { "type": "string" },
-                                "to": { "type": "string" },
+                                "from": { "type": "string", "description": "An endpoint: the exact label of a node from this same call, OR the id of a node already in the graph (e.g. the grounded terminal you were given, by its type-prefixed id), OR a document section `path#n`." },
+                                "to": { "type": "string", "description": "An endpoint: the exact label of a node from this same call, OR the id of a node already in the graph (e.g. the grounded terminal you were given, by its type-prefixed id), OR a document section `path#n`." },
                                 "edge_type": { "type": "string" },
                                 "source_path": { "type": "string" }
                             },

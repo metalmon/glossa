@@ -78,17 +78,16 @@ mod tests {
         let p = scaffold_init(dir.path(), false).unwrap();
         let reason = std::fs::read_to_string(&p.reason).unwrap();
         assert!(
-            reason.contains("backward from the terminal"),
+            reason.contains("query side"),
+            "reason.md must frame the task as reconstructing the query side of the chain"
+        );
+        assert!(
+            reason.contains("walk the schema-graph backward"),
             "reason.md must instruct walking the schema-graph backward from the grounded terminal"
         );
         assert!(
             reason.contains("entry node"),
             "reason.md must instruct reifying each path's far end as an entry node"
-        );
-        assert!(
-            reason.contains("no terminating line and no closing message"),
-            "reason.md must instruct stopping tool calls with no closing marker, not an old \
-             CHAIN terminator"
         );
     }
 
