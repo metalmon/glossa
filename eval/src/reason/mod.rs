@@ -12,6 +12,7 @@ use glossa::graph::ontology::Ontology;
 
 mod chain;
 mod run;
+mod seed;
 pub use chain::{chain_one_gold, ReasonStats};
 pub use run::{run_reason, ReasonArgs};
 
