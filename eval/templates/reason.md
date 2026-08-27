@@ -1,54 +1,54 @@
 # kbx reason
 
-You are building a TYPED REASONING CHAIN over a corpus, anchored to one SOLVED case: a question
-together with its verified answer. Above this prompt you have been given the ontology's
-schema-graph — the entity types this corpus's knowledge is typed with, and the relations that
-connect them, each relation shown with the types it may run from and to. That schema-graph is the
-only vocabulary you may use: every node you create must fit one of its types, and every edge must
-match a relation's declared from/to types. You also have corpus search and read tools, and a
-`graph_upsert` tool to emit the nodes and edges you find.
+You are extending a TYPED REASONING CHAIN over a corpus, starting from one node that is already
+grounded: the terminal, together with the full source text it came from. Above this prompt you
+have been given the ontology's schema-graph — the entity types this corpus's knowledge is typed
+with, and the relations that connect them, each relation shown with the types it may run from and
+to. That schema-graph is the only vocabulary you may use: every node you create must fit one of its
+types, and every edge must match a relation's declared from/to types. You also have corpus search
+and read tools, and a `graph_upsert` tool to emit the nodes and edges you find.
 
-Work BACKWARD from the answer, not forward from the question. The answer is already known to be
-correct, so it is your most reliable starting point: find where the corpus states it, in exactly
-those or equivalent words, and quote the passage. Type that node as whichever entity type in the
-schema-graph it fits — it must be a type that some relation can point INTO, since it sits at the
-end of the chain. Ground it with the exact source text you read, not a summary of it.
+Your job runs the opposite direction from the terminal's own grounding. The terminal states a fact;
+your task is to reconstruct the query side of the chain — the predecessor nodes a real question
+would have to pass through, in this corpus, to arrive at that terminal. Walk the schema-graph
+backward from the terminal: at each node, ask which predecessor types some relation allows to point
+into it, and whether the source text actually describes such a predecessor for this terminal, not
+merely one the schema-graph would tolerate in the abstract.
 
-From that grounded terminal, trace the reasoning back toward the question one grounded step at a
-time. At each step, ask: what other fact, of some type the schema-graph allows, connects to the
-node you just grounded — and does the corpus actually state that connecting fact? Search for it,
-read it, and if it is there, ground it the same way, quoting its source, and add the edge joining
-it to the node before it using whichever relation the schema-graph offers for that pair of types.
-Keep stepping backward like this for as long as the corpus keeps supplying real, groundable
-intermediates — a chain worth building is usually more than one hop long. Do not stop the first
-time you reach something groundable and call it done; that is the most common way this task goes
-wrong. An easy-to-ground terminal is not a signal that the rest of the path is short — it is only
-where you started. Keep mining the surrounding text for the next genuine link, and the one after
-that, until you reach a node that plausibly belongs to the question itself, or until the corpus
-truly has nothing more to offer on this path.
+A terminal often serves more than one problem or task, and the source text will usually show that
+if you read it closely — the same fact can answer several distinct situations a user might bring to
+it. When you notice this, fan out: build a separate predecessor path for each genuinely distinct
+situation the terminal resolves, rather than forcing them all through one shared node upstream.
+Two paths that happen to end at the same terminal do not need to share any node above it; let them
+diverge as far back as the source text actually supports.
 
-The question itself becomes the entry node of the chain — reify it as whichever query-type the
-schema-graph provides for this. This entry node is usually a shape of question, not a fact this
-corpus states about a specific case, so leave it ungrounded unless you actually find the corpus
-describing that same situation — do not force a quote onto it. Connect the entry node to the rest
-of the chain with an ontology-legal relation, the same way as any other step.
+Trace each path through its real intermediates rather than collapsing straight from the terminal to
+an entry node. A chain worth building is usually more than one hop long — keep asking what would
+have to be true, or known, or asked, one step before the node you just placed, and check whether
+the source text supplies that step. Stop a path only where the source truly stops supplying
+groundable intermediates, not at the first plausible-looking predecessor. Emit a node only when it
+is a real reasoning step the source text supports — never a placeholder or a filler step added just
+to make the chain look longer or to reach a target depth.
 
-Give this entry node GENEROUS aliases — this is what lets a future question that is worded
-differently still find the chain. A later user will describe the same problem in their own words,
-not the corpus's: so alias the entry node with the varied ways someone would phrase THIS situation
-— its paraphrases, the same symptom said plainly, the shorthand or partial description a user would
-actually type, the synonyms for the thing that is wrong. The grounded nodes further down the chain
-keep the corpus's own terms; it is the entry node that must reach toward the user's vocabulary.
-Keep every alias a genuine restatement of THIS specific problem, though — not a broad category or a
-loose keyword that would pull in unrelated questions; over-wide aliases anchor the wrong chain.
+Each path ends, at its far end, in an entry node — reify it as whichever query-type the schema-graph
+provides for this. The entry node stands for the situation a person actually has when they come
+looking for this terminal, so phrase its label the way that person would ask, not the way the
+corpus states its own facts. Give it generous aliases: the paraphrases, the shorthand, the partial
+or informally worded version of the same situation, the different ways someone unfamiliar with the
+corpus's own vocabulary would describe it. Keep every alias a genuine restatement of that one
+situation, though — steer clear of a broad category or a loose keyword that would just as easily
+match unrelated situations; an alias that is too wide anchors the wrong chain later.
 
-Honesty is the one place this task is strict. Ground a node only when you can point to and quote
-the exact text that states it. If a value the chain seems to need — the terminal, an intermediate,
-or anything else — is not something you can find and quote in the corpus, say so plainly and leave
-it out rather than write a plausible-sounding invention. A partial chain that stops at the last
-point you could actually verify is a correct result, not a failure; a chain padded with an
-unverifiable guess is the failure. The same applies to every edge: connect two nodes only when the
-corpus text actually supports that link, not merely because the schema-graph would permit it.
+Grounding stays strict all the way up the path, but what counts as available to ground changes as
+you move toward the entry. The corpus holds general knowledge, not any one person's specific
+situation — so ground a node when the source text actually states that fact, quoting the passage,
+and leave it ungrounded when it does not. Query-side and entry nodes in particular are often
+un-groundable by nature: they represent a situation a user brings with them rather than a fact this
+corpus asserts, so leaving one ungrounded is the expected, correct outcome, not a gap to paper over.
+Never invent a quote to make a node look grounded — an ungrounded node with an honest label is worth
+more than a fabricated citation. The same honesty applies to edges: connect two nodes only when the
+source text (for a grounded step) or the situation itself (for an ungrounded query-side step)
+actually supports that link, not merely because the schema-graph would permit it.
 
 Some node types in the schema-graph are marked as needing a valid time span rather than a single
 timeless fact — a role held over a period, a state true within a window, a value that changed
@@ -58,10 +58,11 @@ source never states it, and leave both unset entirely for a node whose type does
 validity.
 
 Emit every node and edge you find through `graph_upsert` as you go — nodes carrying their type,
-label, any aliases the source text uses for the same thing, the source grounding you quoted, and a
-valid time span where the type calls for one; edges carrying the from node, the to node, and the
-relation joining them. When the chain is as complete as the corpus allows — grounded from the
-answer back to wherever the trail of real, quotable intermediates ends, with the question reified
-at the entry — end your turn with this exact line, and nothing after it:
+label, any aliases (generous ones for entry nodes, the corpus's own terms further down each path),
+the source grounding you quoted where a node is grounded, and a valid time span where the type
+calls for one; edges carrying the from node, the to node, and the relation joining them. When every
+path you can support is as complete as the source text allows — each one reaching back from the
+terminal through its genuine intermediates to an entry node true to how a person would actually ask
+— end your turn with this exact line, and nothing after it:
 
 === CHAIN ===
