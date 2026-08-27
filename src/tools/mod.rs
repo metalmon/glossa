@@ -285,7 +285,7 @@ fn read_node(
     for (attr, p, ord) in &chunks {
         if let Ok(Some(c)) = idx.read_chunk_by_ord(p, *ord) {
             text.push_str(&format!(
-                "\n\n── {attr} · {p} #{ord} ──\n{}",
+                "\n\n── {attr} · {p}#{ord} ──\n{}",
                 format_chunk_body(*ord, &c.body)
             ));
         }
@@ -294,6 +294,18 @@ fn read_node(
         );
     }
     ReadOut { text, images }
+}
+
+/// Split a copy-ready `path#<digits>` chunk reference into its document path and chunk ordinal.
+/// `None` when `path` carries no numeric anchor — mirrors `store::strip_section_anchor`'s
+/// digit-only rule so a real `#` in a filename (e.g. `C#_notes.md`) is left untouched.
+fn parse_path_anchor(path: &str) -> Option<(String, u64)> {
+    let pos = path.rfind('#')?;
+    if !path[pos + 1..].starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = path[pos + 1..].parse().ok()?;
+    Some((crate::index::store::strip_section_anchor(path), n))
 }
 
 /// Human-readable body for a chunk whose stored text may be empty (blank PDF page).
@@ -333,6 +345,19 @@ pub fn read(
     page_image: bool,
     trace: &TraceLog,
 ) -> ReadOut {
+    // The canonical copy-ready chunk reference every search/grep/read result leads with is the
+    // single token `path#n`. A model that copies it verbatim passes it here as `path` with no
+    // separate `n` — parse the trailing `#<digits>` anchor and prefer its ordinal over the `n`
+    // arg (a real second arg is still honored when `path` carries no anchor), then strip the
+    // anchor so downstream resolution sees a clean document path.
+    let owned_path;
+    let (path, n) = match parse_path_anchor(path) {
+        Some((stripped, anchored_n)) => {
+            owned_path = stripped;
+            (owned_path.as_str(), anchored_n)
+        }
+        None => (path, n),
+    };
     #[cfg(feature = "notebook")]
     if looks_like_notebook_path(path) {
         if page_image {
@@ -452,9 +477,9 @@ pub fn read(
         return ReadOut { text, images };
     }
     let footer = match (chunk.prev, chunk.next) {
-        (Some(p), Some(nx)) => format!("\n\n‹ prev #{p} · next #{nx} ›"),
-        (None, Some(nx)) => format!("\n\n‹ start of document · next #{nx} ›"),
-        (Some(p), None) => format!("\n\n‹ prev #{p} · end of document ›"),
+        (Some(p), Some(nx)) => format!("\n\n‹ prev {path}#{p} · next {path}#{nx} ›"),
+        (None, Some(nx)) => format!("\n\n‹ start of document · next {path}#{nx} ›"),
+        (Some(p), None) => format!("\n\n‹ prev {path}#{p} · end of document ›"),
         (None, None) => String::new(),
     };
     let images =
@@ -537,8 +562,8 @@ pub fn graph_build(
     format_graph_build_output(tables_to_graph(idx, g, ont, doc, &tables))
 }
 
-/// Render a graph node as a `(path, #ord)` reference string.
-/// Section  → `"path  #ord · label"` (None if `ord_for_location` can't resolve).
+/// Render a graph node as a copy-ready reference string.
+/// Section  → `"path#ord · label"` (None if `ord_for_location` can't resolve).
 /// Document → `"path  (document)"`.
 /// Other    → `None` (caller decides whether to skip or fall back to the raw id).
 fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> {
@@ -548,7 +573,7 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
             .ord_for_location(tp, &node.label)
             .ok()
             .flatten()
-            .map(|ord| format!("{}  #{} · {}", tp, ord, node.label)),
+            .map(|ord| format!("{}#{} · {}", tp, ord, node.label)),
         "Document" => Some(format!("{}  (document)", tp)),
         _ => None,
     }
@@ -2023,7 +2048,7 @@ mod tests {
         assert!(!out.text.contains("no chunk"), "must succeed: {}", out.text);
         assert!(out.text.contains("(page #2"), "blank label: {}", out.text);
         assert!(
-            out.text.contains("prev #1") && out.text.contains("next #3"),
+            out.text.contains("prev d.pdf#1") && out.text.contains("next d.pdf#3"),
             "footer: {}",
             out.text
         );
@@ -2967,7 +2992,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "node header: {out}"
         );
         assert!(
-            out.contains("── MENTIONS · MODULE.pdf #7 ──"),
+            out.contains("── MENTIONS · MODULE.pdf#7 ──"),
             "attributed evidence header: {out}"
         );
         assert!(
@@ -2988,7 +3013,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let (body, hits) = search(&i, "timeout", 10, None, None, &t);
         assert_eq!(hits.len(), 1);
-        assert!(body.starts_with("[#7] ") && body.contains("timeout"));
+        assert!(body.starts_with("MODULE.pdf#7") && body.contains("timeout"));
         let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t);
         assert_eq!(empty, "(no results)");
     }
@@ -3016,8 +3041,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let out = read(d.path(), &i, None, "d.md", 1, false, &t);
         assert!(out.text.contains(&big), "full body, no cap"); // not truncated
-        assert!(out.text.contains("next #2") && !out.text.contains("end of document"));
-        assert!(out.text.contains("‹ start of document · next #2 ›")); // unified footer (MCP wording)
+        assert!(out.text.contains("next d.md#2") && !out.text.contains("end of document"));
+        assert!(out.text.contains("‹ start of document · next d.md#2 ›")); // unified footer (MCP wording)
                                                                        // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
                                                                        // #2 = "second") instead of an error the model loops on.
         let oor = read(d.path(), &i, None, "d.md", 99, false, &t).text;
@@ -3026,6 +3051,42 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(read(d.path(), &i, None, "nope.md", 1, false, &t)
             .text
             .contains("no document indexed at nope.md"));
+    }
+
+    #[test]
+    fn read_accepts_copy_ready_path_hash_n_token() {
+        // A model that copies the canonical `path#n` reference from a search/grep/read result
+        // straight into `read`'s single `path` arg (no separate `n`) must land on the same
+        // chunk as the classic two-arg form.
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "first chunk".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "second chunk".into(),
+            },
+        ])
+        .unwrap();
+        let t = TraceLog::disabled();
+        let via_token = read(d.path(), &i, None, "d.md#2", 0, false, &t);
+        let via_split = read(d.path(), &i, None, "d.md", 2, false, &t);
+        assert_eq!(via_token.text, via_split.text, "token form must match split form");
+        assert!(via_token.text.contains("second chunk"), "{}", via_token.text);
+        // the `n` arg is ignored when the anchor is present — the anchor wins.
+        let anchor_wins = read(d.path(), &i, None, "d.md#1", 99, false, &t);
+        assert!(
+            anchor_wins.text.contains("first chunk"),
+            "{}",
+            anchor_wins.text
+        );
     }
 
     #[test]
@@ -3228,7 +3289,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &crate::grep::GrepOpts::default(),
             &t
         )
-        .contains(":#7:"));
+        .contains("MODULE.pdf#7:"));
         let no = grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t);
         assert!(no.starts_with("(no matches)"), "still reports the miss: {no}");
         assert!(no.contains("fixed:true"), "coaches toward a simpler literal: {no}");
@@ -3434,7 +3495,7 @@ strict = true
         let g = crate::graph::store::GraphStore::open(dir.path()).unwrap();
         let t = TraceLog::disabled();
 
-        // "Intro" is a Section node; glossary should render it as "path  #1 · Intro".
+        // "Intro" is a Section node; glossary should render it as "path#1 · Intro".
         let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None, None);
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");

@@ -107,10 +107,9 @@ pub struct GrepHit {
 }
 
 impl GrepHit {
-    /// One grep result line, addressing the chunk by its read key `#ord`. A match uses `:` as the
-    /// separator, a context line uses `-` (mirroring ripgrep), and the 1-based `line_no` is inserted
-    /// only when line numbering is on (`line_no > 0`). Default output (no new flags) is byte-identical
-    /// to the historical `"{path}:#{ord}: {line}"`.
+    /// One grep result line, leading with the canonical copy-ready `path#ord` chunk reference. A
+    /// match uses `:` as the separator, a context line uses `-` (mirroring ripgrep), and the 1-based
+    /// `line_no` is inserted only when line numbering is on (`line_no > 0`).
     pub fn display_line(&self) -> String {
         let sep = if self.kind == HitKind::Context {
             '-'
@@ -119,11 +118,11 @@ impl GrepHit {
         };
         if self.line_no > 0 {
             format!(
-                "{}{sep}#{}{sep}{}{sep} {}",
+                "{}#{}{sep}{}{sep} {}",
                 self.path, self.ord, self.line_no, self.line
             )
         } else {
-            format!("{}{sep}#{}{sep} {}", self.path, self.ord, self.line)
+            format!("{}#{}{sep} {}", self.path, self.ord, self.line)
         }
     }
 }
@@ -539,7 +538,7 @@ mod tests {
         assert!(hits[0].line.contains("respTimeout"));
         assert_eq!(
             hits[0].display_line(),
-            "d.pdf:#7: Set parameter respTimeout to 3000 tbit."
+            "d.pdf#7: Set parameter respTimeout to 3000 tbit."
         );
     }
 
@@ -723,7 +722,7 @@ mod tests {
 
     // ── new ripgrep-parity flags ────────────────────────────────────────────
 
-    /// Default output (no new flags) is byte-identical to the historical format.
+    /// Default output (no new flags) leads with the canonical copy-ready `path#ord` token.
     #[test]
     fn grep_default_display_is_unchanged() {
         let (_d, idx) = idx_with(&[("d.md", "S1", "md", "alpha\nbeta match here\ngamma")]);
@@ -731,7 +730,7 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].kind, HitKind::Match);
         assert_eq!(h[0].line_no, 0);
-        assert_eq!(h[0].display_line(), "d.md:#1: beta match here");
+        assert_eq!(h[0].display_line(), "d.md#1: beta match here");
     }
 
     #[test]
@@ -783,7 +782,7 @@ mod tests {
         // context lines render with '-' separators
         let ctx = h.iter().find(|x| x.kind == HitKind::Context).unwrap();
         assert!(
-            ctx.display_line().contains("-#1-"),
+            ctx.display_line().contains("#1-"),
             "{}",
             ctx.display_line()
         );
@@ -861,7 +860,7 @@ mod tests {
         .unwrap();
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].line_no, 2);
-        assert_eq!(h[0].display_line(), "d.md:#1:2: two target");
+        assert_eq!(h[0].display_line(), "d.md#1:2: two target");
     }
 
     #[test]
@@ -882,7 +881,7 @@ mod tests {
         assert_eq!(h.len(), 1, "only the chunk with matches reports a count");
         assert_eq!(h[0].kind, HitKind::Count);
         assert_eq!(h[0].line, "3");
-        assert_eq!(h[0].display_line(), "a.md:#1: 3");
+        assert_eq!(h[0].display_line(), "a.md#1: 3");
     }
 
     #[test]

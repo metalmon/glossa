@@ -467,11 +467,13 @@ struct IndexArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ReadArgs {
-    #[schemars(description = "document path, exactly as shown in a search result")]
-    path: String,
-    #[serde(deserialize_with = "crate::json_util::deserialize_u32_loose")]
     #[schemars(
-        description = "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)"
+        description = "the copy-ready `path#n` token exactly as a search/grep/read result showed it (or just the document path, paired with `n` below)"
+    )]
+    path: String,
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_u32_loose")]
+    #[schemars(
+        description = "chunk number to read — the n in a `path#n` reference (page number for PDFs). Omit when `path` already carries the `#n` anchor."
     )]
     n: u32,
     #[serde(
@@ -499,7 +501,7 @@ struct SourceFileArgs {
         deserialize_with = "crate::json_util::deserialize_opt_u32_loose"
     )]
     #[schemars(
-        description = "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page"
+        description = "cited page number (PDF) — the n in a `path#n` reference — used for provenance and, if the file exceeds the cap, to deliver just that page"
     )]
     n: Option<u32>,
     #[serde(
@@ -536,7 +538,7 @@ pub(crate) struct RelatedArgs {
         default,
         deserialize_with = "crate::json_util::deserialize_opt_u64_loose"
     )]
-    #[schemars(description = "chunk number, exactly as shown in `[#n]` in a search result")]
+    #[schemars(description = "chunk number — the n in a `path#n` reference from a search result")]
     n: Option<u64>,
     #[serde(
         default,
@@ -1005,7 +1007,7 @@ impl GlossaServer {
     // keep in sync with registry::DESC_SEARCH (rmcp's #[tool(description=…)] rejects a
     // non-literal path expr; the mcp_tool_list_matches_registry test enforces byte-equality).
     #[tool(
-        description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
+        description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
     )]
     async fn search(
         &self,
@@ -1026,7 +1028,7 @@ impl GlossaServer {
 
     // keep in sync with registry::DESC_READ (see search's comment above for why this is a literal).
     #[tool(
-        description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+        description = "Read material by reference. Usually a document chunk: pass the copy-ready `path#n` token exactly as a search/grep/read result showed it (or `path` plus chunk number `n` separately; for PDFs `n` is the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk references, also `path#n`; if `n` is out of range the reply states the valid range. That same `path#n` token is what a node's `source_path` takes to ground it — an ungrounded query-side node should OMIT `source_path` entirely. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
     )]
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
@@ -1080,7 +1082,7 @@ impl GlossaServer {
 
     // keep in sync with registry::DESC_GLOSSARY (see search's comment above for why this is a literal).
     #[tool(
-        description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
+        description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read(path#n)` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path#n` anchor — that same token grounds a node's `source_path` (omit `source_path` entirely for an ungrounded query-side node). Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
     )]
     async fn glossary(
         &self,
@@ -1106,7 +1108,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
+        description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read(path#n)` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
     )]
     async fn related(
         &self,
@@ -1131,7 +1133,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
+        description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read(path#n)` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
     )]
     async fn neighbors(
         &self,
@@ -1160,7 +1162,7 @@ impl GlossaServer {
 
     // keep in sync with registry::DESC_REACH (see search's comment above for why this is a literal).
     #[tool(
-        description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read path #n` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump. Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
+        description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read(path#n)` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump; that same `path#n` token grounds a node's `source_path` (omit it for an ungrounded query-side node). Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
     )]
     async fn reach(
         &self,
@@ -1354,7 +1356,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+        description = "Create/update reasoning nodes and directed edges. A GROUNDED node (backed by document evidence) needs a human-readable `label`, `node_type`, and `source_path` set to the exact `path#n` token a search/grep/read result showed you — the same copy-ready reference, unchanged: just the path, `#`, and the INTEGER chunk number, nothing appended (no clause like `4.1`, no note in parentheses). An UNGROUNDED node — a query-side/entry node with no document backing — must OMIT `source_path` entirely; do not invent or guess a value for it. Reference endpoints in `edges` the same way: by label, or a document section as that same `path#n` token. When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
     )]
     async fn graph_upsert(
         &self,
@@ -1527,7 +1529,7 @@ impl GlossaServer {
 
     // keep in sync with registry::DESC_GREP (see search's comment above for why this is a literal).
     #[tool(
-        description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
+        description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path#n: line`; a context line uses `-` instead of `:`. Reach for `read(path#n)` only when you actually need a whole chunk, not to locate a value; that same `path#n` token is what a node's `source_path` takes to ground it. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
     )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
@@ -1676,7 +1678,7 @@ impl ServerHandler for GlossaServer {
         info.protocol_version = ProtocolVersion::V_2025_06_18;
         info.server_info.name = "glossa".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
-        info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns numbered hits `[#n]`; `read` opens chunk number `n`.".into());
+        info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns hits led by a copy-ready `path#n` token; `read(path#n)` opens that chunk.".into());
         info
     }
 }
@@ -2037,7 +2039,7 @@ mod tests {
             .await
             .unwrap();
         assert!(format!("{:?}", out).contains("maxTsdr"));
-        assert!(format!("{:?}", out).contains(":#")); // carries the #n read key
+        assert!(format!("{:?}", out).contains("d.md#")); // carries the copy-ready path#n read key
     }
 
     #[tokio::test]

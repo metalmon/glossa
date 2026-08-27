@@ -171,9 +171,9 @@ pub struct RankedHit {
 }
 
 impl RankedHit {
-    /// One search-result line carrying exactly one number — the read key `[#ord]` — and a
-    /// non-numeric label (the heading text, or the file type for paged formats whose location is
-    /// itself a number) so nothing competes with the read key.
+    /// One search-result line leading with the canonical copy-ready chunk reference `path#ord`,
+    /// followed by a non-numeric label (the heading text, or the file type for paged formats whose
+    /// location is itself a number) so nothing competes with the read key.
     pub fn display_line(&self) -> String {
         let label = if self.location.starts_with("p.") {
             self.file_type.as_str()
@@ -181,8 +181,8 @@ impl RankedHit {
             self.location.as_str()
         };
         format!(
-            "[#{}] {} · {} · {}",
-            self.ord, self.path, label, self.snippet
+            "{}#{} · {} · {}",
+            self.path, self.ord, label, self.snippet
         )
     }
 }
@@ -2607,7 +2607,7 @@ mod search_tests {
             score: 17.7,
         };
         let line = pdf.display_line();
-        assert!(line.starts_with("[#350] "), "numbered key: {line}");
+        assert!(line.starts_with("d.pdf#350"), "copy-ready key: {line}");
         assert!(line.contains("pdf"), "non-numeric label for pdf: {line}");
         assert!(!line.contains("p.350"), "no competing page number: {line}");
 
@@ -2619,7 +2619,7 @@ mod search_tests {
             snippet: "text".into(),
             score: 3.0,
         };
-        assert!(md.display_line().starts_with("[#2] "));
+        assert!(md.display_line().starts_with("d.md#2"));
         assert!(md.display_line().contains("Introduction"));
         assert!(
             !md.display_line().contains("· md ·"),
