@@ -8,18 +8,18 @@ use std::sync::OnceLock;
 /// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
 /// (glossary's main hits AND its chain hops, related, neighbors, reach, and sql's
 /// id-column handles) funnels a grounded node through `tools::node_ref`'s anchor in ONE of two
-/// forms, both built from the SAME `<path>  #<ord>` token (`tools.rs:532`):
-///   - **entity/reasoning node**: `tools::read_anchor` wraps it as `— read <path>  #<ord> · <label>`
+/// forms, both built from the SAME glued `<path>#<ord>` token (`tools.rs:532`):
+///   - **entity/reasoning node**: `tools::read_anchor` wraps it as `— read <path>#<ord> · <label>`
 ///     (only emitted when the node has an outgoing MENTIONS edge to a section).
 ///   - **structural node (Section/Document)**: `tools::endpoint_ref`/`node_ref` print the anchor
-///     BARE, with no "read" word at all — `<path>  #<ord> · <label>` for a Section (glossary's
+///     BARE, with no "read" word at all — `<path>#<ord> · <label>` for a Section (glossary's
 ///     exact-title stub at `tools.rs:765`, `edge_line`/neighbors at `tools.rs:1018`,
 ///     `render_reach_chain` at `tools.rs:1190`), or `<path>  (document)` — no ord — for a Document.
 /// The first fix here only matched the "— read" form, so a totally normal move — `neighbors` on a
 /// Document returning its child Sections, or several glossary/reach calls landing on different
 /// Section/Document nodes — surfaced ZERO ids per call and falsely tripped the streak on a reader
-/// making real (structural) progress. The regex below matches `<path>  #<ord>` (or the Document's
-/// `<path>  (document)`) regardless of whether "— read " precedes it, so both forms count.
+/// making real (structural) progress. The regex below matches the glued `<path>#<ord>` (or the
+/// Document's `<path>  (document)`) regardless of whether "— read " precedes it, so both forms count.
 /// It's still unambiguous against a glossary chain-hop line (`edge_type  [node_type]  label`, no
 /// bare id at all — see `tools::chain_lines`): that line has no `#<ord>` or `(document)` token, so
 /// it never matches — a generic `<token>  [Type]` scan would have misread the EDGE TYPE as a
@@ -31,12 +31,14 @@ use std::sync::OnceLock;
 /// calls in a burst to register progress, not every line.
 fn extract_node_ids(body: &str) -> Vec<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // The ordinal branch tolerates ZERO or more spaces before `#n` — `tools::node_ref` now emits
-    // the unified tight `path#n` anchor (no gap), while some renderers still pad with two spaces;
-    // the bare `(document)` anchor is untouched by that unification and still requires the wider
-    // gap so a path token's own text doesn't false-positive into a document match.
+    // The ordinal branch requires the GLUED `path#n` anchor (zero spaces) — `tools::node_ref`
+    // emits exactly this tight form for every real anchor. Tolerating `\s*` here let a node's own
+    // label text (e.g. "issue #42") spuriously match as an anchor, causing false novelty for the
+    // loop detector; requiring glued-only fixes that. The bare `(document)` anchor is untouched
+    // and still requires the wider `\s{2,}` gap so a path token's own text doesn't
+    // false-positive into a document match.
     let re = RE.get_or_init(|| {
-        Regex::new(r"(\S+?)(?:\s*#(\d+)|\s{2,}\(document\))").expect("valid regex")
+        Regex::new(r"(\S+?)(?:#(\d+)|\s{2,}\(document\))").expect("valid regex")
     });
     re.captures_iter(body)
         .map(|c| match c.get(2) {
@@ -506,13 +508,14 @@ mod tests {
     /// `node_ref` with no "read" word at all) surfaced zero ids.
     #[test]
     fn extract_node_ids_matches_entity_anchor_and_bare_structural_forms() {
-        // Entity/reasoning node: `tools::read_anchor`'s "— read <path>  #<ord> · <label>".
-        let entity_line = "n1  [Entity]  Some Fact   — read doc.md  #3 · SecTitle";
+        // Entity/reasoning node: `tools::read_anchor`'s "— read <path>#<ord> · <label>" (glued,
+        // no space — the real form `tools::node_ref` emits).
+        let entity_line = "n1  [Entity]  Some Fact   — read doc.md#3 · SecTitle";
         assert_eq!(extract_node_ids(entity_line), vec!["doc.md#3".to_string()]);
 
         // Bare structural Section endpoint (edge_line / render_reach_chain / glossary's
         // exact-title stub) — no "read" word, just the raw `node_ref` anchor.
-        let section_line = "CONTAINS       ->  doc.md  #2 · SecB";
+        let section_line = "CONTAINS       ->  doc.md#2 · SecB";
         assert_eq!(extract_node_ids(section_line), vec!["doc.md#2".to_string()]);
 
         // Bare structural Document endpoint — no ord at all.
@@ -521,6 +524,13 @@ mod tests {
 
         // A line with neither anchor form contributes nothing.
         assert!(extract_node_ids("REFERENCES      ->  fact-9  [Entity]  no anchor here").is_empty());
+
+        // A single space before `#n` inside a node's own label text (NOT a real glued anchor)
+        // must NOT spuriously match — this is the false-novelty bug the tightened regex fixes.
+        assert!(
+            extract_node_ids("n2  [Entity]  reported issue #42 with no read anchor").is_empty(),
+            "a spaced '#n' inside label text must not be mistaken for a glued anchor"
+        );
 
         // Multiple anchors on one body (e.g. several neighbors lines) all extract.
         let multi = format!("{section_line}\n{entity_line}\n{doc_line}");

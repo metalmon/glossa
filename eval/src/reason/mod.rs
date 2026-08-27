@@ -10,12 +10,10 @@
 
 use glossa::graph::ontology::Ontology;
 
-mod chain;
 mod run;
 mod seed;
-pub use chain::{chain_one_gold, ReasonStats};
 pub use run::{run_reason, ReasonArgs};
-pub use seed::chain_one_seed;
+pub use seed::{chain_one_seed, ReasonStats};
 
 /// Render the ontology's schema-graph (entity types + typed relations) as a compact text
 /// block suitable for injecting into a prompt. Lists every `entity_type`, marking those that

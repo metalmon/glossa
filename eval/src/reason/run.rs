@@ -3,14 +3,8 @@
 //! backward-synthesize the query-side reasoning layer, checkpoint per-seed for `--resume`, then
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
-//!
-//! The prior gold-anchored loop (`chain_one_gold` + `--mode split`/`kb` train/test split) is
-//! RESERVED, not deleted — `chain_one_gold` and `split_gold_by_id` stay in this module for the
-//! future `kbx train` verb (gold-anchored GEPA-style optimization), marked `#[allow(dead_code)]`
-//! where the seed-loop no longer reaches them.
 
 use crate::checkpoint::Checkpoint;
-use crate::dataset::Question;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
@@ -18,15 +12,6 @@ use glossa::graph::ontology::Ontology;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::path::PathBuf;
-
-// reserved for kbx train (gold-anchored): `split_gold_by_id` parses/holds a gold dataset.toml.
-#[allow(unused_imports)]
-use crate::dataset_toml::parse_dataset_toml;
-
-/// Deterministic held-out fraction of gold ids under the future `kbx train`'s split mode. Not
-/// consumed by the phase-2 seed-loop — reserved for kbx train (gold-anchored).
-#[allow(dead_code)]
-const DEFAULT_TEST_FRAC: f64 = 0.2;
 
 /// Soft cap on predecessors synthesized per backward step when `--fanout-max` isn't given —
 /// the single source of truth `run_reason_at` applies at its real call site AND the unit test
@@ -77,38 +62,16 @@ fn clear_checkpoint(run_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// The checkpoint unit id for one gold case — `reason:{id}`, matching `run_build`'s
+/// The checkpoint unit id for one seed — `reason:{id}`, matching `run_build`'s
 /// `extract:{doc}` naming convention.
-fn unit_id(gold_id: &str) -> String {
-    format!("reason:{gold_id}")
+fn unit_id(seed_id: &str) -> String {
+    format!("reason:{seed_id}")
 }
 
-/// A gold id is skipped this pass iff `--resume` is set AND the checkpoint already recorded it
+/// A seed id is skipped this pass iff `--resume` is set AND the checkpoint already recorded it
 /// done. Pure and model-free — the piece Step 1's TDD unit exercises directly.
-pub fn should_skip(cp: &Checkpoint, gold_id: &str, resume: bool) -> bool {
-    resume && cp.is_done(&unit_id(gold_id))
-}
-
-/// Deterministically split `questions` into (kept, held_out) by sorted id, holding out the last
-/// `frac` fraction — same split-by-id shape as `crate::gepa::split_by_episode`, kept local here
-/// since that helper is generic over an externally-owned `episode_id` closure and gepa's own
-/// item types, whereas this just needs the ids themselves recorded to a run file.
-///
-/// Not called by the phase-2 seed-loop — reserved for kbx train (gold-anchored).
-#[allow(dead_code)]
-fn split_gold_by_id(questions: Vec<Question>, frac: f64) -> (Vec<Question>, Vec<String>) {
-    let mut ids: Vec<String> = questions.iter().map(|q| q.id.clone()).collect();
-    ids.sort();
-    let n_held = if ids.len() <= 1 {
-        0
-    } else {
-        ((ids.len() as f64 * frac).round() as usize).clamp(1, ids.len() - 1)
-    };
-    let held: std::collections::HashSet<String> = ids.iter().rev().take(n_held).cloned().collect();
-    let mut held_sorted: Vec<String> = held.iter().cloned().collect();
-    held_sorted.sort();
-    let kept: Vec<Question> = questions.into_iter().filter(|q| !held.contains(&q.id)).collect();
-    (kept, held_sorted)
+pub fn should_skip(cp: &Checkpoint, seed_id: &str, resume: bool) -> bool {
+    resume && cp.is_done(&unit_id(seed_id))
 }
 
 /// Orchestrate the `kbx reason` pipeline over the corpus at `path` (kb-style PATH resolution via
@@ -143,7 +106,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
              carrying a MENTIONS edge) — run `kbx build` first"
         );
     }
-    drop(g); // chain_one_seed opens its own store per call (mirrors chain_one_gold)
+    drop(g); // chain_one_seed opens its own store per call
 
     let fanout_max = args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX);
     let run_dir = paths.runs.join("reason");
@@ -196,25 +159,25 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Step 1's TDD unit (per the brief): a gold id already recorded done in the checkpoint is
+    /// Step 1's TDD unit (per the brief): a seed id already recorded done in the checkpoint is
     /// skipped under `--resume`; a fresh id is not. Pure, tempdir-only — no model involved.
     #[test]
     fn should_skip_marks_done_id_under_resume_and_not_a_fresh_id() {
         let dir = tempfile::tempdir().unwrap();
         let cp = Checkpoint::open(&dir.path().join("runs").join("reason")).unwrap();
-        cp.mark(&unit_id("gold-1"), "done").unwrap();
+        cp.mark(&unit_id("seed-1"), "done").unwrap();
 
         assert!(
-            should_skip(&cp, "gold-1", true),
-            "an already-done gold id must be skipped under --resume"
+            should_skip(&cp, "seed-1", true),
+            "an already-done seed id must be skipped under --resume"
         );
         assert!(
-            !should_skip(&cp, "gold-2", true),
-            "a fresh gold id must not be skipped even under --resume"
+            !should_skip(&cp, "seed-2", true),
+            "a fresh seed id must not be skipped even under --resume"
         );
         assert!(
-            !should_skip(&cp, "gold-1", false),
-            "a done gold id must NOT be skipped when --resume isn't set"
+            !should_skip(&cp, "seed-1", false),
+            "a done seed id must NOT be skipped when --resume isn't set"
         );
     }
 
@@ -235,33 +198,5 @@ mod tests {
             no_progress: true,
         };
         assert_eq!(args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
-    }
-
-    #[test]
-    fn split_gold_by_id_holds_out_a_deterministic_fraction_and_never_returns_a_held_out_kept_id() {
-        let questions: Vec<Question> = (0..10)
-            .map(|i| Question {
-                id: format!("q{i:02}"),
-                question: "q".into(),
-                answer: "a".into(),
-                ..Default::default()
-            })
-            .collect();
-
-        let (kept1, held1) = split_gold_by_id(questions.clone(), 0.2);
-        let (kept2, held2) = split_gold_by_id(questions.clone(), 0.2);
-
-        assert_eq!(held1, held2, "split must be deterministic across calls");
-        assert_eq!(held1.len(), 2, "20% of 10 ids => 2 held out");
-        let kept_ids: std::collections::HashSet<&str> =
-            kept1.iter().map(|q| q.id.as_str()).collect();
-        for h in &held1 {
-            assert!(
-                !kept_ids.contains(h.as_str()),
-                "a held-out id must never also appear in kept: {h}"
-            );
-        }
-        assert_eq!(kept1.len() + held1.len(), questions.len());
-        assert_eq!(kept2.len(), kept1.len());
     }
 }

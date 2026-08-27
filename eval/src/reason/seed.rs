@@ -1,6 +1,6 @@
 //! Phase-2 (`kbx reason` seed-from-grounded) engine: read a grounded terminal's FULL source,
 //! backward-synthesize the query-side reasoning layer (fan-out), and write it via the canonical
-//! write triad. Sibling to `chain.rs` (gold-anchored, migrating to `kbx train`).
+//! write triad.
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
@@ -8,7 +8,6 @@ use crate::build::extract::{extract_tools_schema, parse_and_filter_upsert, upser
 use crate::distil::Seed;
 use crate::lab::LabConfig;
 use crate::reason::schema_graph_block;
-use crate::reason::ReasonStats;
 use crate::workspace::KbxPaths;
 use anyhow::anyhow;
 use glossa::graph::ontology::Ontology;
@@ -19,9 +18,18 @@ use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-/// High cap on tool-call rounds for one seed's backward-synth pass — matches `chain_one_gold`'s
-/// `MAX_ROUNDS` (generous for several reads + multiple fan-out `graph_upsert` writes, still bounded).
+/// High cap on tool-call rounds for one seed's backward-synth pass — generous for several reads
+/// plus multiple fan-out `graph_upsert` writes, still bounded against a stuck model.
 const MAX_ROUNDS: usize = 30;
+
+/// How much of one seed's typed reasoning layer a `chain_one_seed` pass wrote: nodes and edges
+/// upserted, and how many of those edges were `MENTIONS` groundings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReasonStats {
+    pub nodes: usize,
+    pub edges: usize,
+    pub grounded: usize,
+}
 
 /// Thin, generic `graph_upsert` tool description for phase-2. The behavioural guidance lives in the
 /// system prompt (`reason.md`, loaded from disk and editable without a rebuild) and the field-level

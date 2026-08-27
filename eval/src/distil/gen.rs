@@ -1,14 +1,14 @@
 //! `kbx distil`'s per-seed generator: an agentic pass over ONE grounded seed node, reusing the
-//! SAME agent-loop substrate as `reason::chain_one_gold` (`run_agent_loop` + `lmstudio_chat` +
+//! SAME agent-loop substrate as `reason::chain_one_seed` (`run_agent_loop` + `lmstudio_chat` +
 //! `schema_graph_block(ont)`) but READ-ONLY — the model gets the reader tools
 //! (`search`/`read`/`grep`/`glob`/`glossary`/`reach`/`sql`) and a `propose_gold` tool, and NEVER
 //! `graph_upsert`. The only thing this pass produces is an in-memory `GoldProposal`; nothing is
 //! written to the graph.
 //!
-//! Mirrors `chain_one_gold`'s shape closely (same `paths`/`ont`/`lab` inputs, same
-//! open-store-per-call pattern) so the two stay recognizably siblings — `chain_one_gold` walks
-//! backward from a KNOWN (question, answer); `generate_one` walks FORWARD from a seed to invent
-//! one.
+//! Mirrors `chain_one_seed`'s shape closely (same `paths`/`ont`/`lab` inputs, same
+//! open-store-per-call pattern) so the two stay recognizably siblings — `chain_one_seed` walks
+//! backward from a grounded terminal; `generate_one` walks FORWARD from a seed to invent a new
+//! (question, answer) pair instead.
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::{chat_once, lmstudio_chat, run_agent_loop};
@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::time::Duration;
 
-/// High cap on tool-call rounds for one seed's generate pass — mirrors `chain_one_gold`'s
+/// High cap on tool-call rounds for one seed's generate pass — mirrors `chain_one_seed`'s
 /// `MAX_ROUNDS`, trimmed a little since this pass has no writes to make, only exploration plus
 /// one `propose_gold` call.
 const MAX_ROUNDS: usize = 20;
@@ -193,7 +193,7 @@ fn seed_source_text(
 /// `propose_gold` or leaves nothing to keep. Verify-gate is MVP-level: the model's own `gate_ok`,
 /// plus one extra adversarial call — the question ALONE, no tools, no chain — that drops the
 /// proposal if it answers correctly anyway (a leak). NEVER calls `graph_upsert`; opens its own
-/// `GraphStore`/`DocIndex` per call, mirroring `chain_one_gold`.
+/// `GraphStore`/`DocIndex` per call, mirroring `chain_one_seed`.
 pub fn generate_one(
     paths: &KbxPaths,
     ont: &Ontology,
