@@ -43,7 +43,7 @@ const DEFAULT_MIN_P: f64 = 0.1;
 /// spew thousands of tokens before the server stops) while staying generous enough not to clip a
 /// legitimate multi-node `graph_upsert` batch or a normal reader answer. Overridable via
 /// `KB_EVAL_MAX_TOKENS`.
-const DEFAULT_MAX_TOKENS: u64 = 4096;
+const DEFAULT_MAX_TOKENS: u64 = 8192;
 
 /// How many times to resample a completion whose content is a degenerate repetition loop before
 /// giving up and returning the last (best-effort) result.
