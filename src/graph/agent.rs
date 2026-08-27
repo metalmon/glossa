@@ -44,7 +44,16 @@ pub struct EdgeSpec {
 /// `root.join(source_path)`. Stamping against the bare (CWD-relative) path here used to
 /// silently defeat staleness whenever the process CWD differed from the corpus root (the
 /// normal MCP-server deployment).
+///
+/// A blank (or all-whitespace) `source_path` — an ungrounded node/edge, now legal — must stay
+/// `None`: `root.join("")` resolves to `root` itself, so `file_sig` would happily stat the corpus
+/// DIRECTORY and stamp the node with the root's mtime/size. `hygiene::stale_nodes` then flips that
+/// ungrounded node to "stale" every time anything else in the corpus changes — a false, unclearable
+/// staleness with no real file behind it.
 fn stat_sig(root: &std::path::Path, source_path: &str) -> Option<FileSig> {
+    if source_path.trim().is_empty() {
+        return None;
+    }
     crate::index::store::file_sig(&root.join(source_path)).ok()
 }
 
@@ -463,6 +472,18 @@ strict = true
             range: None,
             confidence: None,
         }
+    }
+
+    #[test]
+    fn stat_sig_blank_source_path_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real file at an existing path DOES get a signature...
+        std::fs::write(dir.path().join("a.md"), "hello").unwrap();
+        assert!(stat_sig(dir.path(), "a.md").is_some());
+        // ...but a blank or whitespace-only source_path (an ungrounded node) must not fall back
+        // to stamping the corpus ROOT directory's own signature.
+        assert_eq!(stat_sig(dir.path(), ""), None);
+        assert_eq!(stat_sig(dir.path(), "   "), None);
     }
 
     #[test]

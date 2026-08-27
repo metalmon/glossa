@@ -33,10 +33,11 @@ pub struct OpenAiBackend {
 
 const MAX_ROUNDS: usize = 50;
 
-/// Default `min_p` nucleus-sampling floor for every chat call this backend makes (`chat_once` and
-/// `lmstudio_chat`), overridable via `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that
-/// otherwise widen at high temperature, cutting down on degenerate generation loops without forcing
-/// low-temperature (deterministic) sampling.
+/// Default `min_p` nucleus-sampling floor for the agent-loop chat call (`lmstudio_chat`),
+/// overridable via `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that otherwise widen at
+/// high temperature, cutting down on degenerate generation loops without forcing low-temperature
+/// (deterministic) sampling. NOT sent by `chat_once` — that path is already greedy (temperature 0)
+/// and targets a strict provider that may reject non-OpenAI fields.
 const DEFAULT_MIN_P: f64 = 0.1;
 /// Cap on completion length per call. Bounds a runaway generation (a degenerate loop can otherwise
 /// spew thousands of tokens before the server stops) while staying generous enough not to clip a
@@ -154,10 +155,8 @@ pub(crate) fn chat_once(
     // One-shot (the file-prompt judge): greedy sampling so grading is reproducible run-to-run
     // (NOT the reader's stochastic KB_EVAL_TEMP), and NO `tools` field at all — a strict provider
     // (the MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
-    let min_p: f64 = std::env::var("KB_EVAL_MIN_P")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MIN_P);
+    // NOTE: no `min_p` here either — it's a non-OpenAI extension a strict provider may 400 on, and
+    // it would be inert anyway since this path is greedy (temperature 0).
     let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -166,7 +165,6 @@ pub(crate) fn chat_once(
         "model": model,
         "messages": messages,
         "temperature": 0,
-        "min_p": min_p,
         "max_tokens": max_tokens,
     });
     chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
