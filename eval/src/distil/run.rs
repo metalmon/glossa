@@ -7,6 +7,7 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
+use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
@@ -107,7 +108,7 @@ pub fn run(path: Option<PathBuf>, mut args: DistilArgs) -> Result<()> {
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `reason::progress_bar`).
+/// isn't a TTY (mirrors `reason::progress_bar`, including its white/ETA template).
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     if !show {
@@ -115,7 +116,9 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     }
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
-        ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+        ProgressStyle::with_template(
+            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+        )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
     pb
@@ -419,13 +422,24 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     }
     let cp = Checkpoint::open(&run_dir).context("open distil checkpoint")?;
 
+    reset_tokens();
+    let distil_price = lab.distil.as_ref().and_then(|e| e.price_per_1m);
+    let densify_msg = || -> String {
+        let tokens = tokens_used();
+        let cost_suffix = distil_price
+            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
+            .unwrap_or_default();
+        format!("densify · {} tok{}", human_tokens(tokens), cost_suffix)
+    };
+
     let pb = progress_bar(total_chunks.max(1), args.no_progress);
-    pb.set_message("distil (chunks)");
+    pb.set_message(densify_msg());
     let mut total = DensifyStats::default();
     let mut docs_done: Vec<String> = Vec::new();
     for doc in &docs {
         let w = crate::build::extract_doc_weight(doc, &chunk_counts) as u64;
         if should_skip_densify(&cp, doc, args.resume) {
+            pb.set_message(densify_msg());
             pb.inc(w);
             continue;
         }
@@ -459,6 +473,7 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
             "distil {doc}: {} node(s), {} edge(s), {} grounded",
             stats.nodes, stats.edges, stats.grounded
         ));
+        pb.set_message(densify_msg());
         // Top up any gap so the bar stays aligned to this doc's weight, same as `run_build`.
         if covered < w {
             pb.inc(w - covered);
