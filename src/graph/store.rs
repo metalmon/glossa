@@ -1372,9 +1372,12 @@ impl GraphStore {
             })
             .collect();
         for e in &edges {
-            if e.prov.source_path.is_empty() {
-                anyhow::bail!("edge {}->{} has empty provenance", e.from, e.to);
-            }
+            // Unlike a node, an edge has no ontology-level `requires_grounding` flag of its
+            // own — the caller (`graph_upsert`, `ops.rs`) is the single gatekeeper that
+            // decides when a document-backed source_path is required (e.g. MENTIONS always
+            // resolves to a real path before it gets here) versus when an edge is a
+            // query-side chaining link, ungrounded BY DESIGN, same as an ungrounded node.
+            // So the store layer no longer blanket-rejects an edge for empty provenance.
             let ft = type_of(&e.from, nodes).unwrap_or_default();
             let tt = type_of(&e.to, nodes).unwrap_or_default();
             ont.validate_edge(&e.edge_type, &ft, &tt)
@@ -1752,6 +1755,49 @@ strict = true
             prov: p,
         };
         assert!(g.upsert(&ont, &[n], &[]).is_ok());
+    }
+
+    /// Reason-fix: an edge has no `requires_grounding` flag of its own — a query-side
+    /// chaining edge (e.g. Symptom -CAUSED_BY-> Cause) is ungrounded BY DESIGN, mirroring
+    /// the node case above. Before this fix the store layer blanket-rejected ANY edge with
+    /// empty provenance regardless of type, silently orphaning such edges even when
+    /// `graph_upsert` (ops.rs) had already decided the empty source_path was legitimate.
+    #[test]
+    fn upsert_allows_empty_provenance_for_chaining_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::default();
+        let mut node_prov = agent_prov();
+        node_prov.source_path = String::new();
+        let a = Node {
+            id: "sym:a".into(),
+            node_type: "Symptom".into(),
+            label: "a".into(),
+            aliases: vec![],
+            prov: node_prov.clone(),
+        };
+        let b = Node {
+            id: "cau:a".into(),
+            node_type: "Cause".into(),
+            label: "b".into(),
+            aliases: vec![],
+            prov: node_prov.clone(),
+        };
+        let mut edge_prov = agent_prov();
+        edge_prov.source_path = String::new();
+        let e = Edge {
+            from: "sym:a".into(),
+            to: "cau:a".into(),
+            edge_type: "CAUSED_BY".into(),
+            prov: edge_prov,
+        };
+        assert!(g.upsert(&ont, &[a, b], &[e]).is_ok());
+        let out = g.outgoing("sym:a").unwrap();
+        assert!(
+            out.iter().any(|e| e.edge_type == "CAUSED_BY" && e.to == "cau:a"),
+            "chaining edge with empty provenance must be written: {:?}",
+            out
+        );
     }
 }
 

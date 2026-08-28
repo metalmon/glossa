@@ -765,15 +765,26 @@ pub fn graph_upsert(
             ));
             continue;
         }
-        let edge_source_path = match idx.canonical_document_path(&ue.source_path) {
-            Some(canonical) => canonical,
-            None => {
-                errs.push(format!(
-                    "edge {of} -{oet}-> {ot} dropped: source_path \"{}\" is not a document — use a real path from a search/read result{}",
-                    ue.source_path,
-                    crate::tools::document_path_hints(idx, &ue.source_path)
-                ));
-                continue;
+        // A blank source_path is a query-side chaining edge — ungrounded by design (it links
+        // two reasoning nodes, not a document fact). Mirrors the node "ungrounded by design"
+        // branch above: only a NON-empty source_path is required to resolve to a real document.
+        // `edge_source_path` is only consulted by `qualify` below to expand a bare `#N` endpoint
+        // into `{edge_source_path}#N`; with it empty, a real label/id endpoint is untouched and a
+        // bare `#N` endpoint fails to expand — which then errors clearly via `resolve_section_ref`,
+        // correctly, since a section-anchor endpoint genuinely needs a document.
+        let edge_source_path = if ue.source_path.trim().is_empty() {
+            String::new()
+        } else {
+            match idx.canonical_document_path(&ue.source_path) {
+                Some(canonical) => canonical,
+                None => {
+                    errs.push(format!(
+                        "edge {of} -{oet}-> {ot} dropped: source_path \"{}\" is not a document — use a real path from a search/read result{}",
+                        ue.source_path,
+                        crate::tools::document_path_hints(idx, &ue.source_path)
+                    ));
+                    continue;
+                }
             }
         };
 
@@ -3145,6 +3156,81 @@ strict = true
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "{}", out.message);
         assert!(out.message.contains("is not a document"), "{}", out.message);
+    }
+
+    /// Reason-fix: a query-side chaining edge (e.g. Symptom --RESOLVED_BY--> Resolution used
+    /// purely as a reasoning link, not a document fact) is ungrounded BY DESIGN, same as an
+    /// ungrounded node. Before this fix, the edge-resolution loop required EVERY edge's
+    /// source_path to resolve to a real document and dropped it otherwise — silently orphaning
+    /// query-side reasoning nodes. An edge with a blank source_path between two plain
+    /// label-to-label endpoints must now be written, not dropped.
+    #[test]
+    fn graph_upsert_writes_chaining_edge_with_empty_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Connection loss", ""),
+                unode("Resolution", "Restart device", ""),
+            ],
+            vec![uedge("Connection loss", "RESOLVED_BY", "Restart device", "")],
+            1_000_000, "agent"
+        );
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 2, "{}", out.message);
+        assert_eq!(
+            out.edges, 1,
+            "an ungrounded chaining edge (empty source_path) must be written, not dropped: {:?}",
+            out.dropped
+        );
+
+        let sym_id = id_for(&ont, "Symptom", "Connection loss");
+        let out_edges = g.outgoing(&sym_id).unwrap();
+        assert!(
+            out_edges.iter().any(|e| e.edge_type == "RESOLVED_BY"),
+            "chaining edge must actually land in the graph: {:?}",
+            out_edges
+        );
+    }
+
+    /// Reason-fix regression guard: the edge hallucination guard is intact — a NON-empty but
+    /// unresolvable source_path still drops the edge with the usual "is not a document"
+    /// message (unchanged behaviour; only the truly EMPTY case is now allowed).
+    #[test]
+    fn graph_upsert_edge_with_nonempty_bogus_source_path_still_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![
+                unode("Symptom", "Connection loss", ""),
+                unode("Resolution", "Restart device", ""),
+            ],
+            vec![uedge(
+                "Connection loss",
+                "RESOLVED_BY",
+                "Restart device",
+                "nope.md",
+            )],
+            1_000_000, "agent"
+        );
+        assert_eq!(out.edges, 0, "{:?}", out.dropped);
+        assert!(
+            out.dropped.iter().any(|d| d.contains("is not a document")),
+            "{:?}",
+            out.dropped
+        );
     }
 
     /// Task 12: an edge endpoint may reference an EXISTING graph node by its id (not just
