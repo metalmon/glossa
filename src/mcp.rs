@@ -1281,14 +1281,28 @@ impl GlossaServer {
                 "index busy (another process is indexing), try again: {rel}"
             ))]));
         }
-        let s = index_dir(&self.root, a.force.unwrap_or(false)).map_err(internal)?;
+        let forced = a.force.unwrap_or(false);
+        let s = index_dir(&self.root, forced).map_err(internal)?;
         self.mark_dirty();
+        let mut generalize_note = "";
+        if forced {
+            // CLI parity (`kb index --force` also re-runs generalize): refresh the derived layer
+            // (SIMILAR/closure/communities/node_meta) right away after a full rebuild instead of
+            // waiting for the debounced maintenance loop. Use the server's lock-safe path — same
+            // spawn_blocking pattern as `maintenance_loop` — so this coordinates via
+            // `.glossa/generalize.lock` instead of racing other editors. Best-effort: quietly
+            // skipped if another editor already holds the lock.
+            let me = self.clone();
+            let _ = tokio::task::spawn_blocking(move || me.run_generalize()).await;
+            generalize_note = ", generalized derived layer";
+        }
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "indexed: {} added, {} removed, {} unchanged in {}",
+            "indexed: {} added, {} removed, {} unchanged in {}{}",
             s.added,
             s.removed,
             s.unchanged,
-            crate::cli_fmt::format_elapsed(started.elapsed())
+            crate::cli_fmt::format_elapsed(started.elapsed()),
+            generalize_note
         ))]))
     }
 
@@ -2531,6 +2545,104 @@ mod tests {
         assert!(
             format!("{out:?}").contains("a.md"),
             "single-file index made the edit searchable"
+        );
+    }
+
+    // CLI parity (`kb index --force` also re-runs generalize): a forced MCP `index` must leave the
+    // derived layer populated, not stale until the debounced maintenance loop happens to catch up.
+    #[tokio::test]
+    async fn index_tool_force_true_runs_generalize() {
+        use crate::graph::store::{Node, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        // generalize scopes community/centrality to the REASONING subgraph, so seed a reasoning
+        // node for the pass to annotate (mirrors run_generalize_populates_node_meta).
+        {
+            let g = GraphStore::open(dir.path()).unwrap();
+            g.put_node(&Node {
+                id: "sym:x".into(),
+                node_type: "Symptom".into(),
+                label: "link loss".into(),
+                aliases: vec![],
+                prov: Provenance {
+                    source_path: "a.md".into(),
+                    range: None,
+                    file_sig: None,
+                    origin: "agent".into(),
+                    confidence: 0.8,
+                    created_at: 1,
+                },
+            })
+            .unwrap();
+        }
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        srv.index(Parameters(IndexArgs {
+            force: Some(true),
+            path: None,
+        }))
+        .await
+        .unwrap();
+        assert!(
+            GraphStore::open(dir.path())
+                .unwrap()
+                .node_meta("sym:x")
+                .unwrap()
+                .is_some(),
+            "force=true index ran generalize inline, node_meta populated"
+        );
+    }
+
+    // Companion: force=false must NOT trigger the inline generalize — the debounced
+    // maintenance_loop owns the incremental path, so a plain index leaves node_meta untouched.
+    #[tokio::test]
+    async fn index_tool_force_false_does_not_run_generalize() {
+        use crate::graph::store::{Node, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nintro\n## B\nbody b\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        {
+            let g = GraphStore::open(dir.path()).unwrap();
+            g.put_node(&Node {
+                id: "sym:x".into(),
+                node_type: "Symptom".into(),
+                label: "link loss".into(),
+                aliases: vec![],
+                prov: Provenance {
+                    source_path: "a.md".into(),
+                    range: None,
+                    file_sig: None,
+                    origin: "agent".into(),
+                    confidence: 0.8,
+                    created_at: 1,
+                },
+            })
+            .unwrap();
+        }
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        srv.index(Parameters(IndexArgs {
+            force: Some(false),
+            path: None,
+        }))
+        .await
+        .unwrap();
+        assert!(
+            GraphStore::open(dir.path())
+                .unwrap()
+                .node_meta("sym:x")
+                .unwrap()
+                .is_none(),
+            "force=false must not run the inline generalize (debounced loop owns incremental)"
         );
     }
 
