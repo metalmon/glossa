@@ -41,6 +41,12 @@ pub struct GrepOpts {
     /// `crate::tools::grep` probes this for a doc-scoped notebook path (`<doc>/<file>`)
     /// before falling through to the corpus grep below.
     pub path: Option<String>,
+    /// The friendly "restrict to one document" filter — a SEPARATE, ANDed filter alongside `glob`
+    /// (and whatever the MCP/CLI caller derived `glob` from, e.g. `path`). Unlike `path` above,
+    /// `grep()`/`grep_fullscan()` in this module DO read this field directly: a bare document path
+    /// compiles to `**/<p>` via [`path_to_glob`] (also stripping a trailing `#n`); a value already
+    /// carrying glob metacharacters passes through unchanged. `None` = no extra filtering.
+    pub scope: Option<String>,
 }
 
 impl GrepOpts {
@@ -401,6 +407,11 @@ pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Ve
         Some(g) => Some(compile_glob(g)?),
         None => None,
     };
+    // `scope` is a SEPARATE, ANDed filter from `glob` — see its doc comment on `GrepOpts`.
+    let scope_m = match &opts.scope {
+        Some(s) => Some(compile_glob(&path_to_glob(s))?),
+        None => None,
+    };
     let plan = trigram::trigram_plan(pattern, opts);
     let mut hits = Vec::new();
     // The trigram plan can visit the same chunk via several OR branches; a chunk's hits are fully
@@ -416,6 +427,11 @@ pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Ve
             }
         }
         if let Some(m) = &glob_m {
+            if !path_matches(m, path) {
+                return;
+            }
+        }
+        if let Some(m) = &scope_m {
             if !path_matches(m, path) {
                 return;
             }
@@ -462,6 +478,10 @@ pub fn grep_fullscan(
         Some(g) => Some(compile_glob(g)?),
         None => None,
     };
+    let scope_m = match &opts.scope {
+        Some(s) => Some(compile_glob(&path_to_glob(s))?),
+        None => None,
+    };
     let mut hits = Vec::new();
     let mut visit = |path: &str, ord: u64, file_type: &str, body: &str| {
         if hits.len() >= GREP_MAX_HITS {
@@ -473,6 +493,11 @@ pub fn grep_fullscan(
             }
         }
         if let Some(m) = &glob_m {
+            if !path_matches(m, path) {
+                return;
+            }
+        }
+        if let Some(m) = &scope_m {
             if !path_matches(m, path) {
                 return;
             }
@@ -626,6 +651,45 @@ mod tests {
         assert_eq!(g.len(), 2);
         let paths: std::collections::BTreeSet<_> = g.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, ["dir\\nested.md", "top.md"].into_iter().collect());
+    }
+
+    #[test]
+    fn grep_scope_narrows_to_one_document_and_ands_with_glob() {
+        let (_d, idx) = idx_with(&[
+            ("docA.md", "S1", "md", "hot cpu swap"),
+            ("docB.md", "S1", "md", "hot cpu swap"),
+        ]);
+
+        // No scope: unchanged baseline — both documents hit.
+        let all = grep(&idx, "swap", &GrepOpts::default()).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // scope=docA.md (a bare path, path_to_glob semantics): only that document's hit remains.
+        let scoped = grep(
+            &idx,
+            "swap",
+            &GrepOpts {
+                scope: Some("docA.md".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].path, "docA.md");
+
+        // scope ANDs with glob — a glob that excludes docA.md leaves nothing, even though scope
+        // alone would have matched it.
+        let anded_out = grep(
+            &idx,
+            "swap",
+            &GrepOpts {
+                glob: Some("**/docB.md".into()),
+                scope: Some("docA.md".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(anded_out.is_empty(), "glob and scope must be ANDed: {anded_out:?}");
     }
 
     #[test]

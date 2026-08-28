@@ -59,8 +59,9 @@ pub fn run_search(
     glob: Option<&str>,
     file_type: Option<&str>,
     trace: &TraceLog,
+    scope: Option<&str>,
 ) -> (String, Vec<String>) {
-    let (body, hits) = glossa::tools::search(idx, query, limit, glob, file_type, trace);
+    let (body, hits) = glossa::tools::search(idx, query, limit, glob, file_type, trace, scope);
     (body, hits.iter().map(|h| h.location.clone()).collect())
 }
 
@@ -143,7 +144,8 @@ pub fn exec(
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let glob = args.get("glob").and_then(|v| v.as_str());
             let file_type = args.get("file_type").and_then(|v| v.as_str());
-            let (body, titles) = run_search(idx, query, limit, glob, file_type, trace);
+            let scope = args.get("scope").and_then(|v| v.as_str());
+            let (body, titles) = run_search(idx, query, limit, glob, file_type, trace, scope);
             (body, titles, Vec::new())
         }
         "glob" => {
@@ -191,6 +193,7 @@ pub fn exec(
                 multiline: bool_arg("multiline"),
                 line_cap: None,
                 path: path_arg,
+                scope: args.get("scope").and_then(|v| v.as_str()).map(String::from),
             };
             let (body, titles) = run_grep(root, idx, pattern, opts.with_default_context(), trace);
             (body, titles, Vec::new())

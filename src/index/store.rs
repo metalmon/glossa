@@ -270,18 +270,30 @@ impl DocIndex {
     /// BM25 search scoped by an optional path glob and/or exact file_type. The filters are applied
     /// AFTER ranking, so a generous candidate pool is fetched when filtering to still fill `limit`.
     /// Reuses `search` (unfiltered) so ranking semantics stay identical.
+    ///
+    /// `scope` (when `Some`) is a SEPARATE, ANDed filter — the friendly "restrict to one document"
+    /// counterpart to `glob` (the raw ripgrep `-g` glob `search` has always taken): a bare document
+    /// path compiles to `**/<p>` via [`crate::grep::path_to_glob`] (also stripping a trailing `#n`);
+    /// a value already carrying glob metacharacters passes through unchanged. When both `glob` and
+    /// `scope` are set, a hit must match BOTH. `None` scope = no extra filtering (identical to
+    /// omitting it).
     pub fn search_filtered(
         &self,
         query: &str,
         limit: usize,
         glob: Option<&str>,
         file_type: Option<&str>,
+        scope: Option<&str>,
     ) -> anyhow::Result<Vec<RankedHit>> {
-        if glob.is_none() && file_type.is_none() {
+        if glob.is_none() && file_type.is_none() && scope.is_none() {
             return self.search(query, limit);
         }
         let glob_m = match glob {
             Some(g) => Some(crate::glob::compile_glob(g)?),
+            None => None,
+        };
+        let scope_m = match scope {
+            Some(s) => Some(crate::glob::compile_glob(&crate::grep::path_to_glob(s))?),
             None => None,
         };
         let pool = limit.saturating_mul(20).min(2000).max(limit);
@@ -291,6 +303,11 @@ impl DocIndex {
             .filter(|h| file_type.is_none_or(|ft| h.file_type == ft))
             .filter(|h| {
                 glob_m
+                    .as_ref()
+                    .is_none_or(|m| crate::glob::path_matches(m, &h.path))
+            })
+            .filter(|h| {
+                scope_m
                     .as_ref()
                     .is_none_or(|m| crate::glob::path_matches(m, &h.path))
             })
@@ -2855,16 +2872,18 @@ mod search_tests {
         ])
         .unwrap();
 
-        let all = idx.search_filtered("swap", 10, None, None).unwrap();
+        let all = idx.search_filtered("swap", 10, None, None, None).unwrap();
         assert_eq!(all.len(), 3);
         // glob scopes to the matching path only
         let manual = idx
-            .search_filtered("swap", 10, Some("*MODULE*"), None)
+            .search_filtered("swap", 10, Some("*MODULE*"), None, None)
             .unwrap();
         assert_eq!(manual.len(), 1);
         assert!(manual[0].path.contains("MODULE"));
         // file_type scopes to md only
-        let md = idx.search_filtered("swap", 10, None, Some("md")).unwrap();
+        let md = idx
+            .search_filtered("swap", 10, None, Some("md"), None)
+            .unwrap();
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
         // recursive glob on nested paths
@@ -2876,10 +2895,55 @@ mod search_tests {
         }])
         .unwrap();
         let rec = idx
-            .search_filtered("swap", 10, Some("**/*.pdf"), None)
+            .search_filtered("swap", 10, Some("**/*.pdf"), None, None)
             .unwrap();
         assert!(rec.len() >= 2);
         assert!(rec.iter().any(|h| h.path.contains("inner.pdf")));
+    }
+
+    #[test]
+    fn search_filtered_scope_ands_with_glob_and_narrows_to_one_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("docA.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "hot cpu swap".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("docB.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "hot cpu swap".into(),
+            },
+        ])
+        .unwrap();
+
+        // No scope: unchanged baseline — both documents hit.
+        let all = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // scope=docA.md: only that document's hit remains.
+        let scoped = idx
+            .search_filtered("swap", 10, None, None, Some("docA.md"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].path, "docA.md");
+
+        // glob AND scope must both match — a glob that excludes docA.md leaves nothing, even
+        // though scope alone would have matched it.
+        let anded_out = idx
+            .search_filtered("swap", 10, Some("**/docB.md"), None, Some("docA.md"))
+            .unwrap();
+        assert!(anded_out.is_empty(), "glob and scope must be ANDed: {anded_out:?}");
+
+        // A non-matching scope glob returns nothing.
+        let none = idx
+            .search_filtered("swap", 10, None, None, Some("nomatch*"))
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]

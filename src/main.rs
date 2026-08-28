@@ -85,6 +85,10 @@ enum Cmd {
         /// Only this file type, e.g. pdf (-t).
         #[arg(short = 't', long = "type")]
         file_type: Option<String>,
+        /// Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`);
+        /// ANDed with --glob when both are set.
+        #[arg(long)]
+        scope: Option<String>,
         /// Max number of hits.
         #[arg(short = 'l', long, default_value_t = 100)]
         limit: usize,
@@ -157,6 +161,10 @@ enum Cmd {
         glob: Option<String>,
         #[arg(short = 't', long = "type")]
         file_type: Option<String>,
+        /// Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`);
+        /// ANDed with --glob when both are set.
+        #[arg(long)]
+        scope: Option<String>,
         #[arg(short = 'A', long, help = "N context lines after each match (-A)")]
         after: Option<usize>,
         #[arg(short = 'B', long, help = "N context lines before each match (-B)")]
@@ -901,6 +909,7 @@ fn main() -> anyhow::Result<()> {
             fixed,
             glob,
             file_type,
+            scope,
             limit,
             scan,
             no_ignore,
@@ -919,9 +928,13 @@ fn main() -> anyhow::Result<()> {
             if !scan {
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                for h in
-                    idx.search_filtered(&pattern, limit, glob.as_deref(), file_type.as_deref())?
-                {
+                for h in idx.search_filtered(
+                    &pattern,
+                    limit,
+                    glob.as_deref(),
+                    file_type.as_deref(),
+                    scope.as_deref(),
+                )? {
                     rg_lines.push(format!(
                         "{}:{}: {}  [{:.3}]",
                         h.path, h.location, h.snippet, h.score
@@ -1165,6 +1178,7 @@ fn main() -> anyhow::Result<()> {
             word,
             glob,
             file_type,
+            scope,
             after,
             before,
             context,
@@ -1193,6 +1207,7 @@ fn main() -> anyhow::Result<()> {
                 multiline,
                 line_cap: None,
                 path: None,
+                scope,
             };
             for h in glossa::grep::grep(&idx, &pattern, &opts)? {
                 println!("{}", h.display_line());

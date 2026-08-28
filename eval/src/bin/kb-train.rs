@@ -1146,7 +1146,7 @@ fn run_dump(
             )?;
             search_written += 1;
             let hits = idx
-                .search_filtered(&node.label, k, None, None)
+                .search_filtered(&node.label, k, None, None, None)
                 .unwrap_or_default();
             let gold_set: HashSet<(String, String)> = relevant.into_iter().collect();
             let gold_ords: Vec<u64> = hits

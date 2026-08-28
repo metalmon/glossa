@@ -440,6 +440,9 @@ pub(crate) struct SearchArgs {
     #[serde(default)]
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -821,6 +824,9 @@ pub(crate) struct GrepArgs {
     #[serde(default)]
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. ANDed with `path`/`glob` when set. Omit to search the whole corpus.")]
+    scope: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_usize_loose"
@@ -1037,6 +1043,7 @@ impl GlossaServer {
             a.glob.as_deref(),
             a.file_type.as_deref(),
             &self.trace,
+            a.scope.as_deref(),
         );
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
@@ -1581,6 +1588,7 @@ impl GlossaServer {
             multiline: a.multiline.unwrap_or(false),
             line_cap: None,
             path: a.path,
+            scope: a.scope,
         };
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::grep(
@@ -1730,20 +1738,23 @@ mod tests {
         assert_eq!(s.max_bytes, Some(1024));
         assert_eq!(s.raw, Some(true));
 
-        let se: SearchArgs = serde_json::from_str(r#"{"query":"x","limit":"5"}"#).unwrap();
+        let se: SearchArgs =
+            serde_json::from_str(r#"{"query":"x","limit":"5","scope":"docA.md"}"#).unwrap();
         assert_eq!(se.limit, Some(5));
+        assert_eq!(se.scope, Some("docA.md".to_string()));
 
         let ix: IndexArgs = serde_json::from_str(r#"{"force":"true","path":"a.md"}"#).unwrap();
         assert_eq!(ix.force, Some(true));
         assert_eq!(ix.path, Some("a.md".to_string()));
 
         let g: GrepArgs = serde_json::from_str(
-            r#"{"pattern":"x","ignore_case":"true","context":"20","multiline":"1"}"#,
+            r#"{"pattern":"x","ignore_case":"true","context":"20","multiline":"1","scope":"docA.md"}"#,
         )
         .unwrap();
         assert_eq!(g.ignore_case, Some(true));
         assert_eq!(g.context, Some(20));
         assert_eq!(g.multiline, Some(true));
+        assert_eq!(g.scope, Some("docA.md".to_string()));
 
         let ne: NeighborsArgs = serde_json::from_str(
             r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out","as_of":"2022","scope":"somedoc.pdf"}"#,
@@ -1907,6 +1918,7 @@ mod tests {
                 limit: None,
                 glob: None,
                 file_type: None,
+                scope: None,
             }))
             .await
             .unwrap();
@@ -1964,6 +1976,7 @@ mod tests {
                 limit: None,
                 glob: None,
                 file_type: None,
+                scope: None,
             }))
             .await
             .unwrap();
@@ -2059,6 +2072,7 @@ mod tests {
                 word: None,
                 glob: None,
                 file_type: None,
+                scope: None,
                 context: None,
                 before: None,
                 after: None,
@@ -2420,6 +2434,7 @@ mod tests {
                 limit: None,
                 glob: None,
                 file_type: None,
+                scope: None,
             }))
             .await
             .unwrap();
@@ -2454,6 +2469,7 @@ mod tests {
                 limit: None,
                 glob: None,
                 file_type: None,
+                scope: None,
             }))
             .await
             .unwrap();

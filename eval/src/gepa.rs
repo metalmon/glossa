@@ -251,7 +251,7 @@ fn render_hits(hits: &[Value]) -> String {
 }
 
 fn search_top_k(idx: &DocIndex, query: &str, k: usize) -> Vec<glossa::index::store::RankedHit> {
-    idx.search_filtered(query, k, None, None)
+    idx.search_filtered(query, k, None, None, None)
         .unwrap_or_default()
 }
 
