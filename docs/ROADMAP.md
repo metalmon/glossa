@@ -76,7 +76,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Row-level CSV | **Open** | 100 rows/chunk today |
 | OpenDocument odt/ods/odp | **Shipped** (0.3.2) | Own `content.xml`→IR parser (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker; embedded images via `Pictures/` |
 | Chart data (Office/ODF) | **Shipped** (0.3.2) | OOXML `charts/chartN.xml` cache; ODF embedded local table or cell-range refs resolved against the sheet → one GFM chunk per chart. Legacy `.doc/.xls/.ppt` (BIFF) charts and visual chart rendering are out of scope (see `architecture.md`) |
-| Engineering drawings / CAD | **Open** | Direction in [cad-drawing-reading-design.md](cad-drawing-reading-design.md): 3 layers (text metadata / image / structural CAD model), native Rust render (DXF→`tiny-skia`, STEP→`truck`), delivered as an **MCP Apps** interactive artifact behind an opt-in `cargo` feature (render client-side, server stays lean) |
+| Engineering drawings / CAD | **Open** | Direction: 3 layers (text metadata / image / structural CAD model), native Rust render (DXF→`tiny-skia`, STEP→`truck`), delivered as an **MCP Apps** interactive artifact behind an opt-in `cargo` feature (render client-side, server stays lean) |
 | rtf, epub, eml/msg | **Open** | No extractors |
 
 ### Graph
