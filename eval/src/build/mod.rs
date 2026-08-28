@@ -19,7 +19,9 @@ pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_group, run_judge, JudgeStats};
 
-use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
+use crate::backend::openai::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::KbxPaths;
@@ -440,6 +442,12 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             total.nodes,
             total.mentions
         );
+        let footnote = if cache_is_estimated() {
+            " (cache estimated from prompt re-send)"
+        } else {
+            ""
+        };
+        println!("tokens: {}{footnote}", token_summary());
     }
 
     if run_candidates_stage || run_judge_stage {
@@ -484,6 +492,12 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
             pb.finish_and_clear();
             println!("judge: {} group(s) judged, {} link(s)", stats.judged, stats.linked);
+            let footnote = if cache_is_estimated() {
+                " (cache estimated from prompt re-send)"
+            } else {
+                ""
+            };
+            println!("tokens: {}{footnote}", token_summary());
             report.groups_judged = stats.judged;
         }
     }

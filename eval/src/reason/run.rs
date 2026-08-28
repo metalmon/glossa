@@ -4,7 +4,7 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
-use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
+use crate::backend::openai::{cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
@@ -172,6 +172,12 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         "reason: {} seed(s) processed, {} node(s), {} edge(s), {} grounded",
         processed, total_nodes, total_edges, total_grounded
     );
+    let footnote = if cache_is_estimated() {
+        " (cache estimated from prompt re-send)"
+    } else {
+        ""
+    };
+    println!("tokens: {}{footnote}", token_summary());
 
     let summary = crate::build::finalize(&paths.root).context("finalizing reason")?;
     println!("{summary}");

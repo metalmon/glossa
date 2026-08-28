@@ -6,7 +6,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use kb_eval::backend::openai::{reset_resamples, reset_tokens, OpenAiBackend, StatusTicker};
+use kb_eval::backend::openai::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary, OpenAiBackend, StatusTicker,
+};
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
@@ -629,6 +631,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     };
     let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
     println!("{}", summary_text(&all_results));
+    let footnote = if cache_is_estimated() {
+        " (cache estimated from prompt re-send)"
+    } else {
+        ""
+    };
+    println!("tokens: {}{footnote}", token_summary());
     println!("wrote {}", report_path.display());
     Ok(())
 }

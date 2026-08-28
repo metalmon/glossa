@@ -7,7 +7,9 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
-use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
+use crate::backend::openai::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
@@ -325,6 +327,12 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         n_dropped,
         out_path.display()
     );
+    let footnote = if cache_is_estimated() {
+        " (cache estimated from prompt re-send)"
+    } else {
+        ""
+    };
+    println!("tokens: {}{footnote}", token_summary());
     if let Some(t) = target {
         if kept.len() < t {
             println!(
@@ -514,6 +522,12 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         total.edges,
         total.grounded
     );
+    let footnote = if cache_is_estimated() {
+        " (cache estimated from prompt re-send)"
+    } else {
+        ""
+    };
+    println!("tokens: {}{footnote}", token_summary());
 
     // Same hygiene/generalize/node-index finalize `run_reason` runs at the end of `kbx reason`,
     // so the derived layer + node index are refreshed after densify's writes too.
