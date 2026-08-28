@@ -162,18 +162,14 @@ impl Drop for ActivityGuard {
 /// Compose the live after-time status-bar segment: `" · {N new · M cache}{ · N resampled}"`. The
 /// activity word is NOT here — it now rides at the FRONT of the bar in `{prefix}`, driven (debounced)
 /// by `StatusTicker` — so this message carries only the running token counters and the resample
-/// count. The cache segment is omitted when nothing has been cached yet (a local no-cache run stays
-/// clean instead of permanently showing "0 cache"). Pure aside from reading the shared atomics, so
+/// count. New and cache are ALWAYS shown as two labelled segments, so the split is legible even on a
+/// server that reports no cached tokens (a local LM Studio run reads `... · N new · 0 cache`, making
+/// visible that nothing is being cached). Pure aside from reading the shared atomics, so
 /// `StatusTicker` and any direct caller compose exactly the same text as each other.
 fn status_message() -> String {
     let mut parts: Vec<String> = Vec::new();
-    let cached = cached_tokens();
-    if cached > 0 {
-        parts.push(format!("{} new", human_tokens(new_tokens())));
-        parts.push(format!("{} cache", human_tokens(cached)));
-    } else {
-        parts.push(format!("{} tok", human_tokens(new_tokens())));
-    }
+    parts.push(format!("{} new", human_tokens(new_tokens())));
+    parts.push(format!("{} cache", human_tokens(cached_tokens())));
     let n = resamples();
     if n > 0 {
         parts.push(format!("{n} resampled"));
