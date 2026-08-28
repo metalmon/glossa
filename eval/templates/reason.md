@@ -36,5 +36,10 @@ The terminal, and any intermediate the corpus itself states, carry their source;
 query-side node stands for the situation a person brings with them rather than a fact this corpus
 asserts, so it stands on its own. Connect each predecessor to the next, and the chain to the
 terminal, along the ontology's relations, respecting the types each relation joins. Write each node
-and edge through `graph_upsert` as you find it. The work is complete when every path the source
-supports has reached its entry node.
+and edge through `graph_upsert` as you find it.
+
+Reason briefly and reach for the tool, not for prose — the value is in the nodes and edges you
+commit, not in explanation about them. Write the chain out in full, but the moment the source
+supports the next predecessor, record it with `graph_upsert` and move on rather than deliberating at
+length first. The work is complete when every path the source supports has reached its
+entry node.
