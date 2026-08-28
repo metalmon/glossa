@@ -12,25 +12,39 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use indicatif::ProgressBar;
 
-/// Process-global running total of tokens consumed across every chat call routed through
-/// `chat_http` — every one of reason/build/eval/distil goes through that single function, so this
-/// one counter tallies all of them without each call site needing to thread usage back up itself.
-static TOKENS_USED: AtomicU64 = AtomicU64::new(0);
+/// Process-global running total of NEWLY-processed tokens (freshly-processed prompt + all
+/// completion) consumed across every chat call routed through `chat_http` — every one of
+/// reason/build/eval/distil goes through that single function, so this one counter tallies all of
+/// them without each call site needing to thread usage back up itself. Split from the CACHED
+/// counter below because with prompt caching most of a naive running total is cheap re-sent
+/// prompt, not new work — see `usage_split`.
+static NEW_TOKENS: AtomicU64 = AtomicU64::new(0);
 
-/// Current value of the running token counter (see `TOKENS_USED`).
-pub fn tokens_used() -> u64 {
-    TOKENS_USED.load(Ordering::Relaxed)
+/// Process-global running total of CACHED prompt tokens (`usage.prompt_tokens_details
+/// .cached_tokens`) across every chat call — mirrors `NEW_TOKENS`, tallied by the same
+/// `usage_split` call in `chat_http`.
+static CACHED_TOKENS: AtomicU64 = AtomicU64::new(0);
+
+/// Current value of the running new-token counter (see `NEW_TOKENS`).
+pub fn new_tokens() -> u64 {
+    NEW_TOKENS.load(Ordering::Relaxed)
 }
 
-/// Zero the running token counter. Call at the start of a run loop that wants its own per-run
+/// Current value of the running cached-token counter (see `CACHED_TOKENS`).
+pub fn cached_tokens() -> u64 {
+    CACHED_TOKENS.load(Ordering::Relaxed)
+}
+
+/// Zero both running token counters. Call at the start of a run loop that wants its own per-run
 /// total (reason/build-extract/build-judge/eval each call this before their loop starts), so one
 /// stage's bar reflects only tokens spent in that stage, not a prior one's leftover total.
 pub fn reset_tokens() {
-    TOKENS_USED.store(0, Ordering::Relaxed);
+    NEW_TOKENS.store(0, Ordering::Relaxed);
+    CACHED_TOKENS.store(0, Ordering::Relaxed);
 }
 
 /// Process-global running count of resamples performed by `lmstudio_chat`'s resample loop (both the
-/// length-cap path and the degenerate-loop path) across every chat call — mirrors `TOKENS_USED` so a
+/// length-cap path and the degenerate-loop path) across every chat call — mirrors `NEW_TOKENS` so a
 /// run loop can surface `resamples()` on the same progress-bar message instead of the resample
 /// diagnostic colliding with the bar via a raw `eprintln!`.
 static RESAMPLES: AtomicU64 = AtomicU64::new(0);
@@ -46,24 +60,25 @@ pub fn reset_resamples() {
     RESAMPLES.store(0, Ordering::Relaxed);
 }
 
-/// Extract total token usage from a parsed chat-completions response `resp`: `usage.total_tokens`
-/// when present, else `usage.prompt_tokens + usage.completion_tokens`, else `0` when `usage` is
-/// absent entirely (some OpenAI-compatible servers omit it). Factored out of `chat_http` as a pure
-/// function purely so this extraction logic is unit-testable without a live server.
-pub fn usage_tokens(resp: &Value) -> u64 {
-    let usage = resp.get("usage");
-    if let Some(t) = usage.and_then(|u| u.get("total_tokens")).and_then(Value::as_u64) {
-        return t;
-    }
-    let prompt = usage
-        .and_then(|u| u.get("prompt_tokens"))
+/// Split a parsed chat-completions response `resp`'s token usage into (new, cached):
+/// `cached` = `usage.prompt_tokens_details.cached_tokens` (`0` when that field/object is absent —
+/// e.g. servers without caching support such as LM Studio); `new` = the freshly-processed prompt
+/// (`prompt_tokens - cached`) plus all of `completion_tokens` (completion is never cached). When
+/// `usage` is absent entirely, both are `0`. Factored out of `chat_http` as a pure function purely
+/// so this extraction logic is unit-testable without a live server.
+pub fn usage_split(resp: &Value) -> (u64, u64) {
+    let Some(usage) = resp.get("usage") else {
+        return (0, 0);
+    };
+    let prompt = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let completion = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let completion = usage
-        .and_then(|u| u.get("completion_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    prompt + completion
+    let new = prompt.saturating_sub(cached) + completion;
+    (new, cached)
 }
 
 /// Format a token count compactly for a progress-bar message: `999` -> `"999"`, `1500` ->
@@ -82,7 +97,7 @@ pub fn human_tokens(n: u64) -> String {
 /// through a seed/case (about to ask the model something vs about to run a tool), read a few times
 /// a second by `StatusTicker` so a live progress bar can show more than a static bar segment while
 /// one seed is mid-flight. A plain integer code (not an enum) so it fits an `AtomicU8`, mirroring
-/// `TOKENS_USED`/`RESAMPLES` above.
+/// `NEW_TOKENS`/`CACHED_TOKENS`/`RESAMPLES` above.
 ///
 /// `0`=idle `1`=reasoning `2`=reading `3`=writing `4`=searching `5`=querying-graph `6`=other
 /// (a tool call whose name isn't in the mapping below).
@@ -144,17 +159,24 @@ impl Drop for ActivityGuard {
     }
 }
 
-/// Compose the live status-bar segment: `" · {activity}{ · N tok}{ · N resampled}"` — the
-/// activity word is omitted entirely when idle (`activity_label` returns `""`). Pure aside from
-/// reading the shared atomics, so `StatusTicker` and any direct caller compose exactly the same
-/// text as each other.
+/// Compose the live status-bar segment: `" · {activity}{ · N new · M cache}{ · N resampled}"` —
+/// the activity word is omitted entirely when idle (`activity_label` returns `""`), and the cache
+/// segment is omitted when nothing has been cached yet (a local no-cache run stays clean instead
+/// of permanently showing "0 cache"). Pure aside from reading the shared atomics, so `StatusTicker`
+/// and any direct caller compose exactly the same text as each other.
 fn status_message() -> String {
     let mut parts: Vec<String> = Vec::new();
     let activity = activity_label();
     if !activity.is_empty() {
         parts.push(activity.to_string());
     }
-    parts.push(format!("{} tok", human_tokens(tokens_used())));
+    let cached = cached_tokens();
+    if cached > 0 {
+        parts.push(format!("{} new", human_tokens(new_tokens())));
+        parts.push(format!("{} cache", human_tokens(cached)));
+    } else {
+        parts.push(format!("{} tok", human_tokens(new_tokens())));
+    }
     let n = resamples();
     if n > 0 {
         parts.push(format!("{n} resampled"));
@@ -550,9 +572,11 @@ fn chat_http(
                         let retryable = is_transient_upstream(&err.to_string());
                         (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
                     } else if v.pointer("/choices/0/message").is_some() {
-                        // Tally this call's usage into the process-global running counter (see
-                        // `usage_tokens`/`TOKENS_USED`) before handing the response back.
-                        TOKENS_USED.fetch_add(usage_tokens(&v), Ordering::Relaxed);
+                        // Tally this call's usage into the process-global running counters (see
+                        // `usage_split`/`NEW_TOKENS`/`CACHED_TOKENS`) before handing the response back.
+                        let (new, cached) = usage_split(&v);
+                        NEW_TOKENS.fetch_add(new, Ordering::Relaxed);
+                        CACHED_TOKENS.fetch_add(cached, Ordering::Relaxed);
                         // Return the FULL response — see the doc comment above for why.
                         (false, Ok(v))
                     } else {
@@ -971,20 +995,27 @@ mod tests {
     }
 
     #[test]
-    fn usage_tokens_prefers_total_falls_back_to_sum_then_zero() {
-        // total_tokens present -> used directly, even if it disagrees with the sum (trust the
-        // server's own total over reconstructing it).
+    fn usage_split_separates_new_from_cached() {
+        // prompt_tokens_details.cached_tokens present -> cached tallied separately, new is the
+        // freshly-processed prompt remainder plus all of completion.
         assert_eq!(
-            usage_tokens(&json!({"usage": {"total_tokens": 42, "prompt_tokens": 1, "completion_tokens": 1}})),
-            42
+            usage_split(&json!({
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 200,
+                    "prompt_tokens_details": {"cached_tokens": 800}
+                }
+            })),
+            (400, 800)
         );
-        // No total_tokens -> fall back to prompt_tokens + completion_tokens.
+        // No prompt_tokens_details at all (e.g. LM Studio) -> cached 0, new = prompt + completion
+        // (matches the old total_tokens behavior when nothing is cached).
         assert_eq!(
-            usage_tokens(&json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})),
-            15
+            usage_split(&json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})),
+            (15, 0)
         );
-        // No usage object at all -> 0, never a panic.
-        assert_eq!(usage_tokens(&json!({"choices": []})), 0);
+        // No usage object at all -> (0, 0), never a panic.
+        assert_eq!(usage_split(&json!({"choices": []})), (0, 0));
     }
 
     #[test]
@@ -1055,15 +1086,28 @@ mod tests {
 
     #[test]
     fn tokens_used_resets_and_accumulates() {
-        // Process-global counter — reset first so this test isn't order-dependent on whatever
-        // other tests in this file (or run concurrently) touched it.
+        // Process-global counters — reset first so this test isn't order-dependent on whatever
+        // other tests in this file (or run concurrently) touched them.
         reset_tokens();
-        assert_eq!(tokens_used(), 0);
-        TOKENS_USED.fetch_add(usage_tokens(&json!({"usage": {"total_tokens": 7}})), Ordering::Relaxed);
-        TOKENS_USED.fetch_add(usage_tokens(&json!({"usage": {"total_tokens": 3}})), Ordering::Relaxed);
-        assert_eq!(tokens_used(), 10);
+        assert_eq!(new_tokens(), 0);
+        assert_eq!(cached_tokens(), 0);
+        let (n1, c1) = usage_split(&json!({"usage": {"prompt_tokens": 5, "completion_tokens": 2}}));
+        NEW_TOKENS.fetch_add(n1, Ordering::Relaxed);
+        CACHED_TOKENS.fetch_add(c1, Ordering::Relaxed);
+        let (n2, c2) = usage_split(&json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 6}
+            }
+        }));
+        NEW_TOKENS.fetch_add(n2, Ordering::Relaxed);
+        CACHED_TOKENS.fetch_add(c2, Ordering::Relaxed);
+        assert_eq!(new_tokens(), 12); // (5+2) + (10-6+1)
+        assert_eq!(cached_tokens(), 6);
         reset_tokens();
-        assert_eq!(tokens_used(), 0);
+        assert_eq!(new_tokens(), 0);
+        assert_eq!(cached_tokens(), 0);
     }
 
     /// Default `on_repeat` for tests that don't exercise NBA: a static nudge.
