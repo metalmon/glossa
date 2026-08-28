@@ -24,6 +24,11 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Fallback for `chunks_per_round` when neither a CLI flag nor `lab.toml`'s `[tuning]
+/// chunks_per_round` overrides it — mirrors `build::DEFAULT_CHUNKS_PER_ROUND`'s rationale (single
+/// source of truth `run_densify_at` resolves against AND this module's own test asserts against).
+const DEFAULT_CHUNKS_PER_ROUND: usize = 3;
+
 /// CLI-level options for `kbx distil`, folded from the `kbx` binary's clap fields (mirrors
 /// `reason::ReasonArgs`'s shape).
 #[derive(Debug, Clone)]
@@ -55,9 +60,12 @@ pub struct DistilArgs {
     /// `BuildOpts::resume`/`ReasonArgs::resume`).
     pub resume: bool,
     /// Number of chunks folded into a single densify round — threaded straight into
-    /// `densify_doc` (mirrors `BuildOpts::chunks_per_round`). Default `3`, matching
-    /// `BuildOpts::default()`.
-    pub chunks_per_round: usize,
+    /// `densify_doc` (mirrors `BuildOpts::chunks_per_round`). `None` defers to `lab.toml`'s
+    /// `[tuning] chunks_per_round`, then the built-in default (3) — resolved in `run_densify_at`.
+    pub chunks_per_round: Option<usize>,
+    /// Agent-loop round cap for the densify pass. `None` defers to `lab.toml`'s `[tuning]
+    /// max_rounds`, then `distil::densify::DEFAULT_MAX_ROUNDS` (30) — resolved in `run_densify_at`.
+    pub max_rounds: Option<usize>,
     /// When set, `distil::run` runs the synthetic (question, answer) gold generator (the former
     /// default `kbx distil` behavior) instead of densify, writing the kept golds to this file —
     /// it supplies the gold path `run_distil_at` writes to (see [`run`]). `None` selects densify,
@@ -400,6 +408,18 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     let distil_md = std::fs::read_to_string(&paths.distil)
         .with_context(|| format!("reading {}", paths.distil.display()))?;
 
+    // Precedence: CLI flag > lab.toml `[tuning]` > built-in default (see `crate::lab::resolve`).
+    let chunks_per_round = crate::lab::resolve(
+        args.chunks_per_round,
+        lab.tuning.chunks_per_round,
+        DEFAULT_CHUNKS_PER_ROUND,
+    );
+    let max_rounds = crate::lab::resolve(
+        args.max_rounds,
+        lab.tuning.max_rounds,
+        crate::distil::densify::DEFAULT_MAX_ROUNDS,
+    );
+
     // A fresh, short-lived handle: enumerate then drop before densify_doc opens its own
     // per-document GraphStore connection — same reasoning as `run_build`'s extract stage.
     let mut docs = {
@@ -457,7 +477,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
             &lab,
             &distil_md,
             doc,
-            args.chunks_per_round,
+            chunks_per_round,
+            max_rounds,
             |n| {
                 covered += n;
                 pb.inc(n);
@@ -762,12 +783,38 @@ to = ["Fact"]
             doc: Some("a.md".to_string()),
             force: true,
             resume: false,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
             emit_golds: None,
         };
         assert_eq!(args.doc.as_deref(), Some("a.md"));
         assert!(args.force);
-        assert_eq!(args.chunks_per_round, 3);
+        assert_eq!(args.chunks_per_round, Some(3));
+    }
+
+    /// Precedence resolver's contract at `run_densify_at`'s exact call sites, for both knobs this
+    /// pass resolves: CLI wins, then `lab.toml`'s `[tuning]`, then the built-in default.
+    #[test]
+    fn chunks_per_round_and_max_rounds_resolve_cli_over_lab_over_default() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_CHUNKS_PER_ROUND, 3);
+        assert_eq!(resolve(Some(9), Some(6), DEFAULT_CHUNKS_PER_ROUND), 9);
+        assert_eq!(resolve(None, Some(6), DEFAULT_CHUNKS_PER_ROUND), 6);
+        assert_eq!(resolve(None, None, DEFAULT_CHUNKS_PER_ROUND), DEFAULT_CHUNKS_PER_ROUND);
+
+        assert_eq!(crate::distil::densify::DEFAULT_MAX_ROUNDS, 30);
+        assert_eq!(
+            resolve(Some(50), Some(40), crate::distil::densify::DEFAULT_MAX_ROUNDS),
+            50
+        );
+        assert_eq!(
+            resolve(None, Some(40), crate::distil::densify::DEFAULT_MAX_ROUNDS),
+            40
+        );
+        assert_eq!(
+            resolve(None, None, crate::distil::densify::DEFAULT_MAX_ROUNDS),
+            crate::distil::densify::DEFAULT_MAX_ROUNDS
+        );
     }
 
     // ---- `distil::run` mode dispatch (Task 4): pure selector, no model involved -----------------
@@ -785,7 +832,8 @@ to = ["Fact"]
             doc: None,
             force: false,
             resume: false,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
             emit_golds,
         }
     }

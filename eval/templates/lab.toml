@@ -28,3 +28,9 @@ timeout_secs = 120
 # endpoint = "http://localhost:1234/v1/chat/completions"
 # model = "big-model"
 # timeout_secs = 300
+
+[tuning]                              # reason/build/distil agent-loop tuning knobs.
+                                       # Precedence: CLI flag > this section > built-in default.
+fanout_max = 3          # predecessors synthesized per backward step (reason)
+max_rounds = 30         # agent-loop rounds per unit (reason / build / distil)
+chunks_per_round = 3    # sections read per round (build / distil)

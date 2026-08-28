@@ -45,10 +45,12 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-/// High cap on tool-call rounds for one document's densify pass — mirrors `extract_doc`'s
-/// `MAX_ROUNDS`: generous for several reads plus multiple `graph_upsert` fan-out writes, still
-/// bounded against a stuck model.
-const MAX_ROUNDS: usize = 30;
+/// Fallback cap on tool-call rounds for one document's densify pass, used when neither a CLI flag
+/// nor `lab.toml`'s `[tuning] max_rounds` overrides it — mirrors `extract_doc`'s
+/// `DEFAULT_MAX_ROUNDS`: generous for several reads plus multiple `graph_upsert` fan-out writes,
+/// still bounded against a stuck model. The resolved value (CLI > lab > this default; see
+/// `crate::lab::resolve`) is threaded in by the caller as `densify_doc`'s `max_rounds` parameter.
+pub(crate) const DEFAULT_MAX_ROUNDS: usize = 30;
 
 /// Sampling temperature for the densify pass (via `KB_EVAL_TEMP`, read by `lmstudio_chat`) —
 /// same default `extract_doc`'s callers use for the build harvest (`BuildOpts::build_temp`
@@ -132,6 +134,8 @@ pub(crate) fn densify_write(
 /// graph already has grounded to the round's starting section ([`existing_for_chunk`]), and adds
 /// via `graph_upsert` whatever is missing — grounded terminals and/or query-side reasoning,
 /// unlike `extract_doc`'s terminals-only harvest. Errors clearly if `[distil]` is unset.
+/// `max_rounds` bounds EACH round's agent loop (resolved CLI > lab.toml `[tuning]` >
+/// `DEFAULT_MAX_ROUNDS` by the caller — see `distil::run::run_densify_at`).
 pub fn densify_doc(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -139,6 +143,7 @@ pub fn densify_doc(
     distil_md: &str,
     doc_path: &str,
     chunks_per_round: usize,
+    max_rounds: usize,
     // Called once per coverage round with the number of chunk ordinals newly covered that round
     // (mirrors `extract_doc`'s live-progress callback).
     mut on_progress: impl FnMut(u64),
@@ -272,7 +277,7 @@ pub fn densify_doc(
             )
         };
 
-        run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
+        run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
 
         // Advance coverage monotonically (identical to `extract_doc`): `start` is unconditionally
         // marked covered after its round, plus whatever ordinals the round actually read.

@@ -28,6 +28,9 @@ pub struct ReasonArgs {
     pub seed_type: Option<String>,
     /// Soft cap on predecessors synthesized per backward step (default 3).
     pub fanout_max: Option<usize>,
+    /// Agent-loop round cap for one seed's backward-synth pass (default 30). Resolved
+    /// CLI > `lab.toml` `[tuning] max_rounds` > `reason::seed::DEFAULT_MAX_ROUNDS`.
+    pub max_rounds: Option<usize>,
     /// Only process the first N (in seed-pool order) grounded seeds.
     pub limit: Option<usize>,
     /// Clear this run's checkpoint first — a true full rebuild of the typed layer's seed marks.
@@ -116,7 +119,12 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     }
     drop(g); // chain_one_seed opens its own store per call
 
-    let fanout_max = args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX);
+    let fanout_max = crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
+    let max_rounds = crate::lab::resolve(
+        args.max_rounds,
+        lab.tuning.max_rounds,
+        crate::reason::seed::DEFAULT_MAX_ROUNDS,
+    );
     let run_dir = paths.runs.join("reason");
     if args.force {
         clear_checkpoint(&run_dir).context("clearing reason checkpoint for --force")?;
@@ -143,7 +151,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
             continue;
         }
         let stats = crate::reason::chain_one_seed(
-            &paths, &ontology, &lab, &reason_md, seed, fanout_max,
+            &paths, &ontology, &lab, &reason_md, seed, fanout_max, max_rounds,
         )
         .with_context(|| format!("synthesizing query-side for seed {}", seed.id))?;
         total_nodes += stats.nodes;
@@ -207,11 +215,50 @@ mod tests {
         let args = ReasonArgs {
             seed_type: None,
             fanout_max: None,
+            max_rounds: None,
             limit: None,
             force: false,
             resume: false,
             no_progress: true,
         };
         assert_eq!(args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
+    }
+
+    /// `max_rounds`' own default mirrors `fanout_max`'s: `reason::seed::DEFAULT_MAX_ROUNDS` (30)
+    /// when neither a CLI flag nor `lab.toml` overrides it.
+    #[test]
+    fn default_max_rounds_is_thirty_when_unset() {
+        assert_eq!(crate::reason::seed::DEFAULT_MAX_ROUNDS, 30);
+        let args = ReasonArgs {
+            seed_type: None,
+            fanout_max: None,
+            max_rounds: None,
+            limit: None,
+            force: false,
+            resume: false,
+            no_progress: true,
+        };
+        assert_eq!(
+            crate::lab::resolve(args.max_rounds, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
+            30
+        );
+    }
+
+    /// Precedence at the exact call sites `run_reason_at` uses: a CLI flag wins over a lab.toml
+    /// `[tuning]` value, which wins over the built-in default — for both `fanout_max` and
+    /// `max_rounds`.
+    #[test]
+    fn tuning_precedence_cli_over_lab_over_default() {
+        use crate::lab::resolve;
+        assert_eq!(resolve(Some(7), Some(5), DEFAULT_FANOUT_MAX), 7);
+        assert_eq!(resolve(None, Some(5), DEFAULT_FANOUT_MAX), 5);
+        assert_eq!(resolve(None, None, DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
+
+        assert_eq!(resolve(Some(50), Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS), 50);
+        assert_eq!(resolve(None, Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS), 40);
+        assert_eq!(
+            resolve(None, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
+            crate::reason::seed::DEFAULT_MAX_ROUNDS
+        );
     }
 }

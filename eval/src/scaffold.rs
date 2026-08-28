@@ -86,6 +86,30 @@ mod tests {
         assert!(!lab.contains("corpus"));
     }
 
+    /// A fresh `kbx init` workspace ships `[tuning]` fully populated at its documented defaults
+    /// (3/30/3) — the user's explicit ask: a workspace should be ready to edit, not empty, so a
+    /// user tuning a knob edits an existing line instead of having to invent the section from
+    /// scratch. `LabConfig::load` (the same parser `kbx` itself uses) must read it back exactly.
+    #[test]
+    fn init_writes_lab_toml_with_tuning_section_at_documented_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = scaffold_init(dir.path(), false).unwrap();
+        let lab_text = std::fs::read_to_string(&p.lab).unwrap();
+        assert!(lab_text.contains("[tuning]"), "scaffolded lab.toml must have a [tuning] section");
+
+        let lab = kb_eval_lab_config(&p.lab);
+        assert_eq!(lab.tuning.fanout_max, Some(3));
+        assert_eq!(lab.tuning.max_rounds, Some(30));
+        assert_eq!(lab.tuning.chunks_per_round, Some(3));
+    }
+
+    /// Thin helper so the scaffold test parses lab.toml through the SAME `LabConfig::load_at` path
+    /// `kbx` itself uses, not a hand-rolled TOML check — proves the scaffolded file is not just
+    /// text containing `[tuning]`, but a section the real config loader actually resolves.
+    fn kb_eval_lab_config(lab_path: &std::path::Path) -> crate::lab::LabConfig {
+        crate::lab::LabConfig::load_at(lab_path).expect("scaffolded lab.toml must parse")
+    }
+
     #[test]
     fn init_writes_reason_md_with_backward_chain_markers() {
         let dir = tempfile::tempdir().unwrap();

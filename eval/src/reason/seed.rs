@@ -18,9 +18,12 @@ use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-/// High cap on tool-call rounds for one seed's backward-synth pass — generous for several reads
-/// plus multiple fan-out `graph_upsert` writes, still bounded against a stuck model.
-const MAX_ROUNDS: usize = 30;
+/// Fallback cap on tool-call rounds for one seed's backward-synth pass, used when neither a CLI
+/// flag nor `lab.toml`'s `[tuning] max_rounds` overrides it — generous for several reads plus
+/// multiple fan-out `graph_upsert` writes, still bounded against a stuck model. The resolved value
+/// (CLI > lab > this default; see `crate::lab::resolve`) is threaded in by the caller as
+/// `chain_one_seed`'s `max_rounds` parameter, not read from this const directly.
+pub(crate) const DEFAULT_MAX_ROUNDS: usize = 30;
 
 /// How much of one seed's typed reasoning layer a `chain_one_seed` pass wrote: nodes and edges
 /// upserted, and how many of those edges were `MENTIONS` groundings.
@@ -110,6 +113,9 @@ pub(crate) fn seed_source_text_all(
 /// `parse_and_filter_upsert` (ontology-permitting, partial-apply) -> `ops::graph_upsert`
 /// (auto-grounds from a `<path>#n` source_path). Returns nodes/edges/groundings written; errors if
 /// no reason/distil endpoint is configured.
+///
+/// `max_rounds` bounds this seed's agent loop (resolved CLI > lab.toml `[tuning]` > `DEFAULT_MAX_ROUNDS`
+/// by the caller — see `reason::run::run_reason_at`).
 pub fn chain_one_seed(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -117,6 +123,7 @@ pub fn chain_one_seed(
     reason_md: &str,
     seed: &Seed,
     fanout_max: usize,
+    max_rounds: usize,
 ) -> anyhow::Result<ReasonStats> {
     let ep = lab
         .reason_endpoint()
@@ -187,7 +194,7 @@ pub fn chain_one_seed(
         )
     };
 
-    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
+    run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
     Ok(stats)
 }
 

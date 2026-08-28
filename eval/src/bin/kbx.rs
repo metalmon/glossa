@@ -117,9 +117,14 @@ enum Cmd {
         /// Sampling temperature for the extract-stage model call.
         #[arg(long = "build-temp", default_value_t = 0.8)]
         build_temp: f64,
-        /// Number of chunks folded into a single extract-stage model call.
-        #[arg(long = "chunks-per-round", default_value_t = 3)]
-        chunks_per_round: usize,
+        /// Number of chunks folded into a single extract-stage model call (default 3). Falls back
+        /// to `lab.toml`'s `[tuning] chunks_per_round`, then the built-in default, when unset.
+        #[arg(long = "chunks-per-round")]
+        chunks_per_round: Option<usize>,
+        /// Agent-loop round cap for the extract stage (default 30). Falls back to `lab.toml`'s
+        /// `[tuning] max_rounds`, then the built-in default, when unset.
+        #[arg(long = "max-rounds")]
+        max_rounds: Option<usize>,
     },
     /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
     /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
@@ -178,6 +183,10 @@ enum Cmd {
         /// Soft cap on predecessors synthesized per backward step (default 3).
         #[arg(long = "fanout-max")]
         fanout_max: Option<usize>,
+        /// Agent-loop round cap for one seed's backward-synth pass (default 30). Falls back to
+        /// `lab.toml`'s `[tuning] max_rounds`, then the built-in default, when unset.
+        #[arg(long = "max-rounds")]
+        max_rounds: Option<usize>,
         /// Only process the first N (in seed-pool order) grounded seeds.
         #[arg(long)]
         limit: Option<usize>,
@@ -215,9 +224,15 @@ enum Cmd {
         /// Skip documents already recorded done in the densify checkpoint. Densify mode only.
         #[arg(long)]
         resume: bool,
-        /// Number of chunks folded into a single densify round. Densify mode only.
-        #[arg(long = "chunks-per-round", default_value_t = 3)]
-        chunks_per_round: usize,
+        /// Number of chunks folded into a single densify round (default 3). Falls back to
+        /// `lab.toml`'s `[tuning] chunks_per_round`, then the built-in default, when unset.
+        /// Densify mode only.
+        #[arg(long = "chunks-per-round")]
+        chunks_per_round: Option<usize>,
+        /// Agent-loop round cap for the densify pass (default 30). Falls back to `lab.toml`'s
+        /// `[tuning] max_rounds`, then the built-in default, when unset. Densify mode only.
+        #[arg(long = "max-rounds")]
+        max_rounds: Option<usize>,
         /// Number of synthetic golds to ATTEMPT (the gate may drop some). Use this OR `--target`.
         /// Golds mode only (`--emit-golds`).
         #[arg(long)]
@@ -291,6 +306,7 @@ fn main() -> Result<()> {
             vision,
             build_temp,
             chunks_per_round,
+            max_rounds,
         } => {
             let paths = workspace::resolve(path);
             let report = run_build(
@@ -306,6 +322,7 @@ fn main() -> Result<()> {
                     vision,
                     build_temp,
                     chunks_per_round,
+                    max_rounds,
                 },
             )?;
             println!(
@@ -350,6 +367,7 @@ fn main() -> Result<()> {
             path,
             seed_type,
             fanout_max,
+            max_rounds,
             limit,
             force,
             resume,
@@ -359,6 +377,7 @@ fn main() -> Result<()> {
             ReasonArgs {
                 seed_type,
                 fanout_max,
+                max_rounds,
                 limit,
                 force,
                 resume,
@@ -372,6 +391,7 @@ fn main() -> Result<()> {
             force,
             resume,
             chunks_per_round,
+            max_rounds,
             count,
             target,
             max_attempts,
@@ -391,6 +411,7 @@ fn main() -> Result<()> {
                 force,
                 resume,
                 chunks_per_round,
+                max_rounds,
                 emit_golds,
             },
         ),
@@ -820,6 +841,7 @@ mod tests {
                 vision,
                 build_temp,
                 chunks_per_round,
+                max_rounds,
                 path,
             } => {
                 assert_eq!(stage, BuildStage::All);
@@ -833,7 +855,14 @@ mod tests {
                     (build_temp - 0.8).abs() < f64::EPSILON,
                     "build_temp default should be 0.8, got {build_temp}"
                 );
-                assert_eq!(chunks_per_round, 3);
+                assert!(
+                    chunks_per_round.is_none(),
+                    "unset --chunks-per-round must be None (resolved CLI>lab>default in run_build), not a clap-level 3"
+                );
+                assert!(
+                    max_rounds.is_none(),
+                    "unset --max-rounds must be None (resolved CLI>lab>default in run_build)"
+                );
                 assert!(path.is_none());
             }
             _ => panic!("expected Cmd::Build"),
@@ -860,6 +889,8 @@ mod tests {
             "0.5",
             "--chunks-per-round",
             "7",
+            "--max-rounds",
+            "50",
         ])
         .unwrap();
         match cli.cmd {
@@ -875,6 +906,7 @@ mod tests {
                 vision,
                 build_temp,
                 chunks_per_round,
+                max_rounds,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
                 assert_eq!(stage, BuildStage::Judge);
@@ -888,7 +920,8 @@ mod tests {
                     (build_temp - 0.5).abs() < f64::EPSILON,
                     "build_temp should parse to 0.5, got {build_temp}"
                 );
-                assert_eq!(chunks_per_round, 7);
+                assert_eq!(chunks_per_round, Some(7));
+                assert_eq!(max_rounds, Some(50));
             }
             _ => panic!("expected Cmd::Build"),
         }

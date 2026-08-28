@@ -30,10 +30,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-/// High cap on tool-call rounds for one document's extraction pass — generous because a real
-/// document may need several read/grep calls before every STATED node is grounded, but still
-/// bounded so a stuck model can't loop forever.
-const MAX_ROUNDS: usize = 30;
+/// Fallback cap on tool-call rounds for one document's extraction pass, used when neither a CLI
+/// flag nor `lab.toml`'s `[tuning] max_rounds` overrides it — generous because a real document may
+/// need several read/grep calls before every STATED node is grounded, but still bounded so a
+/// stuck model can't loop forever. The resolved value (CLI > lab > this default; see
+/// `crate::lab::resolve`) is threaded in by the caller as `extract_doc`'s `max_rounds` parameter.
+pub(crate) const DEFAULT_MAX_ROUNDS: usize = 30;
 
 /// How much of one document's STATED reasoning graph an `extract_doc` pass wrote.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +298,8 @@ pub(crate) fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u6
 /// `build_temp` sets the sampling temperature (via `KB_EVAL_TEMP`, read by `lmstudio_chat`).
 /// `vision`: `kbx build --vision` (default OFF) — `read` here surfaces text only, so images are
 /// gated out via `gate_images`; the flag is threaded through for parity with the vision path.
+/// `max_rounds` bounds EACH round's agent loop (resolved CLI > lab.toml `[tuning]` >
+/// `DEFAULT_MAX_ROUNDS` by the caller — see `build::run_build`).
 pub fn extract_doc(
     root: &Path,
     lab: &LabConfig,
@@ -305,6 +309,7 @@ pub fn extract_doc(
     build_temp: f64,
     chunks_per_round: usize,
     vision: bool,
+    max_rounds: usize,
     // Called once per coverage round with the number of chunk ordinals newly covered that round,
     // so a caller's progress bar can advance WITHIN a document instead of only when the whole doc
     // finishes (a big doc is otherwise many minutes at a standstill on a slow local model).
@@ -424,7 +429,7 @@ pub fn extract_doc(
             )
         };
 
-        run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
+        run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
 
         // Advance coverage monotonically: `start` is unconditionally marked covered after its
         // round (regardless of what the round actually read), plus whatever ordinals the round

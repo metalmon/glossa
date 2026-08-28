@@ -67,6 +67,34 @@ pub struct LabConfig {
     /// at a small local model to keep a large candidate set from costing a strong-model call each.
     #[serde(default)]
     pub bridge: Option<Endpoint>,
+    /// Per-workspace overrides for the reason/build/distil agent-loop tuning knobs. Absent
+    /// section == every field unset == identical behavior to today (see [`Tuning`]).
+    #[serde(default)]
+    pub tuning: Tuning,
+}
+
+/// Per-workspace overrides for the reason/build/distil agent-loop tuning knobs — `fanout_max`
+/// (reason's predecessor branching cap), `max_rounds` (agent-loop round cap, shared by reason/
+/// build/distil), and `chunks_per_round` (sections read per coverage round, build/distil). Every
+/// field is optional: an absent `[tuning]` section (or an absent field within it) means "no
+/// override here", so [`resolve`] falls through to the CLI flag (if any) and finally the
+/// built-in default — this section is purely additive over today's CLI-flag-or-hardcoded-const
+/// behavior.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Tuning {
+    #[serde(default)]
+    pub fanout_max: Option<usize>,
+    #[serde(default)]
+    pub max_rounds: Option<usize>,
+    #[serde(default)]
+    pub chunks_per_round: Option<usize>,
+}
+
+/// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,
+/// then a `lab.toml` `[tuning]` value, then the built-in default. A plain `Option::or`/
+/// `unwrap_or` chain, named so every call site reads the same, self-documenting way.
+pub fn resolve<T>(cli: Option<T>, lab: Option<T>, default: T) -> T {
+    cli.or(lab).unwrap_or(default)
 }
 
 impl LabConfig {
@@ -166,5 +194,53 @@ mod tests {
         let toml3 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
         let lab3: LabConfig = toml::from_str(toml3).unwrap();
         assert!(lab3.reason_endpoint().is_none());
+    }
+
+    #[test]
+    fn tuning_parses_all_three_fields_when_present() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [tuning]
+            fanout_max = 5
+            max_rounds = 40
+            chunks_per_round = 4
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.fanout_max, Some(5));
+        assert_eq!(lab.tuning.max_rounds, Some(40));
+        assert_eq!(lab.tuning.chunks_per_round, Some(4));
+    }
+
+    #[test]
+    fn tuning_defaults_to_all_none_when_section_absent() {
+        let toml = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.fanout_max, None);
+        assert_eq!(lab.tuning.max_rounds, None);
+        assert_eq!(lab.tuning.chunks_per_round, None);
+    }
+
+    #[test]
+    fn tuning_section_with_a_subset_of_fields_leaves_the_rest_none() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [tuning]
+            max_rounds = 40
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.fanout_max, None);
+        assert_eq!(lab.tuning.max_rounds, Some(40));
+        assert_eq!(lab.tuning.chunks_per_round, None);
+    }
+
+    #[test]
+    fn resolve_prefers_cli_over_lab_over_default() {
+        assert_eq!(resolve(Some(9), Some(5), 3), 9, "CLI must win outright");
+        assert_eq!(resolve(None, Some(5), 3), 5, "lab must win when CLI is unset");
+        assert_eq!(resolve(None::<usize>, None, 3), 3, "default when both are unset");
     }
 }

@@ -34,6 +34,12 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
+/// Fallback for `chunks_per_round` when neither a CLI flag nor `lab.toml`'s `[tuning]
+/// chunks_per_round` overrides it. Single source of truth `run_build` resolves against AND this
+/// module's own default-value test asserts against, so drift between the two can't happen
+/// silently (mirrors `reason::run::DEFAULT_FANOUT_MAX`'s rationale).
+const DEFAULT_CHUNKS_PER_ROUND: usize = 3;
+
 /// Which stage(s) of the build pipeline a `kbx build` invocation should run. `All` (the clap
 /// default) runs every stage, in pipeline order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -78,8 +84,13 @@ pub struct BuildOpts {
     /// recall breadth over ambiguous/underspecified passages.
     pub build_temp: f64,
     /// Number of chunks folded into a single extract-stage model call (prompt-fit knob, mirrors
-    /// `bridge_max_facts` for the judge stage).
-    pub chunks_per_round: usize,
+    /// `bridge_max_facts` for the judge stage). `None` defers to `lab.toml`'s `[tuning]
+    /// chunks_per_round`, then `DEFAULT_CHUNKS_PER_ROUND` (3) — resolved in `run_build`.
+    pub chunks_per_round: Option<usize>,
+    /// Agent-loop round cap for the extract stage (per document round). `None` defers to
+    /// `lab.toml`'s `[tuning] max_rounds`, then `build::extract::DEFAULT_MAX_ROUNDS` (30) —
+    /// resolved in `run_build`.
+    pub max_rounds: Option<usize>,
 }
 
 impl Default for BuildOpts {
@@ -94,7 +105,8 @@ impl Default for BuildOpts {
             bridge_max_facts: 0,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: None,
+            max_rounds: None,
         }
     }
 }
@@ -294,6 +306,18 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         let builder_md = std::fs::read_to_string(&paths.builder)
             .with_context(|| format!("reading {}", paths.builder.display()))?;
 
+        // Precedence: CLI flag > lab.toml `[tuning]` > built-in default (see `crate::lab::resolve`).
+        let chunks_per_round = crate::lab::resolve(
+            opts.chunks_per_round,
+            lab.tuning.chunks_per_round,
+            DEFAULT_CHUNKS_PER_ROUND,
+        );
+        let max_rounds = crate::lab::resolve(
+            opts.max_rounds,
+            lab.tuning.max_rounds,
+            extract::DEFAULT_MAX_ROUNDS,
+        );
+
         // A fresh, short-lived handle: enumerate then drop before extract_doc opens its own
         // per-document GraphStore connection, so nothing else holds `graph.sqlite` open across
         // the whole (possibly slow, model-calling) extraction loop.
@@ -386,8 +410,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 &ontology,
                 doc,
                 opts.build_temp,
-                opts.chunks_per_round,
+                chunks_per_round,
                 opts.vision,
+                max_rounds,
                 |n| {
                     covered += n;
                     pb.inc(n);
@@ -520,8 +545,26 @@ mod tests {
     #[test]
     fn build_opts_defaults() {
         let o = BuildOpts::default();
-        assert_eq!(o.chunks_per_round, 3);
+        assert_eq!(o.chunks_per_round, None, "unset — resolved against lab/default in run_build");
+        assert_eq!(o.max_rounds, None, "unset — resolved against lab/default in run_build");
         assert!((o.build_temp - 0.8).abs() < 1e-9);
+    }
+
+    /// Precedence resolver's contract at `run_build`'s exact call sites, for both knobs this
+    /// stage resolves: a CLI value wins outright; absent that, `lab.toml`'s `[tuning]` value wins;
+    /// absent both, the built-in default (`DEFAULT_CHUNKS_PER_ROUND` / `extract::DEFAULT_MAX_ROUNDS`).
+    #[test]
+    fn chunks_per_round_and_max_rounds_resolve_cli_over_lab_over_default() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_CHUNKS_PER_ROUND, 3);
+        assert_eq!(resolve(Some(9), Some(6), DEFAULT_CHUNKS_PER_ROUND), 9);
+        assert_eq!(resolve(None, Some(6), DEFAULT_CHUNKS_PER_ROUND), 6);
+        assert_eq!(resolve(None, None, DEFAULT_CHUNKS_PER_ROUND), DEFAULT_CHUNKS_PER_ROUND);
+
+        assert_eq!(extract::DEFAULT_MAX_ROUNDS, 30);
+        assert_eq!(resolve(Some(50), Some(40), extract::DEFAULT_MAX_ROUNDS), 50);
+        assert_eq!(resolve(None, Some(40), extract::DEFAULT_MAX_ROUNDS), 40);
+        assert_eq!(resolve(None, None, extract::DEFAULT_MAX_ROUNDS), extract::DEFAULT_MAX_ROUNDS);
     }
 
     #[test]
@@ -539,7 +582,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         run_build(paths, opts).unwrap();
     }
@@ -607,7 +651,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         run_build(paths, opts).unwrap();
 
@@ -835,7 +880,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -866,7 +912,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -894,7 +941,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         run_build(paths, opts).unwrap();
 
@@ -967,7 +1015,8 @@ mod tests {
             bridge_max_facts: 40,
             vision: false,
             build_temp: 0.8,
-            chunks_per_round: 3,
+            chunks_per_round: Some(3),
+            max_rounds: None,
         };
         run_build(paths, opts).unwrap();
 
