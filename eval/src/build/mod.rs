@@ -359,6 +359,12 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
+            // Advance the bar WITHIN the doc via extract_doc's per-round callback (real chunks
+            // covered), so a large doc on a slow model shows steady motion instead of sitting at
+            // one value until it finishes. `covered` tracks what the callback advanced so the
+            // per-doc total can be reconciled to this doc's weight below.
+            let w = extract_doc_weight(doc, &chunk_counts) as u64;
+            let mut covered = 0u64;
             let stats = extract_doc(
                 &paths.root,
                 &lab,
@@ -368,13 +374,21 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 opts.build_temp,
                 opts.chunks_per_round,
                 opts.vision,
+                |n| {
+                    covered += n;
+                    pb.inc(n);
+                },
             )
             .with_context(|| format!("extracting {doc}"))?;
             total.nodes += stats.nodes;
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
             report.docs_extracted.push(doc.clone());
-            pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
+            // Top up any gap so the bar stays aligned to this doc's weight even when covered
+            // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
+            if covered < w {
+                pb.inc(w - covered);
+            }
         }
         pb.finish_and_clear();
         println!(

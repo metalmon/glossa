@@ -304,6 +304,10 @@ pub fn extract_doc(
     build_temp: f64,
     chunks_per_round: usize,
     vision: bool,
+    // Called once per coverage round with the number of chunk ordinals newly covered that round,
+    // so a caller's progress bar can advance WITHIN a document instead of only when the whole doc
+    // finishes (a big doc is otherwise many minutes at a standstill on a slow local model).
+    mut on_progress: impl FnMut(u64),
 ) -> anyhow::Result<ExtractStats> {
     // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP; set it once for this pass.
     std::env::set_var("KB_EVAL_TEMP", build_temp.to_string());
@@ -426,8 +430,11 @@ pub fn extract_doc(
         // read. This guarantees strict progress even if the model reads zero sections, or reads
         // only already-covered ordinals but never `start` itself — either way the coverage loop
         // can't spin forever on the same `start`.
+        let before = covered.len();
         covered.insert(start);
         covered.extend(reads.borrow().iter().copied());
+        // Real chunks covered this round → advance the caller's bar live.
+        on_progress((covered.len() - before) as u64);
     }
 
     Ok(stats.into_inner())
