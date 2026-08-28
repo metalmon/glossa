@@ -4,6 +4,7 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
+use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
@@ -45,7 +46,9 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     }
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
-        ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+        ProgressStyle::with_template(
+            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+        )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
     pb
@@ -120,11 +123,22 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         seeds.truncate(n);
     }
 
+    reset_tokens();
+    let reason_price = lab.reason_endpoint().and_then(|e| e.price_per_1m);
+    let reason_msg = || -> String {
+        let tokens = tokens_used();
+        let cost_suffix = reason_price
+            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
+            .unwrap_or_default();
+        format!("reason · {} tok{}", human_tokens(tokens), cost_suffix)
+    };
+
     let pb = progress_bar(seeds.len(), args.no_progress);
-    pb.set_message("reason");
+    pb.set_message(reason_msg());
     let (mut total_nodes, mut total_edges, mut total_grounded, mut processed) = (0, 0, 0, 0usize);
     for seed in &seeds {
         if should_skip(&cp, &seed.id, args.resume) {
+            pb.set_message(reason_msg());
             pb.inc(1);
             continue;
         }
@@ -142,6 +156,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
             "reason {}: {} node(s), {} edge(s), {} grounded",
             seed.id, stats.nodes, stats.edges, stats.grounded
         ));
+        pb.set_message(reason_msg());
         pb.inc(1);
     }
     pb.finish_and_clear();

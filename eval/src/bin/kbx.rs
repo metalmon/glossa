@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use kb_eval::backend::openai::OpenAiBackend;
+use kb_eval::backend::openai::{human_tokens, reset_tokens, tokens_used, OpenAiBackend};
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
@@ -499,7 +499,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let pb = if show_progress {
         let pb = ProgressBar::new(cases.len() as u64);
         pb.set_style(
-            ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+            ProgressStyle::with_template(
+                "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+            )
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
         pb
@@ -507,9 +509,19 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         ProgressBar::hidden()
     };
 
+    reset_tokens();
+    let eval_price = lab.model.price_per_1m;
+    let eval_msg = |id: &str| -> String {
+        let tokens = tokens_used();
+        let cost_suffix = eval_price
+            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
+            .unwrap_or_default();
+        format!("{id} · {} tok{}", human_tokens(tokens), cost_suffix)
+    };
+
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
-        pb.set_message(q.id.clone());
+        pb.set_message(eval_msg(&q.id));
         let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
@@ -551,6 +563,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         };
 
         pb.println(format!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id));
+        pb.set_message(eval_msg(&q.id));
 
         let r = CaseResult {
             id: q.id.clone(),

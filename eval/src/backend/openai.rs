@@ -6,8 +6,58 @@ use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Process-global running total of tokens consumed across every chat call routed through
+/// `chat_http` — every one of reason/build/eval/distil goes through that single function, so this
+/// one counter tallies all of them without each call site needing to thread usage back up itself.
+static TOKENS_USED: AtomicU64 = AtomicU64::new(0);
+
+/// Current value of the running token counter (see `TOKENS_USED`).
+pub fn tokens_used() -> u64 {
+    TOKENS_USED.load(Ordering::Relaxed)
+}
+
+/// Zero the running token counter. Call at the start of a run loop that wants its own per-run
+/// total (reason/build-extract/build-judge/eval each call this before their loop starts), so one
+/// stage's bar reflects only tokens spent in that stage, not a prior one's leftover total.
+pub fn reset_tokens() {
+    TOKENS_USED.store(0, Ordering::Relaxed);
+}
+
+/// Extract total token usage from a parsed chat-completions response `resp`: `usage.total_tokens`
+/// when present, else `usage.prompt_tokens + usage.completion_tokens`, else `0` when `usage` is
+/// absent entirely (some OpenAI-compatible servers omit it). Factored out of `chat_http` as a pure
+/// function purely so this extraction logic is unit-testable without a live server.
+pub fn usage_tokens(resp: &Value) -> u64 {
+    let usage = resp.get("usage");
+    if let Some(t) = usage.and_then(|u| u.get("total_tokens")).and_then(Value::as_u64) {
+        return t;
+    }
+    let prompt = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    prompt + completion
+}
+
+/// Format a token count compactly for a progress-bar message: `999` -> `"999"`, `1500` ->
+/// `"1.5k"`, `2_000_000` -> `"2.0M"`. Pure — unit-tested.
+pub fn human_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 /// Generic OpenAI-compatible chat backend (LM Studio, llama.cpp server, vLLM, OpenRouter, …).
 ///
@@ -310,6 +360,9 @@ fn chat_http(
                         let retryable = is_transient_upstream(&err.to_string());
                         (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
                     } else if v.pointer("/choices/0/message").is_some() {
+                        // Tally this call's usage into the process-global running counter (see
+                        // `usage_tokens`/`TOKENS_USED`) before handing the response back.
+                        TOKENS_USED.fetch_add(usage_tokens(&v), Ordering::Relaxed);
                         // Return the FULL response — see the doc comment above for why.
                         (false, Ok(v))
                     } else {
@@ -710,6 +763,43 @@ mod tests {
         ] {
             assert!(!is_transient_upstream(fatal), "should fail fast: {fatal}");
         }
+    }
+
+    #[test]
+    fn usage_tokens_prefers_total_falls_back_to_sum_then_zero() {
+        // total_tokens present -> used directly, even if it disagrees with the sum (trust the
+        // server's own total over reconstructing it).
+        assert_eq!(
+            usage_tokens(&json!({"usage": {"total_tokens": 42, "prompt_tokens": 1, "completion_tokens": 1}})),
+            42
+        );
+        // No total_tokens -> fall back to prompt_tokens + completion_tokens.
+        assert_eq!(
+            usage_tokens(&json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})),
+            15
+        );
+        // No usage object at all -> 0, never a panic.
+        assert_eq!(usage_tokens(&json!({"choices": []})), 0);
+    }
+
+    #[test]
+    fn human_tokens_formats_compactly() {
+        assert_eq!(human_tokens(999), "999");
+        assert_eq!(human_tokens(1500), "1.5k");
+        assert_eq!(human_tokens(2_000_000), "2.0M");
+    }
+
+    #[test]
+    fn tokens_used_resets_and_accumulates() {
+        // Process-global counter — reset first so this test isn't order-dependent on whatever
+        // other tests in this file (or run concurrently) touched it.
+        reset_tokens();
+        assert_eq!(tokens_used(), 0);
+        TOKENS_USED.fetch_add(usage_tokens(&json!({"usage": {"total_tokens": 7}})), Ordering::Relaxed);
+        TOKENS_USED.fetch_add(usage_tokens(&json!({"usage": {"total_tokens": 3}})), Ordering::Relaxed);
+        assert_eq!(tokens_used(), 10);
+        reset_tokens();
+        assert_eq!(tokens_used(), 0);
     }
 
     /// Default `on_repeat` for tests that don't exercise NBA: a static nudge.

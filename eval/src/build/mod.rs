@@ -19,6 +19,7 @@ pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_group, run_judge, JudgeStats};
 
+use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::KbxPaths;
@@ -97,6 +98,18 @@ impl Default for BuildOpts {
     }
 }
 
+/// Compose a progress-bar message combining a stage label with the running token total (see
+/// `crate::backend::openai::tokens_used`) and, when `price` (USD per 1M tokens) is `Some`, a rough
+/// `~$` cost estimate. Shared by build's extract and judge loops (`run_build` here and
+/// `judge::run_judge`) so both stages format their bar message the same way.
+pub(crate) fn token_progress_msg(prefix: &str, price: Option<f64>) -> String {
+    let tokens = tokens_used();
+    let cost_suffix = price
+        .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
+        .unwrap_or_default();
+    format!("{prefix} · {} tok{}", human_tokens(tokens), cost_suffix)
+}
+
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
 /// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`).
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
@@ -107,7 +120,9 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     }
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
-        ProgressStyle::with_template("{msg} [{pos}/{len}] {bar:40.cyan/blue} {elapsed_precise}")
+        ProgressStyle::with_template(
+            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+        )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
     pb
@@ -350,12 +365,15 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         .context("counting chunks per doc for extract-bar weights")?;
         let total_chunks = extract_total_chunks(&docs, &chunk_counts);
 
+        reset_tokens();
+        let extract_price = lab.model.price_per_1m;
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
-        pb.set_message("extract (chunks)");
+        pb.set_message(token_progress_msg("extract (chunks)", extract_price));
         let mut total = ExtractStats::default();
         for doc in &docs {
             let unit_id = format!("extract:{doc}");
             if opts.resume && cp.is_done(&unit_id) {
+                pb.set_message(token_progress_msg("extract (chunks)", extract_price));
                 pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
@@ -384,6 +402,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
             report.docs_extracted.push(doc.clone());
+            pb.set_message(token_progress_msg("extract (chunks)", extract_price));
             // Top up any gap so the bar stays aligned to this doc's weight even when covered
             // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
             if covered < w {
@@ -420,8 +439,10 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 .with_context(|| format!("reading {}", paths.bridge.display()))?;
 
             let idx = DocIndex::open_or_create(&paths.root).context("open doc index")?;
+            reset_tokens();
+            let judge_price = lab.bridge.as_ref().unwrap_or(&lab.model).price_per_1m;
             let pb = progress_bar(groups.len(), opts.no_progress);
-            pb.set_message("judge");
+            pb.set_message(token_progress_msg("judge", judge_price));
             let stats = run_judge(
                 &paths.root,
                 &lab,

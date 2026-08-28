@@ -22,6 +22,11 @@ pub struct Endpoint {
     /// Per-endpoint request timeout, in seconds.
     #[serde(default = "d120")]
     pub timeout_secs: u64,
+    /// USD per 1M tokens, for a rough running-cost estimate in the progress bar. `None` (the
+    /// default) leaves cost display off — local endpoints are free, so leaving this unset in
+    /// `lab.toml` is the common case, not an oversight.
+    #[serde(default)]
+    pub price_per_1m: Option<f64>,
 }
 
 impl Endpoint {
