@@ -1133,7 +1133,7 @@ fn exec_graph_upsert(idx: &DocIndex, g: &GraphStore, ont: &Ontology, args: &Valu
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now);
+    let out = glossa::graph::ops::graph_upsert(idx, g, ont, nodes, edges, now, "agent");
     if errs.is_empty() {
         out.message
     } else {

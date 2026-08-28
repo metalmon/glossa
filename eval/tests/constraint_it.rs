@@ -537,7 +537,7 @@ fn agent_style_upsert_builds_enum_constraint() {
             "CONSTRAINED_BY",
             "Outer diameter enum",
         )],
-        1,
+        1, "agent"
     );
     assert!(!out.rejected, "{}", out.message);
     assert_eq!(g.all_nodes().unwrap().len(), 2, "{}", out.message);

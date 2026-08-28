@@ -534,6 +534,12 @@ pub fn format_upsert_response(out: &UpsertOutcome) -> String {
 /// 5. Build dump lines.
 /// 6. If any errors: return rejection (nothing written), keeping the hint block.
 /// 7. Otherwise call `apply_upsert` and return.
+///
+/// `origin` is an engine/Rust-caller argument only — it is stamped onto every written
+/// `Provenance.origin` and is NOT part of the model-facing `graph_upsert` MCP tool schema; the
+/// model never supplies it. Every caller today passes `"agent"`; `"distil"` is reserved for the
+/// kbx distil densification writer, and is treated as an authored origin everywhere `"agent"` is
+/// (see `store::delete_agent_table_compile_layer` and `doctor::doctor`).
 pub fn graph_upsert(
     idx: &DocIndex,
     g: &GraphStore,
@@ -541,6 +547,7 @@ pub fn graph_upsert(
     nodes: Vec<UpsertNode>,
     edges: Vec<UpsertEdge>,
     now: u64,
+    origin: &str,
 ) -> UpsertOutcome {
     // Partial apply: validate each item on its own, WRITE everything well-formed, and DROP only the
     // bad items with a clear, actionable reason — never discard valid work because a sibling item is
@@ -1110,7 +1117,7 @@ pub fn graph_upsert(
         .collect();
 
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
-    match apply_upsert(g, ont, nodespecs, edgespecs, now, &idx.root) {
+    match apply_upsert(g, ont, nodespecs, edgespecs, now, &idx.root, origin) {
         Ok(result) => {
             // Author node_validity for each node that supplied a bound. `result.merged` is
             // (requested_id → canonical_id) for every node that converged into an EXISTING
@@ -1656,7 +1663,7 @@ strict = false
             "case1.docx",
         )];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         assert!(!out.rejected, "should not be rejected: {}", out.message);
         assert_eq!(out.nodes, 2);
         assert_eq!(out.edges, 1);
@@ -1686,7 +1693,7 @@ strict = false
             unode("Symptom", "Cache", "case1.docx"),
             unode("Resolution", "Cache", "case1.docx"),
         ];
-        let out = graph_upsert(&idx, &g, &ont, nodes, vec![], 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, vec![], 1_000_000, "agent");
 
         assert!(!out.rejected, "should not be rejected: {}", out.message);
         assert!(
@@ -1734,7 +1741,7 @@ strict = false
                 unode("Resolution", "Cache", "case1.docx"),
             ],
             vec![uedge("Source", "RESOLVED_BY", "Cache", "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(out.dropped.is_empty(), "edge kept: {:?}", out.dropped);
         let res_cache = g
@@ -1771,7 +1778,7 @@ strict = false
                 unode("Symptom", "Cache", "case1.docx"),
             ],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(g.node_count().unwrap(), 1, "same (label,type) is one node");
@@ -1801,7 +1808,7 @@ strict = false
             ],
             // "Cache" is ambiguous (Symptom + Resolution) under the untyped RELATED_TO.
             vec![uedge("Source", "RELATED_TO", "Cache", "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
 
         // No RELATED_TO edge may be written — the ambiguity is not silently guessed.
@@ -1851,7 +1858,7 @@ strict = false
                 unode("Resolution", "Cache", "case1.docx"),
             ],
             vec![uedge("Source", "RELATED_TO", &res_cache, "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(out.dropped.is_empty(), "id-addressed edge kept: {:?}", out.dropped);
         let e = g
@@ -1884,7 +1891,7 @@ strict = false
                 unode("Resolution", "Cache", "case1.docx"),
             ],
             vec![uedge("Source", "RELATED_TO", "Symptom:Cache", "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(out.dropped.is_empty(), "qualified edge kept: {:?}", out.dropped);
         let e = g
@@ -1938,7 +1945,7 @@ strict = false
             "Module restart",
             "case1.docx",
         )];
-        graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        graph_upsert(&idx, &g, &ont, nodes, edges, 1, "agent");
 
         // Rename the Symptom node.
         let ups = vec![NodeUpdate {
@@ -1986,7 +1993,7 @@ strict = false
             "case1.docx",
         )];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         // Partial apply: the valid Symptom IS written; only the edge to an unknown node is dropped.
         assert!(!out.rejected, "valid node written: {}", out.message);
         assert_eq!(out.nodes, 1, "the Symptom node is written");
@@ -2018,7 +2025,7 @@ strict = false
             "case1.docx",
         )];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         assert!(!out.rejected, "should not be rejected: {}", out.message);
         assert_eq!(out.nodes, 2);
         assert_eq!(out.edges, 1);
@@ -2071,7 +2078,7 @@ strict = false
             &ont,
             vec![unode("Resolution", "case1 docx", "docs\\case1.docx")],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "setup node written: {}", out.message);
 
@@ -2114,7 +2121,7 @@ strict = false
             "case1.docx",
         )];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         assert_eq!(
             out.edges, 1,
             "type-prefixed endpoints should resolve: {}",
@@ -2159,7 +2166,7 @@ strict = false
             "case1.docx",
         )];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         // Partial apply: the Symptom IS written; the edge to an undefined label is dropped (named).
         assert!(!out.rejected, "valid node written: {}", out.message);
         assert_eq!(out.nodes, 1);
@@ -2188,7 +2195,7 @@ strict = false
         // a MENTIONS edge with no `to` target — malformed.
         let edges = vec![uedge("Connection loss", "MENTIONS", "", "case1.docx")];
 
-        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         assert!(!out.rejected, "valid nodes are written: {}", out.message);
         assert_eq!(out.nodes, 2, "both valid nodes written");
         assert_eq!(out.edges, 0, "the edge with no `to` is dropped");
@@ -2232,7 +2239,7 @@ strict = false
             &ont,
             vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
-            1,
+            1, "agent"
         );
 
         let del = graph_delete(&idx, &g, vec!["Nonexistent".into()], vec![]);
@@ -2283,7 +2290,7 @@ strict = false
                 "Change maxTsdr parameter and restart service",
                 "c.docx",
             )],
-            1,
+            1, "agent"
         );
         assert!(!out1.rejected, "{}", out1.message);
 
@@ -2299,7 +2306,7 @@ strict = false
                 "Change maxTsdr parameter",
                 "c.docx",
             )],
-            2,
+            2, "agent"
         );
         assert!(
             !out2.rejected,
@@ -2326,7 +2333,7 @@ strict = false
             &ont,
             vec![unode("Symptom", "Connection loss", "case_support_001")],
             vec![],
-            1,
+            1, "agent"
         );
         assert!(
             out.rejected,
@@ -2350,7 +2357,7 @@ strict = false
                 "kb-test\\extra-data\\real.pdf",
             )],
             vec![],
-            2,
+            2, "agent"
         );
         assert!(
             !out_real.rejected,
@@ -2377,7 +2384,7 @@ strict = false
                 "kb-manual\\kb-test\\extra-data\\real.pdf",
             )],
             vec![],
-            1,
+            1, "agent"
         );
         assert!(
             !out.rejected,
@@ -2403,7 +2410,7 @@ strict = false
             &ont,
             vec![unode("Symptom", "Connection loss", "wrong\\real.pdf")],
             vec![],
-            1,
+            1, "agent"
         );
         assert!(out.rejected, "bad path must reject: {}", out.message);
         assert!(
@@ -2509,7 +2516,7 @@ to = ["Enum"]
                 &ont,
                 vec![unode("Field", "Type", "spec.pdf")],
                 vec![],
-                1,
+                1, "agent"
             )
             .rejected
         );
@@ -2519,7 +2526,7 @@ to = ["Enum"]
             &ont,
             vec![unode("Enum", "Type", "spec.pdf")],
             vec![uedge("Type", "MENTIONS", "#1", "spec.pdf")],
-            2,
+            2, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         let fld = id_for(&ont, "Field", "Type");
@@ -2570,7 +2577,7 @@ to = ["Enum"]
             &ont,
             vec![unode("Symptom", "Type", "spec.docx")],
             vec![uedge("Type", "MENTIONS", "#1", "spec.docx")],
-            1,
+            1, "agent"
         );
         assert!(!out.rejected, "upsert rejected: {}", out.message);
         let from_id = id_for(&ont, "Symptom", "Type");
@@ -2609,7 +2616,7 @@ to = ["Enum"]
             &ont,
             vec![unode("Symptom", "Voltage", "spec.docx")],
             vec![uedge("Voltage", "MENTIONS", "spec.docx#1", "spec.docx")],
-            1,
+            1, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
 
@@ -2660,7 +2667,7 @@ to = ["Enum"]
                 &ont,
                 vec![unode("Symptom", "Voltage", "spec.docx")],
                 vec![],
-                1,
+                1, "agent"
             )
             .rejected
         );
@@ -2699,7 +2706,7 @@ to = ["Enum"]
         .unwrap();
         let mut n = unode("Symptom", "Type", "d.md");
         n.aliases = vec!["41".into(), "42".into()];
-        assert!(!graph_upsert(&idx, &g, &ont, vec![n], vec![], 1).rejected);
+        assert!(!graph_upsert(&idx, &g, &ont, vec![n], vec![], 1, "agent").rejected);
         // Re-send the same node with no aliases (e.g. re-anchoring a dropped edge).
         assert!(
             !graph_upsert(
@@ -2708,7 +2715,7 @@ to = ["Enum"]
                 &ont,
                 vec![unode("Symptom", "Type", "d.md")],
                 vec![],
-                2
+                2, "agent"
             )
             .rejected
         );
@@ -2750,7 +2757,7 @@ to = ["Enum"]
                 unode("Resolution", "Test Fix", "real.md"),
             ],
             vec![uedge("Test Symptom", "RESOLVED_BY", "Test Fix", "real.md")],
-            1,
+            1, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
 
@@ -2827,7 +2834,7 @@ to = ["Enum"]
             &ont,
             vec![unode("Symptom", "sym:CPU hot swap", "case1.docx")],
             vec![],
-            1,
+            1, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         let expected = id_for(&ont, "Symptom", "CPU hot swap");
@@ -2919,7 +2926,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
-            1,
+            1, "agent"
         );
         let sym_id = id_for(&ont, "Symptom", "Connection loss");
         let out = graph_upsert(
@@ -2928,7 +2935,7 @@ strict = true
             &ont,
             vec![unode("Resolution", "Restart", "case1.docx")],
             vec![uedge(&sym_id, "RESOLVED_BY", "Restart", "case1.docx")],
-            2,
+            2, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.edges, 1);
@@ -2961,7 +2968,7 @@ strict = true
             }],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -2971,7 +2978,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Connection loss", "case1.docx")],
             vec![],
-            2,
+            2, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "deduped node not created");
@@ -2992,7 +2999,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "X", "nonexistent.docx")],
             vec![],
-            1,
+            1, "agent"
         );
         assert!(out.rejected, "{}", out.message);
         assert!(
@@ -3016,7 +3023,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Existing symptom", "case1.docx")],
             vec![],
-            1,
+            1, "agent"
         );
 
         let out = graph_upsert(
@@ -3025,7 +3032,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Y", "bad.docx")],
             vec![],
-            2,
+            2, "agent"
         );
         assert!(out.rejected, "{}", out.message);
         assert!(
@@ -3048,7 +3055,7 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(GROUNDING_ONT).unwrap();
         write_doc(&idx, "case1.docx");
-        let out = graph_upsert(&idx, &g, &ont, vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 1_000_000, "agent");
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0);
         assert_eq!(out.edges, 0);
@@ -3072,7 +3079,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Engine stalls", "")],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1, "{}", out.message);
@@ -3106,7 +3113,7 @@ strict = true
             &ont,
             vec![unode("Resolution", "Module restart", "")],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "{}", out.message);
@@ -3133,7 +3140,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Engine stalls", "#162")],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "{}", out.message);
@@ -3168,7 +3175,7 @@ strict = true
                 "case1.docx#1",
                 "case1.docx",
             )],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out1.rejected, "should not be rejected: {}", out1.message);
         assert_eq!(out1.nodes, 1, "{}", out1.message);
@@ -3186,7 +3193,7 @@ strict = true
             &ont,
             vec![unode("Symptom", "Connection loss", "")],
             vec![uedge("Connection loss", "RESOLVED_BY", &n_id, "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out2.rejected, "should not be rejected: {}", out2.message);
         assert_eq!(
@@ -3229,7 +3236,7 @@ strict = true
                 "res:does_not_exist_00000000",
                 "case1.docx",
             )],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1, "{}", out.message);
@@ -3254,7 +3261,7 @@ strict = true
         write_doc(&idx, "case1.docx");
         let out = graph_upsert(&idx, &g, &ont,
             vec![unode("Resolution", "Module restart", "case1.docx")],
-            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1_000_000);
+            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1_000_000, "agent");
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
         assert_eq!(out.edges, 1);
@@ -3276,7 +3283,7 @@ strict = true
             &ont,
             vec![unode("Resolution", "Module restart", "case1.docx#1")],
             vec![],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
@@ -3312,7 +3319,7 @@ strict = true
             &ont,
             vec![unode("Resolution", "Module restart", "case1.docx#1")],
             vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")],
-            1_000_000,
+            1_000_000, "agent"
         );
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
@@ -3342,7 +3349,7 @@ strict = true
         write_doc(&idx, "other.docx");
         let out = graph_upsert(&idx, &g, &ont,
             vec![unode("Resolution", "Cross ref fix", "case1.docx")],
-            vec![uedge("Cross ref fix", "MENTIONS", "other.docx#1", "other.docx")], 1_000_000);
+            vec![uedge("Cross ref fix", "MENTIONS", "other.docx#1", "other.docx")], 1_000_000, "agent");
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.edges, 1);
     }
@@ -3356,10 +3363,10 @@ strict = true
         write_doc(&idx, "case1.docx");
         let out1 = graph_upsert(&idx, &g, &ont,
             vec![unode("Resolution", "Module restart", "case1.docx")],
-            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1);
+            vec![uedge("Module restart", "MENTIONS", "case1.docx#1", "case1.docx")], 1, "agent");
         assert!(!out1.rejected, "{}", out1.message);
         let out2 = graph_upsert(&idx, &g, &ont,
-            vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 2);
+            vec![unode("Resolution", "Module restart", "case1.docx")], vec![], 2, "agent");
         assert!(!out2.rejected, "existing grounding must satisfy: {}", out2.message);
     }
 
@@ -3370,7 +3377,7 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(GROUNDING_ONT).unwrap();
         write_doc(&idx, "case1.docx");
-        let out = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Connection loss", "case1.docx")], vec![], 1_000_000);
+        let out = graph_upsert(&idx, &g, &ont, vec![unode("Symptom", "Connection loss", "case1.docx")], vec![], 1_000_000, "agent");
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
     }
@@ -3427,7 +3434,7 @@ strict = true
             valid_to: Some("2023-06".into()),
             ..unode("Record", "clearance", "a.md")
         };
-        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 0);
+        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 0, "agent");
         assert!(!out.rejected, "{}", out.message);
 
         let id = id_for(&ont, "Record", "clearance");
@@ -3449,7 +3456,7 @@ strict = true
 
         // no valid_from → rejected, nothing written
         let untimed = unode("Record", "x", "a.md");
-        let out = graph_upsert(&idx, &g, &ont, vec![untimed], vec![], 0);
+        let out = graph_upsert(&idx, &g, &ont, vec![untimed], vec![], 0, "agent");
         assert!(out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0);
         assert!(
@@ -3464,7 +3471,7 @@ strict = true
             valid_from: Some("2024-01-01".into()),
             ..unode("Record", "y", "a.md")
         };
-        let out2 = graph_upsert(&idx, &g, &ont, vec![timed], vec![], 0);
+        let out2 = graph_upsert(&idx, &g, &ont, vec![timed], vec![], 0, "agent");
         assert!(!out2.rejected, "{}", out2.message);
     }
 
@@ -3500,7 +3507,7 @@ strict = true
             }],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -3511,7 +3518,7 @@ strict = true
             valid_to: Some("2022-01-01".into()),
             ..unode("Symptom", "Connection loss", "case1.docx")
         };
-        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 2);
+        let out = graph_upsert(&idx, &g, &ont, vec![node], vec![], 2, "agent");
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 0, "deduped node not created");
         assert!(out.message.contains("sym:legacy-id"), "{}", out.message);

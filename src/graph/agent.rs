@@ -66,9 +66,10 @@ pub struct ApplyUpsertResult {
 }
 
 /// Convert agent-supplied specs into provenance-stamped graph elements
-/// (origin="agent", file_sig from the current source file, created_at=`now`),
-/// validate against the ontology, and upsert. Deduplicates nodes by normalized
-/// label+type so the graph converges across cases.
+/// (origin stamped from the caller-supplied `origin`, file_sig from the current source file,
+/// created_at=`now`), validate against the ontology, and upsert. Deduplicates nodes by
+/// normalized label+type so the graph converges across cases. Every caller in this codebase
+/// currently passes `"agent"`; `"distil"` is reserved for the kbx distil densification writer.
 pub fn apply_upsert(
     g: &GraphStore,
     ont: &Ontology,
@@ -76,6 +77,7 @@ pub fn apply_upsert(
     edges: Vec<EdgeSpec>,
     now: u64,
     root: &std::path::Path,
+    origin: &str,
 ) -> anyhow::Result<ApplyUpsertResult> {
     use std::collections::HashMap;
 
@@ -83,7 +85,7 @@ pub fn apply_upsert(
         source_path: source_path.to_string(),
         range,
         file_sig: stat_sig(root, source_path),
-        origin: "agent".into(),
+        origin: origin.into(),
         confidence: confidence.unwrap_or(0.8),
         created_at: now,
     };
@@ -508,7 +510,7 @@ strict = true
             range: None,
             confidence: Some(0.9),
         }];
-        let r = apply_upsert(&g, &ont, nodes, edges, 123, dir.path()).unwrap();
+        let r = apply_upsert(&g, &ont, nodes, edges, 123, dir.path(), "agent").unwrap();
         assert_eq!((r.nodes_written, r.edges_written), (2, 1));
         assert_eq!(g.node_count().unwrap(), 2);
         let org = g.get_node("org:acme").unwrap().unwrap();
@@ -522,7 +524,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![node("x", "Alien", "x", "d.docx")];
-        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).is_err());
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").is_err());
         assert_eq!(g.node_count().unwrap(), 0);
     }
 
@@ -553,7 +555,7 @@ strict = true
             "RESOLVED_BY",
             "case1.docx",
         )];
-        apply_upsert(&g, &ont, nodes1, edges1, 1, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes1, edges1, 1, dir.path(), "agent").unwrap();
 
         // Second upsert: DIFFERENT id but SAME label (different case + extra space) → dedup
         let nodes2 = vec![
@@ -576,7 +578,7 @@ strict = true
             "RESOLVED_BY",
             "case2.docx",
         )];
-        apply_upsert(&g, &ont, nodes2, edges2, 2, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes2, edges2, 2, dir.path(), "agent").unwrap();
 
         // Only 1 Symptom node (deduped — first id wins)
         let all = g.all_nodes().unwrap();
@@ -618,7 +620,7 @@ strict = true
             "RESOLVED_BY",
             "test.docx",
         )];
-        apply_upsert(&g, &ont, nodes, edges, 1, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, dir.path(), "agent").unwrap();
 
         assert_eq!(g.node_count().unwrap(), 2);
         assert_eq!(g.edge_count().unwrap(), 1);
@@ -654,7 +656,7 @@ strict = true
             vec![node("sym:test", "Symptom", "Test symptom", "test.docx")],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -690,7 +692,7 @@ strict = true
             )],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -724,7 +726,7 @@ strict = true
             Some("2020-01-01"),
             Some("2020-12-31"),
         )];
-        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").unwrap();
 
         let v = g
             .validity_for("sym:bounded")
@@ -742,7 +744,7 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
         let nodes = vec![node("sym:unbounded", "Symptom", "Unbounded symptom", "test.docx")];
-        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").unwrap();
 
         assert!(
             g.validity_for("sym:unbounded").unwrap().is_none(),
@@ -765,7 +767,7 @@ strict = true
             vec![node("sym:first", "Symptom", "Recurring symptom", "case1.docx")],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -778,7 +780,7 @@ strict = true
             Some("2021-06"),
             None,
         )];
-        let r = apply_upsert(&g, &ont, nodes2, vec![], 2, dir.path()).unwrap();
+        let r = apply_upsert(&g, &ont, nodes2, vec![], 2, dir.path(), "agent").unwrap();
         assert_eq!(r.merged, vec![("sym:second".to_string(), "sym:first".to_string())]);
 
         assert!(
@@ -806,7 +808,7 @@ strict = true
             Some("not-a-date"),
             None,
         )];
-        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path()).is_err());
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").is_err());
         assert_eq!(g.node_count().unwrap(), 0, "the whole batch is dropped, nothing written");
     }
 
@@ -820,7 +822,7 @@ strict = true
         let ont = Ontology::parse(VALIDITY_ONT).unwrap();
 
         let untimed = node("rec:x", "Record", "Untimed record", "a.md");
-        let result = apply_upsert(&g, &ont, vec![untimed], vec![], 1, dir.path());
+        let result = apply_upsert(&g, &ont, vec![untimed], vec![], 1, dir.path(), "agent");
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected an untimed requires_validity node to be rejected"),
@@ -847,7 +849,7 @@ strict = true
             Some("2024-01-01"),
             None,
         );
-        let r = apply_upsert(&g, &ont, vec![timed], vec![], 1, dir.path()).unwrap();
+        let r = apply_upsert(&g, &ont, vec![timed], vec![], 1, dir.path(), "agent").unwrap();
         assert_eq!(r.nodes_written, 1);
         assert!(g.validity_for("rec:y").unwrap().unwrap().valid_from.is_some());
     }
@@ -875,14 +877,14 @@ strict = true
             )],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
         // Second upsert: SAME node (re-sent, e.g. to touch its label/source), no valid_from this
         // time — must still be accepted because the graph already has one for this canonical id.
         let retouch = node("rec:z", "Record", "Already-timed record", "a.md");
-        let r = apply_upsert(&g, &ont, vec![retouch], vec![], 2, dir.path()).unwrap();
+        let r = apply_upsert(&g, &ont, vec![retouch], vec![], 2, dir.path(), "agent").unwrap();
         assert_eq!(r.nodes_written, 1);
     }
 
@@ -894,7 +896,7 @@ strict = true
         let ont = Ontology::parse(VALIDITY_ONT).unwrap();
 
         let note = node("note:a", "Note", "A note", "a.md");
-        let r = apply_upsert(&g, &ont, vec![note], vec![], 1, dir.path()).unwrap();
+        let r = apply_upsert(&g, &ont, vec![note], vec![], 1, dir.path(), "agent").unwrap();
         assert_eq!(r.nodes_written, 1);
     }
 }

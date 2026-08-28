@@ -74,7 +74,7 @@ fn heal_round_trip_through_real_grounding_path() {
     // 2. graph_upsert a grounded node with a MENTIONS to that source — this drives
     // apply_upsert's prov closure, which calls stat_sig(root, "case1.docx") for real (no
     // hand-set file_sig anywhere in this test).
-    let out = graph_upsert(&idx, &g, &ont, vec![unode()], vec![mentions_edge()], 1);
+    let out = graph_upsert(&idx, &g, &ont, vec![unode()], vec![mentions_edge()], 1, "agent");
     assert!(!out.rejected, "{}", out.message);
     assert_eq!(out.nodes, 1);
     assert_eq!(out.edges, 1);
@@ -111,7 +111,7 @@ fn heal_round_trip_through_real_grounding_path() {
 
     // 5. Re-graph_upsert the same node's MENTIONS (re-grounds) — apply_upsert stamps a fresh
     // file_sig against the now-current (drifted) file, so it must no longer be stale.
-    let out2 = graph_upsert(&idx, &g, &ont, vec![unode()], vec![mentions_edge()], 2);
+    let out2 = graph_upsert(&idx, &g, &ont, vec![unode()], vec![mentions_edge()], 2, "agent");
     assert!(!out2.rejected, "{}", out2.message);
 
     let rep2 = doctor::doctor(&g, &ont, root).unwrap();

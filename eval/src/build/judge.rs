@@ -253,7 +253,7 @@ pub fn run_judge(
                 range: None,
                 confidence: None,
             };
-            apply_upsert(g, &ont, Vec::new(), vec![edge], now, root)?;
+            apply_upsert(g, &ont, Vec::new(), vec![edge], now, root, "agent")?;
             stats.linked += 1;
         }
 

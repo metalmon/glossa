@@ -174,14 +174,14 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
             rep.dangling.push(d);
         }
     }
-    // Count nodes we SHOULD be able to verify but can't: agent-authored, of a type the
-    // ontology declares `requires_grounding`, with no stored file_sig. Excludes
+    // Count nodes we SHOULD be able to verify but can't: authored (agent- or distil-origin), of
+    // a type the ontology declares `requires_grounding`, with no stored file_sig. Excludes
     // ungrounded-by-design reasoning node types (requires_grounding == false) — those never
     // carry a file_sig and are not a doubt, just not source-verifiable by design.
     rep.unverifiable = nodes
         .iter()
         .filter(|n| {
-            n.prov.origin == "agent"
+            matches!(n.prov.origin.as_str(), "agent" | "distil")
                 && n.prov.file_sig.is_none()
                 && ont.requires_grounding(&n.node_type)
         })
@@ -348,6 +348,55 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         );
         assert!(g.get_node("cau:orphan").unwrap().is_none());
         assert!(g.get_node("res:b").unwrap().is_none());
+    }
+
+    #[test]
+    fn unverifiable_counts_distil_origin_same_as_agent() {
+        // Regression guard: `unverifiable` must key on origin IN ('agent', 'distil'), not just
+        // "agent" — a distil-origin node (kbx distil densification writer) that requires
+        // grounding but has no stored file_sig must be counted too, or it silently escapes the
+        // doubt it should raise. A "curated" origin (not authored by either writer) must NOT be
+        // swept in.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let ungrounded_prov = |origin: &str| Provenance {
+            source_path: "docA.md".into(),
+            range: None,
+            file_sig: None,
+            origin: origin.into(),
+            confidence: 0.9,
+            created_at: 1,
+        };
+        let nodes = vec![
+            node(
+                "res:agent",
+                "Resolution",
+                "Agent res",
+                ungrounded_prov("agent"),
+            ),
+            node(
+                "res:distil",
+                "Resolution",
+                "Distil res",
+                ungrounded_prov("distil"),
+            ),
+            node(
+                "res:curated",
+                "Resolution",
+                "Curated res",
+                ungrounded_prov("curated"),
+            ),
+        ];
+        g.upsert(&ont, &nodes, &[]).unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert_eq!(
+            rep.unverifiable, 2,
+            "agent- and distil-origin ungrounded Resolution nodes must both count; curated must not"
+        );
     }
 
     #[test]

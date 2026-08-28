@@ -1446,7 +1446,7 @@ impl GlossaServer {
         let res = crate::graph::lock::with_graph_write_lock(
             &self.root,
             std::time::Duration::from_secs(5),
-            || Ok(crate::graph::ops::graph_upsert(&idx, &g, &ont, nodes, edges, now)),
+            || Ok(crate::graph::ops::graph_upsert(&idx, &g, &ont, nodes, edges, now, "agent")),
         );
         let message = match res {
             Ok(out) if parse_notes.is_empty() => out.message,

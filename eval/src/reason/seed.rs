@@ -155,7 +155,7 @@ pub fn chain_one_seed(
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name == "graph_upsert" {
             let (nodes, edges, notes) = parse_and_filter_upsert(args, ont);
-            let out = ops::graph_upsert(&idx, &g, ont, nodes, edges, now);
+            let out = ops::graph_upsert(&idx, &g, ont, nodes, edges, now, "agent");
             if !out.rejected {
                 stats.nodes += out.nodes;
                 stats.edges += out.edges;

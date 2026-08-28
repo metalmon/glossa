@@ -419,7 +419,7 @@ pub fn import_merge_layer(
     now: u64,
     root: &std::path::Path,
 ) -> anyhow::Result<(usize, usize, usize)> {
-    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root)?;
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root, "agent")?;
     Ok((0, r.nodes_written, r.edges_written))
 }
 
@@ -435,7 +435,7 @@ pub fn import_replace_layer(
     for t in &e.exported_types {
         pruned += g.delete_by_type(t)?;
     }
-    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root)?;
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root, "agent")?;
     Ok((pruned, r.nodes_written, r.edges_written))
 }
 
@@ -580,7 +580,7 @@ to = ["Resolution"]
             range: None,
             confidence: None,
         }];
-        apply_upsert(&g, &ont, nodes, edges, 1, dir.path()).unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, dir.path(), "agent").unwrap();
 
         // Also insert a structural Document node directly
         g.put_node(&Node {
@@ -641,7 +641,7 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -690,7 +690,7 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 
@@ -762,7 +762,7 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            dir.path(), "agent"
         )
         .unwrap();
 

@@ -374,7 +374,7 @@ pub fn extract_doc(
                 // ontology), then write through the SAME ops::graph_upsert path the MCP server uses.
                 let (nodes, edges, _notes) = parse_and_filter_upsert(args, ontology);
                 let (nodes, _drop_notes) = filter_grounding_only(nodes, ontology);
-                let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now);
+                let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now, "agent");
                 if !out.rejected {
                     let mut s = stats.borrow_mut();
                     s.nodes += out.nodes;
@@ -493,7 +493,7 @@ strict = true
         });
         let (nodes, edges, notes) = parse_and_filter_upsert(&call, &ont);
         assert!(notes.is_empty(), "no node should be filtered: {notes:?}");
-        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1, "agent");
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.nodes, 1);
         assert_eq!(
@@ -541,7 +541,7 @@ strict = true
             "the drop reason must name the offending type: {notes:?}"
         );
 
-        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+        let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1, "agent");
         assert!(
             !out.rejected,
             "the valid Fact sibling must still write: {}",
@@ -579,7 +579,7 @@ strict = true
         // returning the written node ids as the surfaced ids (the fix under test).
         let exec = |_name: &str, args: &Value| -> (String, Vec<String>, Vec<DocImage>) {
             let (nodes, edges, _notes) = parse_and_filter_upsert(args, &ont);
-            let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1);
+            let out = ops::graph_upsert(&idx, &g, &ont, nodes, edges, 1, "agent");
             let ids = upserted_node_ids(&out);
             (out.message, ids, Vec::new())
         };

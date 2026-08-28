@@ -127,7 +127,7 @@ pub fn tables_to_graph(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let out = graph_upsert(idx, g, ont, nodes, edges, now);
+    let out = graph_upsert(idx, g, ont, nodes, edges, now, "agent");
     if out.rejected {
         anyhow::bail!("graph_upsert rejected: {}", out.message);
     }
