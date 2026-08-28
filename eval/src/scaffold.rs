@@ -92,17 +92,21 @@ mod tests {
     }
 
     #[test]
-    fn init_writes_distil_md_with_seed_generation_markers() {
+    fn init_writes_distil_md_with_densify_markers() {
         let dir = tempfile::tempdir().unwrap();
         let p = scaffold_init(dir.path(), false).unwrap();
         let distil = std::fs::read_to_string(&p.distil).unwrap();
         assert!(
-            distil.contains("propose_gold"),
-            "distil.md must instruct the model to call propose_gold"
+            distil.contains("graph_upsert"),
+            "distil.md must instruct the model to write via graph_upsert"
         );
         assert!(
-            distil.contains("gate_ok"),
-            "distil.md must instruct the model to self-gate via gate_ok"
+            distil.contains("already holds") || distil.contains("already grounded"),
+            "distil.md must frame the task around what the graph already holds for a section"
+        );
+        assert!(
+            distil.contains("query-side"),
+            "distil.md must cover query-side reasoning, not just grounded terminals"
         );
     }
 
