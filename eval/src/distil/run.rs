@@ -56,6 +56,54 @@ pub struct DistilArgs {
     /// `densify_doc` (mirrors `BuildOpts::chunks_per_round`). Default `3`, matching
     /// `BuildOpts::default()`.
     pub chunks_per_round: usize,
+    /// When set, `distil::run` runs the synthetic (question, answer) gold generator (the former
+    /// default `kbx distil` behavior) instead of densify, writing the kept golds to this file —
+    /// it supplies the gold path `run_distil_at` writes to (see [`run`]). `None` selects densify,
+    /// the new default.
+    pub emit_golds: Option<PathBuf>,
+}
+
+/// Which pipeline `distil::run` dispatches to — decided purely from `DistilArgs.emit_golds`, kept
+/// as a standalone enum/function so the decision is unit-testable without touching either
+/// model-driven body (`run_distil`/`run_densify`) it selects between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `--emit-golds <file>` was given: run the synthetic (question, answer) gold generator,
+    /// writing kept golds to that file.
+    Golds,
+    /// The default when `--emit-golds` is absent: densify the graph with the strong model.
+    Densify,
+}
+
+/// Pure selector behind `distil::run`: present `emit_golds` picks the gold generator, absent
+/// picks densify. See [`Mode`].
+pub fn distil_mode(args: &DistilArgs) -> Mode {
+    if args.emit_golds.is_some() {
+        Mode::Golds
+    } else {
+        Mode::Densify
+    }
+}
+
+/// `kbx distil`'s single CLI entry point (mirrors `run_distil`/`run_densify`'s thin
+/// `workspace::resolve`-then-dispatch shape one level up): `--emit-golds <file>` runs the
+/// synthetic gold generator, writing to that file — otherwise densify runs, the new default.
+///
+/// The gold path is byte-for-byte the pre-existing `run_distil` behavior: `emit_golds` simply
+/// supplies the `out` path the existing `write_dataset_toml`/seed-pool/`generate_one` plumbing
+/// already writes to, overriding any `--out` also given (both name the same output file; a
+/// caller wanting a different name once golds mode is selected should pass it via `--emit-golds`,
+/// not `--out`).
+pub fn run(path: Option<PathBuf>, mut args: DistilArgs) -> Result<()> {
+    match distil_mode(&args) {
+        Mode::Golds => {
+            if let Some(emit) = args.emit_golds.clone() {
+                args.out = Some(emit);
+            }
+            run_distil(path, args)
+        }
+        Mode::Densify => run_densify(path, &args),
+    }
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -695,9 +743,42 @@ to = ["Fact"]
             force: true,
             resume: false,
             chunks_per_round: 3,
+            emit_golds: None,
         };
         assert_eq!(args.doc.as_deref(), Some("a.md"));
         assert!(args.force);
         assert_eq!(args.chunks_per_round, 3);
+    }
+
+    // ---- `distil::run` mode dispatch (Task 4): pure selector, no model involved -----------------
+
+    /// Bare constructor for `DistilArgs` in dispatch tests — every field explicit so a future field
+    /// addition fails loudly here instead of silently defaulting in a test.
+    fn args_with_emit_golds(emit_golds: Option<PathBuf>) -> DistilArgs {
+        DistilArgs {
+            count: None,
+            target: None,
+            max_attempts: None,
+            out: None,
+            seed_type: None,
+            no_progress: true,
+            doc: None,
+            force: false,
+            resume: false,
+            chunks_per_round: 3,
+            emit_golds,
+        }
+    }
+
+    #[test]
+    fn distil_mode_selects_golds_when_emit_golds_is_set() {
+        let args = args_with_emit_golds(Some(PathBuf::from("out.toml")));
+        assert_eq!(distil_mode(&args), Mode::Golds);
+    }
+
+    #[test]
+    fn distil_mode_selects_densify_when_emit_golds_is_absent() {
+        let args = args_with_emit_golds(None);
+        assert_eq!(distil_mode(&args), Mode::Densify);
     }
 }

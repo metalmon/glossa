@@ -109,3 +109,21 @@ fn kbx_distil_help_lists_count_and_seed_type() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("--count") && s.contains("--seed-type"));
 }
+
+/// `kbx distil --help` should also expose the densify-mode flags (Task 4: densify is now the
+/// default, golds are opt-in via `--emit-golds`) — a regression here means the `Distil` clap
+/// variant lost a flag `distil::run`'s dispatch needs.
+#[test]
+fn kbx_distil_help_lists_densify_flags_and_emit_golds() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kbx"))
+        .args(["distil", "--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--emit-golds"));
+    assert!(s.contains("--force"));
+    assert!(s.contains("--resume"));
+    assert!(s.contains("--doc"));
+    assert!(s.contains("--chunks-per-round"));
+    assert!(s.contains("--no-progress"));
+}

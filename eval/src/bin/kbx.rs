@@ -191,29 +191,54 @@ enum Cmd {
         #[arg(long = "no-progress")]
         no_progress: bool,
     },
-    /// Distil synthetic `(question, answer)` golds by re-packaging the existing grounded graph
-    /// into new questions (the inverse of `reason`): seed from a grounded node, explore the
-    /// corpus read-only, propose one gated gold per attempt, and write the kept ones to `--out`.
+    /// Densify the graph with the strong model (`lab.distil`), adding the reasoning the weak
+    /// build+reason pass missed — the default. `--emit-golds <file>` instead runs the synthetic
+    /// (question, answer) gold generator (the former default): seed from a grounded node, explore
+    /// the corpus read-only, propose one gated gold per attempt, and write the kept ones to that
+    /// file.
     Distil {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
+        /// Run the synthetic gold generator instead of densify, writing kept `(question, answer)`
+        /// golds to this dataset TOML — the same shape `kbx eval --dataset`/`kbx reason --gold`
+        /// read back. Absent: densify runs (the default).
+        #[arg(long = "emit-golds")]
+        emit_golds: Option<PathBuf>,
+        /// Restrict densify to a single document (its corpus-relative path). Densify mode only.
+        #[arg(long)]
+        doc: Option<String>,
+        /// Clear this run's densify checkpoint first — a full rebuild of the densify pass.
+        /// Densify mode only.
+        #[arg(long)]
+        force: bool,
+        /// Skip documents already recorded done in the densify checkpoint. Densify mode only.
+        #[arg(long)]
+        resume: bool,
+        /// Number of chunks folded into a single densify round. Densify mode only.
+        #[arg(long = "chunks-per-round", default_value_t = 3)]
+        chunks_per_round: usize,
         /// Number of synthetic golds to ATTEMPT (the gate may drop some). Use this OR `--target`.
+        /// Golds mode only (`--emit-golds`).
         #[arg(long)]
         count: Option<usize>,
         /// Keep generating until this many golds are KEPT (accumulate to a target), instead of a
         /// fixed attempt count. Bounded by `--max-attempts` so a stubborn gate can't loop forever.
+        /// Golds mode only.
         #[arg(long)]
         target: Option<usize>,
         /// Attempt ceiling when `--target` is set (default: target x 4). Stops and reports the
-        /// shortfall honestly if the target isn't reached within this many attempts.
+        /// shortfall honestly if the target isn't reached within this many attempts. Golds mode
+        /// only.
         #[arg(long = "max-attempts")]
         max_attempts: Option<usize>,
-        /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`). Always overwritten.
+        /// Dataset TOML to write (default `<kbx>/dataset.synthetic.toml`); overridden by
+        /// `--emit-golds` when both are given. Always overwritten. Golds mode only.
         #[arg(long)]
         out: Option<PathBuf>,
         /// Restrict seeds to this node_type (default: the ontology's grounding-required types,
         /// or every non-structural declared type when none are marked `requires_grounding`).
+        /// Golds mode only.
         #[arg(long = "seed-type")]
         seed_type: Option<String>,
         /// Never draw the progress bar, even on a TTY.
@@ -342,13 +367,18 @@ fn main() -> Result<()> {
         ),
         Cmd::Distil {
             path,
+            emit_golds,
+            doc,
+            force,
+            resume,
+            chunks_per_round,
             count,
             target,
             max_attempts,
             out,
             seed_type,
             no_progress,
-        } => distil::run_distil(
+        } => distil::run(
             path,
             DistilArgs {
                 count,
@@ -357,12 +387,11 @@ fn main() -> Result<()> {
                 out,
                 seed_type,
                 no_progress,
-                // `kbx distil densify`'s orchestrator fields (Task 3) — CLI flags for these land
-                // in Task 4; `run_distil` (the gold-synthesis path this arm calls) ignores them.
-                doc: None,
-                force: false,
-                resume: false,
-                chunks_per_round: 3,
+                doc,
+                force,
+                resume,
+                chunks_per_round,
+                emit_golds,
             },
         ),
     }
