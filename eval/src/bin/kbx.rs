@@ -523,7 +523,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("case {}: agent error: {e}", q.id);
+                pb.println(format!("case {}: agent error: {e}", q.id));
                 format!("(error: {e})")
             }
         };
@@ -550,7 +550,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             _ => (Verdict::Unscored, String::new(), String::new()),
         };
 
-        println!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id);
+        pb.println(format!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id));
 
         let r = CaseResult {
             id: q.id.clone(),

@@ -138,10 +138,10 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         processed += 1;
         cp.mark(&unit_id(&seed.id), "done")
             .with_context(|| format!("marking seed {} done", seed.id))?;
-        println!(
+        pb.println(format!(
             "reason {}: {} node(s), {} edge(s), {} grounded",
             seed.id, stats.nodes, stats.edges, stats.grounded
-        );
+        ));
         pb.inc(1);
     }
     pb.finish_and_clear();
