@@ -54,7 +54,7 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
 | `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive; no longer reports ungrounded) |
-| `graph_doctor` | | ✓ | ✓ | Report ungrounded, stale, and incomplete nodes (report-only; pruning is CLI-only via `kb graph doctor`) |
+| `graph_doctor` | | ✓ | ✓ | Report ungrounded, stale, incomplete, and dangling nodes (report-only today; pruning is CLI-only via `kb graph doctor` — doubt-scoped `prune_*` for the agent is planned) |
 | `graph_stats` | | ✓ | ✓ | Node/edge counts and community overview |
 | `purge` | | | ✓ | Delete entire `.glossa/` |
 
@@ -152,6 +152,8 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 ## Freshness and maintenance
 
 Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `del`) use `.glossa/notebook.lock` the same way.
+
+**What an agent maintains.** An agent authors and tends its *own* nodes: create (`graph_upsert`), edit (`graph_update`), delete one (`graph_delete`), and diagnose (`graph_doctor`). Two blunt, corpus-wide operations are deliberately **terminal-only** and have no MCP tool — `generalize --merge` (destructive near-duplicate collapse) and `prune -t <Type>` (wipe a whole node type) — so an agent cannot mass-mutate the graph; a human runs those from `kb`. The full create/maintain lifecycle is in [graph-lifecycle.md](graph-lifecycle.md).
 
 Index (re)builds are serialized across processes by `.glossa/index.lock`: `index` (incremental, `force`, or single-`path`) and the `ensure_fresh` background scan hold it for the whole rebuild. If another process already holds it, the call skips with a no-op stat instead of racing it — clearing and reopening `.glossa/index` concurrently would otherwise fail on Windows ("Access is denied"). The index is cooperative, so whoever wins the lock leaves it correct.
 

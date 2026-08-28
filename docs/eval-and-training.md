@@ -108,6 +108,25 @@ Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/deri
 
 > **Local prerequisites:** the `kb-val/derived/*.json` case registries, `eval-corpus/`, and `gepa-out/` are local, git-ignored data — they do not ship with the repo. Recipes that reference them require generating or providing this data locally first.
 
+### The `kbx` pipeline (reasoning-layer toolkit)
+
+The reasoning layer is built and evaluated by the **`kbx`** toolkit — a single binary with a
+verb per lifecycle stage. Over an indexed corpus:
+
+| Verb | Stage | Status |
+|---|---|---|
+| `kbx init` | Scaffold a `.glossa/kbx/` workspace (lab.toml, prompts, dataset) | built |
+| `kbx build` | Phase 1 — harvest grounded terminals from each document | built |
+| `kbx reason` | Phase 2 — synthesize the query-side reasoning layer | built |
+| `kbx train` | `(Q,A)` + GEPA optimization of the answer prompt | partial |
+| `kbx distil` | Densify the graph with a stronger model | planned (current subcommand is the superseded gold-generator; do not extend it) |
+| `kbx eval` | Score the reader (graph-on vs graph-off) | built |
+
+For the operator-facing create / maintain workflows built on these verbs, see
+[graph-lifecycle.md](graph-lifecycle.md). The `enrich` recipe below is the earlier
+`kb-train`-based silver-graph path; it and the `kb-eval`/`kb-train` binaries remain until `kbx`
+grows `train` + `distil` to full parity.
+
 ### Index once
 
 Build or rebuild the search index **before** eval or GEPA (not per question):

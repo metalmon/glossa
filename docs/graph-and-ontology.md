@@ -134,13 +134,14 @@ former is queried by `--as-of`.
 
 ## Graph doctor
 
-The graph accumulates three types of doubts as documents and reasoning edges evolve. The `graph doctor` command reports all three, and offers targeted pruning options for two:
+The graph accumulates four types of doubts as documents and reasoning edges evolve. The `graph doctor` command reports all four, and offers targeted pruning options for two (with a third planned):
 
-**Three doubts:**
+**Four doubts:**
 
 - **`ungrounded`** — a reasoning node marked `requires_grounding = true` in the ontology has no `MENTIONS` edge pointing to an indexed section (or a `MENTIONS` edge whose target section no longer exists in the index). This means the source evidence was deleted or lost.
 - **`stale`** — a reasoning node's source document has changed on disk since the node was grounded. The grounding captured a file signature (`file_sig`) at write time; a subsequent file edit changed that signature, so the node's reasoning may no longer align with the current source text.
 - **`incomplete`** — a reasoning node is off the reasoning spine (not reachable from a grounding type via the ontology's declared relations). Such nodes do not participate in derived-layer reasoning (SIMILAR, closure, communities) and often indicate a malformed edge or a type that was removed from the ontology.
+- **`dangling`** — a query-side reasoning node (a type *not* marked `requires_grounding`, e.g. a symptom or task) whose forward walk over the ontology's chaining relations reaches **no live grounded terminal** — one that is present, not `ungrounded`, and not `stale`. These nodes carry no `file_sig` of their own, so file-based staleness can never flag them; instead their freshness is derived structurally from whether their chain still reaches a live answer. A `dangling` node usually means its terminal was deleted or drifted. Structural `Document`/`Section` nodes are excluded — they are substrate, never chain links.
 
 Use the doctor to audit and heal:
 
@@ -158,6 +159,10 @@ The **healing loop** for stale nodes:
 4. Repeat until `graph doctor` reports no stale nodes.
 
 **No `--prune-stale`.** Stale nodes are never deleted by the doctor — they are re-grounded instead. A stale flag is a signal to re-read the source, not a reason to discard reasoning.
+
+**Dangling nodes** are remediated by fixing the *terminal* they can no longer reach: re-ground or restore it and the chain becomes live again. If the terminal is genuinely gone, prune the orphaned branch — today via the agent's `graph_delete` after `--prune-ungrounded` clears the terminals; a single `--prune-dangling` flag is *planned* to clear the whole orphaned sub-tree in one pass.
+
+For the end-to-end add / edit / delete-a-document workflows built on these doubts, see [graph-lifecycle.md](graph-lifecycle.md).
 
 **Inline stale marker.** When reading or querying the graph via `read`, `glossary`, or `neighbors`, stale nodes are marked with `⚠ stale` so an answering agent can de-prioritize drifted facts and re-fetch the source if needed.
 
@@ -185,10 +190,10 @@ The `kb-train enrich` command reverse-traces solved cases into reasoning edges. 
 
 ### 3. Diagnose (optional)
 
-Inspect the three types of doubts before recomputing:
+Inspect the four types of doubts before recomputing:
 
 ```bash
-kb graph doctor ./my-corpus    # report ungrounded, stale, and incomplete nodes
+kb graph doctor ./my-corpus    # report ungrounded, stale, incomplete, and dangling nodes
 ```
 
 See [Graph doctor](#graph-doctor) for healing workflows and pruning options (`--prune-ungrounded`, `--prune-incomplete`). Pruning is CLI-only; MCP `graph_doctor` is report-only.
