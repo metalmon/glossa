@@ -19,7 +19,7 @@ pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_group, run_judge, JudgeStats};
 
-use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
+use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::KbxPaths;
@@ -107,7 +107,9 @@ pub(crate) fn token_progress_msg(prefix: &str, price: Option<f64>) -> String {
     let cost_suffix = price
         .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
         .unwrap_or_default();
-    format!("{prefix} · {} tok{}", human_tokens(tokens), cost_suffix)
+    let resample_suffix =
+        if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
+    format!("{prefix} · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -366,6 +368,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         let total_chunks = extract_total_chunks(&docs, &chunk_counts);
 
         reset_tokens();
+        reset_resamples();
         let extract_price = lab.model.price_per_1m;
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
         pb.set_message(token_progress_msg("extract (chunks)", extract_price));
@@ -440,6 +443,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
 
             let idx = DocIndex::open_or_create(&paths.root).context("open doc index")?;
             reset_tokens();
+            reset_resamples();
             let judge_price = lab.bridge.as_ref().unwrap_or(&lab.model).price_per_1m;
             let pb = progress_bar(groups.len(), opts.no_progress);
             pb.set_message(token_progress_msg("judge", judge_price));

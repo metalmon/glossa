@@ -4,7 +4,7 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
-use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
+use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
@@ -124,13 +124,16 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     }
 
     reset_tokens();
+    reset_resamples();
     let reason_price = lab.reason_endpoint().and_then(|e| e.price_per_1m);
     let reason_msg = || -> String {
         let tokens = tokens_used();
         let cost_suffix = reason_price
             .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
             .unwrap_or_default();
-        format!("reason · {} tok{}", human_tokens(tokens), cost_suffix)
+        let resample_suffix =
+            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
+        format!("reason · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let pb = progress_bar(seeds.len(), args.no_progress);

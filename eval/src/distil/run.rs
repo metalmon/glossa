@@ -7,7 +7,7 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
-use crate::backend::openai::{human_tokens, reset_tokens, tokens_used};
+use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
@@ -423,13 +423,16 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     let cp = Checkpoint::open(&run_dir).context("open distil checkpoint")?;
 
     reset_tokens();
+    reset_resamples();
     let distil_price = lab.distil.as_ref().and_then(|e| e.price_per_1m);
     let densify_msg = || -> String {
         let tokens = tokens_used();
         let cost_suffix = distil_price
             .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
             .unwrap_or_default();
-        format!("densify · {} tok{}", human_tokens(tokens), cost_suffix)
+        let resample_suffix =
+            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
+        format!("densify · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let pb = progress_bar(total_chunks.max(1), args.no_progress);

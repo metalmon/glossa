@@ -6,7 +6,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use kb_eval::backend::openai::{human_tokens, reset_tokens, tokens_used, OpenAiBackend};
+use kb_eval::backend::openai::{
+    human_tokens, reset_resamples, reset_tokens, resamples, tokens_used, OpenAiBackend,
+};
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
@@ -510,13 +512,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     };
 
     reset_tokens();
+    reset_resamples();
     let eval_price = lab.model.price_per_1m;
     let eval_msg = |id: &str| -> String {
         let tokens = tokens_used();
         let cost_suffix = eval_price
             .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
             .unwrap_or_default();
-        format!("{id} · {} tok{}", human_tokens(tokens), cost_suffix)
+        let resample_suffix =
+            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
+        format!("{id} · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let mut results = Vec::with_capacity(cases.len());
