@@ -118,8 +118,13 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
         .filter(|(_, et, _)| ont.relation_role(et) == RelationRole::Chaining)
         .map(|(f, _, t)| (f.clone(), t.clone()))
         .collect();
-    let dangling_ids =
-        hygiene::dangling_nodes(&id_types, &chaining_edges, &grounding_types, &live_terminal_ids);
+    let dangling_ids = hygiene::dangling_nodes(
+        &id_types,
+        &chaining_edges,
+        &grounding_types,
+        &structural,
+        &live_terminal_ids,
+    );
 
     // index nodes by id for detail lookup
     let by_id: std::collections::HashMap<&str, &crate::graph::store::Node> =

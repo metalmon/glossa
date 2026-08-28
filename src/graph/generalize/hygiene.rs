@@ -116,6 +116,7 @@ pub fn dangling_nodes(
     id_types: &[(String, String)],
     chaining_edges: &[(String, String)],
     grounding_types: &HashSet<String>,
+    structural_types: &HashSet<String>,
     live_terminal_ids: &HashSet<String>,
 ) -> Vec<String> {
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -139,9 +140,13 @@ pub fn dangling_nodes(
         }
         false
     };
+    // Candidates are query-side REASONING nodes only: not a grounded terminal type, and NOT a
+    // core structural type (Document/Section). Structural nodes are the grounding SUBSTRATE — they
+    // never sit on a reasoning chain and have no chaining edge to a terminal, so without this guard
+    // every Document/Section would be flagged dangling (the whole indexed corpus).
     let mut out: Vec<String> = id_types
         .iter()
-        .filter(|(_, ty)| !grounding_types.contains(ty))
+        .filter(|(_, ty)| !grounding_types.contains(ty) && !structural_types.contains(ty))
         .filter(|(id, _)| !reaches_live_terminal(id.as_str()))
         .map(|(id, _)| id.clone())
         .collect();
@@ -416,6 +421,8 @@ mod tests {
             ("cau:b", "Cause"),
             ("res:b", "Resolution"), // NOT live (e.g. ungrounded/stale)
             ("sym:orphan", "Symptom"), // no outgoing chaining edge at all
+            ("doc:x", "Document"),     // structural substrate — must NOT be flagged
+            ("sec:x", "Section"),      // structural substrate — must NOT be flagged
         ]);
         let chaining = vec![
             ("sym:a".to_string(), "cau:a".to_string()),
@@ -425,11 +432,14 @@ mod tests {
         ];
         let mut grounding_types = HashSet::new();
         grounding_types.insert("Resolution".to_string());
+        let mut structural_types = HashSet::new();
+        structural_types.insert("Document".to_string());
+        structural_types.insert("Section".to_string());
         let mut live = HashSet::new();
         live.insert("res:a".to_string());
         // res:b deliberately NOT live.
 
-        let out = dangling_nodes(&ids, &chaining, &grounding_types, &live);
+        let out = dangling_nodes(&ids, &chaining, &grounding_types, &structural_types, &live);
         assert_eq!(
             out,
             vec![
@@ -439,7 +449,9 @@ mod tests {
             ]
         );
         // sym:a/cau:a reach the live res:a → not dangling; res:a/res:b are terminals, never
-        // checked for danglingness themselves.
+        // checked for danglingness themselves; doc:x/sec:x are structural substrate — excluded
+        // even though they're non-grounding and reach no terminal (regression guard for the
+        // "whole indexed corpus flagged dangling" bug).
     }
 
     #[test]
