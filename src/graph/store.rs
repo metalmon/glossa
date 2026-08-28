@@ -672,15 +672,19 @@ impl GraphStore {
     }
 
     /// Remove prior table-compile output for one document:
-    /// - authored (`origin` in `agent`/`distil`) edges whose `edge_type` is in `edge_types` (only
-    ///   relations the compiler writes);
-    /// - authored nodes whose `node_type` is in `node_types` (including Field — the compiler
+    /// - agent edges whose `edge_type` is in `edge_types` (only relations the compiler writes);
+    /// - agent nodes whose `node_type` is in `node_types` (including Field — the compiler
     ///   recreates them on upsert; ids are deterministic from type+label).
     ///
     /// Edges the compiler does not write (e.g. `MENTIONS`) are never deleted, even when they
     /// touch a node being replaced. After Field is re-upserted under the same id they stay valid.
-    /// Structural/index nodes are untouched. `distil` is included alongside `agent` so a
-    /// distil-authored node in this same layer does not escape the doc re-compile lifecycle.
+    /// Structural/index nodes are untouched. Scoped to `origin = 'agent'` ON PURPOSE: this is the
+    /// constraint-table compiler's own re-write layer (`node_type`/`edge_type` restricted to the
+    /// compiler's own Field/Enum/constraint-relation types), which `kbx distil` never writes —
+    /// distil writes ontology reasoning types, an unrelated layer. Do not widen this to `distil`;
+    /// the general doc-drop/re-extract paths (`delete_by_source`,
+    /// `eval::build::incremental::drop_doc_nodes`) are already origin-agnostic and handle distil
+    /// nodes correctly without this predicate's help.
     pub fn delete_agent_table_compile_layer(
         &self,
         doc: &str,
@@ -705,7 +709,7 @@ impl GraphStore {
             }
             c.execute(
                 &format!(
-                    "DELETE FROM edges WHERE source_path = ?1 AND origin IN ('agent', 'distil') \
+                    "DELETE FROM edges WHERE source_path = ?1 AND origin = 'agent' \
                      AND edge_type IN ({in_list})"
                 ),
                 rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
@@ -732,7 +736,7 @@ impl GraphStore {
             c.execute(
                 &format!(
                     "DELETE FROM node_validity WHERE node_id IN \
-                     (SELECT id FROM nodes WHERE source_path = ?1 AND origin IN ('agent', 'distil') \
+                     (SELECT id FROM nodes WHERE source_path = ?1 AND origin = 'agent' \
                       AND node_type IN ({in_list}))"
                 ),
                 rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
@@ -741,7 +745,7 @@ impl GraphStore {
             // Do not cascade-delete non-compiler edges (MENTIONS, …) off these nodes.
             c.execute(
                 &format!(
-                    "DELETE FROM nodes WHERE source_path = ?1 AND origin IN ('agent', 'distil') \
+                    "DELETE FROM nodes WHERE source_path = ?1 AND origin = 'agent' \
                      AND node_type IN ({in_list})"
                 ),
                 rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
@@ -2134,10 +2138,9 @@ mod tests {
         );
     }
 
-    /// `delete_agent_table_compile_layer` deletes `origin IN ('agent', 'distil') AND node_type
-    /// IN (...)` nodes — exactly the validity-bearing authored category — and must clean up
-    /// `node_validity` too, or a table-compile re-run silently leaves a stale interval behind
-    /// forever.
+    /// `delete_agent_table_compile_layer` deletes `origin = 'agent' AND node_type IN (...)`
+    /// nodes — exactly the validity-bearing agent category — and must clean up `node_validity`
+    /// too, or a table-compile re-run silently leaves a stale interval behind forever.
     #[test]
     fn delete_agent_table_compile_layer_removes_node_validity() {
         let dir = tempfile::tempdir().unwrap();
@@ -2179,12 +2182,12 @@ mod tests {
         );
     }
 
-    /// Regression guard: a `distil`-origin node/edge must be treated as authored wherever
-    /// `agent`-origin is — i.e. it must still be dropped by the authored doc-recompile/delete
-    /// lifecycle (`delete_agent_table_compile_layer`), not escape it. Before the `origin IN
-    /// ('agent', 'distil')` widening this test fails: the distil node/edge survive the delete.
+    /// Confirms `delete_by_source` — the general doc-drop path used on doc change/delete — is
+    /// origin-AGNOSTIC: it drops a `distil`-origin node (kbx distil densification writer) exactly
+    /// like an `agent`-origin one, with no predicate to maintain or widen. Both are grounded to
+    /// the same `docA.md`.
     #[test]
-    fn delete_agent_table_compile_layer_drops_distil_origin_same_as_agent() {
+    fn delete_by_source_drops_distil_origin_same_as_agent() {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let prov = |origin: &str| Provenance {
@@ -2211,35 +2214,17 @@ mod tests {
             prov: prov("distil"),
         })
         .unwrap();
-        g.put_edge(&Edge {
-            from: "agent:fact:one".into(),
-            to: "distil:fact:two".into(),
-            edge_type: "LEADS_TO".into(),
-            prov: prov("distil"),
-        })
-        .unwrap();
 
-        let stats = g
-            .delete_agent_table_compile_layer(
-                "docA.md",
-                &["LEADS_TO".to_string()],
-                &["Fact".to_string()],
-            )
-            .unwrap();
+        g.delete_by_source("docA.md").unwrap();
 
         assert!(
             g.get_node("agent:fact:one").unwrap().is_none(),
-            "agent-origin node must still be dropped"
+            "agent-origin node must be dropped"
         );
         assert!(
             g.get_node("distil:fact:two").unwrap().is_none(),
-            "distil-origin node must be dropped same as agent-origin (regression guard)"
+            "distil-origin node must be dropped exactly like agent-origin — delete_by_source has no origin filter"
         );
-        assert_eq!(
-            stats.edges_removed, 1,
-            "distil-origin edge must be dropped same as agent-origin (regression guard)"
-        );
-        assert!(g.outgoing("agent:fact:one").unwrap().is_empty());
     }
 
     #[test]

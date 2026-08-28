@@ -145,17 +145,31 @@ mod tests {
     use glossa::graph::store::{Edge, Node, Provenance};
 
     fn prov(source_path: &str, file_sig: Option<FileSig>) -> Provenance {
+        prov_origin(source_path, file_sig, "agent")
+    }
+
+    fn prov_origin(source_path: &str, file_sig: Option<FileSig>, origin: &str) -> Provenance {
         Provenance {
             source_path: source_path.into(),
             range: None,
             file_sig,
-            origin: "agent".into(),
+            origin: origin.into(),
             confidence: 0.9,
             created_at: 1,
         }
     }
 
     fn put_fact(g: &GraphStore, id: &str, mentions: &[&str], file_sig: Option<FileSig>) {
+        put_fact_origin(g, id, mentions, file_sig, "agent")
+    }
+
+    fn put_fact_origin(
+        g: &GraphStore,
+        id: &str,
+        mentions: &[&str],
+        file_sig: Option<FileSig>,
+        origin: &str,
+    ) {
         let source_path = mentions
             .first()
             .and_then(|m| m.rsplit_once('#'))
@@ -166,7 +180,7 @@ mod tests {
             node_type: "Fact".into(),
             label: id.into(),
             aliases: vec![id.into()],
-            prov: prov(&source_path, file_sig),
+            prov: prov_origin(&source_path, file_sig, origin),
         })
         .unwrap();
         for m in mentions {
@@ -175,7 +189,7 @@ mod tests {
                 from: id.into(),
                 to: (*m).into(),
                 edge_type: MENTIONS.into(),
-                prov: prov(doc, file_sig),
+                prov: prov_origin(doc, file_sig, origin),
             })
             .unwrap();
         }
@@ -235,5 +249,25 @@ mod tests {
         assert_eq!(removed, vec!["f_only_a".to_string()]);
         assert!(g.get_node("f_only_a").unwrap().is_none());
         assert!(g.get_node("f_multi").unwrap().is_some());
+    }
+
+    /// Confirms `drop_doc_nodes` — the doc-CHANGE re-extract drop path — is origin-AGNOSTIC: it
+    /// selects purely on grounding (non-structural, MENTIONS-only-to-`doc`), with no origin
+    /// filter, so a `distil`-origin node (kbx distil densification writer) grounded only to the
+    /// changed doc is dropped exactly like an `agent`-origin one, with no predicate to widen.
+    #[test]
+    fn drop_doc_nodes_drops_distil_origin_grounded_only_to_changed_doc() {
+        let (_dir, root) = synthetic_corpus();
+        let g = GraphStore::open(&root).unwrap();
+
+        // distil-origin, grounded ONLY to a.md -> removed when a.md is dropped.
+        put_fact_origin(&g, "f_distil_only_a", &["a.md#1"], None, "distil");
+        // distil-origin, grounded to BOTH a.md and b.md -> survives.
+        put_fact_origin(&g, "f_distil_multi", &["a.md#1", "b.md#1"], None, "distil");
+
+        let removed = drop_doc_nodes(&g, "a.md").unwrap();
+        assert_eq!(removed, vec!["f_distil_only_a".to_string()]);
+        assert!(g.get_node("f_distil_only_a").unwrap().is_none());
+        assert!(g.get_node("f_distil_multi").unwrap().is_some());
     }
 }
