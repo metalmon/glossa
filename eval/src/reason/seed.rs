@@ -36,7 +36,7 @@ pub struct ReasonStats {
 /// contracts (source_path = `path#n`/omit-for-ungrounded; edge endpoints by label or existing node
 /// id) live in the tool's parameter schema (`graph_upsert_tool_value`). This one line only names
 /// the tool's job so nothing behavioural is baked into the binary.
-const SEED_GRAPH_UPSERT_DESC: &str =
+pub(crate) const SEED_GRAPH_UPSERT_DESC: &str =
     "Write the query-side reasoning nodes and edges for this terminal, as instructed in the system \
      prompt.";
 

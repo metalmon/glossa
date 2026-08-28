@@ -9,8 +9,10 @@
 //! See docs/superpowers/specs/2026-08-24-kbx-synth-spec.md for the full design (written before
 //! this module was renamed from `synth` to `distil`).
 
+mod densify;
 mod gen;
 mod run;
 
+pub use densify::{densify_doc, DensifyStats};
 pub use gen::{parse_propose_gold, DropReason, GenOutcome, GoldProposal, Seed};
 pub use run::{eligible_seed_types, run_distil, seed_pool, DistilArgs};

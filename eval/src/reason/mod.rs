@@ -11,7 +11,9 @@
 use glossa::graph::ontology::Ontology;
 
 mod run;
-mod seed;
+// `pub(crate)` (not private): `distil::densify` (Task 2) reuses `seed::SEED_GRAPH_UPSERT_DESC` —
+// the same thin graph_upsert description `chain_one_seed` pairs with `build::extract`'s schema.
+pub(crate) mod seed;
 pub use run::{run_reason, ReasonArgs};
 pub use seed::{chain_one_seed, ReasonStats};
 

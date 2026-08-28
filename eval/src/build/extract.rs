@@ -240,7 +240,8 @@ fn gate_images(vision: bool, images: Vec<DocImage>) -> Vec<DocImage> {
 }
 
 /// Ordered list of a document's existing chunk ordinals (chunks are sparse — follow `.next`).
-fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u64>> {
+/// `pub(crate)`: `distil::densify` (Task 2) reuses this to drive the same coverage loop.
+pub(crate) fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u64>> {
     let mut ords = Vec::new();
     // find the first existing ord at or after 0
     let mut cur = match idx.read_chunk_by_ord(doc, 0)? {
