@@ -6,9 +6,11 @@ use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
+use indicatif::ProgressBar;
 
 /// Process-global running total of tokens consumed across every chat call routed through
 /// `chat_http` — every one of reason/build/eval/distil goes through that single function, so this
@@ -73,6 +75,132 @@ pub fn human_tokens(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// Process-global "what is the loop doing right now" signal — set by `run_agent_loop` as it works
+/// through a seed/case (about to ask the model something vs about to run a tool), read a few times
+/// a second by `StatusTicker` so a live progress bar can show more than a static bar segment while
+/// one seed is mid-flight. A plain integer code (not an enum) so it fits an `AtomicU8`, mirroring
+/// `TOKENS_USED`/`RESAMPLES` above.
+///
+/// `0`=idle `1`=reasoning `2`=reading `3`=writing `4`=searching `5`=querying-graph `6`=other
+/// (a tool call whose name isn't in the mapping below).
+static ACTIVITY: AtomicU8 = AtomicU8::new(0);
+
+/// Set the current activity code (see `ACTIVITY`'s doc comment for the mapping). Called from
+/// `run_agent_loop` right before each `chat` call (reasoning) and right before each tool `exec`
+/// call (mapped from the tool name via `activity_for_tool`), and reset to idle by `ActivityGuard`
+/// when the loop returns.
+pub fn set_activity(a: u8) {
+    ACTIVITY.store(a, Ordering::Relaxed);
+}
+
+/// The current activity as a display word for a progress-bar message. `""` for idle (`0`) or an
+/// unmapped/"other" code (`6`), so a caller composing a bar message can just skip the segment
+/// when this is empty instead of special-casing idle itself. Thin wrapper over `activity_word` —
+/// factored apart so the mapping itself is unit-testable without touching the shared `ACTIVITY`
+/// static (which other tests in this file mutate concurrently via `run_agent_loop`).
+pub fn activity_label() -> &'static str {
+    activity_word(ACTIVITY.load(Ordering::Relaxed))
+}
+
+/// Pure code -> display-word mapping backing `activity_label` (see `ACTIVITY`'s doc comment for
+/// the code assignments).
+fn activity_word(code: u8) -> &'static str {
+    match code {
+        1 => "reasoning",
+        2 => "reading",
+        3 => "writing",
+        4 => "searching",
+        5 => "querying graph",
+        _ => "",
+    }
+}
+
+/// Map a tool name (as the model's `tool_calls[].function.name` names it) to an `ACTIVITY` code.
+/// Shared by `run_agent_loop`'s pre-`exec` activity update so the mapping lives in exactly one
+/// place. Unrecognized names (future tools, typos) fall through to `6` ("other"), which
+/// `activity_label` renders as an empty segment rather than a misleading guess.
+fn activity_for_tool(name: &str) -> u8 {
+    match name {
+        "read" | "read_chunk" => 2,
+        "graph_upsert" => 3,
+        "search" | "grep" | "glob" => 4,
+        "glossary" | "reach" | "neighbors" | "related" | "resolve" | "sql" => 5,
+        _ => 6,
+    }
+}
+
+/// RAII guard that resets `ACTIVITY` to idle when `run_agent_loop` returns. Every exit path —
+/// the early return on a tool-call-free answer, the final nudge's answer, or an early bail via `?`
+/// on a `chat` error — drops this guard on the way out, so "idle on return" holds uniformly
+/// without a `set_activity(0)` duplicated at each individual return site.
+struct ActivityGuard;
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        set_activity(0);
+    }
+}
+
+/// Compose the live status-bar segment: `" · {activity}{ · N tok}{ · N resampled}"` — the
+/// activity word is omitted entirely when idle (`activity_label` returns `""`). Pure aside from
+/// reading the shared atomics, so `StatusTicker` and any direct caller compose exactly the same
+/// text as each other.
+fn status_message() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let activity = activity_label();
+    if !activity.is_empty() {
+        parts.push(activity.to_string());
+    }
+    parts.push(format!("{} tok", human_tokens(tokens_used())));
+    let n = resamples();
+    if n > 0 {
+        parts.push(format!("{n} resampled"));
+    }
+    format!(" · {}", parts.join(" · "))
+}
+
+/// Background thread that keeps a progress bar's message reflecting live in-loop activity
+/// (`reasoning`/`reading`/`writing`/… from `activity_label`) plus the running token/resample
+/// counters, redrawing every ~90ms. A run loop's own per-seed `pb.set_message` only fires once per
+/// seed/case, so it can't show the model reasoning, then calling a tool, then reasoning again
+/// WITHIN one seed — this ticker is what actually keeps the bar looking alive while a seed is in
+/// flight.
+///
+/// `ProgressBar` is `Clone + Send + Sync` (cloning shares the same underlying draw target), so the
+/// ticker owns its own clone and never needs to borrow the caller's `pb`. On a hidden (non-TTY)
+/// bar, `set_message` is a harmless no-op, so starting a ticker unconditionally is safe.
+pub struct StatusTicker {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StatusTicker {
+    /// Spawn the ticker thread against a clone of `pb`. Runs until this `StatusTicker` is dropped.
+    pub fn start(pb: &ProgressBar) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = Arc::clone(&stop);
+        let pb = pb.clone();
+        let handle = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                pb.set_message(status_message());
+                std::thread::sleep(Duration::from_millis(90));
+            }
+        });
+        StatusTicker { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for StatusTicker {
+    /// Stop the ticker thread and join it, so a `StatusTicker` can never outlive the loop that
+    /// started it — no leaked thread left writing to a bar the caller has already cleared/dropped.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -643,6 +771,9 @@ where
     F: FnMut(&str, &Value) -> (String, Vec<String>, Vec<DocImage>),
     N: FnMut(&str, &Value) -> String,
 {
+    // Reset to idle on every exit path (normal return, early return, or an early `?` bail) — see
+    // `ActivityGuard`'s doc comment.
+    let _activity_guard = ActivityGuard;
     // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
     // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
     // the next-best-action. Default callers pass `repeat_nudge`; the reader path passes a fan-out.
@@ -651,6 +782,7 @@ where
     let mut seen: HashSet<String> = HashSet::new();
     let mut unproductive: usize = 0;
     for _ in 0..max_rounds {
+        set_activity(1); // reasoning — about to ask the model for the next step
         let msg = chat(&messages)?;
         let calls: Vec<Value> = msg
             .get("tool_calls")
@@ -672,6 +804,7 @@ where
             let (result, images) = if last_key.as_deref() == Some(key.as_str()) {
                 (on_repeat(name, &args), Vec::new())
             } else {
+                set_activity(activity_for_tool(name));
                 let (body, ids, images) = exec(name, &args);
                 last_key = Some(key);
                 let has_new = ids.into_iter().fold(false, |acc, i| seen.insert(i) || acc);
@@ -704,6 +837,7 @@ where
         "role": "user",
         "content": "Stop searching. Give your final answer now on a single line beginning with `ANSWER:`."
     }));
+    set_activity(1); // reasoning — the final forced-answer nudge
     let msg = chat(&messages)?;
     Ok(content_of(&msg))
 }
@@ -821,6 +955,38 @@ mod tests {
         assert_eq!(human_tokens(999), "999");
         assert_eq!(human_tokens(1500), "1.5k");
         assert_eq!(human_tokens(2_000_000), "2.0M");
+    }
+
+    #[test]
+    fn activity_word_maps_each_code_and_defaults_idle_other_to_empty() {
+        // Exercises the pure mapping directly (not `activity_label`/`ACTIVITY`), so it's immune to
+        // other tests in this file mutating the shared `ACTIVITY` static concurrently via
+        // `run_agent_loop`.
+        assert_eq!(activity_word(1), "reasoning");
+        assert_eq!(activity_word(2), "reading");
+        assert_eq!(activity_word(3), "writing");
+        assert_eq!(activity_word(4), "searching");
+        assert_eq!(activity_word(5), "querying graph");
+        assert_eq!(activity_word(0), ""); // idle
+        assert_eq!(activity_word(6), ""); // other (unmapped tool)
+        assert_eq!(activity_word(200), ""); // any future/garbage code
+    }
+
+    #[test]
+    fn activity_for_tool_maps_known_names_and_defaults_unknown_to_other() {
+        assert_eq!(activity_for_tool("read"), 2);
+        assert_eq!(activity_for_tool("read_chunk"), 2);
+        assert_eq!(activity_for_tool("graph_upsert"), 3);
+        assert_eq!(activity_for_tool("search"), 4);
+        assert_eq!(activity_for_tool("grep"), 4);
+        assert_eq!(activity_for_tool("glob"), 4);
+        assert_eq!(activity_for_tool("glossary"), 5);
+        assert_eq!(activity_for_tool("reach"), 5);
+        assert_eq!(activity_for_tool("neighbors"), 5);
+        assert_eq!(activity_for_tool("related"), 5);
+        assert_eq!(activity_for_tool("resolve"), 5);
+        assert_eq!(activity_for_tool("sql"), 5);
+        assert_eq!(activity_for_tool("some_future_tool"), 6);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
-use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
+use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
@@ -13,6 +13,7 @@ use glossa::graph::ontology::Ontology;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Soft cap on predecessors synthesized per backward step when `--fanout-max` isn't given —
 /// the single source of truth `run_reason_at` applies at its real call site AND the unit test
@@ -47,10 +48,14 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
+            "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
+    // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
+    // calls — a no-op on a hidden bar.
+    pb.enable_steady_tick(Duration::from_millis(90));
     pb
 }
 
@@ -125,24 +130,15 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
 
     reset_tokens();
     reset_resamples();
-    let reason_price = lab.reason_endpoint().and_then(|e| e.price_per_1m);
-    let reason_msg = || -> String {
-        let tokens = tokens_used();
-        let cost_suffix = reason_price
-            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
-            .unwrap_or_default();
-        let resample_suffix =
-            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
-    };
 
     let pb = progress_bar(seeds.len(), args.no_progress);
     pb.set_prefix("reason");
-    pb.set_message(reason_msg());
+    // Owns the live `{msg}` segment for the rest of this stage (activity word + tokens/resamples),
+    // redrawn on its own timer so it can show mid-seed changes `pb.set_message` here never could.
+    let ticker = StatusTicker::start(&pb);
     let (mut total_nodes, mut total_edges, mut total_grounded, mut processed) = (0, 0, 0, 0usize);
     for seed in &seeds {
         if should_skip(&cp, &seed.id, args.resume) {
-            pb.set_message(reason_msg());
             pb.inc(1);
             continue;
         }
@@ -160,9 +156,9 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
             "reason {}: {} node(s), {} edge(s), {} grounded",
             seed.id, stats.nodes, stats.edges, stats.grounded
         ));
-        pb.set_message(reason_msg());
         pb.inc(1);
     }
+    drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
     println!(
         "reason: {} seed(s) processed, {} node(s), {} edge(s), {} grounded",

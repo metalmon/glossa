@@ -19,7 +19,7 @@ pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_group, run_judge, JudgeStats};
 
-use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
+use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::workspace::KbxPaths;
@@ -32,6 +32,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::Path;
+use std::time::Duration;
 
 /// Which stage(s) of the build pipeline a `kbx build` invocation should run. `All` (the clap
 /// default) runs every stage, in pipeline order.
@@ -98,28 +99,11 @@ impl Default for BuildOpts {
     }
 }
 
-/// Compose a progress-bar message with the running token total (see
-/// `crate::backend::openai::tokens_used`) and, when `price` (USD per 1M tokens) is `Some`, a rough
-/// `~$` cost estimate — the "service" counters that render AFTER the elapsed/ETA time, once the
-/// stage label itself has been set via `pb.set_prefix(..)` (so it renders at the front instead).
-/// Shared by build's extract and judge loops (`run_build` here and `judge::run_judge`) so both
-/// stages format their bar message the same way. The leading " · " is load-bearing: the template
-/// places `{msg}` directly after `{eta_precise}` with no space.
-pub(crate) fn token_progress_msg(price: Option<f64>) -> String {
-    let tokens = tokens_used();
-    let cost_suffix = price
-        .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
-        .unwrap_or_default();
-    let resample_suffix =
-        if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-    format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
-}
-
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
 /// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`). Stage label goes in
-/// `{prefix}` (set once via `pb.set_prefix`) so it renders at the front; the token/resample
-/// "service" counters go in `{msg}` (set per iteration via `pb.set_message`) so they render after
-/// the elapsed/ETA time.
+/// `{prefix}` (set once via `pb.set_prefix`) so it renders at the front; a `StatusTicker` (started
+/// by the caller) owns `{msg}` — the live activity word + token/resample "service" counters — for
+/// the loop's scope, redrawn on its own timer so it renders after the elapsed/ETA time.
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let show =
         !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
@@ -129,10 +113,14 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
+            "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
+    // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
+    // calls — a no-op on a hidden bar.
+    pb.enable_steady_tick(Duration::from_millis(90));
     pb
 }
 
@@ -375,15 +363,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
 
         reset_tokens();
         reset_resamples();
-        let extract_price = lab.model.price_per_1m;
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
         pb.set_prefix("extract (chunks)");
-        pb.set_message(token_progress_msg(extract_price));
+        let ticker = StatusTicker::start(&pb);
         let mut total = ExtractStats::default();
         for doc in &docs {
             let unit_id = format!("extract:{doc}");
             if opts.resume && cp.is_done(&unit_id) {
-                pb.set_message(token_progress_msg(extract_price));
                 pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
@@ -412,13 +398,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
             report.docs_extracted.push(doc.clone());
-            pb.set_message(token_progress_msg(extract_price));
             // Top up any gap so the bar stays aligned to this doc's weight even when covered
             // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
             if covered < w {
                 pb.inc(w - covered);
             }
         }
+        drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
         pb.finish_and_clear();
         println!(
             "extract: {} doc(s), {} chunk(s), {} node(s), {} mention edge(s)",
@@ -451,10 +437,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             let idx = DocIndex::open_or_create(&paths.root).context("open doc index")?;
             reset_tokens();
             reset_resamples();
-            let judge_price = lab.bridge.as_ref().unwrap_or(&lab.model).price_per_1m;
             let pb = progress_bar(groups.len(), opts.no_progress);
             pb.set_prefix("judge");
-            pb.set_message(token_progress_msg(judge_price));
+            let ticker = StatusTicker::start(&pb);
             let stats = run_judge(
                 &paths.root,
                 &lab,
@@ -467,6 +452,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                 opts.bridge_max_facts,
             )
             .context("judging candidate groups")?;
+            drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
             pb.finish_and_clear();
             println!("judge: {} group(s) judged, {} link(s)", stats.judged, stats.linked);
             report.groups_judged = stats.judged;

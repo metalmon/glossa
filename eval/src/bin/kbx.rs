@@ -6,9 +6,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use kb_eval::backend::openai::{
-    human_tokens, reset_resamples, reset_tokens, resamples, tokens_used, OpenAiBackend,
-};
+use kb_eval::backend::openai::{reset_resamples, reset_tokens, OpenAiBackend, StatusTicker};
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
@@ -502,10 +500,14 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let pb = ProgressBar::new(cases.len() as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
+                "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
             )
-                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
+        // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
+        // calls — a no-op on a hidden bar.
+        pb.enable_steady_tick(Duration::from_millis(90));
         pb
     } else {
         ProgressBar::hidden()
@@ -513,21 +515,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
     reset_tokens();
     reset_resamples();
-    let eval_price = lab.model.price_per_1m;
-    let eval_msg = || -> String {
-        let tokens = tokens_used();
-        let cost_suffix = eval_price
-            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
-            .unwrap_or_default();
-        let resample_suffix =
-            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
-    };
+    // Owns the live `{msg}` segment for the rest of this run (activity word + tokens/resamples),
+    // redrawn on its own timer so it can show mid-case changes `pb.set_message` here never could.
+    let ticker = StatusTicker::start(&pb);
 
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
         pb.set_prefix(q.id.clone());
-        pb.set_message(eval_msg());
         let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
@@ -569,7 +563,6 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         };
 
         pb.println(format!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id));
-        pb.set_message(eval_msg());
 
         let r = CaseResult {
             id: q.id.clone(),
@@ -587,6 +580,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         results.push(r);
         pb.inc(1);
     }
+    drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
 
     // Merge prior (resumed) cases with the ones just run. Dedup by id — a case just re-run wins

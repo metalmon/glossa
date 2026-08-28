@@ -7,7 +7,7 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
-use crate::backend::openai::{human_tokens, reset_resamples, reset_tokens, resamples, tokens_used};
+use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
@@ -22,6 +22,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// CLI-level options for `kbx distil`, folded from the `kbx` binary's clap fields (mirrors
 /// `reason::ReasonArgs`'s shape).
@@ -117,10 +118,14 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
+            "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
+    // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
+    // calls — a no-op on a hidden bar.
+    pb.enable_steady_tick(Duration::from_millis(90));
     pb
 }
 
@@ -258,8 +263,13 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         None => args.count.unwrap_or(1),
     };
 
+    reset_tokens();
+    reset_resamples();
     let pb = progress_bar(cap, args.no_progress);
     pb.set_prefix("distil");
+    // Owns the live `{msg}` segment for the rest of this run (activity word + tokens/resamples);
+    // the per-attempt "which seed" label moves to `{prefix}` below since the ticker now owns `{msg}`.
+    let ticker = StatusTicker::start(&pb);
 
     let mut kept: Vec<OutCase> = Vec::new();
     let mut n_dropped = 0usize;
@@ -271,7 +281,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         }
         let i = attempts;
         let seed = &seeds[i % seeds.len()];
-        pb.set_message(format!(" · attempt {i} (seed {})", seed.id));
+        pb.set_prefix(format!("distil (attempt {i}, seed {})", seed.id));
         match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed)
             .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
         {
@@ -296,6 +306,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         attempts += 1;
         pb.inc(1);
     }
+    drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
 
     write_dataset_toml(&out_path, &kept)?;
@@ -424,26 +435,15 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
 
     reset_tokens();
     reset_resamples();
-    let distil_price = lab.distil.as_ref().and_then(|e| e.price_per_1m);
-    let densify_msg = || -> String {
-        let tokens = tokens_used();
-        let cost_suffix = distil_price
-            .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
-            .unwrap_or_default();
-        let resample_suffix =
-            if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
-    };
 
     let pb = progress_bar(total_chunks.max(1), args.no_progress);
     pb.set_prefix("densify");
-    pb.set_message(densify_msg());
+    let ticker = StatusTicker::start(&pb);
     let mut total = DensifyStats::default();
     let mut docs_done: Vec<String> = Vec::new();
     for doc in &docs {
         let w = crate::build::extract_doc_weight(doc, &chunk_counts) as u64;
         if should_skip_densify(&cp, doc, args.resume) {
-            pb.set_message(densify_msg());
             pb.inc(w);
             continue;
         }
@@ -477,12 +477,12 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
             "distil {doc}: {} node(s), {} edge(s), {} grounded",
             stats.nodes, stats.edges, stats.grounded
         ));
-        pb.set_message(densify_msg());
         // Top up any gap so the bar stays aligned to this doc's weight, same as `run_build`.
         if covered < w {
             pb.inc(w - covered);
         }
     }
+    drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
     println!(
         "distil: {} doc(s) densified, {} chunk(s), {} node(s), {} edge(s), {} grounded",
