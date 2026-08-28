@@ -159,17 +159,14 @@ impl Drop for ActivityGuard {
     }
 }
 
-/// Compose the live status-bar segment: `" · {activity}{ · N new · M cache}{ · N resampled}"` —
-/// the activity word is omitted entirely when idle (`activity_label` returns `""`), and the cache
-/// segment is omitted when nothing has been cached yet (a local no-cache run stays clean instead
-/// of permanently showing "0 cache"). Pure aside from reading the shared atomics, so `StatusTicker`
-/// and any direct caller compose exactly the same text as each other.
+/// Compose the live after-time status-bar segment: `" · {N new · M cache}{ · N resampled}"`. The
+/// activity word is NOT here — it now rides at the FRONT of the bar in `{prefix}`, driven (debounced)
+/// by `StatusTicker` — so this message carries only the running token counters and the resample
+/// count. The cache segment is omitted when nothing has been cached yet (a local no-cache run stays
+/// clean instead of permanently showing "0 cache"). Pure aside from reading the shared atomics, so
+/// `StatusTicker` and any direct caller compose exactly the same text as each other.
 fn status_message() -> String {
     let mut parts: Vec<String> = Vec::new();
-    let activity = activity_label();
-    if !activity.is_empty() {
-        parts.push(activity.to_string());
-    }
     let cached = cached_tokens();
     if cached > 0 {
         parts.push(format!("{} new", human_tokens(new_tokens())));
@@ -214,12 +211,68 @@ fn format_eta(secs: Option<u64>) -> String {
     }
 }
 
-/// Background thread that keeps a progress bar's message reflecting live in-loop activity
-/// (`reasoning`/`reading`/`writing`/… from `activity_label`) plus the running token/resample
-/// counters, redrawing every ~90ms. A run loop's own per-seed `pb.set_message` only fires once per
-/// seed/case, so it can't show the model reasoning, then calling a tool, then reasoning again
-/// WITHIN one seed — this ticker is what actually keeps the bar looking alive while a seed is in
-/// flight.
+/// How many CONSECUTIVE ticks a new (different) activity word must be observed before the debounced
+/// front-of-bar display switches to it. At the ~90ms tick period, `2` is ~180ms — enough to swallow
+/// the single-tick flashes of `reading`/`writing` that a fast tool call produces, so the front reads
+/// steadily (mostly `reasoning`) and only changes on a genuine sustained switch.
+const ACTIVITY_SWITCH_TICKS: u8 = 2;
+
+/// Neutral word shown at the front of the bar before any real activity has been observed yet.
+const ACTIVITY_STARTING: &str = "starting";
+
+/// Debounce state for the front-of-bar activity word. Holds the currently-DISPLAYED word plus a
+/// short run-length counter over a *candidate* different word, so a one-tick blip (a fast tool call
+/// that flashes `reading`/`writing` for a single ~90ms sample) never replaces the steadily-shown
+/// word — only an activity observed for `ACTIVITY_SWITCH_TICKS` consecutive ticks takes over. Idle
+/// samples (the empty word from `activity_label`) are held through: they neither change the display
+/// nor disturb an in-progress candidate, so the last real word persists across brief gaps. Pure
+/// (no shared state / IO), so `observe` is unit-tested directly over a scripted sample sequence.
+struct ActivityDebounce {
+    /// Word currently shown at the front; `None` until the first sustained activity is accepted.
+    shown: Option<String>,
+    /// A different word being observed toward a switch, with how many consecutive ticks so far.
+    candidate: Option<(String, u8)>,
+}
+
+impl ActivityDebounce {
+    fn new() -> Self {
+        ActivityDebounce { shown: None, candidate: None }
+    }
+
+    /// Feed one sampled activity word (`""` for idle) and return the word to display this tick.
+    /// The display only changes to a new word after it has been seen for `ACTIVITY_SWITCH_TICKS`
+    /// consecutive non-idle ticks; idle samples and single-tick blips leave the display untouched.
+    fn observe(&mut self, sample: &str) -> &str {
+        if sample.is_empty() {
+            // Idle: hold the last real word (and any in-progress candidate) unchanged.
+        } else if self.shown.as_deref() == Some(sample) {
+            // Already showing this word — cancel any stray candidate.
+            self.candidate = None;
+        } else {
+            // A different, non-idle word: advance its consecutive-tick run.
+            let run = match &self.candidate {
+                Some((w, r)) if w == sample => r + 1,
+                _ => 1,
+            };
+            if run >= ACTIVITY_SWITCH_TICKS {
+                self.shown = Some(sample.to_string());
+                self.candidate = None;
+            } else {
+                self.candidate = Some((sample.to_string(), run));
+            }
+        }
+        self.shown.as_deref().unwrap_or(ACTIVITY_STARTING)
+    }
+}
+
+/// Background thread that keeps a progress bar's FRONT word (`{prefix}`) and after-time message
+/// (`{msg}`) reflecting live in-loop activity, redrawing every ~90ms. Each tick it sets the
+/// (debounced) activity word — `reasoning`/`reading`/`writing`/… from `activity_label`, via
+/// `ActivityDebounce` — as the bar's `{prefix}` (replacing the old static stage label), and sets the
+/// message to the ETA plus the running token/resample counters (no activity word — that moved to the
+/// front). A run loop's own per-seed `pb.set_message` only fires once per seed/case, so it can't show
+/// the model reasoning, then calling a tool, then reasoning again WITHIN one seed — this ticker is
+/// what actually keeps the bar looking alive while a seed is in flight.
 ///
 /// Also computes and prepends a self-computed, stable ETA (see `eta_secs`) as `<{eta}` — the
 /// bar's TEMPLATE now ends in plain `{elapsed_precise}{msg}` (no `{eta_precise}` of its own; see
@@ -241,9 +294,13 @@ impl StatusTicker {
         let stop_bg = Arc::clone(&stop);
         let pb = pb.clone();
         let handle = std::thread::spawn(move || {
+            let mut debounce = ActivityDebounce::new();
             while !stop_bg.load(Ordering::Relaxed) {
                 let len = pb.length().unwrap_or(0);
                 let eta = eta_secs(pb.elapsed().as_secs(), pb.position(), len);
+                // Front word: the debounced live activity, replacing the old static stage label.
+                pb.set_prefix(debounce.observe(activity_label()).to_string());
+                // After-time message: ETA + tokens/resamples only (activity moved to the front).
                 pb.set_message(format!("<{}{}", format_eta(eta), status_message()));
                 std::thread::sleep(Duration::from_millis(90));
             }
@@ -1065,6 +1122,51 @@ mod tests {
         assert_eq!(activity_word(0), ""); // idle
         assert_eq!(activity_word(6), ""); // other (unmapped tool)
         assert_eq!(activity_word(200), ""); // any future/garbage code
+    }
+
+    /// Fold a scripted sequence of sampled activity words through `ActivityDebounce`, collecting the
+    /// displayed word after each tick — the pure basis the debounce assertions below check.
+    fn debounce_trace(samples: &[&str]) -> Vec<String> {
+        let mut d = ActivityDebounce::new();
+        samples.iter().map(|s| d.observe(s).to_string()).collect()
+    }
+
+    #[test]
+    fn activity_debounce_switches_only_after_two_consecutive_and_holds_through_blips() {
+        // Before any activity: the neutral "starting" word.
+        assert_eq!(debounce_trace(&[""]), ["starting"]);
+
+        // First real word needs 2 consecutive ticks to be accepted (one tick still shows "starting").
+        assert_eq!(
+            debounce_trace(&["reasoning", "reasoning"]),
+            ["starting", "reasoning"]
+        );
+
+        // Once "reasoning" is shown, a single-tick blip of a different word does NOT switch the
+        // display; a subsequent idle tick holds "reasoning" too.
+        assert_eq!(
+            debounce_trace(&["reasoning", "reasoning", "reading", "reasoning", ""]),
+            ["starting", "reasoning", "reasoning", "reasoning", "reasoning"]
+        );
+
+        // A genuine sustained switch (2 consecutive of the SAME new word) takes over on the 2nd.
+        assert_eq!(
+            debounce_trace(&["reasoning", "reasoning", "reading", "reading"]),
+            ["starting", "reasoning", "reasoning", "reading"]
+        );
+
+        // Idle in the middle holds the last real word instead of reverting to "starting".
+        assert_eq!(
+            debounce_trace(&["reasoning", "reasoning", "", "", "reasoning"]),
+            ["starting", "reasoning", "reasoning", "reasoning", "reasoning"]
+        );
+
+        // Two DIFFERENT single-tick blips in a row (each a distinct new word) never accumulate into
+        // a switch — the candidate run resets when the word changes.
+        assert_eq!(
+            debounce_trace(&["reasoning", "reasoning", "reading", "writing", "reasoning"]),
+            ["starting", "reasoning", "reasoning", "reasoning", "reasoning"]
+        );
     }
 
     #[test]

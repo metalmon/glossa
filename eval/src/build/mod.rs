@@ -112,10 +112,10 @@ impl Default for BuildOpts {
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`). Stage label goes in
-/// `{prefix}` (set once via `pb.set_prefix`) so it renders at the front; a `StatusTicker` (started
-/// by the caller) owns `{msg}` — the live activity word + token/resample "service" counters — for
-/// the loop's scope, redrawn on its own timer so it renders after the elapsed/ETA time.
+/// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`). A `StatusTicker`
+/// (started by the caller) owns BOTH `{prefix}` — the live debounced activity word at the front,
+/// replacing any static stage label — and `{msg}` — the ETA + token/resample "service" counters —
+/// for the loop's scope, redrawn on its own timer so `{msg}` renders after the elapsed/ETA time.
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let show =
         !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
@@ -388,7 +388,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         reset_tokens();
         reset_resamples();
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
-        pb.set_prefix("extract (chunks)");
+        // Ticker owns the front word (debounced activity) + after-time message — no static label.
         let ticker = StatusTicker::start(&pb);
         let mut total = ExtractStats::default();
         for doc in &docs {
@@ -463,7 +463,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             reset_tokens();
             reset_resamples();
             let pb = progress_bar(groups.len(), opts.no_progress);
-            pb.set_prefix("judge");
+            // Ticker owns the front word (debounced activity) + after-time message — no static label.
             let ticker = StatusTicker::start(&pb);
             let stats = run_judge(
                 &paths.root,

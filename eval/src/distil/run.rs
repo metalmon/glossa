@@ -274,9 +274,8 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     reset_tokens();
     reset_resamples();
     let pb = progress_bar(cap, args.no_progress);
-    pb.set_prefix("distil");
-    // Owns the live `{msg}` segment for the rest of this run (activity word + tokens/resamples);
-    // the per-attempt "which seed" label moves to `{prefix}` below since the ticker now owns `{msg}`.
+    // Owns the live `{prefix}` (debounced activity word) AND `{msg}` (ETA + tokens/resamples) for
+    // the rest of this run. No static stage label is set — the ticker's front word replaces it.
     let ticker = StatusTicker::start(&pb);
 
     let mut kept: Vec<OutCase> = Vec::new();
@@ -289,7 +288,6 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         }
         let i = attempts;
         let seed = &seeds[i % seeds.len()];
-        pb.set_prefix(format!("distil (attempt {i}, seed {})", seed.id));
         match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed)
             .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
         {
@@ -457,7 +455,7 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     reset_resamples();
 
     let pb = progress_bar(total_chunks.max(1), args.no_progress);
-    pb.set_prefix("densify");
+    // Ticker owns the front word (debounced activity) + after-time message — no static label.
     let ticker = StatusTicker::start(&pb);
     let mut total = DensifyStats::default();
     let mut docs_done: Vec<String> = Vec::new();

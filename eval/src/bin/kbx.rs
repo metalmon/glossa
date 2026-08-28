@@ -536,13 +536,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
     reset_tokens();
     reset_resamples();
-    // Owns the live `{msg}` segment for the rest of this run (activity word + tokens/resamples),
-    // redrawn on its own timer so it can show mid-case changes `pb.set_message` here never could.
+    // Owns the live `{prefix}` (debounced activity word) AND `{msg}` (ETA + tokens/resamples) for
+    // the rest of this run, redrawn on its own timer so it shows mid-case changes `pb.set_message`
+    // here never could. No per-case static label is set — the ticker's front word replaces it.
     let ticker = StatusTicker::start(&pb);
 
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
-        pb.set_prefix(q.id.clone());
         let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
