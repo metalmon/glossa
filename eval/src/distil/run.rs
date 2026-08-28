@@ -208,9 +208,10 @@ fn write_dataset_toml(out_path: &std::path::Path, kept: &[OutCase]) -> Result<()
 }
 
 /// Orchestrate `kbx distil` over the corpus at `path` (kb-style PATH resolution via
-/// `workspace::resolve`): load `lab.toml` + ontology + `distil.md`, build the seed pool, attempt
-/// `args.count` generate+gate passes (`gen::generate_one`), and write the kept golds to
-/// `args.out` (default `<kbx>/dataset.synthetic.toml`).
+/// `workspace::resolve`): load `lab.toml` + ontology + `distil_golds.md` (the gold-gen mode's own
+/// prompt file, separate from densify's `distil.md`), build the seed pool, attempt `args.count`
+/// generate+gate passes (`gen::generate_one`), and write the kept golds to `args.out` (default
+/// `<kbx>/dataset.synthetic.toml`).
 pub fn run_distil(path: Option<PathBuf>, args: DistilArgs) -> Result<()> {
     let paths = workspace::resolve(path);
     run_distil_at(paths, args)
@@ -227,8 +228,8 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     // indexed. Needed so `read` calls the generator makes resolve real chunks.
     glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
 
-    let distil_md = std::fs::read_to_string(&paths.distil)
-        .with_context(|| format!("reading {}", paths.distil.display()))?;
+    let distil_golds_md = std::fs::read_to_string(&paths.distil_golds)
+        .with_context(|| format!("reading {}", paths.distil_golds.display()))?;
 
     let g = GraphStore::open(&paths.root)?;
     let seeds = seed_pool(&g, &ontology, args.seed_type.as_deref())?;
@@ -268,7 +269,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         let i = attempts;
         let seed = &seeds[i % seeds.len()];
         pb.set_message(format!("distil {i} (seed {})", seed.id));
-        match generate_one(&paths, &ontology, &lab, &distil_md, seed)
+        match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed)
             .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
         {
             GenOutcome::Kept(p) => {

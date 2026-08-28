@@ -20,8 +20,9 @@
 //! deleted, just demoted from the default.
 //!
 //! `distil::run` dispatches between the two modes purely on whether `--emit-golds` was given (see
-//! [`distil_mode`]); they share the seed/chunk-iteration substrate and the `[distil]` strong-model
-//! endpoint, differing only in what they write.
+//! [`distil_mode`]); they share the `[distil]` strong-model endpoint but read their OWN system
+//! prompt file — densify reads `distil.md`, the gold generator reads `distil_golds.md` — and
+//! differ in what they write.
 //!
 //! See docs/superpowers/specs/2026-08-28-kbx-distil-densification-design.md for the densify design,
 //! and docs/superpowers/specs/2026-08-24-kbx-synth-spec.md for the original gold-generator design

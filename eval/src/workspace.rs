@@ -13,6 +13,7 @@ pub struct KbxPaths {
     pub reflect: PathBuf,
     pub reason: PathBuf,
     pub distil: PathBuf,
+    pub distil_golds: PathBuf,
 }
 
 impl KbxPaths {
@@ -30,6 +31,7 @@ impl KbxPaths {
             reflect: f("reflect.md"),
             reason: f("reason.md"),
             distil: f("distil.md"),
+            distil_golds: f("distil_golds.md"),
             kbx_dir: kbx,
             root,
         }
