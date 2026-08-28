@@ -388,7 +388,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         reset_tokens();
         reset_resamples();
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
-        // Ticker owns the front word (debounced activity) + after-time message — no static label.
+        // One static stage word at the front for the whole extract pass; the ticker owns only
+        // `{msg}` (ETA + tokens/resamples).
+        pb.set_prefix("building");
         let ticker = StatusTicker::start(&pb);
         let mut total = ExtractStats::default();
         for doc in &docs {
@@ -463,7 +465,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             reset_tokens();
             reset_resamples();
             let pb = progress_bar(groups.len(), opts.no_progress);
-            // Ticker owns the front word (debounced activity) + after-time message — no static label.
+            // One static stage word at the front for the whole judge pass; the ticker owns only
+            // `{msg}` (ETA + tokens/resamples).
+            pb.set_prefix("judging");
             let ticker = StatusTicker::start(&pb);
             let stats = run_judge(
                 &paths.root,

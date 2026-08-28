@@ -140,9 +140,9 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     reset_resamples();
 
     let pb = progress_bar(seeds.len(), args.no_progress);
-    // Owns the live `{prefix}` (debounced activity word) AND `{msg}` (ETA + tokens/resamples) for
-    // the rest of this stage, redrawn on its own timer so it shows mid-seed changes `pb.set_message`
-    // here never could. No static stage label is set — the ticker's front word replaces it.
+    // One static stage word at the front for the whole run — never switches. The ticker owns only
+    // `{msg}` (ETA + tokens/resamples), redrawn on its own timer.
+    pb.set_prefix("reasoning");
     let ticker = StatusTicker::start(&pb);
     let (mut total_nodes, mut total_edges, mut total_grounded, mut processed) = (0, 0, 0, 0usize);
     for seed in &seeds {

@@ -274,8 +274,9 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     reset_tokens();
     reset_resamples();
     let pb = progress_bar(cap, args.no_progress);
-    // Owns the live `{prefix}` (debounced activity word) AND `{msg}` (ETA + tokens/resamples) for
-    // the rest of this run. No static stage label is set — the ticker's front word replaces it.
+    // One static stage word at the front for the whole run; the ticker owns only `{msg}` (ETA +
+    // tokens/resamples).
+    pb.set_prefix("distilling");
     let ticker = StatusTicker::start(&pb);
 
     let mut kept: Vec<OutCase> = Vec::new();
@@ -455,7 +456,9 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     reset_resamples();
 
     let pb = progress_bar(total_chunks.max(1), args.no_progress);
-    // Ticker owns the front word (debounced activity) + after-time message — no static label.
+    // One static stage word at the front for the whole densify pass; the ticker owns only `{msg}`
+    // (ETA + tokens/resamples).
+    pb.set_prefix("distilling");
     let ticker = StatusTicker::start(&pb);
     let mut total = DensifyStats::default();
     let mut docs_done: Vec<String> = Vec::new();

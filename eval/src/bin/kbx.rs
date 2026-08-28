@@ -536,9 +536,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
     reset_tokens();
     reset_resamples();
-    // Owns the live `{prefix}` (debounced activity word) AND `{msg}` (ETA + tokens/resamples) for
-    // the rest of this run, redrawn on its own timer so it shows mid-case changes `pb.set_message`
-    // here never could. No per-case static label is set — the ticker's front word replaces it.
+    // One static stage word at the front for the whole run — never switches. The ticker owns only
+    // `{msg}` (ETA + tokens/resamples), redrawn on its own timer.
+    pb.set_prefix("evaluating");
     let ticker = StatusTicker::start(&pb);
 
     let mut results = Vec::with_capacity(cases.len());
