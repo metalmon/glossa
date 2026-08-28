@@ -162,12 +162,47 @@ fn status_message() -> String {
     format!(" · {}", parts.join(" · "))
 }
 
+/// Compute a stable ETA (in whole seconds remaining) from a bar's own `elapsed_secs`/`pos`/`len`,
+/// or `None` when there's no basis for an estimate yet (`pos == 0`, or `pos > len` — the latter
+/// shouldn't happen but is guarded rather than underflowing). Plain linear-rate arithmetic:
+/// `elapsed * (len - pos) / pos`, computed FRESH from the bar's current position/length/elapsed
+/// every time it's called — unlike indicatif's own `{eta_precise}`, which maintains a smoothed
+/// rate estimator fed by every redraw. `enable_steady_tick` (used here to animate the spinner)
+/// redraws every ~90ms regardless of whether real progress (`pb.inc`) happened in between, so
+/// indicatif's estimator gets flooded with near-zero-delta-position samples between real steps;
+/// its smoothed rate collapses toward zero and the resulting ETA blows up to absurd values (e.g.
+/// "448d"). Recomputing from raw elapsed/pos/len on each tick has no history to corrupt. Pure —
+/// unit-tested.
+fn eta_secs(elapsed_secs: u64, pos: u64, len: u64) -> Option<u64> {
+    if pos == 0 || pos > len {
+        return None;
+    }
+    let remaining = len - pos;
+    Some(elapsed_secs.saturating_mul(remaining) / pos)
+}
+
+/// Render an `eta_secs` result the same way indicatif renders `{elapsed_precise}`/`{eta_precise}`
+/// (`HH:MM:SS`, or `Nd HH:MM:SS` past a day) by reusing indicatif's own `FormattedDuration` — so
+/// the stable ETA looks visually consistent with the elapsed time it sits next to on the bar.
+/// `None` (no progress yet) renders as a placeholder instead of a misleading `00:00:00`.
+fn format_eta(secs: Option<u64>) -> String {
+    match secs {
+        Some(s) => indicatif::FormattedDuration(Duration::from_secs(s)).to_string(),
+        None => "--:--:--".to_string(),
+    }
+}
+
 /// Background thread that keeps a progress bar's message reflecting live in-loop activity
 /// (`reasoning`/`reading`/`writing`/… from `activity_label`) plus the running token/resample
 /// counters, redrawing every ~90ms. A run loop's own per-seed `pb.set_message` only fires once per
 /// seed/case, so it can't show the model reasoning, then calling a tool, then reasoning again
 /// WITHIN one seed — this ticker is what actually keeps the bar looking alive while a seed is in
 /// flight.
+///
+/// Also computes and prepends a self-computed, stable ETA (see `eta_secs`) as `<{eta}` — the
+/// bar's TEMPLATE now ends in plain `{elapsed_precise}{msg}` (no `{eta_precise}` of its own; see
+/// the 4 `ProgressStyle::with_template` call sites), so this ticker is the sole source of the
+/// `<eta` half of the "elapsed<eta" pairing the bar displays.
 ///
 /// `ProgressBar` is `Clone + Send + Sync` (cloning shares the same underlying draw target), so the
 /// ticker owns its own clone and never needs to borrow the caller's `pb`. On a hidden (non-TTY)
@@ -185,7 +220,9 @@ impl StatusTicker {
         let pb = pb.clone();
         let handle = std::thread::spawn(move || {
             while !stop_bg.load(Ordering::Relaxed) {
-                pb.set_message(status_message());
+                let len = pb.length().unwrap_or(0);
+                let eta = eta_secs(pb.elapsed().as_secs(), pb.position(), len);
+                pb.set_message(format!("<{}{}", format_eta(eta), status_message()));
                 std::thread::sleep(Duration::from_millis(90));
             }
         });
@@ -955,6 +992,33 @@ mod tests {
         assert_eq!(human_tokens(999), "999");
         assert_eq!(human_tokens(1500), "1.5k");
         assert_eq!(human_tokens(2_000_000), "2.0M");
+    }
+
+    #[test]
+    fn eta_secs_none_at_zero_progress_and_when_pos_exceeds_len() {
+        assert_eq!(eta_secs(100, 0, 1871), None); // no progress yet -> no basis for an estimate
+        assert_eq!(eta_secs(100, 5, 3), None); // guarded, shouldn't happen in practice
+    }
+
+    #[test]
+    fn eta_secs_linear_rate_after_one_step() {
+        // 1 of 1871 steps took 100s -> remaining 1870 steps at the same rate.
+        assert_eq!(eta_secs(100, 1, 1871), Some(100 * 1870));
+    }
+
+    #[test]
+    fn eta_secs_zero_when_almost_done() {
+        assert_eq!(eta_secs(100, 10, 10), Some(0));
+    }
+
+    #[test]
+    fn format_eta_matches_elapsed_precise_style() {
+        assert_eq!(format_eta(None), "--:--:--");
+        assert_eq!(format_eta(Some(0)), "00:00:00");
+        assert_eq!(format_eta(Some(65)), "00:01:05");
+        // Past a day -> "Nd HH:MM:SS", matching indicatif's own FormattedDuration exactly (this
+        // is the stable replacement for the corrupted "{eta_precise}" that used to show "448d").
+        assert_eq!(format_eta(Some(3 * 86400 + 5 * 3600)), "3d 05:00:00");
     }
 
     #[test]
