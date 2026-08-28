@@ -374,6 +374,9 @@ enum GraphAction {
         /// Delete ungrounded nodes (last resort; prefer re-grounding).
         #[arg(long = "prune-ungrounded")]
         prune_ungrounded: bool,
+        /// Delete dangling nodes (last resort; prefer restoring the terminal).
+        #[arg(long = "prune-dangling")]
+        prune_dangling: bool,
     },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
@@ -1406,22 +1409,24 @@ fn main() -> anyhow::Result<()> {
                 path,
                 prune_incomplete,
                 prune_ungrounded,
+                prune_dangling,
             } => {
                 let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
-                if prune_incomplete || prune_ungrounded {
-                    let (inc, ung) = glossa::graph::doctor::prune(
+                if prune_incomplete || prune_ungrounded || prune_dangling {
+                    let (inc, ung, dang) = glossa::graph::doctor::prune(
                         &g,
                         &report,
                         &glossa::graph::doctor::PruneOpts {
                             incomplete: prune_incomplete,
                             ungrounded: prune_ungrounded,
+                            dangling: prune_dangling,
                         },
                     )?;
-                    println!("pruned: incomplete={inc} ungrounded={ung}");
+                    println!("pruned: incomplete={inc} ungrounded={ung} dangling={dang}");
                 }
                 Ok(())
             }

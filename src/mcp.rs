@@ -469,6 +469,28 @@ struct IndexArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DoctorArgs {
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(description = "also delete incomplete (off-spine/degenerate) nodes; default false (report-only)")]
+    prune_incomplete: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(description = "also delete ungrounded nodes (last resort; prefer re-grounding); default false (report-only)")]
+    prune_ungrounded: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(description = "also delete dangling nodes (last resort; prefer restoring the terminal); default false (report-only)")]
+    prune_dangling: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ReadArgs {
     #[schemars(
         description = "the copy-ready `path#n` token exactly as a search/grep/read result showed it (or just the document path, paired with `n` below)"
@@ -1492,17 +1514,35 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Diagnose graph health: the three doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), and incomplete nodes (off-spine / degenerate, on no complete reasoning chain). Report-only — never mutates the graph. Use it to decide what to re-ground, re-verify, or clean up; pruning incomplete/ungrounded nodes is CLI-only (`kb graph doctor --prune-incomplete` / `--prune-ungrounded`)."
+        description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default — pass prune_incomplete/prune_ungrounded/prune_dangling (each opt-in, last resort — prefer re-grounding or restoring the terminal) to also delete that bucket; the response then includes the pruned counts. `stale` is never prunable — its source may be re-synced."
     )]
     async fn graph_doctor(
         &self,
-        Parameters(_): Parameters<Empty>,
+        Parameters(a): Parameters<DoctorArgs>,
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::graph::ops::graph_doctor(&g, &ont, &self.root),
-        )]))
+        let report = crate::graph::doctor::doctor(&g, &ont, &self.root).map_err(internal)?;
+        let mut out = crate::graph::ops::fmt_doctor_report(&report);
+        let prune_incomplete = a.prune_incomplete.unwrap_or(false);
+        let prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
+        let prune_dangling = a.prune_dangling.unwrap_or(false);
+        if prune_incomplete || prune_ungrounded || prune_dangling {
+            let (inc, ung, dang) = crate::graph::doctor::prune(
+                &g,
+                &report,
+                &crate::graph::doctor::PruneOpts {
+                    incomplete: prune_incomplete,
+                    ungrounded: prune_ungrounded,
+                    dangling: prune_dangling,
+                },
+            )
+            .map_err(internal)?;
+            out.push_str(&format!(
+                "pruned: incomplete={inc} ungrounded={ung} dangling={dang}\n"
+            ));
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
     #[tool(
@@ -1746,6 +1786,21 @@ mod tests {
         let ix: IndexArgs = serde_json::from_str(r#"{"force":"true","path":"a.md"}"#).unwrap();
         assert_eq!(ix.force, Some(true));
         assert_eq!(ix.path, Some("a.md".to_string()));
+
+        let da: DoctorArgs = serde_json::from_str(
+            r#"{"prune_incomplete":"true","prune_ungrounded":"false","prune_dangling":"true"}"#,
+        )
+        .unwrap();
+        assert_eq!(da.prune_incomplete, Some(true));
+        assert_eq!(da.prune_ungrounded, Some(false));
+        assert_eq!(da.prune_dangling, Some(true));
+
+        // Absent optionals stay None (report-only default).
+        let da2: DoctorArgs = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(
+            (da2.prune_incomplete, da2.prune_ungrounded, da2.prune_dangling),
+            (None, None, None)
+        );
 
         let g: GrepArgs = serde_json::from_str(
             r#"{"pattern":"x","ignore_case":"true","context":"20","multiline":"1","scope":"docA.md"}"#,

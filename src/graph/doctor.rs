@@ -47,6 +47,10 @@ pub struct DoctorReport {
 pub struct PruneOpts {
     pub incomplete: bool,
     pub ungrounded: bool,
+    /// Opt-in, like `ungrounded`: last resort, prefer restoring the terminal. By default a
+    /// dangling node's terminal may come back live (source restored, or re-grounded), so this
+    /// stays off unless explicitly requested.
+    pub dangling: bool,
 }
 
 /// Run the four hygiene checks (ungrounded / incomplete / stale / dangling) over the live graph
@@ -185,19 +189,21 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
     Ok(rep)
 }
 
-/// Delete the incomplete and/or ungrounded nodes from `report` (per `opts`). Returns
-/// `(incomplete_pruned, ungrounded_pruned)`. `report.stale` AND `report.dangling` are
-/// intentionally NEVER pruned — both are doubtful, not doomed: a stale node's source may be
-/// re-synced, and a dangling node's terminal may come back live (its source restored, or a new
-/// MENTIONS re-grounding it), at which point the chain is fresh again. Deleting either would
-/// destroy reasoning work over what may be a transient state.
+/// Delete the incomplete, ungrounded and/or dangling nodes from `report` (per `opts`). Returns
+/// `(incomplete_pruned, ungrounded_pruned, dangling_pruned)`. `report.stale` is intentionally
+/// NEVER pruned — a stale node's source may be re-synced, at which point it is fresh again;
+/// deleting it would destroy reasoning work over what may be a transient state. `dangling` is
+/// prunable, but opt-in only (like `ungrounded`: last resort, prefer restoring the terminal) —
+/// by default a dangling node's terminal may come back live (source restored, or a new MENTIONS
+/// re-grounding it).
 pub fn prune(
     g: &GraphStore,
     report: &DoctorReport,
     opts: &PruneOpts,
-) -> anyhow::Result<(usize, usize)> {
+) -> anyhow::Result<(usize, usize, usize)> {
     let mut inc = 0;
     let mut ung = 0;
+    let mut dang = 0;
     if opts.incomplete && !report.incomplete.is_empty() {
         let ids: Vec<String> = report.incomplete.iter().map(|d| d.id.clone()).collect();
         inc = g.delete_nodes(&ids)?;
@@ -206,8 +212,12 @@ pub fn prune(
         let ids: Vec<String> = report.ungrounded.iter().map(|d| d.id.clone()).collect();
         ung = g.delete_nodes(&ids)?;
     }
+    if opts.dangling && !report.dangling.is_empty() {
+        let ids: Vec<String> = report.dangling.iter().map(|d| d.id.clone()).collect();
+        dang = g.delete_nodes(&ids)?;
+    }
     // stale is intentionally NEVER pruned
-    Ok((inc, ung))
+    Ok((inc, ung, dang))
 }
 
 #[cfg(test)]
@@ -321,16 +331,17 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         assert_eq!(rep.incomplete[0].id, "cau:orphan");
 
         // prune removes incomplete + ungrounded, NOT stale
-        let (inc, ung) = prune(
+        let (inc, ung, dang) = prune(
             &g,
             &rep,
             &PruneOpts {
                 incomplete: true,
                 ungrounded: true,
+                dangling: false,
             },
         )
         .unwrap();
-        assert_eq!((inc, ung), (1, 1));
+        assert_eq!((inc, ung, dang), (1, 1, 0));
         assert!(
             g.get_node(&rep.stale[0].id).unwrap().is_some(),
             "stale node must survive prune"
@@ -383,6 +394,78 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         assert!(
             dangling.contains(&"cau:1"),
             "Cause must dangle: its only terminal went stale"
+        );
+    }
+
+    #[test]
+    fn prune_dangling_is_opt_in_and_stale_survives_regardless() {
+        // Same shape as `doctor_flags_query_side_node_dangling_when_its_terminal_is_stale`:
+        // sym:1 -CAUSED_BY-> cau:1 -RESOLVED_BY-> res:1(stale). sym:1/cau:1 are dangling.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let nodes = vec![
+            node("sym:1", "Symptom", "S", prov("doc.md", None)),
+            node("cau:1", "Cause", "C", prov("doc.md", None)),
+            node("res:1", "Resolution", "R", prov("doc.md", Some(sig0))),
+            node("sec:1", "Section", "Sec", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:1", "CAUSED_BY", "cau:1", prov("doc.md", None)),
+            edge("cau:1", "RESOLVED_BY", "res:1", prov("doc.md", None)),
+            edge("res:1", "MENTIONS", "sec:1", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        // The Resolution's source drifts → it goes stale, and sym:1/cau:1 go dangling.
+        std::fs::write(&doc, b"v2-longer").unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert_eq!(rep.stale.len(), 1);
+        assert_eq!(rep.dangling.len(), 2);
+
+        // dangling=false leaves both dangling nodes (and stale) untouched.
+        let (inc0, ung0, dang0) = prune(
+            &g,
+            &rep,
+            &PruneOpts {
+                incomplete: false,
+                ungrounded: false,
+                dangling: false,
+            },
+        )
+        .unwrap();
+        assert_eq!((inc0, ung0, dang0), (0, 0, 0));
+        assert!(g.get_node("sym:1").unwrap().is_some());
+        assert!(g.get_node("cau:1").unwrap().is_some());
+        assert!(
+            g.get_node("res:1").unwrap().is_some(),
+            "stale node must survive prune regardless of the dangling flag"
+        );
+
+        // dangling=true deletes exactly the dangling nodes; stale still survives.
+        let (inc1, ung1, dang1) = prune(
+            &g,
+            &rep,
+            &PruneOpts {
+                incomplete: false,
+                ungrounded: false,
+                dangling: true,
+            },
+        )
+        .unwrap();
+        assert_eq!((inc1, ung1, dang1), (0, 0, 2));
+        assert!(g.get_node("sym:1").unwrap().is_none());
+        assert!(g.get_node("cau:1").unwrap().is_none());
+        assert!(
+            g.get_node("res:1").unwrap().is_some(),
+            "stale node must survive prune even when dangling=true"
         );
     }
 
