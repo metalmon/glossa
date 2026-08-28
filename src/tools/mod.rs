@@ -701,6 +701,53 @@ pub(crate) fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, i
     String::new()
 }
 
+/// The document that "owns" `id`, for `scope` filtering: a Section/Document node's own
+/// `prov.source_path`; any other (reasoning) node follows its `MENTIONS` edge to a
+/// Section/Document node and uses THAT path. `None` when no owning document resolves — e.g. a
+/// purely ungrounded query-side node with no MENTIONS — which [`in_scope`] treats as out of scope.
+pub fn owning_doc(g: &crate::graph::store::GraphStore, id: &str) -> Option<String> {
+    let node = g.get_node(id).ok().flatten()?;
+    if matches!(node.node_type.as_str(), "Section" | "Document") {
+        return Some(node.prov.source_path.clone());
+    }
+    for e in g.outgoing(id).unwrap_or_default() {
+        if e.edge_type != crate::graph::MENTIONS {
+            continue;
+        }
+        if let Ok(Some(sec)) = g.get_node(&e.to) {
+            if matches!(sec.node_type.as_str(), "Section" | "Document") {
+                return Some(sec.prov.source_path);
+            }
+        }
+    }
+    None
+}
+
+/// True when `doc` (a node's owning-document path, if any — see [`owning_doc`]) matches the
+/// compiled `scope` glob. `None` glob = always true (no scope set — unchanged behaviour). `None`
+/// doc with a set glob = false: an unattributable node isn't "material belonging to this
+/// document", so it is filtered out.
+pub fn in_scope(glob: Option<&globset::GlobMatcher>, doc: Option<&str>) -> bool {
+    match glob {
+        None => true,
+        Some(m) => doc.is_some_and(|d| crate::glob::path_matches(m, d)),
+    }
+}
+
+/// Compile a `scope` MCP/CLI argument (a bare document path or a real glob) once per call,
+/// mirroring how `grep`'s `path` is scoped: [`crate::grep::path_to_glob`] turns a plain path into
+/// `**/<p>` (and strips a trailing `#n`) while a value already carrying glob metacharacters passes
+/// through unchanged; [`crate::glob::compile_glob`] then compiles it. `None`/empty/
+/// whitespace-only `scope` compiles to `Ok(None)` — no filtering, identical to omitting it.
+pub fn compile_scope(scope: Option<&str>) -> Result<Option<globset::GlobMatcher>, String> {
+    match scope.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) => crate::glob::compile_glob(&crate::grep::path_to_glob(s))
+            .map(Some)
+            .map_err(|e| format!("scope error: {e}")),
+    }
+}
+
 /// Walk a reasoning node's full spine chain (e.g. Symptom → Cause → Resolution, or Task →
 /// Resolution) by following outgoing edges whose type is one of `spine_rels`, transitively. Each
 /// hop is one indented line `→ REL  [Type] label  — read <anchor>`; deeper hops indent further.
@@ -767,7 +814,9 @@ fn chain_lines(
 /// hides any resolved node (and any chain hop) outside its authored validity interval
 /// (`GraphStore::visible_at`); a timeless node (no validity row) is always shown. `stale` (when
 /// `Some`), flags any resolved node (or chain hop) whose source has drifted since grounding with
-/// an inline `⚠ stale` marker — advisory only, never hides the node.
+/// an inline `⚠ stale` marker — advisory only, never hides the node. `scope` (when `Some`), a bare
+/// document path or glob, drops any resolved entry (and any composed candidate) whose owning
+/// document ([`owning_doc`]) doesn't match; an unattributable entry is dropped too.
 #[allow(clippy::too_many_arguments)]
 /// Back-compat wrapper: `glossary` without a ranking query. Composed candidates fall back to
 /// ranking by the entity name.
@@ -779,12 +828,14 @@ pub fn glossary(
     trace: &TraceLog,
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
+    scope: Option<&str>,
 ) -> String {
-    glossary_with_query(idx, g, name, None, spec, trace, as_of, stale)
+    glossary_with_query(idx, g, name, None, spec, trace, as_of, stale, scope)
 }
 
 /// Look an entity up. `query` (when the caller has it — e.g. the full question) ranks the composed
 /// neighbourhood by the question's own terms, not just the entity name; `None` ranks by the name.
+#[allow(clippy::too_many_arguments)]
 pub fn glossary_with_query(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -794,10 +845,15 @@ pub fn glossary_with_query(
     trace: &TraceLog,
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
+    scope: Option<&str>,
 ) -> String {
     let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
+    };
+    let scope_glob = match compile_scope(scope) {
+        Ok(s) => s,
+        Err(e) => return e,
     };
     match g.resolve(name) {
         Ok(ids) => {
@@ -819,6 +875,7 @@ pub fn glossary_with_query(
                 .filter(|id| {
                     at.as_deref()
                         .is_none_or(|a| g.visible_at(id, a).unwrap_or(true))
+                        && in_scope(scope_glob.as_ref(), owning_doc(g, id).as_deref())
                 })
                 .collect();
             let truncated = visible.len().saturating_sub(GLOSSARY_MAX_ENTRIES);
@@ -948,6 +1005,7 @@ pub fn glossary_with_query(
                     let extra: Vec<String> = cands
                         .iter()
                         .filter(|c| !shown.contains(c.id.as_str()))
+                        .filter(|c| in_scope(scope_glob.as_ref(), owning_doc(g, &c.id).as_deref()))
                         .map(|c| {
                             // Show the node's ACTUAL type, whatever the ontology calls it — never a
                             // hardcoded "Fact".
@@ -991,12 +1049,20 @@ const COMMUNITY_TOP_LIMIT: usize = 8;
 /// uses — small models can't reliably reproduce a hashed id, so they may pass the label/entity
 /// instead. Any such substitution returns a `note` so the caller can surface "searched X → used Y"
 /// and it is never a silent swap.
+///
+/// `scope` (when set) narrows a fuzzy NAME resolution to candidates whose owning document matches:
+/// the first in-scope hit is preferred over `resolve`'s plain best-first order, falling back to the
+/// unrestricted best hit only when NONE of the candidates are in scope (so a scoped `reach` anchor
+/// lookup never hard-fails just because its best-ranked namesake lives in another document). An
+/// explicit node id or a `(path, n)` chunk ref is used as-is regardless of scope — the caller
+/// already pinned it precisely.
 fn resolve_node_ref(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     node: Option<&str>,
     path: Option<&str>,
     n: Option<u64>,
+    scope: Option<&globset::GlobMatcher>,
 ) -> Result<(String, Option<String>), String> {
     if let Some(nid) = node.filter(|s| !s.trim().is_empty()) {
         let nid = nid.trim();
@@ -1006,7 +1072,15 @@ fn resolve_node_ref(
         }
         // Not an id we hold: treat it as a name and resolve fuzzily. Report the substitution.
         if let Ok(hits) = g.resolve(nid) {
-            if let Some(hit) = hits.into_iter().next() {
+            let chosen = match scope {
+                Some(m) => hits
+                    .iter()
+                    .find(|h| in_scope(Some(m), owning_doc(g, h).as_deref()))
+                    .cloned()
+                    .or_else(|| hits.first().cloned()),
+                None => hits.into_iter().next(),
+            };
+            if let Some(hit) = chosen {
                 let label = g
                     .get_node(&hit)
                     .ok()
@@ -1048,7 +1122,9 @@ fn prepend_note(note: Option<String>, body: String) -> String {
 /// (no validity row) is always shown. This filters the *surrounding* graph only — the anchor node
 /// itself (resolved from `node`/`path`+`n`) is always looked up and its related nodes computed
 /// regardless of the anchor's own validity window. `stale` (when `Some`) flags any drifted-source
-/// endpoint with an inline `⚠ stale` marker.
+/// endpoint with an inline `⚠ stale` marker. `scope` (when `Some`), a bare document path or glob,
+/// drops any surrounding endpoint whose owning document ([`owning_doc`]) doesn't match — same
+/// filtering-the-surrounding-graph-only rule as `as_of`; an unattributable endpoint is dropped too.
 #[allow(clippy::too_many_arguments)]
 pub fn related(
     idx: &DocIndex,
@@ -1059,8 +1135,9 @@ pub fn related(
     trace: &TraceLog,
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
+    scope: Option<&str>,
 ) -> String {
-    let (id, note) = match resolve_node_ref(idx, g, node, path, n) {
+    let (id, note) = match resolve_node_ref(idx, g, node, path, n, None) {
         Ok(x) => x,
         Err(m) => return m,
     };
@@ -1068,8 +1145,14 @@ pub fn related(
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
     };
-    let visible =
-        |nid: &str| at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true));
+    let scope_glob = match compile_scope(scope) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let visible = |nid: &str| {
+        at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
+            && in_scope(scope_glob.as_ref(), owning_doc(g, nid).as_deref())
+    };
     let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
     for e in g.outgoing(&id).unwrap_or_default() {
@@ -1152,7 +1235,9 @@ fn edge_line(
 /// This filters the *surrounding* graph only — the anchor node itself (resolved from
 /// `node`/`path`+`n`) is always looked up and its edges enumerated regardless of the anchor's own
 /// validity window. `stale` (when `Some`) flags any drifted-source endpoint with an inline
-/// `⚠ stale` marker.
+/// `⚠ stale` marker. `scope` (when `Some`), a bare document path or glob, drops any surrounding
+/// endpoint whose owning document ([`owning_doc`]) doesn't match — same filtering-the-surrounding-
+/// graph-only rule as `as_of`; an unattributable endpoint is dropped too.
 #[allow(clippy::too_many_arguments)]
 pub fn neighbors(
     idx: &DocIndex,
@@ -1165,8 +1250,9 @@ pub fn neighbors(
     trace: &TraceLog,
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
+    scope: Option<&str>,
 ) -> String {
-    let (id, note) = match resolve_node_ref(idx, g, node, path, n) {
+    let (id, note) = match resolve_node_ref(idx, g, node, path, n, None) {
         Ok(x) => x,
         Err(m) => return m,
     };
@@ -1174,8 +1260,14 @@ pub fn neighbors(
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
     };
-    let visible =
-        |nid: &str| at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true));
+    let scope_glob = match compile_scope(scope) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let visible = |nid: &str| {
+        at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
+            && in_scope(scope_glob.as_ref(), owning_doc(g, nid).as_deref())
+    };
     let want = |et: &str| edge_types.is_none_or(|ts| ts.iter().any(|t| t == et));
     let mut lines = Vec::new();
     if direction != "in" {
@@ -1234,7 +1326,12 @@ const DEFAULT_REACH_BRIDGE_BUDGET: usize = 1;
 /// cross-document **bridge hop** renders as `↝ bridged on "<term>" (conf 0.NN)` so the reader
 /// always sees WHERE and on what mention the reasoning crossed a document — never a silent jump.
 /// Discovery with nothing found, or verify with no grounded path, returns a plain-English message
-/// instead of an empty body.
+/// instead of an empty body. `scope` (when `Some`), a bare document path or glob: (1) narrows a
+/// fuzzy NAME resolution of `from`/`to` to in-scope candidates ([`resolve_node_ref`]'s `scope`
+/// param — an exact id or `path`+`n` ref is unaffected, it's already precise), and (2) drops any
+/// discovered/verified hop-chain whose TERMINAL node's owning document ([`owning_doc`]) doesn't
+/// match, before rendering — this reproduces `grep`'s doc-scoping for cross-document reasoning
+/// without adding a per-hop gate (out of scope for this primitive; see module docs).
 #[allow(clippy::too_many_arguments)]
 pub fn reach(
     idx: &DocIndex,
@@ -1250,8 +1347,14 @@ pub fn reach(
     max_depth: usize,
     bridge: bool,
     trace: &TraceLog,
+    scope: Option<&str>,
 ) -> String {
-    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n) {
+    let scope_glob = match compile_scope(scope) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n, scope_glob.as_ref())
+    {
         Ok(x) => x,
         Err(m) => return format!("from: {m}"),
     };
@@ -1261,7 +1364,7 @@ pub fn reach(
     let to_requested =
         to_node.is_some_and(|s| !s.trim().is_empty()) || (to_path.is_some() && to_n.is_some());
     let (to, note_to) = if to_requested {
-        match resolve_node_ref(idx, g, to_node, to_path, to_n) {
+        match resolve_node_ref(idx, g, to_node, to_path, to_n, scope_glob.as_ref()) {
             Ok((id, note)) => (Some(id), note),
             Err(m) => return format!("to: {m}"),
         }
@@ -1275,7 +1378,17 @@ pub fn reach(
 
     let body = match crate::graph::traverse::reach(g, ont, &from, relation, to.as_deref(), depth, budget)
     {
-        Ok(res) => {
+        Ok(mut res) => {
+            // Filter rendered terminal/bridge endpoints: drop any hop-chain whose last node isn't
+            // in scope. Discovery mode drops out-of-scope targets; verify mode's single path (if
+            // its terminal — the requested `to` — falls out of scope) empties `paths`, so
+            // `render_reach_result` naturally reports "no grounded path" rather than showing it.
+            if let Some(m) = scope_glob.as_ref() {
+                res.paths.retain(|hops| {
+                    hops.last()
+                        .is_some_and(|h| in_scope(Some(m), owning_doc(g, &h.node).as_deref()))
+                });
+            }
             trace.log(
                 "reach",
                 json!({"from": from, "to": to, "relation": relation, "bridge": bridge}),
@@ -2179,13 +2292,13 @@ mod tests {
         .unwrap();
         let t = TraceLog::disabled();
         // No as_of: node is visible as usual.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None, None);
         assert!(out.contains("[Symptom]"), "{out}");
         // as_of after the validity window: the node is filtered out entirely.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"), None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"), None, None);
         assert_eq!(out, "(no matches)", "{out}");
         // as_of inside the window: still visible.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"), None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"), None, None);
         assert!(out.contains("[Symptom]"), "{out}");
     }
 
@@ -2229,7 +2342,7 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None);
+        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None, None);
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
             out.contains("[Symptom]") && out.contains("Bus link dropout"),
@@ -2261,7 +2374,7 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None, None);
+        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None, None, None);
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -2315,14 +2428,14 @@ mod tests {
         let t = TraceLog::disabled();
         let stale = StaleChecker::new(root.path());
 
-        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, Some(&stale));
+        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, Some(&stale), None);
         assert!(out.contains("⚠ stale"), "expected stale marker: {out}");
 
-        let out = glossary(&i, &g, "Fresh symptom", &ChainSpec::default(), &t, None, Some(&stale));
+        let out = glossary(&i, &g, "Fresh symptom", &ChainSpec::default(), &t, None, Some(&stale), None);
         assert!(!out.contains("⚠ stale"), "unexpected stale marker: {out}");
 
         // No checker at all (as production callers that lack a root may pass) → no marker either.
-        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, None);
+        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, None, None);
         assert!(!out.contains("⚠ stale"), "stale check must be opt-in: {out}");
     }
 
@@ -2331,7 +2444,7 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None, None);
         assert!(
             out.contains("SIMILAR")
                 && out.contains("Update module firmware")
@@ -2399,7 +2512,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (_d, i) = idx();
         let (_gd, g) = two_component_reasoning_graph();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:a"), None, None, &t, None, None);
+        let out = related(&i, &g, Some("sym:a"), None, None, &t, None, None, None);
         assert!(
             out.contains("COMMUNITY"),
             "expected community siblings: {out}"
@@ -2423,7 +2536,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let opts = crate::graph::generalize::apply::Opts::from_ontology(&ont, 100);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None, None);
         assert!(
             out.contains("SIMILAR") && out.contains("Update module firmware"),
             "{out}"
@@ -2487,7 +2600,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
-        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None);
+        let out = related(&i, &g, Some("sym:loss"), None, None, &t, None, None, None);
         let community_lines: Vec<_> = out.lines().filter(|l| l.starts_with("COMMUNITY")).collect();
         assert_eq!(
             community_lines.len(),
@@ -2526,6 +2639,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
             None,
             None,
+            None,
         );
         assert!(both.contains("REFERENCES") && both.contains("->"));
         assert!(both.contains("CONSTRAINED_BY") && both.contains("<-"));
@@ -2539,6 +2653,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             None,
             "out",
             &TraceLog::disabled(),
+            None,
             None,
             None,
         );
@@ -2555,6 +2670,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
             None,
             None,
+            None,
         );
         assert!(filtered.contains("CONSTRAINED_BY") && !filtered.contains("REFERENCES"));
 
@@ -2567,6 +2683,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             Some(&["NOPE".to_string()]),
             "both",
             &TraceLog::disabled(),
+            None,
             None,
             None,
         );
@@ -2594,6 +2711,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
             None,
             None,
+            None,
         );
         assert_eq!(both.matches("LINKS").count(), 1, "self-loop rendered twice: {both}");
 
@@ -2609,6 +2727,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
             None,
             None,
+            None,
         );
         assert_eq!(out.matches("LINKS").count(), 1);
         assert!(out.contains("->"));
@@ -2621,6 +2740,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             None,
             "in",
             &TraceLog::disabled(),
+            None,
             None,
             None,
         );
@@ -2660,6 +2780,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             false,
             &TraceLog::disabled(),
+            None,
         );
         assert!(out.contains("--REFERENCES-->"), "got: {out}");
         // first line is the `from` node, no arrow prefix
@@ -2682,6 +2803,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             false,
             &TraceLog::disabled(),
+            None,
         );
         assert!(
             reverse.contains("<--CONSTRAINED_BY--"),
@@ -2702,6 +2824,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             false,
             &TraceLog::disabled(),
+            None,
         );
         assert!(none.starts_with("no grounded path"), "got: {none}");
 
@@ -2720,6 +2843,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             999,
             false,
             &TraceLog::disabled(),
+            None,
         );
         assert!(clamped.contains("--REFERENCES-->"));
     }
@@ -2781,6 +2905,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             true,
             &TraceLog::disabled(),
+            None,
         );
         assert!(out.contains("Target"), "expected the discovered target handle, got: {out}");
         assert!(out.contains("[Entity]"), "expected a glossary-style handle, got: {out}");
@@ -2804,6 +2929,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             false,
             &TraceLog::disabled(),
+            None,
         );
         assert!(
             !no_bridge.contains("Target"),
@@ -2844,6 +2970,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             true,
             &TraceLog::disabled(),
+            None,
         );
         assert!(hit.contains("Target"), "got: {hit}");
         assert!(
@@ -2866,6 +2993,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             6,
             true,
             &TraceLog::disabled(),
+            None,
         );
         assert!(
             miss.starts_with("no grounded path"),
@@ -2884,11 +3012,11 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         g.put_node(&node("fact:x", "Fact", "Some fact")).unwrap();
 
         // An explicit, existing node id resolves to itself with no note.
-        let (id, note) = resolve_node_ref(&idx, &g, Some("fact:x"), None, None).unwrap();
+        let (id, note) = resolve_node_ref(&idx, &g, Some("fact:x"), None, None, None).unwrap();
         assert_eq!(id, "fact:x");
         assert!(note.is_none());
         // Missing both node and (path, n) is an error.
-        assert!(resolve_node_ref(&idx, &g, None, None, None).is_err());
+        assert!(resolve_node_ref(&idx, &g, None, None, None, None).is_err());
     }
 
     #[test]
@@ -2909,7 +3037,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         // A weak model can't reproduce a hashed id, so it passes the name instead. It must resolve
         // to the node AND report the substitution — never a silent swap.
         let (rid, rnote) =
-            resolve_node_ref(&idx, &g, Some("Heliocentrism"), None, None).unwrap();
+            resolve_node_ref(&idx, &g, Some("Heliocentrism"), None, None, None).unwrap();
         assert_eq!(rid, "fact:helio", "resolved the name to the node");
         let rnote = rnote.expect("a fuzzy substitution must be reported");
         assert!(
@@ -2918,7 +3046,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
 
         // A genuine miss is an error, not a wrong node silently returned.
-        assert!(resolve_node_ref(&idx, &g, Some("zzz-nope-xyz"), None, None).is_err());
+        assert!(resolve_node_ref(&idx, &g, Some("zzz-nope-xyz"), None, None, None).is_err());
     }
 
     #[test]
@@ -3397,13 +3525,13 @@ strict = true
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
-        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
+        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None, None);
         assert!(
             result.contains("org:acme"),
             "expected node id in result, got: {result}"
         );
         assert_eq!(
-            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None, None),
+            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None, None, None),
             "(no matches)"
         );
     }
@@ -3420,7 +3548,7 @@ strict = true
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
-        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None);
+        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None, None);
         assert!(after.contains("org:acme"), "still shows the node id: {after}");
         assert!(
             !after.contains("comm ") && !after.contains(" pr ") && !after.contains(" deg "),
@@ -3465,7 +3593,7 @@ strict = true
 
         // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
         // so the agent sees the causal chain without a separate call.
-        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None, None);
+        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None, None, None);
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
             out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
@@ -3499,12 +3627,12 @@ strict = true
         let t = TraceLog::disabled();
 
         // "Intro" is a Section node; glossary should render it as "path#1 · Intro".
-        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None, None);
+        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None, None, None);
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
         assert_eq!(
-            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None, None),
+            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None, None, None),
             "(no matches)"
         );
     }
@@ -3533,7 +3661,7 @@ strict = true
         .unwrap();
         g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id)).unwrap();
 
-        let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None);
+        let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None, None);
         assert!(
             out.contains("3rd century BC"),
             "fact grounded to the matched section must surface, not just the stub: {out}"
@@ -3579,7 +3707,7 @@ strict = true
         let spec = ChainSpec {
             spine_rels: vec!["LEADS_TO".to_string()],
         };
-        let out = glossary(&idx, &g, "Sun", &spec, &t, None, None);
+        let out = glossary(&idx, &g, "Sun", &spec, &t, None, None, None);
         assert!(
             out.contains("3rd century BC"),
             "glossary must expand the LEADS_TO neighbour of a section-grounded fact so the next \
@@ -3613,5 +3741,193 @@ strict = true
             !result.is_empty(),
             "query should return results: {result}"
         );
+    }
+
+    // ── `scope` doc-filter tests ────────────────────────────────────────────
+
+    /// A structural Section node grounding attribution for `owning_doc`: a reasoning node
+    /// MENTIONS-ing this section is attributed to `doc`.
+    fn section_node(id: &str, doc: &str, label: &str) -> Node {
+        Node {
+            id: id.into(),
+            node_type: "Section".into(),
+            label: label.into(),
+            aliases: Vec::new(),
+            prov: Provenance {
+                source_path: doc.into(),
+                range: None,
+                file_sig: None,
+                origin: "auto-structural".into(),
+                confidence: 1.0,
+                created_at: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn neighbors_scope_narrows_to_owning_document_and_glob_and_unattributable() {
+        // Two synthetic documents; a shared "root" entity with a structural edge to one endpoint
+        // grounded (via MENTIONS) in each document, plus one endpoint with NO owning document.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&node("ent:root", "Entity", "Root")).unwrap();
+        g.put_node(&node("ent:in_a", "Entity", "In docA")).unwrap();
+        g.put_node(&node("ent:in_b", "Entity", "In docB")).unwrap();
+        g.put_node(&node("ent:none", "Entity", "Ungrounded")).unwrap();
+        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA")).unwrap();
+        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB")).unwrap();
+        // ent:none has no MENTIONS edge at all — unattributable.
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_a")).unwrap();
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_b")).unwrap();
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:none")).unwrap();
+
+        let t = TraceLog::disabled();
+
+        // No scope: unchanged baseline — every endpoint shows.
+        let all = neighbors(
+            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None, None,
+        );
+        assert!(
+            all.contains("ent:in_a") && all.contains("ent:in_b") && all.contains("ent:none"),
+            "{all}"
+        );
+
+        // scope=docA.md: only the docA-owned endpoint remains.
+        let scoped = neighbors(
+            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None,
+            Some("docA.md"),
+        );
+        assert!(scoped.contains("ent:in_a"), "{scoped}");
+        assert!(!scoped.contains("ent:in_b"), "{scoped}");
+        assert!(
+            !scoped.contains("ent:none"),
+            "unattributable endpoint must be excluded once scope is set: {scoped}"
+        );
+
+        // Glob: "doc*" matches both documents — the unattributable endpoint stays excluded.
+        let glob_scoped = neighbors(
+            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None, Some("doc*"),
+        );
+        assert!(
+            glob_scoped.contains("ent:in_a") && glob_scoped.contains("ent:in_b"),
+            "{glob_scoped}"
+        );
+        assert!(!glob_scoped.contains("ent:none"), "{glob_scoped}");
+
+        // Non-matching glob: nothing survives.
+        let none_scoped = neighbors(
+            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None,
+            Some("nomatch*"),
+        );
+        assert_eq!(none_scoped, "(no structural edges)", "{none_scoped}");
+    }
+
+    #[test]
+    fn related_scope_narrows_to_owning_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&node("ent:root", "Entity", "Root")).unwrap();
+        g.put_node(&node("ent:in_a", "Entity", "In docA")).unwrap();
+        g.put_node(&node("ent:in_b", "Entity", "In docB")).unwrap();
+        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA")).unwrap();
+        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB")).unwrap();
+        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_a")).unwrap();
+        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_b")).unwrap();
+
+        let t = TraceLog::disabled();
+
+        // No scope: unchanged baseline.
+        let all = related(&idx, &g, Some("ent:root"), None, None, &t, None, None, None);
+        assert!(all.contains("ent:in_a") && all.contains("ent:in_b"), "{all}");
+
+        // scope=docA.md: only the docA-owned SIMILAR case remains.
+        let scoped = related(
+            &idx, &g, Some("ent:root"), None, None, &t, None, None, Some("docA.md"),
+        );
+        assert!(scoped.contains("ent:in_a"), "{scoped}");
+        assert!(!scoped.contains("ent:in_b"), "{scoped}");
+    }
+
+    #[test]
+    fn glossary_scope_narrows_grounded_entries_to_owning_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        // Two facts sharing the exact same label — `resolve` returns both (label_norm match).
+        g.put_node(&node("fact:a", "Fact", "Shared term")).unwrap();
+        g.put_node(&node("fact:b", "Fact", "Shared term")).unwrap();
+        g.put_edge(&edge("fact:a", "MENTIONS", "sec:docA")).unwrap();
+        g.put_edge(&edge("fact:b", "MENTIONS", "sec:docB")).unwrap();
+
+        let t = TraceLog::disabled();
+
+        // No scope: unchanged baseline — both facts surface.
+        let all = glossary(&idx, &g, "Shared term", &ChainSpec::default(), &t, None, None, None);
+        assert!(all.contains("fact:a") && all.contains("fact:b"), "{all}");
+
+        // scope=docA.md: only the docA-grounded fact surfaces.
+        let scoped = glossary(
+            &idx,
+            &g,
+            "Shared term",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            Some("docA.md"),
+        );
+        assert!(scoped.contains("fact:a"), "{scoped}");
+        assert!(!scoped.contains("fact:b"), "{scoped}");
+    }
+
+    #[test]
+    fn reach_scope_filters_discovered_targets_by_owning_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::default();
+
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        for id in ["reach_start", "reach_target_a", "reach_target_b"] {
+            g.put_node(&node(id, "Entity", id)).unwrap();
+        }
+        g.put_edge(&edge("reach_target_a", "MENTIONS", "sec:docA")).unwrap();
+        g.put_edge(&edge("reach_target_b", "MENTIONS", "sec:docB")).unwrap();
+        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_a")).unwrap();
+        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_b")).unwrap();
+
+        let t = TraceLog::disabled();
+
+        // No scope: unchanged baseline — discovery finds both targets. Discovery mode only
+        // records a target when `relation` is explicit (`traverse::reach`'s undirected
+        // `relation=None` connectivity mode records no targets at all), so pass one here.
+        let all = reach(
+            &idx, &g, &ont, Some("reach_start"), None, None, Some("REFERENCES"), None, None,
+            None, 6, false, &t, None,
+        );
+        assert!(
+            all.contains("reach_target_a") && all.contains("reach_target_b"),
+            "{all}"
+        );
+
+        // scope=docA.md: only the docA-owned target chain survives.
+        let scoped = reach(
+            &idx, &g, &ont, Some("reach_start"), None, None, Some("REFERENCES"), None, None,
+            None, 6, false, &t, Some("docA.md"),
+        );
+        assert!(scoped.contains("reach_target_a"), "{scoped}");
+        assert!(!scoped.contains("reach_target_b"), "{scoped}");
     }
 }

@@ -213,6 +213,7 @@ pub fn exec(
                     trace,
                     as_of.as_deref(),
                     None,
+                    None,
                 ),
                 None => "(graph unavailable)".to_string(),
             };
@@ -233,9 +234,17 @@ pub fn exec(
                 glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
             });
             let body = match graph {
-                Some(g) => {
-                    glossa::tools::related(idx, g, node, path, n, trace, as_of.as_deref(), None)
-                }
+                Some(g) => glossa::tools::related(
+                    idx,
+                    g,
+                    node,
+                    path,
+                    n,
+                    trace,
+                    as_of.as_deref(),
+                    None,
+                    None,
+                ),
                 None => "(graph unavailable)".to_string(),
             };
             let ids = extract_node_ids(&body);
@@ -271,6 +280,7 @@ pub fn exec(
                     direction,
                     trace,
                     as_of.as_deref(),
+                    None,
                     None,
                 ),
                 None => "(graph unavailable)".to_string(),
@@ -313,7 +323,7 @@ pub fn exec(
                     let ont = glossa::graph::ontology::Ontology::load_or_default(root);
                     glossa::tools::reach(
                         idx, g, &ont, from, from_path, from_n, relation, to, to_path, to_n,
-                        max_depth, bridge, trace,
+                        max_depth, bridge, trace, None,
                     )
                 }
                 None => "(graph unavailable)".to_string(),
@@ -748,7 +758,7 @@ mod tests {
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
         let mcp_out =
-            glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None, None);
+            glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None, None, None);
         // Eval path: dispatch through exec().
         let eval_out = exec(
             "related",

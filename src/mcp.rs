@@ -548,6 +548,9 @@ pub(crate) struct RelatedArgs {
         description = "show the graph as it was valid on this date (ISO-8601); a related node outside its validity interval is hidden. Timeless nodes are always shown. Filters the surrounding related nodes only, not the anchor `node` itself."
     )]
     as_of: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -581,6 +584,9 @@ pub(crate) struct NeighborsArgs {
         description = "show the graph as it was valid on this date (ISO-8601); a neighbor outside its validity interval is hidden. Timeless nodes are always shown. Filters the surrounding neighbors only, not the anchor `node` itself."
     )]
     as_of: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -599,6 +605,9 @@ pub(crate) struct GlossaryArgs {
         description = "show the graph as it was valid on this date (ISO-8601); a matched node outside its validity interval is hidden. Timeless nodes are always shown."
     )]
     as_of: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -651,11 +660,17 @@ pub(crate) struct ReachArgs {
     )]
     #[schemars(description = "max edges to search (default 6, capped at 12)")]
     max_depth: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct NameArg {
     name: String,
+    #[serde(default)]
+    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1103,6 +1118,7 @@ impl GlossaServer {
                 &self.trace,
                 a.as_of.as_deref(),
                 Some(&stale),
+                a.scope.as_deref(),
             ),
         )]))
     }
@@ -1128,6 +1144,7 @@ impl GlossaServer {
                 &self.trace,
                 a.as_of.as_deref(),
                 Some(&stale),
+                a.scope.as_deref(),
             ),
         )]))
     }
@@ -1156,6 +1173,7 @@ impl GlossaServer {
                 &self.trace,
                 a.as_of.as_deref(),
                 Some(&stale),
+                a.scope.as_deref(),
             ),
         )]))
     }
@@ -1187,6 +1205,7 @@ impl GlossaServer {
                 a.max_depth.unwrap_or(6),
                 a.bridge.unwrap_or(true),
                 &self.trace,
+                a.scope.as_deref(),
             ),
         )]))
     }
@@ -1250,8 +1269,17 @@ impl GlossaServer {
         Parameters(a): Parameters<NameArg>,
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
+        let ids = g.resolve(&a.name).map_err(internal)?;
+        // `GraphStore::resolve` returns bare ids with no path info, so scope is applied here in
+        // the handler (after resolve returns) rather than in the store fn — see task brief.
+        let scope_glob =
+            crate::tools::compile_scope(a.scope.as_deref()).map_err(|e| internal(anyhow::anyhow!(e)))?;
+        let filtered: Vec<String> = ids
+            .into_iter()
+            .filter(|id| crate::tools::in_scope(scope_glob.as_ref(), crate::tools::owning_doc(&g, id).as_deref()))
+            .collect();
         Ok(CallToolResult::success(vec![Content::text(
-            g.resolve(&a.name).map_err(internal)?.join("\n"),
+            filtered.join("\n"),
         )]))
     }
 
@@ -1718,13 +1746,14 @@ mod tests {
         assert_eq!(g.multiline, Some(true));
 
         let ne: NeighborsArgs = serde_json::from_str(
-            r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out","as_of":"2022"}"#,
+            r#"{"node":"sym:x","n":"3","edge_types":"REFERENCES","direction":"out","as_of":"2022","scope":"somedoc.pdf"}"#,
         )
         .unwrap();
         assert_eq!(ne.n, Some(3));
         assert_eq!(ne.edge_types, Some(vec!["REFERENCES".to_string()]));
         assert_eq!(ne.direction, Some("out".to_string()));
         assert_eq!(ne.as_of, Some("2022".to_string()));
+        assert_eq!(ne.scope, Some("somedoc.pdf".to_string()));
 
         // as_of also accepts a bare JSON number (a model writing a year unquoted).
         let ne2: NeighborsArgs =
@@ -1732,16 +1761,18 @@ mod tests {
         assert_eq!(ne2.as_of, Some("2022".to_string()));
 
         let gl: GlossaryArgs =
-            serde_json::from_str(r#"{"name":"loss","query":"why is the connection lost","as_of":"2022-06-01"}"#).unwrap();
+            serde_json::from_str(r#"{"name":"loss","query":"why is the connection lost","as_of":"2022-06-01","scope":"somedoc.pdf"}"#).unwrap();
         assert_eq!(gl.as_of, Some("2022-06-01".to_string()));
         assert_eq!(gl.query, "why is the connection lost");
+        assert_eq!(gl.scope, Some("somedoc.pdf".to_string()));
 
         let re: RelatedArgs =
-            serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
+            serde_json::from_str(r#"{"node":"sym:x","as_of":2022,"scope":"somedoc.pdf"}"#).unwrap();
         assert_eq!(re.as_of, Some("2022".to_string()));
+        assert_eq!(re.scope, Some("somedoc.pdf".to_string()));
 
         let ra: ReachArgs = serde_json::from_str(
-            r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9","relation":"located","bridge":"false"}"#,
+            r#"{"from":"sym:a","to":"sym:b","from_n":"1","to_n":"2","max_depth":"9","relation":"located","bridge":"false","scope":"somedoc.pdf"}"#,
         )
         .unwrap();
         assert_eq!(ra.from_n, Some(1));
@@ -1749,6 +1780,7 @@ mod tests {
         assert_eq!(ra.max_depth, Some(9));
         assert_eq!(ra.relation, Some("located".to_string()));
         assert_eq!(ra.bridge, Some(false));
+        assert_eq!(ra.scope, Some("somedoc.pdf".to_string()));
 
         // relation also accepts a bare JSON number (mirrors as_of above); bridge accepts a bare bool.
         let ra2: ReachArgs =

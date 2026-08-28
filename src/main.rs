@@ -318,6 +318,9 @@ enum GraphAction {
         /// validity interval is hidden. Timeless nodes are always shown.
         #[arg(long = "as-of")]
         as_of: Option<String>,
+        /// Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`).
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Run a read-only SQL SELECT over the graph (the `sql` tool). Empty SQL prints the schema.
     Query {
@@ -380,6 +383,9 @@ enum GraphAction {
         /// Reference instant for validity status (defaults to now). Deterministic in tests.
         #[arg(long)]
         now: Option<String>,
+        /// Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`).
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Show a node: type, label, provenance, and its outgoing edges.
     Node {
@@ -415,6 +421,9 @@ enum GraphAction {
         no_bridge: bool,
         #[arg(short = 'd', long, default_value_t = 6)]
         max_depth: usize,
+        /// Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`).
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Dump all nodes (optionally filtered by type) with their outgoing edges.
     Dump {
@@ -1275,7 +1284,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
-            GraphAction::Glossary { query, path, as_of } => {
+            GraphAction::Glossary { query, path, as_of, scope } => {
                 let path = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
@@ -1295,6 +1304,7 @@ fn main() -> anyhow::Result<()> {
                         &trace,
                         as_of.as_deref(),
                         Some(&stale),
+                        scope.as_deref(),
                     )
                 );
                 Ok(())
@@ -1407,6 +1417,7 @@ fn main() -> anyhow::Result<()> {
                 types,
                 as_of,
                 now: _now,
+                scope,
             } => {
                 let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
@@ -1419,11 +1430,23 @@ fn main() -> anyhow::Result<()> {
                     .as_deref()
                     .map(glossa::graph::temporal::normalize_point)
                     .transpose()?;
+                // `Near` is a multi-hop BFS lister (`traverse::neighbors`), a different primitive
+                // from the `neighbors` MCP tool (1-hop typed edges, `tools::neighbors`) — it has no
+                // shared core fn to thread `scope` through, so filter its output ids directly here
+                // with the same doc-attribution rule (`tools::owning_doc`/`in_scope`) the tools use.
+                let scope_glob = glossa::tools::compile_scope(scope.as_deref())
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 for id in glossa::graph::traverse::neighbors(&g, &node_id, filter, depth)? {
                     if let Some(a) = &at {
                         if !g.visible_at(&id, a)? {
                             continue;
                         }
+                    }
+                    if !glossa::tools::in_scope(
+                        scope_glob.as_ref(),
+                        glossa::tools::owning_doc(&g, &id).as_deref(),
+                    ) {
+                        continue;
                     }
                     // Section ids are opaque ordinals (`<path>#<n>`); print the node label
                     // (heading) alongside so the output stays human-readable.
@@ -1502,6 +1525,7 @@ fn main() -> anyhow::Result<()> {
                 path,
                 no_bridge,
                 max_depth,
+                scope,
             } => {
                 let path = glossa::root::resolve_root(path);
                 glossa::index::store::ensure_fresh(&path)?;
@@ -1525,6 +1549,7 @@ fn main() -> anyhow::Result<()> {
                         max_depth,
                         !no_bridge,
                         &trace,
+                        scope.as_deref(),
                     )
                 );
                 Ok(())
