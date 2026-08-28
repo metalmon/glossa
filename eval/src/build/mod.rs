@@ -28,7 +28,7 @@ use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -125,6 +125,23 @@ fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
         .collect();
     docs.sort();
     Ok(docs)
+}
+
+/// Per-doc progress weight for the extract bar: `doc`'s indexed chunk count from `chunk_counts`
+/// (built via `DocIndex::iter_chunks`, keyed by the same corpus-relative path `enumerate_docs`
+/// uses for Document node ids — both derive from the same `Chunk::doc_path`, so a doc present in
+/// the index matches exactly). Falls back to `1` — never `0` — when `doc` is absent from the map
+/// (an empty document, or one not yet indexed), so the bar always advances instead of stalling.
+fn extract_doc_weight(doc: &str, chunk_counts: &HashMap<String, usize>) -> usize {
+    chunk_counts.get(doc).copied().unwrap_or(1).max(1)
+}
+
+/// Total progress units for the extract bar = sum of each doc's chunk weight (`extract_doc_weight`)
+/// over `docs` — a 20-chunk doc advances the bar by 20, not 1, so `[pos/len]`/elapsed/ETA track
+/// actual extraction work instead of a per-document tick. Empty `docs` sums to `0`; the caller
+/// guards the bar length with `.max(1)` so a length-0 bar can't stall indicator progress.
+fn extract_total_chunks(docs: &[String], chunk_counts: &HashMap<String, usize>) -> usize {
+    docs.iter().map(|d| extract_doc_weight(d, chunk_counts)).sum()
 }
 
 /// How much of a `run_build` pass actually did — the outcome of the incremental gate plus the
@@ -322,13 +339,24 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         }
         drop(g);
 
-        let pb = progress_bar(docs.len(), opts.no_progress);
-        pb.set_message("extract");
+        // Weight the bar by chunk, not by document: a huge document is otherwise one tick and
+        // the bar/ETA lie on a mixed-size corpus. `idx` (opened above for the delta) already has
+        // every indexed chunk, keyed by the same corpus-relative path as `docs`' entries (see
+        // `extract_doc_weight`) — one extra `iter_chunks` pass builds the count map up front.
+        let mut chunk_counts: HashMap<String, usize> = HashMap::new();
+        idx.iter_chunks(|path, _ord, _kind, _text| {
+            *chunk_counts.entry(path.to_string()).or_default() += 1;
+        })
+        .context("counting chunks per doc for extract-bar weights")?;
+        let total_chunks = extract_total_chunks(&docs, &chunk_counts);
+
+        let pb = progress_bar(total_chunks.max(1), opts.no_progress);
+        pb.set_message("extract (chunks)");
         let mut total = ExtractStats::default();
         for doc in &docs {
             let unit_id = format!("extract:{doc}");
             if opts.resume && cp.is_done(&unit_id) {
-                pb.inc(1);
+                pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
             let stats = extract_doc(
@@ -346,12 +374,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
             report.docs_extracted.push(doc.clone());
-            pb.inc(1);
+            pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
         }
         pb.finish_and_clear();
         println!(
-            "extract: {} doc(s), {} node(s), {} mention edge(s)",
+            "extract: {} doc(s), {} chunk(s), {} node(s), {} mention edge(s)",
             docs.len(),
+            total_chunks,
             total.nodes,
             total.mentions
         );
@@ -925,5 +954,75 @@ mod tests {
 
         let g = GraphStore::open(&root).unwrap();
         assert!(g.get_node("f_gone").unwrap().is_none());
+    }
+
+    #[test]
+    fn extract_total_chunks_weighs_by_real_chunk_count() {
+        // The whole point: a 20-chunk doc must weigh 20, not 1.
+        let docs = vec!["docA.md".to_string(), "docB.md".to_string()];
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        counts.insert("docA.md".to_string(), 3);
+        counts.insert("docB.md".to_string(), 20);
+        assert_eq!(extract_total_chunks(&docs, &counts), 23);
+    }
+
+    #[test]
+    fn extract_total_chunks_falls_back_to_one_for_absent_doc() {
+        let docs = vec!["docA.md".to_string()];
+        let counts: HashMap<String, usize> = HashMap::new();
+        assert_eq!(
+            extract_total_chunks(&docs, &counts),
+            1,
+            "a doc missing from chunk_counts must fall back to weight 1, never 0"
+        );
+    }
+
+    #[test]
+    fn extract_total_chunks_empty_docs_is_zero() {
+        // The bar-length call site guards this with `.max(1)` so a zero-length bar can't stall.
+        let docs: Vec<String> = Vec::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        assert_eq!(extract_total_chunks(&docs, &counts), 0);
+    }
+
+    /// Corroborates the assumption `extract_doc_weight` relies on: `DocIndex::iter_chunks`'
+    /// `path` and the `Document` node id `enumerate_docs` returns are the SAME corpus-relative
+    /// string (both derive from `Chunk::doc_path.to_string_lossy()` over the same discovery
+    /// pass — see `build_structural`/`write_chunks`). If they didn't match, `extract_doc_weight`
+    /// would silently fall back to 1 for every real doc and reintroduce the exact per-document
+    /// stepping this task removes. docA.md has 3 headed sections (-> 3 chunks); docB.md is one
+    /// short section (-> 1 chunk).
+    #[test]
+    fn iter_chunks_path_matches_document_node_id_for_multi_chunk_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("docA.md"),
+            "# One\n\nFirst body.\n\n# Two\n\nSecond body.\n\n# Three\n\nThird body.\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docB.md"), "# Solo\n\nOnly body.\n").unwrap();
+        glossa::index::store::index_dir(root, true).unwrap();
+
+        let g = GraphStore::open(root).unwrap();
+        let docs = enumerate_docs(&g).unwrap();
+        drop(g);
+        assert_eq!(docs, vec!["docA.md".to_string(), "docB.md".to_string()]);
+
+        let idx = DocIndex::open_or_create(root).unwrap();
+        let mut chunk_counts: HashMap<String, usize> = HashMap::new();
+        idx.iter_chunks(|path, _ord, _kind, _text| {
+            *chunk_counts.entry(path.to_string()).or_default() += 1;
+        })
+        .unwrap();
+
+        assert_eq!(
+            chunk_counts.get("docA.md").copied(),
+            Some(3),
+            "iter_chunks path must match the Document node id (docA.md) directly"
+        );
+        assert_eq!(chunk_counts.get("docB.md").copied(), Some(1));
+        assert_eq!(extract_doc_weight("docA.md", &chunk_counts), 3);
+        assert_eq!(extract_total_chunks(&docs, &chunk_counts), 4);
     }
 }
