@@ -115,7 +115,7 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
 
 /// Corpus-relative paths of every structural `Document` node in the graph, sorted for
 /// deterministic enumeration order (sqlite row order isn't guaranteed).
-fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
+pub(crate) fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
     let mut docs: Vec<String> = g
         .all_nodes()
         .context("listing nodes to enumerate documents")?
@@ -132,7 +132,7 @@ fn enumerate_docs(g: &GraphStore) -> Result<Vec<String>> {
 /// uses for Document node ids — both derive from the same `Chunk::doc_path`, so a doc present in
 /// the index matches exactly). Falls back to `1` — never `0` — when `doc` is absent from the map
 /// (an empty document, or one not yet indexed), so the bar always advances instead of stalling.
-fn extract_doc_weight(doc: &str, chunk_counts: &HashMap<String, usize>) -> usize {
+pub(crate) fn extract_doc_weight(doc: &str, chunk_counts: &HashMap<String, usize>) -> usize {
     chunk_counts.get(doc).copied().unwrap_or(1).max(1)
 }
 
@@ -140,7 +140,7 @@ fn extract_doc_weight(doc: &str, chunk_counts: &HashMap<String, usize>) -> usize
 /// over `docs` — a 20-chunk doc advances the bar by 20, not 1, so `[pos/len]`/elapsed/ETA track
 /// actual extraction work instead of a per-document tick. Empty `docs` sums to `0`; the caller
 /// guards the bar length with `.max(1)` so a length-0 bar can't stall indicator progress.
-fn extract_total_chunks(docs: &[String], chunk_counts: &HashMap<String, usize>) -> usize {
+pub(crate) fn extract_total_chunks(docs: &[String], chunk_counts: &HashMap<String, usize>) -> usize {
     docs.iter().map(|d| extract_doc_weight(d, chunk_counts)).sum()
 }
 

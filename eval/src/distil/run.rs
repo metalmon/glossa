@@ -7,15 +7,18 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
+use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
+use crate::distil::densify::{densify_doc, DensifyStats};
 use crate::distil::gen::{generate_one, GenOutcome, Seed};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
+use glossa::index::store::DocIndex;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -38,6 +41,21 @@ pub struct DistilArgs {
     pub seed_type: Option<String>,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
+    // --- `kbx distil densify` orchestrator fields (Task 3 of the densification plan; `kbx`'s
+    // CLI wiring for these lands in Task 4) ---
+    /// Restrict `run_densify` to a single document (its structural-graph `Document` node id, i.e.
+    /// its corpus-relative path) — mirrors `BuildOpts::doc`/`ReasonArgs`' single-unit narrowing.
+    pub doc: Option<String>,
+    /// Clear this run's `distil:{doc}` checkpoint first — a true full rebuild of the densify pass
+    /// (mirrors `BuildOpts::force`/`ReasonArgs::force`).
+    pub force: bool,
+    /// Skip documents already recorded done in the densify checkpoint (mirrors
+    /// `BuildOpts::resume`/`ReasonArgs::resume`).
+    pub resume: bool,
+    /// Number of chunks folded into a single densify round — threaded straight into
+    /// `densify_doc` (mirrors `BuildOpts::chunks_per_round`). Default `3`, matching
+    /// `BuildOpts::default()`.
+    pub chunks_per_round: usize,
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -251,6 +269,169 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// `kbx distil densify` — the whole-corpus, checkpointed/resumable orchestrator for `densify_doc`
+// (Task 3 of the 2026-08-28 densification plan). Mirrors `run_build`'s extract stage
+// (`crate::build::run_build`, the `if run_extract_stage { ... }` block) in shape: enumerate docs
+// -> chunk-weighted progress bar (`crate::build::extract_total_chunks`/`extract_doc_weight`,
+// widened to `pub(crate)` for this reuse) -> per-doc loop with a `distil:{doc}` checkpoint mark
+// and per-round `on_progress` top-up -> `finish_and_clear` -> the SAME finalize
+// (`crate::build::finalize`) `run_reason` runs at the end of `kbx reason`.
+// ---------------------------------------------------------------------------------------------
+
+/// The checkpoint unit id for one densify doc pass — `distil:{doc}`, matching `run_build`'s
+/// `extract:{doc}` / `run_reason`'s `reason:{seed_id}` naming convention.
+pub fn distil_unit_id(doc: &str) -> String {
+    format!("distil:{doc}")
+}
+
+/// Narrow an enumerated doc list to exactly `doc` when set, preserving order — the `--doc`
+/// selection `run_densify_at` applies right after enumeration (mirrors `BuildOpts::doc`'s
+/// narrowing in `run_build`'s extract stage). Pure and model-free, extracted so `--doc` selection
+/// is unit-testable without a live model.
+pub fn select_docs(mut docs: Vec<String>, doc: Option<&str>) -> Vec<String> {
+    if let Some(d) = doc {
+        docs.retain(|p| p == d);
+    }
+    docs
+}
+
+/// A doc is skipped this densify pass iff `--resume` is set AND the checkpoint already recorded
+/// its `distil:{doc}` mark done. Pure and model-free — mirrors `reason::should_skip` exactly, one
+/// level down (doc id instead of seed id).
+pub fn should_skip_densify(cp: &Checkpoint, doc: &str, resume: bool) -> bool {
+    resume && cp.is_done(&distil_unit_id(doc))
+}
+
+/// Clear a densify run's persistent checkpoint (`run_dir/done/`) — `--force`'s full-rebuild half,
+/// mirroring `build::clear_checkpoint`/`reason`'s own local copy of the same helper. A no-op when
+/// the checkpoint dir doesn't exist yet (first-ever densify run).
+fn clear_densify_checkpoint(run_dir: &std::path::Path) -> Result<()> {
+    let done_dir = run_dir.join("done");
+    if done_dir.exists() {
+        std::fs::remove_dir_all(&done_dir)
+            .with_context(|| format!("clearing checkpoint {}", done_dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Orchestrate `kbx distil densify` over the corpus at `path` (kb-style PATH resolution via
+/// `workspace::resolve`, mirroring `run_reason`/`run_distil`'s thin entry shape).
+pub fn run_densify(path: Option<PathBuf>, args: &DistilArgs) -> Result<()> {
+    let paths = workspace::resolve(path);
+    run_densify_at(paths, args)
+}
+
+/// `run_densify`'s body, taking already-resolved `KbxPaths` — split out so tests can exercise it
+/// without fighting `workspace::resolve`'s PATH-walking discovery (mirrors
+/// `run_distil_at`/`run_reason_at`).
+fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
+    let lab = LabConfig::load_at(&paths.lab)
+        .with_context(|| format!("loading {}", paths.lab.display()))?;
+    let ontology = Ontology::load_or_default(&paths.root);
+
+    // Ensure the corpus is indexed (structural nodes + chunks) — no-op if already indexed, same
+    // first step every `kbx` pipeline entry takes.
+    glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
+
+    let distil_md = std::fs::read_to_string(&paths.distil)
+        .with_context(|| format!("reading {}", paths.distil.display()))?;
+
+    // A fresh, short-lived handle: enumerate then drop before densify_doc opens its own
+    // per-document GraphStore connection — same reasoning as `run_build`'s extract stage.
+    let mut docs = {
+        let g = GraphStore::open(&paths.root).context("open graph store to enumerate docs")?;
+        crate::build::enumerate_docs(&g)?
+    };
+    docs = select_docs(docs, args.doc.as_deref());
+    if docs.is_empty() {
+        bail!(
+            "kbx distil densify: no document matched (corpus empty, or --doc names a document \
+             that isn't indexed)"
+        );
+    }
+
+    // Weight the bar by chunk, not by document — identical rationale/mechanism to `run_build`'s
+    // extract stage (see `extract_doc_weight`'s doc comment): a huge document is otherwise one
+    // tick and the bar/ETA lie on a mixed-size corpus.
+    let idx = DocIndex::open_or_create(&paths.root).context("open doc index for densify")?;
+    let mut chunk_counts: HashMap<String, usize> = HashMap::new();
+    idx.iter_chunks(|path, _ord, _kind, _text| {
+        *chunk_counts.entry(path.to_string()).or_default() += 1;
+    })
+    .context("counting chunks per doc for densify-bar weights")?;
+    let total_chunks = crate::build::extract_total_chunks(&docs, &chunk_counts);
+
+    // Densify state lives under its own stable `runs/distil/` dir — one corpus has exactly one
+    // in-progress densify pass to resume/checkpoint, same convention as `runs/build/`/`runs/reason/`.
+    let run_dir = paths.runs.join("distil");
+    if args.force {
+        clear_densify_checkpoint(&run_dir).context("clearing distil checkpoint for --force")?;
+    }
+    let cp = Checkpoint::open(&run_dir).context("open distil checkpoint")?;
+
+    let pb = progress_bar(total_chunks.max(1), args.no_progress);
+    pb.set_message("distil (chunks)");
+    let mut total = DensifyStats::default();
+    let mut docs_done: Vec<String> = Vec::new();
+    for doc in &docs {
+        let w = crate::build::extract_doc_weight(doc, &chunk_counts) as u64;
+        if should_skip_densify(&cp, doc, args.resume) {
+            pb.inc(w);
+            continue;
+        }
+        // Advance the bar WITHIN the doc via densify_doc's per-round callback (real chunks
+        // covered), same as `run_build`'s extract stage: `covered` tracks what the callback
+        // advanced so the per-doc total can be reconciled to this doc's weight below.
+        let mut covered = 0u64;
+        let stats = densify_doc(
+            &paths,
+            &ontology,
+            &lab,
+            &distil_md,
+            doc,
+            args.chunks_per_round,
+            |n| {
+                covered += n;
+                pb.inc(n);
+            },
+        )
+        .with_context(|| format!("densifying {doc}"))?;
+        total.nodes += stats.nodes;
+        total.edges += stats.edges;
+        total.grounded += stats.grounded;
+        cp.mark(&distil_unit_id(doc), "done")
+            .with_context(|| format!("marking {doc} done"))?;
+        docs_done.push(doc.clone());
+        // A live indicatif bar owns the terminal: any per-doc message while it's live MUST go
+        // through `pb.println`, never a bare `println!` (the bug this task's brief calls out by
+        // name) — only the post-`finish_and_clear` summary below may use `println!` directly.
+        pb.println(format!(
+            "distil {doc}: {} node(s), {} edge(s), {} grounded",
+            stats.nodes, stats.edges, stats.grounded
+        ));
+        // Top up any gap so the bar stays aligned to this doc's weight, same as `run_build`.
+        if covered < w {
+            pb.inc(w - covered);
+        }
+    }
+    pb.finish_and_clear();
+    println!(
+        "distil: {} doc(s) densified, {} chunk(s), {} node(s), {} edge(s), {} grounded",
+        docs_done.len(),
+        total_chunks,
+        total.nodes,
+        total.edges,
+        total.grounded
+    );
+
+    // Same hygiene/generalize/node-index finalize `run_reason` runs at the end of `kbx reason`,
+    // so the derived layer + node index are refreshed after densify's writes too.
+    let summary = crate::build::finalize(&paths.root).context("finalizing distil")?;
+    println!("{summary}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +601,103 @@ to = ["Fact"]
         assert_eq!(parsed[0].question, "what follows the seed?");
         assert_eq!(parsed[0].answer, "the terminal fact");
         assert_eq!(parsed[1].id, "synth-1");
+    }
+
+    // ---- densify orchestrator (Task 3): doc selection + checkpoint, model-free ----------------
+
+    #[test]
+    fn distil_unit_id_formats_distil_prefix() {
+        assert_eq!(distil_unit_id("a.md"), "distil:a.md");
+    }
+
+    /// `--doc` narrows an enumerated set to exactly that one doc; unset leaves it untouched.
+    /// Mirrors `plan_extract`/`should_skip`'s pure, model-free unit-test style in `build`/`reason`.
+    #[test]
+    fn select_docs_filters_to_exactly_the_named_doc() {
+        let docs = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+
+        assert_eq!(
+            select_docs(docs.clone(), Some("b.md")),
+            vec!["b.md".to_string()]
+        );
+        assert_eq!(select_docs(docs.clone(), None), docs);
+    }
+
+    /// `--doc` naming a document absent from the enumerated set yields an empty selection, not an
+    /// error — `run_densify_at` turns that into a clear bail! rather than silently no-op-ing.
+    #[test]
+    fn select_docs_absent_doc_yields_empty() {
+        let docs = vec!["a.md".to_string()];
+        assert!(select_docs(docs, Some("nonexistent.md")).is_empty());
+    }
+
+    /// Step 1's TDD unit (per the brief, mirroring `reason::should_skip`'s own test): a doc id
+    /// already recorded done in the checkpoint is skipped under `--resume`; a fresh id is not; and
+    /// a done id is NOT skipped when `--resume` isn't set.
+    #[test]
+    fn should_skip_densify_marks_done_doc_under_resume_and_not_a_fresh_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::open(&dir.path().join("runs").join("distil")).unwrap();
+        cp.mark(&distil_unit_id("a.md"), "done").unwrap();
+
+        assert!(
+            should_skip_densify(&cp, "a.md", true),
+            "an already-done doc must be skipped under --resume"
+        );
+        assert!(
+            !should_skip_densify(&cp, "b.md", true),
+            "a fresh doc must not be skipped even under --resume"
+        );
+        assert!(
+            !should_skip_densify(&cp, "a.md", false),
+            "a done doc must NOT be skipped when --resume isn't set"
+        );
+    }
+
+    /// `--force`'s checkpoint-clearing half: a doc marked done in a prior densify run must report
+    /// `!is_done` again after `clear_densify_checkpoint`, mirroring `build::force_clears_checkpoint`.
+    #[test]
+    fn force_clears_densify_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("runs").join("distil");
+        let cp = Checkpoint::open(&run_dir).unwrap();
+        cp.mark(&distil_unit_id("a.md"), "done").unwrap();
+        assert!(cp.is_done(&distil_unit_id("a.md")));
+
+        clear_densify_checkpoint(&run_dir).unwrap();
+
+        let cp2 = Checkpoint::open(&run_dir).unwrap();
+        assert!(!cp2.is_done(&distil_unit_id("a.md")));
+    }
+
+    /// `clear_densify_checkpoint` must be a no-op (not an error) when the run has never
+    /// checkpointed anything yet — the first-ever `--force` densify run on a fresh corpus.
+    #[test]
+    fn clear_densify_checkpoint_noop_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("runs").join("distil");
+        assert!(!run_dir.exists());
+        clear_densify_checkpoint(&run_dir).unwrap();
+    }
+
+    /// `DistilArgs`' new densify fields (Task 3) default to a sane full-corpus, non-resumed pass
+    /// when constructed directly (as `kbx.rs`'s CLI wiring will do in Task 4).
+    #[test]
+    fn distil_args_densify_fields_are_plain_and_settable() {
+        let args = DistilArgs {
+            count: None,
+            target: None,
+            max_attempts: None,
+            out: None,
+            seed_type: None,
+            no_progress: true,
+            doc: Some("a.md".to_string()),
+            force: true,
+            resume: false,
+            chunks_per_round: 3,
+        };
+        assert_eq!(args.doc.as_deref(), Some("a.md"));
+        assert!(args.force);
+        assert_eq!(args.chunks_per_round, 3);
     }
 }

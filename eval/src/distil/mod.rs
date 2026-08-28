@@ -15,4 +15,4 @@ mod run;
 
 pub use densify::{densify_doc, DensifyStats};
 pub use gen::{parse_propose_gold, DropReason, GenOutcome, GoldProposal, Seed};
-pub use run::{eligible_seed_types, run_distil, seed_pool, DistilArgs};
+pub use run::{eligible_seed_types, run_densify, run_distil, seed_pool, DistilArgs};

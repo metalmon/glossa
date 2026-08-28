@@ -357,6 +357,12 @@ fn main() -> Result<()> {
                 out,
                 seed_type,
                 no_progress,
+                // `kbx distil densify`'s orchestrator fields (Task 3) — CLI flags for these land
+                // in Task 4; `run_distil` (the gold-synthesis path this arm calls) ignores them.
+                doc: None,
+                force: false,
+                resume: false,
+                chunks_per_round: 3,
             },
         ),
     }
