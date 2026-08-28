@@ -117,7 +117,7 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
@@ -259,7 +259,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     };
 
     let pb = progress_bar(cap, args.no_progress);
-    pb.set_message("distil");
+    pb.set_prefix("distil");
 
     let mut kept: Vec<OutCase> = Vec::new();
     let mut n_dropped = 0usize;
@@ -271,7 +271,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         }
         let i = attempts;
         let seed = &seeds[i % seeds.len()];
-        pb.set_message(format!("distil {i} (seed {})", seed.id));
+        pb.set_message(format!(" · attempt {i} (seed {})", seed.id));
         match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed)
             .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
         {
@@ -432,10 +432,11 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
             .unwrap_or_default();
         let resample_suffix =
             if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!("densify · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
+        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let pb = progress_bar(total_chunks.max(1), args.no_progress);
+    pb.set_prefix("densify");
     pb.set_message(densify_msg());
     let mut total = DensifyStats::default();
     let mut docs_done: Vec<String> = Vec::new();

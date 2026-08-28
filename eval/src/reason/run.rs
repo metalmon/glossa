@@ -47,7 +47,7 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
@@ -133,10 +133,11 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
             .unwrap_or_default();
         let resample_suffix =
             if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!("reason · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
+        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let pb = progress_bar(seeds.len(), args.no_progress);
+    pb.set_prefix("reason");
     pb.set_message(reason_msg());
     let (mut total_nodes, mut total_edges, mut total_grounded, mut processed) = (0, 0, 0, 0usize);
     for seed in &seeds {

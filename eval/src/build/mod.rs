@@ -98,22 +98,28 @@ impl Default for BuildOpts {
     }
 }
 
-/// Compose a progress-bar message combining a stage label with the running token total (see
+/// Compose a progress-bar message with the running token total (see
 /// `crate::backend::openai::tokens_used`) and, when `price` (USD per 1M tokens) is `Some`, a rough
-/// `~$` cost estimate. Shared by build's extract and judge loops (`run_build` here and
-/// `judge::run_judge`) so both stages format their bar message the same way.
-pub(crate) fn token_progress_msg(prefix: &str, price: Option<f64>) -> String {
+/// `~$` cost estimate — the "service" counters that render AFTER the elapsed/ETA time, once the
+/// stage label itself has been set via `pb.set_prefix(..)` (so it renders at the front instead).
+/// Shared by build's extract and judge loops (`run_build` here and `judge::run_judge`) so both
+/// stages format their bar message the same way. The leading " · " is load-bearing: the template
+/// places `{msg}` directly after `{eta_precise}` with no space.
+pub(crate) fn token_progress_msg(price: Option<f64>) -> String {
     let tokens = tokens_used();
     let cost_suffix = price
         .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
         .unwrap_or_default();
     let resample_suffix =
         if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-    format!("{prefix} · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
+    format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`).
+/// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`). Stage label goes in
+/// `{prefix}` (set once via `pb.set_prefix`) so it renders at the front; the token/resample
+/// "service" counters go in `{msg}` (set per iteration via `pb.set_message`) so they render after
+/// the elapsed/ETA time.
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let show =
         !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
@@ -123,7 +129,7 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+            "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
         )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
@@ -371,12 +377,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         reset_resamples();
         let extract_price = lab.model.price_per_1m;
         let pb = progress_bar(total_chunks.max(1), opts.no_progress);
-        pb.set_message(token_progress_msg("extract (chunks)", extract_price));
+        pb.set_prefix("extract (chunks)");
+        pb.set_message(token_progress_msg(extract_price));
         let mut total = ExtractStats::default();
         for doc in &docs {
             let unit_id = format!("extract:{doc}");
             if opts.resume && cp.is_done(&unit_id) {
-                pb.set_message(token_progress_msg("extract (chunks)", extract_price));
+                pb.set_message(token_progress_msg(extract_price));
                 pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
@@ -405,7 +412,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             total.mentions += stats.mentions;
             cp.mark(&unit_id, "done")?;
             report.docs_extracted.push(doc.clone());
-            pb.set_message(token_progress_msg("extract (chunks)", extract_price));
+            pb.set_message(token_progress_msg(extract_price));
             // Top up any gap so the bar stays aligned to this doc's weight even when covered
             // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
             if covered < w {
@@ -446,7 +453,8 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             reset_resamples();
             let judge_price = lab.bridge.as_ref().unwrap_or(&lab.model).price_per_1m;
             let pb = progress_bar(groups.len(), opts.no_progress);
-            pb.set_message(token_progress_msg("judge", judge_price));
+            pb.set_prefix("judge");
+            pb.set_message(token_progress_msg(judge_price));
             let stats = run_judge(
                 &paths.root,
                 &lab,

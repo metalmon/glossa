@@ -198,7 +198,7 @@ pub fn run_judge(
     for group in groups {
         let unit_id = format!("judge:group:{}", group.entity);
         if cp.is_done(&unit_id) {
-            pb.set_message(crate::build::token_progress_msg("judge", price));
+            pb.set_message(crate::build::token_progress_msg(price));
             pb.inc(1);
             continue;
         }
@@ -221,7 +221,7 @@ pub fn run_judge(
         if facts.len() < 2 {
             // Fewer than two surviving members can't bridge anything — nothing to judge.
             cp.mark(&unit_id, "no-members")?;
-            pb.set_message(crate::build::token_progress_msg("judge", price));
+            pb.set_message(crate::build::token_progress_msg(price));
             pb.inc(1);
             continue;
         }
@@ -261,7 +261,7 @@ pub fn run_judge(
         }
 
         cp.mark(&unit_id, if links.is_empty() { "none" } else { "linked" })?;
-        pb.set_message(crate::build::token_progress_msg("judge", price));
+        pb.set_message(crate::build::token_progress_msg(price));
         pb.inc(1);
     }
 

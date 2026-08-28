@@ -502,7 +502,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let pb = ProgressBar::new(cases.len() as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{msg} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}",
+                "{prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}<{eta_precise}{msg}",
             )
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
@@ -514,19 +514,20 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     reset_tokens();
     reset_resamples();
     let eval_price = lab.model.price_per_1m;
-    let eval_msg = |id: &str| -> String {
+    let eval_msg = || -> String {
         let tokens = tokens_used();
         let cost_suffix = eval_price
             .map(|p| format!(" · ~${:.4}", tokens as f64 / 1e6 * p))
             .unwrap_or_default();
         let resample_suffix =
             if resamples() > 0 { format!(" · {} resampled", resamples()) } else { String::new() };
-        format!("{id} · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
+        format!(" · {} tok{}{}", human_tokens(tokens), cost_suffix, resample_suffix)
     };
 
     let mut results = Vec::with_capacity(cases.len());
     for q in &cases {
-        pb.set_message(eval_msg(&q.id));
+        pb.set_prefix(q.id.clone());
+        pb.set_message(eval_msg());
         let before = list_trace_files(&paths.root);
 
         let backend = OpenAiBackend {
@@ -568,7 +569,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         };
 
         pb.println(format!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id));
-        pb.set_message(eval_msg(&q.id));
+        pb.set_message(eval_msg());
 
         let r = CaseResult {
             id: q.id.clone(),
