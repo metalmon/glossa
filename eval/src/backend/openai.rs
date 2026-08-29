@@ -6,6 +6,7 @@ use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
@@ -34,11 +35,18 @@ static CACHED_TOKENS: AtomicU64 = AtomicU64::new(0);
 /// conversation by `reset_conversation_prefix` so one seed's tail doesn't leak into the next
 /// seed's estimate.
 ///
-/// Assumes chat calls within a run are SEQUENTIAL — never two conversations' requests racing this
-/// one global concurrently. True today: every run loop (`reason/run.rs`, `build/mod.rs`,
-/// `distil/run.rs`, `bin/kbx.rs`'s eval loop) drives one case/seed/doc to completion (one
-/// `run_agent_loop` call) before starting the next; nothing here spawns concurrent chats.
-static PREV_PROMPT_TOKENS: AtomicU64 = AtomicU64::new(0);
+/// **THREAD-LOCAL, not a process-global.** Under parallel workers (`kbx --jobs N`) each worker
+/// thread drives its own conversation concurrently with the others; a shared global here would let
+/// worker A's stored `prompt_tokens` leak into worker B's next estimate (interleaved conversations
+/// corrupting each other's prefix) — see the parallel-jobs design doc's "Caching under
+/// parallelism" section. Each thread gets its own independent cell, so the SEQUENTIAL-within-one-
+/// conversation assumption `usage_split_with_prefix` relies on holds per-thread even though many
+/// threads run concurrently. The cross-worker aggregates (`NEW_TOKENS`/`CACHED_TOKENS`/
+/// `CACHE_ESTIMATED`/`RESAMPLES`) stay process-global atomics — their SUM across workers is still
+/// the correct total, unlike this per-conversation prefix.
+thread_local! {
+    static PREV_PROMPT_TOKENS: Cell<u64> = const { Cell::new(0) };
+}
 
 /// Set true whenever the MOST RECENT `chat_http` call had to self-estimate its cached-token split
 /// (the server omitted `prompt_tokens_details`) rather than use a server-reported figure. Drives
@@ -57,12 +65,14 @@ pub fn cached_tokens() -> u64 {
     CACHED_TOKENS.load(Ordering::Relaxed)
 }
 
-/// Reset the conversation-prefix tracker (see `PREV_PROMPT_TOKENS`) to 0 — call at the START of
-/// every conversation (`run_agent_loop`'s entry, before its first `chat` call) so a fresh
-/// seed/doc/case never estimates its first request's cache off the PREVIOUS conversation's tail
-/// `prompt_tokens`. Also called by `reset_tokens` (a run boundary is a conversation boundary too).
+/// Reset the CALLING THREAD's conversation-prefix tracker (see `PREV_PROMPT_TOKENS`) to 0 — call
+/// at the START of every conversation (`run_agent_loop`'s entry, before its first `chat` call) so
+/// a fresh seed/doc/case never estimates its first request's cache off the PREVIOUS conversation's
+/// tail `prompt_tokens`. Also called by `reset_tokens` (a run boundary is a conversation boundary
+/// too). Under parallel workers each worker thread has its own thread-local cell, so this only
+/// ever clears the calling thread's own prefix — never another worker's in-flight conversation.
 pub fn reset_conversation_prefix() {
-    PREV_PROMPT_TOKENS.store(0, Ordering::Relaxed);
+    PREV_PROMPT_TOKENS.with(|prev| prev.set(0));
 }
 
 /// Zero both running token counters (plus the conversation-prefix tracker and the estimated-flag)
@@ -607,17 +617,18 @@ fn chat_http(
                         // Tally this call's usage into the process-global running counters (see
                         // `usage_split_with_prefix`/`NEW_TOKENS`/`CACHED_TOKENS`) before handing the
                         // response back. `prev` is the PREVIOUS request's `prompt_tokens` in this
-                        // same conversation (see `PREV_PROMPT_TOKENS`'s doc comment for the
-                        // sequential-calls assumption this relies on) — read it BEFORE this call's
-                        // own `prompt_tokens` overwrites it below.
-                        let prev = PREV_PROMPT_TOKENS.load(Ordering::Relaxed);
+                        // same conversation, read from the CALLING THREAD's own cell (see
+                        // `PREV_PROMPT_TOKENS`'s doc comment for the per-thread sequential-calls
+                        // assumption this relies on) — read it BEFORE this call's own
+                        // `prompt_tokens` overwrites it below.
+                        let prev = PREV_PROMPT_TOKENS.with(|prev| prev.get());
                         let (new, cached, estimated) = usage_split_with_prefix(&v, prev);
                         NEW_TOKENS.fetch_add(new, Ordering::Relaxed);
                         CACHED_TOKENS.fetch_add(cached, Ordering::Relaxed);
                         if estimated {
                             CACHE_ESTIMATED.store(true, Ordering::Relaxed);
                         }
-                        PREV_PROMPT_TOKENS.store(prompt_tokens(&v), Ordering::Relaxed);
+                        PREV_PROMPT_TOKENS.with(|prev| prev.set(prompt_tokens(&v)));
                         // Return the FULL response — see the doc comment above for why.
                         (false, Ok(v))
                     } else {
@@ -1175,13 +1186,89 @@ mod tests {
         // false "cached prefix" — `run_agent_loop` calls this at the top of every conversation for
         // exactly this reason.
         reset_tokens();
-        PREV_PROMPT_TOKENS.store(1000, Ordering::Relaxed);
+        PREV_PROMPT_TOKENS.with(|prev| prev.set(1000));
         reset_conversation_prefix();
         let (new, cached, estimated) = usage_split_with_prefix(
             &json!({"usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
-            PREV_PROMPT_TOKENS.load(Ordering::Relaxed),
+            PREV_PROMPT_TOKENS.with(|prev| prev.get()),
         );
         assert_eq!((new, cached, estimated), (15, 0, true));
+    }
+
+    /// Task 2 (parallel-jobs): `PREV_PROMPT_TOKENS` is thread-local, so two "workers" running
+    /// concurrent conversations on separate threads each track their OWN previous `prompt_tokens`
+    /// independently — worker A's stored prefix must never leak into worker B's estimate (the bug
+    /// a process-global `AtomicU64` would have under `kbx --jobs N`). The aggregate `NEW_TOKENS`/
+    /// `CACHED_TOKENS` are still process-global atomics, so their sum across both threads must
+    /// equal the sum of what each thread computed on its own.
+    #[test]
+    fn prev_prompt_tokens_is_thread_local_across_parallel_workers() {
+        reset_tokens();
+
+        // Worker A: a 2-round conversation with one prefix size; worker B: a DIFFERENT 2-round
+        // conversation with a different prefix size, running concurrently on another thread. If
+        // the tracker were a shared global, whichever thread's `store` landed last would corrupt
+        // the other's next `load` and the per-round splits below would not match.
+        let worker_a = std::thread::spawn(|| {
+            reset_conversation_prefix(); // each worker resets its own thread-local at conversation start
+            let prev1 = PREV_PROMPT_TOKENS.with(|c| c.get());
+            let (n1, c1, _) = usage_split_with_prefix(
+                &json!({"usage": {"prompt_tokens": 1000, "completion_tokens": 50}}),
+                prev1,
+            );
+            PREV_PROMPT_TOKENS.with(|c| c.set(1000));
+            NEW_TOKENS.fetch_add(n1, Ordering::Relaxed);
+            CACHED_TOKENS.fetch_add(c1, Ordering::Relaxed);
+
+            let prev2 = PREV_PROMPT_TOKENS.with(|c| c.get());
+            let (n2, c2, _) = usage_split_with_prefix(
+                &json!({"usage": {"prompt_tokens": 1400, "completion_tokens": 200}}),
+                prev2,
+            );
+            NEW_TOKENS.fetch_add(n2, Ordering::Relaxed);
+            CACHED_TOKENS.fetch_add(c2, Ordering::Relaxed);
+            (n1, c1, n2, c2)
+        });
+
+        let worker_b = std::thread::spawn(|| {
+            reset_conversation_prefix();
+            let prev1 = PREV_PROMPT_TOKENS.with(|c| c.get());
+            let (n1, c1, _) = usage_split_with_prefix(
+                &json!({"usage": {"prompt_tokens": 300, "completion_tokens": 20}}),
+                prev1,
+            );
+            PREV_PROMPT_TOKENS.with(|c| c.set(300));
+            NEW_TOKENS.fetch_add(n1, Ordering::Relaxed);
+            CACHED_TOKENS.fetch_add(c1, Ordering::Relaxed);
+
+            let prev2 = PREV_PROMPT_TOKENS.with(|c| c.get());
+            let (n2, c2, _) = usage_split_with_prefix(
+                &json!({"usage": {"prompt_tokens": 500, "completion_tokens": 40}}),
+                prev2,
+            );
+            NEW_TOKENS.fetch_add(n2, Ordering::Relaxed);
+            CACHED_TOKENS.fetch_add(c2, Ordering::Relaxed);
+            (n1, c1, n2, c2)
+        });
+
+        let (a_n1, a_c1, a_n2, a_c2) = worker_a.join().unwrap();
+        let (b_n1, b_c1, b_n2, b_c2) = worker_b.join().unwrap();
+
+        // Worker A: round 1 has no prefix (fresh thread-local) -> new=1050, cached=0. Round 2
+        // re-sends round 1's 1000 as prefix -> new=(1400-1000)+200=600, cached=1000.
+        assert_eq!((a_n1, a_c1), (1050, 0));
+        assert_eq!((a_n2, a_c2), (600, 1000));
+        // Worker B: independently, round 1 new=320, cached=0. Round 2 new=(500-300)+40=240,
+        // cached=300. If A's and B's thread-locals had collided, at least one of these would be
+        // wrong (e.g. B's round 1 would spuriously credit A's leftover prefix).
+        assert_eq!((b_n1, b_c1), (320, 0));
+        assert_eq!((b_n2, b_c2), (240, 300));
+
+        // The process-global aggregates still sum correctly across both worker threads.
+        assert_eq!(new_tokens(), a_n1 + a_n2 + b_n1 + b_n2);
+        assert_eq!(cached_tokens(), a_c1 + a_c2 + b_c1 + b_c2);
+
+        reset_tokens();
     }
 
     #[test]
