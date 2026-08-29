@@ -44,11 +44,13 @@ pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 ///   (`glossa_tools::unproductive_steer`) instead of the (already-seen) body, and the counter resets
 ///   so it fires once per streak, not on every call past the threshold.
 ///
-/// Temperature: read from `KB_EVAL_TEMP` (default 0.8) at the top of the loop and passed to every
-/// `transport.call` — this reproduces `lmstudio_chat`'s sampling behavior exactly (the old reader
-/// path read the same env var, same default, at the same granularity: once per call). The new
-/// `ChatTransport::call` signature takes `temperature` as an explicit argument rather than reading
-/// the env itself, so the env read has to happen at the call site — here, not inside a transport.
+/// Temperature: resolved ONCE at the top of the loop via [`Endpoint::resolve_temperature`]
+/// (`KB_EVAL_TEMP` env override > `ep.temperature` > `None`) and passed to every `transport.call`.
+/// `None` means the request OMITS `temperature` so the provider/model uses its own default — there
+/// is no hardcoded fallback. `KB_EVAL_TEMP` is preserved as the override, so build/distil (which
+/// set it before the worker pool starts) keep steering the reader's sampling exactly as before.
+/// The `ChatTransport::call` signature takes `temperature` as an explicit argument rather than
+/// reading the env itself, so the resolution happens at the call site — here, not in a transport.
 pub fn run_agent_loop(
     transport: &dyn ChatTransport,
     ep: &Endpoint,
@@ -68,10 +70,7 @@ pub fn run_agent_loop(
     // `openai::run_agent_loop` shim delegates to it), so this one reset covers every caller.
     crate::backend::openai::reset_conversation_prefix();
 
-    let temperature: f64 = std::env::var("KB_EVAL_TEMP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.8);
+    let temperature: Option<f64> = ep.resolve_temperature();
 
     // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
     // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
@@ -149,6 +148,7 @@ mod tests {
             api_key_env: String::new(),
             timeout_secs: 30,
             api: crate::lab::ApiKind::default(),
+            temperature: None,
         }
     }
 
@@ -183,7 +183,7 @@ mod tests {
             _system: Option<&str>,
             messages: &[Value],
             _tools: Option<&Value>,
-            _temperature: f64,
+            _temperature: Option<f64>,
         ) -> anyhow::Result<TurnReply> {
             self.calls.borrow_mut().push(messages.to_vec());
             self.replies

@@ -85,6 +85,7 @@ pub fn judge(
         &messages,
         api_key.as_deref(),
         ep.timeout_secs,
+        ep.resolve_temperature(),
     )
     .context("judge endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");

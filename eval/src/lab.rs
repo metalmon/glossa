@@ -47,6 +47,12 @@ pub struct Endpoint {
     /// `lab.toml` files parse unchanged.
     #[serde(default)]
     pub api: ApiKind,
+    /// Optional per-endpoint sampling temperature. `None` (the default, and when the key is absent
+    /// from `lab.toml`) means "don't send a `temperature` field at all" — the provider/model uses
+    /// its own default. Overridable at every call site by the `KB_EVAL_TEMP` env var (see
+    /// [`Endpoint::resolve_temperature`]).
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 impl Endpoint {
@@ -62,6 +68,19 @@ impl Endpoint {
             }
         }
         None
+    }
+
+    /// Resolve the sampling temperature to send for this endpoint, uniform across reader/build/
+    /// judge: the `KB_EVAL_TEMP` env override wins (parsed to `Some`), otherwise this endpoint's
+    /// own `temperature`, otherwise `None`. `None` means the caller OMITS the `temperature` field
+    /// entirely so the provider/model applies its own default — there is no hardcoded fallback.
+    pub fn resolve_temperature(&self) -> Option<f64> {
+        if let Ok(v) = std::env::var("KB_EVAL_TEMP") {
+            if let Ok(t) = v.parse::<f64>() {
+                return Some(t);
+            }
+        }
+        self.temperature
     }
 }
 
@@ -405,6 +424,24 @@ mod tests {
         "#;
         let lab: LabConfig = toml::from_str(toml).unwrap();
         assert_eq!(lab.model.api, ApiKind::OpenAiChat);
+    }
+
+    #[test]
+    fn endpoint_temperature_parses_when_present_and_is_none_when_absent() {
+        // Present -> Some(value).
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            temperature = 0.3
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.temperature, Some(0.3));
+
+        // Absent -> None (existing lab.toml files parse unchanged, field omitted from the request).
+        let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.model.temperature, None);
     }
 
     #[test]

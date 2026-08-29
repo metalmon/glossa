@@ -146,6 +146,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             &msgs,
             key.as_deref(),
             reflect_ep.timeout_secs,
+            reflect_ep.resolve_temperature(),
         )?;
         let text = msg
             .get("content")

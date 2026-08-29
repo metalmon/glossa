@@ -610,6 +610,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             timeout,
             use_graph: true,
             system_prompt: Some(answer_md.clone()),
+            temperature: lab.model.temperature,
         };
         let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,

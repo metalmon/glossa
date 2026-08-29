@@ -26,7 +26,7 @@ impl ChatTransport for OpenAiTransport {
         system: Option<&str>,
         messages: &[Value],
         tools: Option<&Value>,
-        temperature: f64,
+        temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply> {
         // System, when present, is folded in as a leading {role:"system"} message — the OpenAI
         // Chat Completions shape has no top-level `system` field (unlike Anthropic's `/v1/messages`).
@@ -39,8 +39,11 @@ impl ChatTransport for OpenAiTransport {
         let mut body = json!({
             "model": ep.model,
             "messages": full_messages,
-            "temperature": temperature,
         });
+        // Include `temperature` only when set — `None` omits it so the provider default applies.
+        if let Some(t) = temperature {
+            body["temperature"] = json!(t);
+        }
         if let Some(t) = tools {
             body["tools"] = t.clone();
         }
@@ -305,6 +308,7 @@ mod tests {
             &[json!({"role": "user", "content": "hi"})],
             None,
             5,
+            None,
         )
         .unwrap();
         assert_eq!(out["content"], "ok");

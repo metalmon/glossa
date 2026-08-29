@@ -308,6 +308,7 @@ pub fn generate_one(
         &leak_messages,
         api_key.as_deref(),
         distil_ep.timeout_secs,
+        distil_ep.resolve_temperature(),
     )?;
     let leak_text = leak_resp.get("content").and_then(|c| c.as_str()).unwrap_or("");
     if contains_match(leak_text, &proposal.answer) {

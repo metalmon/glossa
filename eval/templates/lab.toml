@@ -21,6 +21,9 @@ model = "qwen3.5-4b"
 # api_key = "sk-..."                 # inline key, OR:
 # api_key_env = "OPENAI_API_KEY"     # read the key from this env var (keeps the secret out of this file)
 timeout_secs = 120
+# temperature = 0.7                  # optional sampling temperature; OMIT to use the provider/model
+                                     # default. The KB_EVAL_TEMP env var overrides this at every
+                                     # call site. Settable per endpoint (any section below).
 
 # [build]                              # override the harvest model for `kbx build`; falls back to [model]
 # endpoint = "http://localhost:1234/v1/chat/completions"

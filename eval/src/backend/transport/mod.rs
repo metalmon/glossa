@@ -45,15 +45,17 @@ pub trait ChatTransport {
     /// eval do today.
     fn tools_schema(&self, graph_on: bool) -> serde_json::Value;
 
-    /// One request/response round-trip: POST `messages` (+ optional `system`, `tools`) to `ep` at
-    /// the given sampling `temperature`, and return the normalized `TurnReply`.
+    /// One request/response round-trip: POST `messages` (+ optional `system`, `tools`) to `ep` and
+    /// return the normalized `TurnReply`. `temperature` is `Some(t)` to sample at `t`, or `None` to
+    /// OMIT the `temperature` field from the request entirely (the provider/model applies its own
+    /// default) — a transport must never send `"temperature": null`.
     fn call(
         &self,
         ep: &crate::lab::Endpoint,
         system: Option<&str>,
         messages: &[serde_json::Value],
         tools: Option<&serde_json::Value>,
-        temperature: f64,
+        temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply>;
 
     /// Append the assistant's turn to the running transcript in this provider's own message

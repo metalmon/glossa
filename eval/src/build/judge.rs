@@ -153,6 +153,7 @@ pub fn judge_group(
         &messages,
         api_key.as_deref(),
         ep.timeout_secs,
+        ep.resolve_temperature(),
     )
     .context("bridge group judge endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");

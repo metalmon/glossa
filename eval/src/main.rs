@@ -158,6 +158,9 @@ fn main() -> anyhow::Result<()> {
                         timeout,
                         use_graph: !no_graph,
                         system_prompt: None,
+                        // Legacy `kb-eval run` CLI: no lab endpoint here, so per-endpoint
+                        // temperature is env-only (`KB_EVAL_TEMP` via `resolve_temperature`).
+                        temperature: None,
                     })
                 }
                 BackendKind::Cli => {

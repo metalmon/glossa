@@ -326,6 +326,10 @@ pub struct OpenAiBackend {
     /// the compiled `prompt::system_prompt(self.use_graph)`. This is what lets the reader's
     /// prompt be edited without a rebuild.
     pub system_prompt: Option<String>,
+    /// Per-endpoint sampling temperature carried from the reader's `[model]` endpoint. Folded into
+    /// the `Endpoint` handed to the agent loop, where `Endpoint::resolve_temperature` still lets
+    /// `KB_EVAL_TEMP` override it and `None` omits the field so the provider default applies.
+    pub temperature: Option<f64>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -333,8 +337,8 @@ const MAX_ROUNDS: usize = 50;
 /// Default `min_p` nucleus-sampling floor for the agent-loop chat call (`lmstudio_chat`),
 /// overridable via `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that otherwise widen at
 /// high temperature, cutting down on degenerate generation loops without forcing low-temperature
-/// (deterministic) sampling. NOT sent by `chat_once` — that path is already greedy (temperature 0)
-/// and targets a strict provider that may reject non-OpenAI fields.
+/// (deterministic) sampling. NOT sent by `chat_once` — that path targets a strict provider that may
+/// reject non-OpenAI fields, and its temperature is resolved by the caller (omitted when unset).
 const DEFAULT_MIN_P: f64 = 0.1;
 /// Cap on completion length per call. Bounds a runaway generation (a degenerate loop can otherwise
 /// spew thousands of tokens before the server stops) while staying generous enough not to clip a
@@ -373,6 +377,7 @@ impl AgentBackend for OpenAiBackend {
             api_key_env: String::new(),
             timeout_secs: self.timeout.as_secs(),
             api: crate::lab::ApiKind::default(),
+            temperature: self.temperature,
         };
         let graph = if self.use_graph {
             glossa::graph::store::GraphStore::open(work).ok()
@@ -460,35 +465,41 @@ impl OpenAiBackend {
             timeout: Duration::from_secs(1),
             use_graph: false,
             system_prompt: Some(s.to_string()),
+            temperature: None,
         }
     }
 }
 
 /// Minimal one-shot OpenAI-compatible chat call: a plain completion (e.g. the file-prompt judge in
-/// `judge.rs`) instead of the full tool-calling agent loop. Builds a greedy (temperature 0), tools
-/// free request body and drives it through `chat_http` — the same transport the agent loop uses.
+/// `judge.rs`) instead of the full tool-calling agent loop. Builds a tools-free request body and
+/// drives it through `chat_http` — the same transport the agent loop uses. `temperature` follows
+/// the same uniform rule as every other call site: `Some(t)` samples at `t`, `None` OMITS the
+/// `temperature` field so the provider/model applies its own default (callers resolve it via
+/// `Endpoint::resolve_temperature`, i.e. `KB_EVAL_TEMP` env > `ep.temperature` > `None`).
 pub(crate) fn chat_once(
     endpoint: &str,
     model: &str,
     messages: &[Value],
     api_key: Option<&str>,
     timeout_secs: u64,
+    temperature: Option<f64>,
 ) -> anyhow::Result<Value> {
-    // One-shot (the file-prompt judge): greedy sampling so grading is reproducible run-to-run
-    // (NOT the reader's stochastic KB_EVAL_TEMP), and NO `tools` field at all — a strict provider
-    // (the MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
-    // NOTE: no `min_p` here either — it's a non-OpenAI extension a strict provider may 400 on, and
-    // it would be inert anyway since this path is greedy (temperature 0).
+    // One-shot (e.g. the file-prompt judge): NO `tools` field at all — a strict provider (the
+    // MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
+    // NOTE: no `min_p` here either — it's a non-OpenAI extension a strict provider may 400 on.
     let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MAX_TOKENS);
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": messages,
-        "temperature": 0,
         "max_tokens": max_tokens,
     });
+    // Include `temperature` only when set — `None` omits it so the provider default applies.
+    if let Some(t) = temperature {
+        body["temperature"] = json!(t);
+    }
     chat_http_full(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
         .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
 }
@@ -783,6 +794,7 @@ where
         api_key_env: String::new(),
         timeout_secs: 120,
         api: crate::lab::ApiKind::default(),
+        temperature: None,
     };
     crate::backend::agent_loop::run_agent_loop(
         &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds,
@@ -823,7 +835,7 @@ where
         _system: Option<&str>,
         messages: &[Value],
         _tools: Option<&Value>,
-        _temperature: f64,
+        _temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply> {
         let msg = (self.chat.borrow_mut())(messages)?;
         let tool_calls: Vec<ToolCall> = msg

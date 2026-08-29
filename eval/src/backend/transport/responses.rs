@@ -34,7 +34,7 @@ impl ChatTransport for ResponsesTransport {
         system: Option<&str>,
         messages: &[Value],
         tools: Option<&Value>,
-        temperature: f64,
+        temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply> {
         // Responses has no `{role:"system"}` item in `input` — it's a dedicated top-level
         // `instructions` string, mirroring Anthropic's top-level `system` (unlike OpenAI Chat
@@ -43,8 +43,11 @@ impl ChatTransport for ResponsesTransport {
             "model": ep.model,
             "input": messages,
             "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-            "temperature": temperature,
         });
+        // Include `temperature` only when set — `None` omits it so the provider default applies.
+        if let Some(t) = temperature {
+            body["temperature"] = json!(t);
+        }
         if let Some(s) = system {
             body["instructions"] = json!(s);
         }
@@ -465,6 +468,7 @@ mod tests {
             api_key_env: String::new(),
             timeout_secs: 5,
             api: crate::lab::ApiKind::OpenAiResponses,
+            temperature: None,
         };
 
         let transport = ResponsesTransport;

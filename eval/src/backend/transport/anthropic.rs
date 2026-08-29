@@ -30,7 +30,7 @@ impl ChatTransport for AnthropicTransport {
         system: Option<&str>,
         messages: &[Value],
         tools: Option<&Value>,
-        temperature: f64,
+        temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply> {
         // Anthropic has no `{role:"system"}` message — it's a dedicated top-level field, unlike
         // OpenAI Chat Completions where `OpenAiTransport::call` folds it into `messages`.
@@ -38,8 +38,11 @@ impl ChatTransport for AnthropicTransport {
             "model": ep.model,
             "max_tokens": DEFAULT_MAX_TOKENS,
             "messages": messages,
-            "temperature": temperature,
         });
+        // Include `temperature` only when set — `None` omits it so the provider default applies.
+        if let Some(t) = temperature {
+            body["temperature"] = json!(t);
+        }
         if let Some(s) = system {
             body["system"] = json!(s);
         }
@@ -444,6 +447,7 @@ mod tests {
             api_key_env: String::new(),
             timeout_secs: 5,
             api: crate::lab::ApiKind::Anthropic,
+            temperature: None,
         };
 
         let transport = AnthropicTransport;
