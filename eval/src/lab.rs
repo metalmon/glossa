@@ -75,11 +75,12 @@ pub struct LabConfig {
 
 /// Per-workspace overrides for the reason/build/distil agent-loop tuning knobs — `fanout_max`
 /// (reason's predecessor branching cap), `max_rounds` (agent-loop round cap, shared by reason/
-/// build/distil), and `chunks_per_round` (sections read per coverage round, build/distil). Every
-/// field is optional: an absent `[tuning]` section (or an absent field within it) means "no
-/// override here", so [`resolve`] falls through to the CLI flag (if any) and finally the
-/// built-in default — this section is purely additive over today's CLI-flag-or-hardcoded-const
-/// behavior.
+/// build/distil), `chunks_per_round` (sections read per coverage round, build/distil), and the
+/// four per-stage `jobs_*` worker-pool sizes (`jobs_build`/`jobs_reason`/`jobs_train`/
+/// `jobs_distil`). Every field is optional: an absent `[tuning]` section (or an absent field
+/// within it) means "no override here", so [`resolve`] falls through to the CLI flag (if any) and
+/// finally the built-in default — this section is purely additive over today's
+/// CLI-flag-or-hardcoded-const behavior.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Tuning {
     #[serde(default)]
@@ -88,6 +89,19 @@ pub struct Tuning {
     pub max_rounds: Option<usize>,
     #[serde(default)]
     pub chunks_per_round: Option<usize>,
+    /// Worker-pool size for `kbx build`'s extract/judge stages. `None` defers to a `--jobs` CLI
+    /// flag, then the built-in default (3) — resolved via [`resolve`] `.max(1)` at the call site.
+    #[serde(default)]
+    pub jobs_build: Option<usize>,
+    /// Worker-pool size for `kbx reason`'s seed workers. Same precedence as `jobs_build`.
+    #[serde(default)]
+    pub jobs_reason: Option<usize>,
+    /// Worker-pool size for `kbx train`'s read-only rollouts. Same precedence as `jobs_build`.
+    #[serde(default)]
+    pub jobs_train: Option<usize>,
+    /// Worker-pool size for `kbx distil`'s densify workers. Same precedence as `jobs_build`.
+    #[serde(default)]
+    pub jobs_distil: Option<usize>,
 }
 
 /// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,
@@ -235,6 +249,47 @@ mod tests {
         assert_eq!(lab.tuning.fanout_max, None);
         assert_eq!(lab.tuning.max_rounds, Some(40));
         assert_eq!(lab.tuning.chunks_per_round, None);
+    }
+
+    #[test]
+    fn tuning_parses_all_four_jobs_fields_when_present() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [tuning]
+            jobs_build = 2
+            jobs_reason = 4
+            jobs_train = 5
+            jobs_distil = 6
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.jobs_build, Some(2));
+        assert_eq!(lab.tuning.jobs_reason, Some(4));
+        assert_eq!(lab.tuning.jobs_train, Some(5));
+        assert_eq!(lab.tuning.jobs_distil, Some(6));
+    }
+
+    #[test]
+    fn tuning_jobs_fields_default_to_none_when_section_absent() {
+        let toml = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.jobs_build, None);
+        assert_eq!(lab.tuning.jobs_reason, None);
+        assert_eq!(lab.tuning.jobs_train, None);
+        assert_eq!(lab.tuning.jobs_distil, None);
+    }
+
+    /// The precedence every stage's `jobs` resolution follows: CLI > lab.toml `[tuning]
+    /// jobs_<stage>` > built-in default (3), then `.max(1)` so `--jobs 0` can never spawn zero
+    /// workers (falls through to 1, the same as a single-threaded inline run).
+    #[test]
+    fn jobs_resolve_precedence_cli_over_lab_over_default_and_clamps_zero_to_one() {
+        assert_eq!(resolve(Some(5), Some(2), 3).max(1), 5);
+        assert_eq!(resolve(None, Some(2), 3).max(1), 2);
+        assert_eq!(resolve(None, None, 3).max(1), 3);
+        assert_eq!(resolve(Some(0), Some(2), 3).max(1), 1);
+        assert_eq!(resolve(None, Some(0), 3).max(1), 1);
     }
 
     #[test]

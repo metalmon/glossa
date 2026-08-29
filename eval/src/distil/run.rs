@@ -31,6 +31,11 @@ use std::time::Duration;
 /// source of truth `run_densify_at` resolves against AND this module's own test asserts against).
 const DEFAULT_CHUNKS_PER_ROUND: usize = 3;
 
+/// Fallback worker-pool size for the densify doc loop when neither `--jobs` nor `lab.toml`'s
+/// `[tuning] jobs_distil` overrides it. Same single-source-of-truth rationale as
+/// `DEFAULT_CHUNKS_PER_ROUND`.
+const DEFAULT_JOBS: usize = 3;
+
 /// CLI-level options for `kbx distil`, folded from the `kbx` binary's clap fields (mirrors
 /// `reason::ReasonArgs`'s shape).
 #[derive(Debug, Clone)]
@@ -68,6 +73,11 @@ pub struct DistilArgs {
     /// Agent-loop round cap for the densify pass. `None` defers to `lab.toml`'s `[tuning]
     /// max_rounds`, then `distil::densify::DEFAULT_MAX_ROUNDS` (30) — resolved in `run_densify_at`.
     pub max_rounds: Option<usize>,
+    /// Worker-pool size for the densify doc loop. `None` defers to `lab.toml`'s `[tuning]
+    /// jobs_distil`, then `DEFAULT_JOBS` (3) — resolved in `run_densify_at`. Stored for now; the
+    /// worker pool itself lands in a later task (see `parallel::run_units_parallel`). Densify
+    /// mode only.
+    pub jobs: Option<usize>,
     /// When set, `distil::run` runs the synthetic (question, answer) gold generator (the former
     /// default `kbx distil` behavior) instead of densify, writing the kept golds to this file —
     /// it supplies the gold path `run_distil_at` writes to (see [`run`]). `None` selects densify,
@@ -426,6 +436,10 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         lab.tuning.max_rounds,
         crate::distil::densify::DEFAULT_MAX_ROUNDS,
     );
+    // Worker-pool size for the densify doc loop. Unused for now — Task 6 (the distil worker pool
+    // via `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires the
+    // config plumbing through.
+    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_distil, DEFAULT_JOBS).max(1);
 
     // A fresh, short-lived handle: enumerate then drop before densify_doc opens its own
     // per-document GraphStore connection — same reasoning as `run_build`'s extract stage.
@@ -800,6 +814,7 @@ to = ["Fact"]
             resume: false,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
             emit_golds: None,
         };
         assert_eq!(args.doc.as_deref(), Some("a.md"));
@@ -832,6 +847,18 @@ to = ["Fact"]
         );
     }
 
+    /// `jobs`' own precedence mirrors `chunks_per_round`/`max_rounds`': CLI > lab.toml `[tuning]
+    /// jobs_distil` > `DEFAULT_JOBS` (3), then `.max(1)` so `--jobs 0` never spawns zero workers.
+    #[test]
+    fn jobs_resolves_cli_over_lab_over_default_and_clamps_zero_to_one() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_JOBS, 3);
+        assert_eq!(resolve(Some(9), Some(6), DEFAULT_JOBS).max(1), 9);
+        assert_eq!(resolve(None, Some(6), DEFAULT_JOBS).max(1), 6);
+        assert_eq!(resolve(None, None, DEFAULT_JOBS).max(1), DEFAULT_JOBS);
+        assert_eq!(resolve(Some(0), Some(6), DEFAULT_JOBS).max(1), 1);
+    }
+
     // ---- `distil::run` mode dispatch (Task 4): pure selector, no model involved -----------------
 
     /// Bare constructor for `DistilArgs` in dispatch tests — every field explicit so a future field
@@ -849,6 +876,7 @@ to = ["Fact"]
             resume: false,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
             emit_golds,
         }
     }

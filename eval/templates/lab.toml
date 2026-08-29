@@ -34,3 +34,7 @@ timeout_secs = 120
 fanout_max = 3          # predecessors synthesized per backward step (reason)
 max_rounds = 30         # agent-loop rounds per unit (reason / build / distil)
 chunks_per_round = 3    # sections read per round (build / distil)
+jobs_build = 3          # worker-pool size for `kbx build`'s extract/judge stages
+jobs_reason = 3         # worker-pool size for `kbx reason`'s seed workers
+jobs_train = 3          # worker-pool size for `kbx train`'s read-only rollouts
+jobs_distil = 3         # worker-pool size for `kbx distil`'s densify workers

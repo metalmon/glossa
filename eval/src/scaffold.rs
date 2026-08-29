@@ -87,9 +87,10 @@ mod tests {
     }
 
     /// A fresh `kbx init` workspace ships `[tuning]` fully populated at its documented defaults
-    /// (3/30/3) — the user's explicit ask: a workspace should be ready to edit, not empty, so a
-    /// user tuning a knob edits an existing line instead of having to invent the section from
-    /// scratch. `LabConfig::load` (the same parser `kbx` itself uses) must read it back exactly.
+    /// (3/30/3, plus the four `jobs_*` knobs at 3) — the user's explicit ask: a workspace should
+    /// be ready to edit, not empty, so a user tuning a knob edits an existing line instead of
+    /// having to invent the section from scratch. `LabConfig::load` (the same parser `kbx` itself
+    /// uses) must read it back exactly.
     #[test]
     fn init_writes_lab_toml_with_tuning_section_at_documented_defaults() {
         let dir = tempfile::tempdir().unwrap();
@@ -101,6 +102,10 @@ mod tests {
         assert_eq!(lab.tuning.fanout_max, Some(3));
         assert_eq!(lab.tuning.max_rounds, Some(30));
         assert_eq!(lab.tuning.chunks_per_round, Some(3));
+        assert_eq!(lab.tuning.jobs_build, Some(3));
+        assert_eq!(lab.tuning.jobs_reason, Some(3));
+        assert_eq!(lab.tuning.jobs_train, Some(3));
+        assert_eq!(lab.tuning.jobs_distil, Some(3));
     }
 
     /// Thin helper so the scaffold test parses lab.toml through the SAME `LabConfig::load_at` path

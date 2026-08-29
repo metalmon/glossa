@@ -42,6 +42,11 @@ use std::time::Duration;
 /// silently (mirrors `reason::run::DEFAULT_FANOUT_MAX`'s rationale).
 const DEFAULT_CHUNKS_PER_ROUND: usize = 3;
 
+/// Fallback worker-pool size for the extract stage when neither `--jobs` nor `lab.toml`'s
+/// `[tuning] jobs_build` overrides it. Same single-source-of-truth rationale as
+/// `DEFAULT_CHUNKS_PER_ROUND`.
+const DEFAULT_JOBS: usize = 3;
+
 /// Which stage(s) of the build pipeline a `kbx build` invocation should run. `All` (the clap
 /// default) runs every stage, in pipeline order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -93,6 +98,10 @@ pub struct BuildOpts {
     /// `lab.toml`'s `[tuning] max_rounds`, then `build::extract::DEFAULT_MAX_ROUNDS` (30) —
     /// resolved in `run_build`.
     pub max_rounds: Option<usize>,
+    /// Worker-pool size for the extract stage. `None` defers to `lab.toml`'s `[tuning]
+    /// jobs_build`, then `DEFAULT_JOBS` (3) — resolved in `run_build`. Stored for now; the
+    /// worker pool itself lands in a later task (see `parallel::run_units_parallel`).
+    pub jobs: Option<usize>,
 }
 
 impl Default for BuildOpts {
@@ -109,6 +118,7 @@ impl Default for BuildOpts {
             build_temp: 0.8,
             chunks_per_round: None,
             max_rounds: None,
+            jobs: None,
         }
     }
 }
@@ -319,6 +329,10 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             lab.tuning.max_rounds,
             extract::DEFAULT_MAX_ROUNDS,
         );
+        // Worker-pool size for the extract stage. Unused for now — Task 5 (the extract worker
+        // pool via `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires
+        // the config plumbing through.
+        let _jobs = crate::lab::resolve(opts.jobs, lab.tuning.jobs_build, DEFAULT_JOBS).max(1);
 
         // A fresh, short-lived handle: enumerate then drop before extract_doc opens its own
         // per-document GraphStore connection, so nothing else holds `graph.sqlite` open across
@@ -565,6 +579,7 @@ mod tests {
         let o = BuildOpts::default();
         assert_eq!(o.chunks_per_round, None, "unset — resolved against lab/default in run_build");
         assert_eq!(o.max_rounds, None, "unset — resolved against lab/default in run_build");
+        assert_eq!(o.jobs, None, "unset — resolved against lab/default in run_build");
         assert!((o.build_temp - 0.8).abs() < 1e-9);
     }
 
@@ -585,6 +600,18 @@ mod tests {
         assert_eq!(resolve(None, None, extract::DEFAULT_MAX_ROUNDS), extract::DEFAULT_MAX_ROUNDS);
     }
 
+    /// `jobs`' own precedence mirrors `chunks_per_round`/`max_rounds`': CLI > lab.toml `[tuning]
+    /// jobs_build` > `DEFAULT_JOBS` (3), then `.max(1)` so `--jobs 0` never spawns zero workers.
+    #[test]
+    fn jobs_resolves_cli_over_lab_over_default_and_clamps_zero_to_one() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_JOBS, 3);
+        assert_eq!(resolve(Some(9), Some(6), DEFAULT_JOBS).max(1), 9);
+        assert_eq!(resolve(None, Some(6), DEFAULT_JOBS).max(1), 6);
+        assert_eq!(resolve(None, None, DEFAULT_JOBS).max(1), DEFAULT_JOBS);
+        assert_eq!(resolve(Some(0), Some(6), DEFAULT_JOBS).max(1), 1);
+    }
+
     #[test]
     fn run_build_finalize_stage_runs_without_error() {
         // No `.glossa/kbx/` at all (see `synthetic_corpus`) — Finalize must not touch lab.toml/
@@ -602,6 +629,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         run_build(paths, opts).unwrap();
     }
@@ -671,6 +699,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         run_build(paths, opts).unwrap();
 
@@ -900,6 +929,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -932,6 +962,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         let report = run_build(paths, opts).unwrap();
         assert!(report.docs_extracted.is_empty());
@@ -961,6 +992,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         run_build(paths, opts).unwrap();
 
@@ -1035,6 +1067,7 @@ mod tests {
             build_temp: 0.8,
             chunks_per_round: Some(3),
             max_rounds: None,
+            jobs: None,
         };
         run_build(paths, opts).unwrap();
 

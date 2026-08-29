@@ -127,6 +127,11 @@ enum Cmd {
         /// `[tuning] max_rounds`, then the built-in default, when unset.
         #[arg(long = "max-rounds")]
         max_rounds: Option<usize>,
+        /// Worker-pool size for the extract/judge stages (default 3). Falls back to `lab.toml`'s
+        /// `[tuning] jobs_build`, then the built-in default, when unset. `0` clamps to 1 (never
+        /// zero workers).
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// GEPA-optimize a corpus's `answer.md` (the answer-agent system prompt) against its
     /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
@@ -172,6 +177,11 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Worker-pool size for concurrent read-only rollouts (default 3). Falls back to
+        /// `lab.toml`'s `[tuning] jobs_train`, then the built-in default, when unset. `0` clamps
+        /// to 1 (never zero workers).
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -201,6 +211,11 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Worker-pool size for seed workers (default 3). Falls back to `lab.toml`'s `[tuning]
+        /// jobs_reason`, then the built-in default, when unset. `0` clamps to 1 (never zero
+        /// workers).
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// Densify the graph with the strong model (`lab.distil`), adding the reasoning the weak
     /// build+reason pass missed — the default. `--emit-golds <file>` instead runs the synthetic
@@ -261,6 +276,11 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Worker-pool size for the densify pass (default 3). Falls back to `lab.toml`'s
+        /// `[tuning] jobs_distil`, then the built-in default, when unset. `0` clamps to 1 (never
+        /// zero workers). Densify mode only.
+        #[arg(long)]
+        jobs: Option<usize>,
     },
 }
 
@@ -309,6 +329,7 @@ fn main() -> Result<()> {
             build_temp,
             chunks_per_round,
             max_rounds,
+            jobs,
         } => {
             let paths = workspace::resolve(path);
             let report = run_build(
@@ -325,6 +346,7 @@ fn main() -> Result<()> {
                     build_temp,
                     chunks_per_round,
                     max_rounds,
+                    jobs,
                 },
             )?;
             println!(
@@ -348,6 +370,7 @@ fn main() -> Result<()> {
             rng_seed,
             no_apply,
             no_progress,
+            jobs,
         } => train::run_train(
             path,
             TrainArgs {
@@ -363,6 +386,7 @@ fn main() -> Result<()> {
                 rng_seed,
                 no_apply,
                 no_progress,
+                jobs,
             },
         ),
         Cmd::Reason {
@@ -374,6 +398,7 @@ fn main() -> Result<()> {
             force,
             resume,
             no_progress,
+            jobs,
         } => reason::run_reason(
             path,
             ReasonArgs {
@@ -384,6 +409,7 @@ fn main() -> Result<()> {
                 force,
                 resume,
                 no_progress,
+                jobs,
             },
         ),
         Cmd::Distil {
@@ -400,6 +426,7 @@ fn main() -> Result<()> {
             out,
             seed_type,
             no_progress,
+            jobs,
         } => distil::run(
             path,
             DistilArgs {
@@ -415,6 +442,7 @@ fn main() -> Result<()> {
                 chunks_per_round,
                 max_rounds,
                 emit_golds,
+                jobs,
             },
         ),
     }
@@ -850,6 +878,7 @@ mod tests {
                 build_temp,
                 chunks_per_round,
                 max_rounds,
+                jobs,
                 path,
             } => {
                 assert_eq!(stage, BuildStage::All);
@@ -870,6 +899,10 @@ mod tests {
                 assert!(
                     max_rounds.is_none(),
                     "unset --max-rounds must be None (resolved CLI>lab>default in run_build)"
+                );
+                assert!(
+                    jobs.is_none(),
+                    "unset --jobs must be None (resolved CLI>lab>default in run_build), not a clap-level 3"
                 );
                 assert!(path.is_none());
             }
@@ -899,6 +932,8 @@ mod tests {
             "7",
             "--max-rounds",
             "50",
+            "--jobs",
+            "8",
         ])
         .unwrap();
         match cli.cmd {
@@ -915,6 +950,7 @@ mod tests {
                 build_temp,
                 chunks_per_round,
                 max_rounds,
+                jobs,
             } => {
                 assert_eq!(path, Some(PathBuf::from("/corpus")));
                 assert_eq!(stage, BuildStage::Judge);
@@ -930,8 +966,62 @@ mod tests {
                 );
                 assert_eq!(chunks_per_round, Some(7));
                 assert_eq!(max_rounds, Some(50));
+                assert_eq!(jobs, Some(8));
             }
             _ => panic!("expected Cmd::Build"),
+        }
+    }
+
+    /// `--jobs 0` must parse as `Some(0)` at the clap level (unclamped) — the `.max(1)` clamp
+    /// happens at each stage's `resolve(...)` call site (see `lab::resolve` tests), not in clap.
+    #[test]
+    fn build_cmd_parses_jobs_zero_unclamped() {
+        let cli = Cli::try_parse_from(["kbx", "build", "--jobs", "0"]).unwrap();
+        match cli.cmd {
+            Cmd::Build { jobs, .. } => assert_eq!(jobs, Some(0)),
+            _ => panic!("expected Cmd::Build"),
+        }
+    }
+
+    #[test]
+    fn reason_cmd_parses_jobs_flag() {
+        let cli = Cli::try_parse_from(["kbx", "reason", "--jobs", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Reason { jobs, .. } => assert_eq!(jobs, Some(5)),
+            _ => panic!("expected Cmd::Reason"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "reason"]).unwrap();
+        match cli.cmd {
+            Cmd::Reason { jobs, .. } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Reason"),
+        }
+    }
+
+    #[test]
+    fn train_cmd_parses_jobs_flag() {
+        let cli = Cli::try_parse_from(["kbx", "train", "--jobs", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Train { jobs, .. } => assert_eq!(jobs, Some(5)),
+            _ => panic!("expected Cmd::Train"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "train"]).unwrap();
+        match cli.cmd {
+            Cmd::Train { jobs, .. } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Train"),
+        }
+    }
+
+    #[test]
+    fn distil_cmd_parses_jobs_flag() {
+        let cli = Cli::try_parse_from(["kbx", "distil", "--jobs", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Distil { jobs, .. } => assert_eq!(jobs, Some(5)),
+            _ => panic!("expected Cmd::Distil"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "distil"]).unwrap();
+        match cli.cmd {
+            Cmd::Distil { jobs, .. } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Distil"),
         }
     }
 }

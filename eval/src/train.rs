@@ -18,6 +18,11 @@ use crate::workspace;
 use anyhow::Context;
 use std::path::PathBuf;
 
+/// Fallback worker-pool size for concurrent read-only rollouts when neither `--jobs` nor
+/// `lab.toml`'s `[tuning] jobs_train` overrides it. Same single-source-of-truth rationale as
+/// `build::DEFAULT_CHUNKS_PER_ROUND`/`reason::run::DEFAULT_FANOUT_MAX`.
+const DEFAULT_JOBS: usize = 3;
+
 /// CLI-facing knobs for `kbx train` (parsed by the later CLI-wiring task; this struct is its
 /// target shape).
 pub struct TrainArgs {
@@ -33,6 +38,10 @@ pub struct TrainArgs {
     pub rng_seed: Option<u64>,
     pub no_apply: bool,
     pub no_progress: bool,
+    /// Worker-pool size for concurrent read-only rollouts. `None` defers to `lab.toml`'s
+    /// `[tuning] jobs_train`, then `DEFAULT_JOBS` (3) — resolved in `run_train`. Stored for now;
+    /// the parallel rollout loop itself lands in a later task (`gepa_graph::score_questions`).
+    pub jobs: Option<usize>,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only on a STRICT EM
@@ -48,6 +57,10 @@ pub(crate) fn should_apply(seed_em: f64, best_em: f64, no_apply: bool) -> bool {
 pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let paths = workspace::resolve(path);
     let lab = LabConfig::load_at(&paths.lab)?;
+    // Worker-pool size for concurrent read-only rollouts. Unused for now — Task 7 (parallel
+    // rollouts in `gepa_graph::score_questions`) consumes it; this task only wires the config
+    // plumbing through.
+    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_train, DEFAULT_JOBS).max(1);
     let reflect_ep = lab
         .reflect
         .clone()
@@ -193,5 +206,17 @@ mod tests {
         assert!(!should_apply(0.5, 0.5, false)); // no improvement -> keep seed
         assert!(!should_apply(0.5, 0.4, false)); // regression -> keep seed
         assert!(!should_apply(0.5, 0.9, true)); // --no-apply -> never write answer.md
+    }
+
+    /// `jobs`' own precedence mirrors every other stage's tuning knob: CLI > lab.toml `[tuning]
+    /// jobs_train` > `DEFAULT_JOBS` (3), then `.max(1)` so `--jobs 0` never spawns zero workers.
+    #[test]
+    fn jobs_resolves_cli_over_lab_over_default_and_clamps_zero_to_one() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_JOBS, 3);
+        assert_eq!(resolve(Some(5), Some(2), DEFAULT_JOBS).max(1), 5);
+        assert_eq!(resolve(None, Some(2), DEFAULT_JOBS).max(1), 2);
+        assert_eq!(resolve(None, None, DEFAULT_JOBS).max(1), DEFAULT_JOBS);
+        assert_eq!(resolve(Some(0), Some(2), DEFAULT_JOBS).max(1), 1);
     }
 }

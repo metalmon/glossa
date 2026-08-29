@@ -20,6 +20,10 @@ use std::time::Duration;
 /// below asserts against, so drift between the two can't happen silently.
 const DEFAULT_FANOUT_MAX: usize = 3;
 
+/// Fallback worker-pool size for the seed loop when neither `--jobs` nor `lab.toml`'s `[tuning]
+/// jobs_reason` overrides it. Same single-source-of-truth rationale as `DEFAULT_FANOUT_MAX`.
+const DEFAULT_JOBS: usize = 3;
+
 /// CLI-level options for `kbx reason`, folded from the `kbx` binary's clap fields (mirrors
 /// `crate::build::BuildOpts`'s shape).
 #[derive(Debug, Clone)]
@@ -39,6 +43,10 @@ pub struct ReasonArgs {
     pub resume: bool,
     /// Never draw the progress bar, even on a TTY.
     pub no_progress: bool,
+    /// Worker-pool size for the seed loop. `None` defers to `lab.toml`'s `[tuning] jobs_reason`,
+    /// then `DEFAULT_JOBS` (3) — resolved in `run_reason_at`. Stored for now; the worker pool
+    /// itself lands in a later task (see `parallel::run_units_parallel`).
+    pub jobs: Option<usize>,
 }
 
 /// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
@@ -125,6 +133,10 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         lab.tuning.max_rounds,
         crate::reason::seed::DEFAULT_MAX_ROUNDS,
     );
+    // Worker-pool size for the seed loop. Unused for now — Task 4 (the reason worker pool via
+    // `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires the config
+    // plumbing through.
+    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_reason, DEFAULT_JOBS).max(1);
     let run_dir = paths.runs.join("reason");
     if args.force {
         clear_checkpoint(&run_dir).context("clearing reason checkpoint for --force")?;
@@ -226,6 +238,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            jobs: None,
         };
         assert_eq!(args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
     }
@@ -243,6 +256,7 @@ mod tests {
             force: false,
             resume: false,
             no_progress: true,
+            jobs: None,
         };
         assert_eq!(
             crate::lab::resolve(args.max_rounds, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
@@ -266,5 +280,17 @@ mod tests {
             resolve(None, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
             crate::reason::seed::DEFAULT_MAX_ROUNDS
         );
+    }
+
+    /// `jobs`' own precedence mirrors `fanout_max`/`max_rounds`': CLI > lab.toml `[tuning]
+    /// jobs_reason` > `DEFAULT_JOBS` (3), then `.max(1)` so `--jobs 0` never spawns zero workers.
+    #[test]
+    fn jobs_resolves_cli_over_lab_over_default_and_clamps_zero_to_one() {
+        use crate::lab::resolve;
+        assert_eq!(DEFAULT_JOBS, 3);
+        assert_eq!(resolve(Some(7), Some(5), DEFAULT_JOBS).max(1), 7);
+        assert_eq!(resolve(None, Some(5), DEFAULT_JOBS).max(1), 5);
+        assert_eq!(resolve(None, None, DEFAULT_JOBS).max(1), DEFAULT_JOBS);
+        assert_eq!(resolve(Some(0), Some(5), DEFAULT_JOBS).max(1), 1);
     }
 }
