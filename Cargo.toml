@@ -52,7 +52,8 @@ sqlparser = "0.53"
 windows-service = "0.7"
 
 [features]
-default = []
+# `notebook` (Jupyter .ipynb indexing) is dependency-free and ships in the standard release binary.
+default = ["notebook"]
 notebook = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
