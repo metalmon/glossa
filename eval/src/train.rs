@@ -33,6 +33,9 @@ pub struct TrainArgs {
     pub rng_seed: Option<u64>,
     pub no_apply: bool,
     pub no_progress: bool,
+    /// Selection metric: `"exact"` (default, exact-match EM — byte-for-byte the pre-metric
+    /// behavior) or `"judge"` (graded LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0).
+    pub metric: String,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only on a STRICT EM
@@ -84,6 +87,23 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             )
         })?;
 
+    // Selection metric: "exact" (default, exact-match EM) or "judge" (graded LLM judge). Judge
+    // needs both a [judge] endpoint in lab.toml and the workspace judge.md prompt; exact needs
+    // neither and reproduces the pre-metric GEPA path exactly (cfg.judge == None).
+    let judge_cfg = match args.metric.as_str() {
+        "exact" => None,
+        "judge" => {
+            let ep = lab
+                .judge
+                .clone()
+                .context("--metric judge needs a [judge] endpoint in lab.toml")?;
+            let md = std::fs::read_to_string(&paths.judge)
+                .with_context(|| format!("read judge prompt {}", paths.judge.display()))?;
+            Some(gepa_graph::JudgeCfg { ep, md })
+        }
+        other => anyhow::bail!("unknown --metric {other:?} (expected \"exact\" or \"judge\")"),
+    };
+
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
     let cfg = GepaGraphConfig {
@@ -98,6 +118,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         seed: rng_seed,
         pareto_size: args.pareto_size,
         candidate_selection,
+        judge: judge_cfg,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

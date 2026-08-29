@@ -858,6 +858,7 @@ fn run_optimize_graph(
             seed: rng_seed,
             pareto_size,
             candidate_selection,
+            judge: None,
         },
         qs,
         &reflect,

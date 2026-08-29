@@ -43,6 +43,14 @@ const MINIBATCH_RESAMPLE_ATTEMPTS: usize = 3;
 /// Per-step tool-result body length fed to the reflector (chars).
 const STEP_RESULT_CHARS: usize = 400;
 
+/// Graded judge metric config: the reused LLM judge endpoint (`lab.judge`) plus the workspace
+/// `judge.md` system prompt. `Some(..)` on `GepaGraphConfig.judge` selects the graded path;
+/// `None` keeps the backward-compatible exact-EM path.
+pub struct JudgeCfg {
+    pub ep: crate::lab::Endpoint,
+    pub md: String,
+}
+
 pub struct GepaGraphConfig {
     pub endpoint: String,
     pub model: String,
@@ -55,6 +63,18 @@ pub struct GepaGraphConfig {
     pub seed: u64,
     pub pareto_size: usize,
     pub candidate_selection: CandidateSelection,
+    /// `Some` => graded judge metric (Correct=1.0/Partial=0.5/Wrong=0.0); `None` => exact-EM
+    /// (default, backward-compatible with pre-metric GEPA).
+    pub judge: Option<JudgeCfg>,
+}
+
+/// Verdict → graded score: Correct=1.0, Partial=0.5, Wrong/Unscored=0.0.
+fn verdict_to_score(v: crate::judge::Verdict) -> f64 {
+    match v {
+        crate::judge::Verdict::Correct => 1.0,
+        crate::judge::Verdict::Partial => 0.5,
+        crate::judge::Verdict::Wrong | crate::judge::Verdict::Unscored => 0.0,
+    }
 }
 
 pub struct GepaGraphResult {
@@ -72,7 +92,9 @@ struct ToolStep {
 }
 
 struct RolloutOutcome {
-    em: bool,
+    /// Graded rollout score in {0.0, 0.5, 1.0}: exact-EM as 0.0/1.0 when `cfg.judge` is `None`,
+    /// else the reused judge's Correct/Partial/Wrong verdict. `< 1.0` means "not fully correct".
+    score: f64,
     pred: String,
     steps: Vec<ToolStep>,
 }
@@ -80,8 +102,8 @@ struct RolloutOutcome {
 #[derive(Clone)]
 struct Candidate {
     prompt: String,
-    /// Per-instance EM hit/miss on D_pareto (not full val).
-    em_val: Vec<bool>,
+    /// Per-instance graded score on D_pareto (not full val).
+    em_val: Vec<f64>,
 }
 
 struct FailCase {
@@ -103,15 +125,15 @@ fn golds_of(q: &Question) -> Vec<String> {
     g
 }
 
-fn mean_bool(b: &[bool]) -> f64 {
-    if b.is_empty() {
+fn mean(v: &[f64]) -> f64 {
+    if v.is_empty() {
         return 0.0;
     }
-    b.iter().filter(|x| **x).count() as f64 / b.len() as f64
+    v.iter().sum::<f64>() / v.len() as f64
 }
 
-fn em_bools(out: &[RolloutOutcome]) -> Vec<bool> {
-    out.iter().map(|o| o.em).collect()
+fn scores(out: &[RolloutOutcome]) -> Vec<f64> {
+    out.iter().map(|o| o.score).collect()
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -187,12 +209,30 @@ fn rollout_one(
         }
     };
     let pred = crate::backend::prompt::parse_answer(&raw);
-    // GEPA optimizes STRICT exact-match: an ungameable target (relaxed/substring EM would reward a
-    // verbose prompt that merely embeds the gold). Since strict ⊆ relaxed, improving strict also
-    // lifts the relaxed EM that `kbx eval` reports; the two just serve different roles.
-    let em = crate::score::exact_match_any(&pred, &golds_of(q));
+    // Scoring is either graded (reused LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0) when a judge
+    // is configured, or STRICT exact-match (0.0/1.0) by default. Exact-EM is the ungameable target
+    // (relaxed/substring EM would reward a verbose prompt that merely embeds the gold); the graded
+    // judge exists for corpora whose gold answers are long paragraphs, where exact-EM is ~0 for
+    // every candidate and GEPA has no gradient to climb. Judge only the primary gold `q.answer`
+    // (aliases are exact-match forms).
+    let score = match &cfg.judge {
+        Some(jc) => match crate::judge::judge(&jc.ep, &jc.md, &q.question, &q.answer, &pred) {
+            Ok(j) => verdict_to_score(j.verdict),
+            Err(e) => {
+                eprintln!("judge failed (scored 0): {e:#}");
+                0.0
+            }
+        },
+        None => {
+            if crate::score::exact_match_any(&pred, &golds_of(q)) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    };
     RolloutOutcome {
-        em,
+        score,
         pred,
         steps: steps.into_inner(),
     }
@@ -340,17 +380,21 @@ fn sample_questions(pool: &[Question], n: usize, rng: &mut StdRng) -> Vec<Questi
         .collect()
 }
 
-fn candidate_bits(c: &Candidate) -> &[bool] {
+fn candidate_bits(c: &Candidate) -> &[f64] {
     &c.em_val
 }
 
-fn dominates(a: &[bool], b: &[bool]) -> bool {
+/// Graded Pareto dominance: `a` dominates `b` iff `a[i] >= b[i]` for every instance AND
+/// `a[i] > b[i]` for at least one. Compared with a small epsilon so the discrete {0,0.5,1} scores
+/// never trip on float equality.
+fn dominates(a: &[f64], b: &[f64]) -> bool {
+    const EPS: f64 = 1e-9;
     let mut strictly = false;
     for (x, y) in a.iter().zip(b) {
-        if !x && *y {
+        if *x < *y - EPS {
             return false;
         }
-        if *x && !y {
+        if *x > *y + EPS {
             strictly = true;
         }
     }
@@ -369,20 +413,21 @@ fn frontier(pool: &[Candidate]) -> Vec<usize> {
 }
 
 fn pareto_frontier_win_counts(pool: &[Candidate]) -> (Vec<usize>, Vec<usize>) {
-    let bits: Vec<&[bool]> = pool.iter().map(candidate_bits).collect();
+    let bits: Vec<&[f64]> = pool.iter().map(candidate_bits).collect();
     let n_inst = bits.first().map(|b| b.len()).unwrap_or(0);
     if n_inst == 0 {
         return ((0..pool.len()).collect(), vec![0; pool.len()]);
     }
 
+    const EPS: f64 = 1e-9;
     let mut union = HashSet::new();
     let mut per_instance_winners: Vec<Vec<usize>> = Vec::with_capacity(n_inst);
     for i in 0..n_inst {
-        let max_score = bits.iter().map(|b| b[i] as u8).max().unwrap_or(0);
+        let max_score = bits.iter().map(|b| b[i]).fold(f64::NEG_INFINITY, f64::max);
         let winners: Vec<usize> = bits
             .iter()
             .enumerate()
-            .filter(|(_, b)| b[i] as u8 == max_score)
+            .filter(|(_, b)| (b[i] - max_score).abs() < EPS)
             .map(|(k, _)| k)
             .collect();
         for &k in &winners {
@@ -467,8 +512,8 @@ fn select_parent_idx(pool: &[Candidate], sel: CandidateSelection, rng: &mut StdR
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
-                mean_bool(&a.em_val)
-                    .partial_cmp(&mean_bool(&b.em_val))
+                mean(&a.em_val)
+                    .partial_cmp(&mean(&b.em_val))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(i, _)| i)
@@ -517,8 +562,8 @@ pub fn run(
         graph.as_ref(),
         &spec,
     );
-    let baseline_em = mean_bool(&em_bools(&baseline_out));
-    println!("baseline val: em={baseline_em:.3}");
+    let baseline_em = mean(&scores(&baseline_out));
+    println!("baseline val: score={baseline_em:.3}");
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let pareto_set = sample_questions(&val, cfg.pareto_size, &mut rng);
@@ -539,7 +584,7 @@ pub fn run(
     );
     let mut pool = vec![Candidate {
         prompt: cfg.seed_prompt.clone(),
-        em_val: em_bools(&base_pareto),
+        em_val: scores(&base_pareto),
     }];
 
     for it in 0..cfg.budget {
@@ -555,7 +600,7 @@ pub fn run(
             }
             let outcomes =
                 score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec);
-            if outcomes.iter().any(|o| !o.em) {
+            if outcomes.iter().any(|o| o.score < 1.0) {
                 minibatch = Some(batch);
                 parent_outcomes = Some(outcomes);
                 break;
@@ -565,11 +610,11 @@ pub fn run(
             println!("[iter {it}] no failures in sampled minibatch — skip");
             continue;
         };
-        let parent_em_mb = mean_bool(&em_bools(&outcomes));
+        let parent_em_mb = mean(&scores(&outcomes));
         let fails: Vec<FailCase> = batch
             .iter()
             .zip(&outcomes)
-            .filter(|(_, o)| !o.em)
+            .filter(|(_, o)| o.score < 1.0)
             .map(|(q, o)| FailCase {
                 question: q.question.clone(),
                 gold: golds_of(q).join(" | "),
@@ -603,7 +648,7 @@ pub fn run(
 
         let child_mb =
             score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec);
-        let child_em_mb = mean_bool(&em_bools(&child_mb));
+        let child_em_mb = mean(&scores(&child_mb));
         if child_em_mb <= parent_em_mb {
             println!("[iter {it}] child_mb {child_em_mb:.3} <= parent_mb {parent_em_mb:.3} — discarded");
             continue;
@@ -621,11 +666,11 @@ pub fn run(
         );
         pool.push(Candidate {
             prompt: child_prompt,
-            em_val: em_bools(&child_pareto),
+            em_val: scores(&child_pareto),
         });
         let best_pareto = pool
             .iter()
-            .map(|c| mean_bool(&c.em_val))
+            .map(|c| mean(&c.em_val))
             .fold(f64::NEG_INFINITY, f64::max);
         println!(
             "[iter {it}] parent_idx={parent_idx} parent_mb={parent_em_mb:.3} -> child_mb={child_em_mb:.3} — accepted (pareto_em={best_pareto:.3}, pool_size={})",
@@ -638,7 +683,7 @@ pub fn run(
     let mut best_em = f64::NEG_INFINITY;
     for c in &pool {
         let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec);
-        let em = mean_bool(&em_bools(&out));
+        let em = mean(&scores(&out));
         if em > best_em {
             best_em = em;
             best_prompt = c.prompt.clone();
@@ -760,8 +805,8 @@ mod tests {
     #[test]
     fn select_parent_current_best_picks_highest_em() {
         let pool = vec![
-            Candidate { prompt: "weak".into(), em_val: vec![false, false] },
-            Candidate { prompt: "strong".into(), em_val: vec![true, true, true] },
+            Candidate { prompt: "weak".into(), em_val: vec![0.0, 0.0] },
+            Candidate { prompt: "strong".into(), em_val: vec![1.0, 1.0, 1.0] },
         ];
         let mut rng = StdRng::seed_from_u64(1);
         assert_eq!(
@@ -773,12 +818,56 @@ mod tests {
     #[test]
     fn pareto_win_counts_prefer_frequent_winner() {
         let pool = vec![
-            Candidate { prompt: "a".into(), em_val: vec![true, false, false] },
-            Candidate { prompt: "b".into(), em_val: vec![false, true, true] },
-            Candidate { prompt: "c".into(), em_val: vec![false, false, false] },
+            Candidate { prompt: "a".into(), em_val: vec![1.0, 0.0, 0.0] },
+            Candidate { prompt: "b".into(), em_val: vec![0.0, 1.0, 1.0] },
+            Candidate { prompt: "c".into(), em_val: vec![0.0, 0.0, 0.0] },
         ];
         let (frontier, counts) = pareto_frontier_win_counts(&pool);
         assert!(frontier.contains(&0) && frontier.contains(&1));
+        assert_eq!(counts[1], 2);
+        assert_eq!(counts[2], 0);
+    }
+
+    #[test]
+    fn verdict_to_score_maps_grades() {
+        assert_eq!(verdict_to_score(crate::judge::Verdict::Correct), 1.0);
+        assert_eq!(verdict_to_score(crate::judge::Verdict::Partial), 0.5);
+        assert_eq!(verdict_to_score(crate::judge::Verdict::Wrong), 0.0);
+        assert_eq!(verdict_to_score(crate::judge::Verdict::Unscored), 0.0);
+    }
+
+    #[test]
+    fn mean_f64_handles_empty_and_grades() {
+        assert_eq!(mean(&[]), 0.0);
+        assert_eq!(mean(&[1.0, 0.5, 0.0]), 0.5);
+    }
+
+    #[test]
+    fn dominates_f64_graded() {
+        // strictly better on one instance, >= on the rest -> dominates
+        assert!(dominates(&[1.0, 0.5], &[0.5, 0.5]));
+        // better on one but worse on another -> does NOT dominate
+        assert!(!dominates(&[1.0, 0.0], &[0.5, 0.5]));
+        // equal vectors never dominate (no strict improvement)
+        assert!(!dominates(&[0.5, 1.0], &[0.5, 1.0]));
+        // graded partial credit counts as strictly better
+        assert!(dominates(&[0.5, 0.5], &[0.0, 0.5]));
+    }
+
+    #[test]
+    fn pareto_win_counts_graded_partial_credit() {
+        // Instance 0: only `b` reaches the max (1.0). Instance 1: `a`=1.0 is sole max, `b`=0.5.
+        // Instance 2: `a` and `b` tie at 0.5. Neither dominates the other -> both on frontier.
+        let pool = vec![
+            Candidate { prompt: "a".into(), em_val: vec![0.5, 1.0, 0.5] },
+            Candidate { prompt: "b".into(), em_val: vec![1.0, 0.5, 0.5] },
+            Candidate { prompt: "c".into(), em_val: vec![0.0, 0.0, 0.0] },
+        ];
+        let (frontier, counts) = pareto_frontier_win_counts(&pool);
+        assert!(frontier.contains(&0) && frontier.contains(&1));
+        assert!(!frontier.contains(&2), "dominated candidate off frontier");
+        // a wins instance 1 outright + ties instance 2 => 2; b wins instance 0 + ties instance 2 => 2.
+        assert_eq!(counts[0], 2);
         assert_eq!(counts[1], 2);
         assert_eq!(counts[2], 0);
     }
