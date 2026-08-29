@@ -18,16 +18,15 @@
 
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::lab::LabConfig;
+use crate::parallel::GraphWriter;
 use crate::reason::grounding_schema_block;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::ops;
-use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::read::DocImage;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::time::Duration;
 
 /// Fallback cap on tool-call rounds for one document's extraction pass, used when neither a CLI
@@ -300,8 +299,13 @@ pub(crate) fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u6
 /// gated out via `gate_images`; the flag is threaded through for parity with the vision path.
 /// `max_rounds` bounds EACH round's agent loop (resolved CLI > lab.toml `[tuning]` >
 /// `DEFAULT_MAX_ROUNDS` by the caller — see `build::run_build`).
+///
+/// `writer` and `idx` are shared across every worker in the pool (opened ONCE by `run_build`, not
+/// per-document): reads go straight through `idx` (WAL-safe, no lock needed), and every write
+/// funnels through `writer.upsert(..)`, which serializes the N worker threads in-process AND
+/// reuses the core file-lock so a concurrent `glossa` MCP writer can never interleave with an eval
+/// worker (mirrors `reason::seed::chain_one_seed`'s `GraphWriter` wiring).
 pub fn extract_doc(
-    root: &Path,
     lab: &LabConfig,
     builder_md: &str,
     ontology: &Ontology,
@@ -310,6 +314,8 @@ pub fn extract_doc(
     chunks_per_round: usize,
     vision: bool,
     max_rounds: usize,
+    writer: &GraphWriter,
+    idx: &DocIndex,
     // Called once per coverage round with the number of chunk ordinals newly covered that round,
     // so a caller's progress bar can advance WITHIN a document instead of only when the whole doc
     // finishes (a big doc is otherwise many minutes at a standstill on a slow local model).
@@ -317,9 +323,6 @@ pub fn extract_doc(
 ) -> anyhow::Result<ExtractStats> {
     // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP; set it once for this pass.
     std::env::set_var("KB_EVAL_TEMP", build_temp.to_string());
-
-    let g = GraphStore::open(root)?;
-    let idx = DocIndex::open_or_create(root)?;
 
     // Grounding-required node types + descriptions prepended to the builder prompt (the schema the
     // harvest may create; `filter_grounding_only` enforces it on write).
@@ -336,7 +339,7 @@ pub fn extract_doc(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let ords = doc_chunk_ords(&idx, doc_path)?;
+    let ords = doc_chunk_ords(idx, doc_path)?;
 
     // `stats` accumulates across rounds; `reads` tracks the ordinals a single round actually read
     // (cleared per round). Both live in RefCell so the FnMut `exec` closure can mutate them without
@@ -380,7 +383,12 @@ pub fn extract_doc(
                 // ontology), then write through the SAME ops::graph_upsert path the MCP server uses.
                 let (nodes, edges, _notes) = parse_and_filter_upsert(args, ontology);
                 let (nodes, _drop_notes) = filter_grounding_only(nodes, ontology);
-                let out = ops::graph_upsert(&idx, &g, ontology, nodes, edges, now, "agent");
+                let out = match writer.upsert(idx, ontology, nodes, edges, now, "agent") {
+                    Ok(out) => out,
+                    // Lock-busy / poisoned-lock timeout: report to the model like any other tool
+                    // error rather than panicking one worker's whole document pass.
+                    Err(e) => return (format!("graph_upsert failed: {e}"), Vec::new(), Vec::new()),
+                };
                 if !out.rejected {
                     let mut s = stats.borrow_mut();
                     s.nodes += out.nodes;

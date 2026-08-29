@@ -24,6 +24,7 @@ use crate::backend::openai::{
 };
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
+use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::workspace::KbxPaths;
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -34,6 +35,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Fallback for `chunks_per_round` when neither a CLI flag nor `lab.toml`'s `[tuning]
@@ -329,14 +331,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             lab.tuning.max_rounds,
             extract::DEFAULT_MAX_ROUNDS,
         );
-        // Worker-pool size for the extract stage. Unused for now — Task 5 (the extract worker
-        // pool via `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires
-        // the config plumbing through.
-        let _jobs = crate::lab::resolve(opts.jobs, lab.tuning.jobs_build, DEFAULT_JOBS).max(1);
+        // Worker-pool size for the extract stage: CLI > lab.toml `[tuning] jobs_build` > 3,
+        // clamped to at least 1 — drives the per-doc extract loop below via `run_units_parallel`.
+        let jobs = crate::lab::resolve(opts.jobs, lab.tuning.jobs_build, DEFAULT_JOBS).max(1);
 
-        // A fresh, short-lived handle: enumerate then drop before extract_doc opens its own
-        // per-document GraphStore connection, so nothing else holds `graph.sqlite` open across
-        // the whole (possibly slow, model-calling) extraction loop.
+        // A fresh, short-lived handle, dropped immediately after enumeration — the real
+        // extraction-loop `GraphStore` (shared via `GraphWriter` across the worker pool) is opened
+        // fresh below, once the delta/drop step has run.
         let mut docs = {
             let g = GraphStore::open(&paths.root).context("open graph store to enumerate docs")?;
             enumerate_docs(&g)?
@@ -390,6 +391,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         }
         drop(g);
 
+        // Extraction shares ONE `GraphStore` (wrapped in a `GraphWriter`) across every worker in
+        // the pool, instead of each document opening its own connection against `graph.sqlite` —
+        // mirrors `reason::run::run_reason_at`'s `GraphWriter` wiring (Task 4). `idx` (opened above
+        // for the delta) is reused as-is: reads go straight through it (WAL-safe, no lock needed).
+        let g = Arc::new(GraphStore::open(&paths.root).context("open graph store for extract")?);
+        let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
+
         // Weight the bar by chunk, not by document: a huge document is otherwise one tick and
         // the bar/ETA lie on a mixed-size corpus. `idx` (opened above for the delta) already has
         // every indexed chunk, keyed by the same corpus-relative path as `docs`' entries (see
@@ -408,44 +416,73 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // `{msg}` (ETA + tokens/resamples).
         pb.set_prefix("building");
         let ticker = StatusTicker::start(&pb);
-        let mut total = ExtractStats::default();
+
+        // Pre-filter (single-threaded, order-preserving): a doc already recorded done under
+        // `--resume` is skipped and accounted for in the bar right here — identical to what the
+        // old sequential loop did inline — BEFORE any doc is handed to the worker pool. The pool
+        // then only ever sees docs that must actually run, so `is_done`'s checkpoint read never
+        // needs to be reasoned about under concurrency (mirrors `reason::run::run_reason_at`'s
+        // pre-filter).
+        let mut to_run: Vec<String> = Vec::with_capacity(docs.len());
         for doc in &docs {
             let unit_id = format!("extract:{doc}");
             if opts.resume && cp.is_done(&unit_id) {
                 pb.inc(extract_doc_weight(doc, &chunk_counts) as u64);
                 continue;
             }
-            // Advance the bar WITHIN the doc via extract_doc's per-round callback (real chunks
-            // covered), so a large doc on a slow model shows steady motion instead of sitting at
-            // one value until it finishes. `covered` tracks what the callback advanced so the
-            // per-doc total can be reconciled to this doc's weight below.
-            let w = extract_doc_weight(doc, &chunk_counts) as u64;
-            let mut covered = 0u64;
-            let stats = extract_doc(
-                &paths.root,
-                &lab,
-                &builder_md,
-                &ontology,
-                doc,
-                opts.build_temp,
-                chunks_per_round,
-                opts.vision,
-                max_rounds,
-                |n| {
-                    covered += n;
-                    pb.inc(n);
-                },
-            )
-            .with_context(|| format!("extracting {doc}"))?;
+            to_run.push(doc.clone());
+        }
+
+        // Each doc's progress is driven entirely by `extract_doc`'s own per-round callback plus
+        // the gap top-up below, so `run_units_parallel`'s own post-work `pb.inc(weight)` must be a
+        // no-op here (`weight` always 0) — unlike `reason`'s seed loop, which has no sub-unit
+        // granularity and so lets `run_units_parallel` own the bar entirely. `--jobs 1` runs this
+        // same closure inline, in `docs` order, byte-for-byte the old sequential loop.
+        let results = run_units_parallel(
+            to_run,
+            jobs,
+            &pb,
+            |_doc| 0u64,
+            |doc: &String| -> Result<(String, ExtractStats)> {
+                // Advance the bar WITHIN the doc via extract_doc's per-round callback (real chunks
+                // covered), so a large doc on a slow model shows steady motion instead of sitting
+                // at one value until it finishes. `covered` tracks what the callback advanced so
+                // the per-doc total can be reconciled to this doc's weight below.
+                let w = extract_doc_weight(doc, &chunk_counts) as u64;
+                let mut covered = 0u64;
+                let stats = extract_doc(
+                    &lab,
+                    &builder_md,
+                    &ontology,
+                    doc,
+                    opts.build_temp,
+                    chunks_per_round,
+                    opts.vision,
+                    max_rounds,
+                    &writer,
+                    &idx,
+                    |n| {
+                        covered += n;
+                        pb.inc(n);
+                    },
+                )
+                .with_context(|| format!("extracting {doc}"))?;
+                cp.mark(&format!("extract:{doc}"), "done")
+                    .with_context(|| format!("marking extract:{doc} done"))?;
+                // Top up any gap so the bar stays aligned to this doc's weight even when covered
+                // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
+                if covered < w {
+                    pb.inc(w - covered);
+                }
+                Ok((doc.clone(), stats))
+            },
+        )?;
+
+        let mut total = ExtractStats::default();
+        for (doc, stats) in results {
             total.nodes += stats.nodes;
             total.mentions += stats.mentions;
-            cp.mark(&unit_id, "done")?;
-            report.docs_extracted.push(doc.clone());
-            // Top up any gap so the bar stays aligned to this doc's weight even when covered
-            // ordinals differ from the chunk count (indicatif clamps a slight overshoot).
-            if covered < w {
-                pb.inc(w - covered);
-            }
+            report.docs_extracted.push(doc);
         }
         drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
         pb.finish_and_clear();
