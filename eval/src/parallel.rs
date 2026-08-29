@@ -41,6 +41,14 @@ impl GraphWriter {
         Self { g, lock: Arc::new(Mutex::new(())), root }
     }
 
+    /// Read-only access to the underlying store. Reads are WAL-safe and need no lock (only the
+    /// read-modify-write in [`Self::upsert`] does) — callers that need to inspect the graph
+    /// (e.g. reading a seed's existing groundings before synthesizing new nodes) share this SAME
+    /// handle rather than opening a second `GraphStore` against the same `graph.sqlite`.
+    pub fn store(&self) -> &GraphStore {
+        &self.g
+    }
+
     /// Serialized `graph_upsert`. Holds the in-process mutex for the ENTIRE call (including the
     /// nested file-lock RMW), so no two workers — nor a worker and a concurrent MCP writer — can
     /// interleave a read-modify-write on the graph.

@@ -10,8 +10,8 @@ use crate::lab::LabConfig;
 use crate::reason::schema_graph_block;
 use crate::workspace::KbxPaths;
 use anyhow::anyhow;
+use crate::parallel::GraphWriter;
 use glossa::graph::ontology::Ontology;
-use glossa::graph::ops;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
@@ -116,6 +116,12 @@ pub(crate) fn seed_source_text_all(
 ///
 /// `max_rounds` bounds this seed's agent loop (resolved CLI > lab.toml `[tuning]` > `DEFAULT_MAX_ROUNDS`
 /// by the caller — see `reason::run::run_reason_at`).
+///
+/// `writer` and `idx` are shared across every worker in the pool (opened ONCE by
+/// `run_reason_at`, not per-seed): reads go straight through `writer.store()` (WAL-safe, no
+/// lock needed), and every write funnels through `writer.upsert(..)`, which serializes the N
+/// worker threads in-process AND reuses the core file-lock so a concurrent `glossa` MCP writer
+/// can never interleave with an eval worker.
 pub fn chain_one_seed(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -124,18 +130,19 @@ pub fn chain_one_seed(
     seed: &Seed,
     fanout_max: usize,
     max_rounds: usize,
+    writer: &GraphWriter,
+    idx: &DocIndex,
 ) -> anyhow::Result<ReasonStats> {
     let ep = lab
         .reason_endpoint()
         .ok_or_else(|| anyhow!("kbx reason needs a [reason] (or [distil]) endpoint in lab.toml"))?;
 
     let root = paths.root.as_path();
-    let g = GraphStore::open(root)?;
-    let idx = DocIndex::open_or_create(root)?;
+    let g = writer.store();
     let trace = TraceLog::disabled();
     let spec = glossa::tools::ChainSpec::from_ontology(ont);
 
-    let source_text = seed_source_text_all(root, &idx, &g, &seed.id);
+    let source_text = seed_source_text_all(root, idx, g, &seed.id);
     let system = format!("{}\n\n{reason_md}", schema_graph_block(ont));
     let user = build_seed_user_message(seed, &source_text, fanout_max);
     let messages = vec![
@@ -162,7 +169,12 @@ pub fn chain_one_seed(
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
         if name == "graph_upsert" {
             let (nodes, edges, notes) = parse_and_filter_upsert(args, ont);
-            let out = ops::graph_upsert(&idx, &g, ont, nodes, edges, now, "agent");
+            let out = match writer.upsert(idx, ont, nodes, edges, now, "agent") {
+                Ok(out) => out,
+                // Lock-busy / poisoned-lock timeout: report to the model like any other tool
+                // error rather than panicking one worker's whole seed pass.
+                Err(e) => return (format!("graph_upsert failed: {e}"), Vec::new(), Vec::new()),
+            };
             if !out.rejected {
                 stats.nodes += out.nodes;
                 stats.edges += out.edges;
@@ -182,7 +194,7 @@ pub fn chain_one_seed(
             (message, ids, Vec::new())
         } else {
             let (body, ids, _images) =
-                glossa_tools::exec(name, args, root, &idx, Some(&g), &spec, &trace);
+                glossa_tools::exec(name, args, root, idx, Some(g), &spec, &trace);
             (body, ids, Vec::new())
         }
     };

@@ -7,12 +7,15 @@
 use crate::backend::openai::{cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker};
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
+use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
 use glossa::graph::ontology::Ontology;
+use glossa::index::store::DocIndex;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Soft cap on predecessors synthesized per backward step when `--fanout-max` isn't given —
@@ -117,7 +120,10 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         .with_context(|| format!("reading {}", paths.reason.display()))?;
 
     // Phase-2 seeds from grounded terminal nodes (reuses distil's seed pool), NOT a gold dataset.
-    let g = glossa::graph::store::GraphStore::open(&paths.root)?;
+    // Opened ONCE for the whole run: every worker in the pool shares this SAME `GraphStore`
+    // (reads via `GraphWriter::store()`, writes via `GraphWriter::upsert`) instead of each seed
+    // opening its own handle against `graph.sqlite`.
+    let g = Arc::new(glossa::graph::store::GraphStore::open(&paths.root)?);
     let seeds = crate::distil::seed_pool(&g, &ontology, args.seed_type.as_deref())?;
     if seeds.is_empty() {
         bail!(
@@ -125,7 +131,8 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
              carrying a MENTIONS edge) — run `kbx build` first"
         );
     }
-    drop(g); // chain_one_seed opens its own store per call
+    let idx = DocIndex::open_or_create(&paths.root).context("opening doc index")?;
+    let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
 
     let fanout_max = crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
     let max_rounds = crate::lab::resolve(
@@ -133,10 +140,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         lab.tuning.max_rounds,
         crate::reason::seed::DEFAULT_MAX_ROUNDS,
     );
-    // Worker-pool size for the seed loop. Unused for now — Task 4 (the reason worker pool via
-    // `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires the config
-    // plumbing through.
-    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_reason, DEFAULT_JOBS).max(1);
+    let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_reason, DEFAULT_JOBS).max(1);
     let run_dir = paths.runs.join("reason");
     if args.force {
         clear_checkpoint(&run_dir).context("clearing reason checkpoint for --force")?;
@@ -156,28 +160,43 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     // `{msg}` (ETA + tokens/resamples), redrawn on its own timer.
     pb.set_prefix("reasoning");
     let ticker = StatusTicker::start(&pb);
-    let (mut total_nodes, mut total_edges, mut total_grounded, mut processed) = (0, 0, 0, 0usize);
-    for seed in &seeds {
+
+    // Pre-filter (single-threaded, order-preserving): a seed already recorded done under
+    // `--resume` is skipped and accounted for in the bar right here — identical to what the old
+    // sequential loop did inline — BEFORE any seed is handed to the worker pool. The pool then
+    // only ever sees seeds that must actually run, so `should_skip`'s checkpoint read never
+    // needs to be reasoned about under concurrency.
+    let mut to_run = Vec::with_capacity(seeds.len());
+    for seed in seeds {
         if should_skip(&cp, &seed.id, args.resume) {
             pb.inc(1);
             continue;
         }
+        to_run.push(seed);
+    }
+
+    let results = run_units_parallel(to_run, jobs, &pb, |_seed| 1, |seed| {
         let stats = crate::reason::chain_one_seed(
-            &paths, &ontology, &lab, &reason_md, seed, fanout_max, max_rounds,
+            &paths, &ontology, &lab, &reason_md, seed, fanout_max, max_rounds, &writer, &idx,
         )
         .with_context(|| format!("synthesizing query-side for seed {}", seed.id))?;
-        total_nodes += stats.nodes;
-        total_edges += stats.edges;
-        total_grounded += stats.grounded;
-        processed += 1;
         cp.mark(&unit_id(&seed.id), "done")
             .with_context(|| format!("marking seed {} done", seed.id))?;
         pb.println(format!(
             "reason {}: {} node(s), {} edge(s), {} grounded",
             seed.id, stats.nodes, stats.edges, stats.grounded
         ));
-        pb.inc(1);
+        Ok(stats)
+    })?;
+
+    let processed = results.len();
+    let (mut total_nodes, mut total_edges, mut total_grounded) = (0usize, 0usize, 0usize);
+    for stats in &results {
+        total_nodes += stats.nodes;
+        total_edges += stats.edges;
+        total_grounded += stats.grounded;
     }
+
     drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
     println!(
