@@ -26,3 +26,10 @@ protocol = "sparse"
 [http]
 multiplexing = false
 check-revoke = false
+
+# Windows MSVC main-thread stack: the linker default (~1 MB) is marginal for `kb`'s deeper
+# search/index call paths and overflows under concurrent test load (e.g. the combined
+# `cargo test -p glossa -p kb-eval` run spawning many `kb` subprocesses at once). Reserve 8 MB
+# (Linux's default) so `kb`/`kbx` and every test binary get a comfortable main stack.
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "link-arg=/STACK:8388608"]
