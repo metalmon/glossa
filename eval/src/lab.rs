@@ -89,8 +89,9 @@ pub struct Tuning {
     pub max_rounds: Option<usize>,
     #[serde(default)]
     pub chunks_per_round: Option<usize>,
-    /// Worker-pool size for `kbx build`'s extract/judge stages. `None` defers to a `--jobs` CLI
-    /// flag, then the built-in default (3) — resolved via [`resolve`] `.max(1)` at the call site.
+    /// Worker-pool size for `kbx build`'s extract stage only (judge stays sequential). `None`
+    /// defers to a `--jobs` CLI flag, then the built-in default (3) — resolved via [`resolve`]
+    /// `.max(1)` at the call site.
     #[serde(default)]
     pub jobs_build: Option<usize>,
     /// Worker-pool size for `kbx reason`'s seed workers. Same precedence as `jobs_build`.

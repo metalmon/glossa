@@ -56,8 +56,10 @@ pub(crate) const DEFAULT_MAX_ROUNDS: usize = 30;
 /// Sampling temperature for the densify pass (via `KB_EVAL_TEMP`, read by `lmstudio_chat`) —
 /// same default `extract_doc`'s callers use for the build harvest (`BuildOpts::build_temp`
 /// defaults to 0.8); `densify_doc`'s interface has no caller-supplied temperature knob, so a
-/// sane constant stands in for the `build_temp` arg.
-const DENSIFY_TEMP: f64 = 0.8;
+/// sane constant stands in for the `build_temp` arg. `pub(crate)` so the caller
+/// (`distil::run::run_densify_at`) can set `KB_EVAL_TEMP` from it ONCE, before the worker pool is
+/// spawned, instead of `densify_doc` writing it per-worker.
+pub(crate) const DENSIFY_TEMP: f64 = 0.8;
 
 /// How much of one document's densify pass wrote: nodes upserted, non-`MENTIONS` edges upserted,
 /// and how many of those edges were `MENTIONS` groundings (mirrors `reason::ReasonStats`'s shape,
@@ -142,11 +144,14 @@ pub(crate) fn densify_write(
 /// `DEFAULT_MAX_ROUNDS` by the caller — see `distil::run::run_densify_at`).
 ///
 /// `writer` and `idx` are shared across every worker in the pool (opened ONCE by
-/// `distil::run::run_densify_at`, not per-document): reads go straight through `idx`/
-/// `writer.store()` (WAL-safe, no lock needed), and every write funnels through
-/// `writer.upsert(..)`, which serializes the N worker threads in-process AND reuses the core
-/// file-lock so a concurrent `glossa` MCP writer can never interleave with an eval worker
-/// (mirrors `build::extract::extract_doc`/`reason::seed::chain_one_seed`'s `GraphWriter` wiring).
+/// `distil::run::run_densify_at`, not per-document): `idx` reads go straight through tantivy's
+/// `IndexReader` (safe for concurrent readers, no lock needed); `writer.store()` reads serialize
+/// on `GraphStore`'s own connection mutex against any in-flight write (correctness is fine either
+/// way — a read mutates nothing; the pool's parallelism win is on the LLM round-trips, not DB
+/// access). Every write funnels through `writer.upsert(..)`, which serializes the N worker
+/// threads in-process AND reuses the core file-lock so a concurrent `glossa` MCP writer can never
+/// interleave with an eval worker (mirrors `build::extract::extract_doc`/
+/// `reason::seed::chain_one_seed`'s `GraphWriter` wiring).
 pub fn densify_doc(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -166,9 +171,9 @@ pub fn densify_doc(
         .as_ref()
         .ok_or_else(|| anyhow!("kbx distil needs a [distil] endpoint in lab.toml"))?;
 
-    // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP; set it once for this pass
-    // (same pattern `extract_doc` uses for its caller-supplied `build_temp`).
-    std::env::set_var("KB_EVAL_TEMP", DENSIFY_TEMP.to_string());
+    // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP — the caller
+    // (`run_densify_at`) sets it ONCE, before the worker pool is spawned, so this fn only ever
+    // reads it (concurrent `set_var` from N worker threads is UB; `env::var` is not).
 
     // `root` is still needed for the search/grep exec arm below (`glossa_tools::exec`) — reads
     // and writes themselves go through the shared `idx`/`writer`, not a fresh handle.

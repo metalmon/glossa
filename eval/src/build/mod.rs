@@ -394,7 +394,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // Extraction shares ONE `GraphStore` (wrapped in a `GraphWriter`) across every worker in
         // the pool, instead of each document opening its own connection against `graph.sqlite` —
         // mirrors `reason::run::run_reason_at`'s `GraphWriter` wiring (Task 4). `idx` (opened above
-        // for the delta) is reused as-is: reads go straight through it (WAL-safe, no lock needed).
+        // for the delta) is reused as-is: reads go straight through it (tantivy's `IndexReader` is
+        // safe for concurrent readers, no lock needed — unlike `GraphStore`'s reads, which funnel
+        // through its own connection mutex; see `GraphWriter::store`'s doc comment).
         let g = Arc::new(GraphStore::open(&paths.root).context("open graph store for extract")?);
         let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
 
@@ -432,6 +434,13 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             }
             to_run.push(doc.clone());
         }
+
+        // `lmstudio_chat` reads the sampling temperature from `KB_EVAL_TEMP`; set it ONCE here,
+        // before the worker pool is spawned below — every worker calls `extract_doc` with the
+        // SAME `opts.build_temp` for the whole run, so a single write covers them all. Setting it
+        // per-worker (the old placement, inside `extract_doc`) would race N threads on a
+        // process-global env var, which is UB even though every writer agrees on the value.
+        std::env::set_var("KB_EVAL_TEMP", opts.build_temp.to_string());
 
         // Each doc's progress is driven entirely by `extract_doc`'s own per-round callback plus
         // the gap top-up below, so `run_units_parallel`'s own post-work `pb.inc(weight)` must be a

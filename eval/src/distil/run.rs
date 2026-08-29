@@ -471,7 +471,9 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // pool, instead of each document opening its own connection against `graph.sqlite` — mirrors
     // `build::run_build`'s/`reason::run_reason_at`'s `GraphWriter` wiring (Tasks 4/5). `idx`
     // (opened above for the chunk-weight count) is reused as-is: reads go straight through it
-    // (WAL-safe, no lock needed).
+    // (tantivy's `IndexReader` is safe for concurrent readers, no lock needed — unlike
+    // `GraphStore`'s reads, which funnel through its own connection mutex; see
+    // `GraphWriter::store`'s doc comment).
     let g = Arc::new(GraphStore::open(&paths.root).context("open graph store for densify")?);
     let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
 
@@ -507,6 +509,13 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         }
         to_run.push(doc.clone());
     }
+
+    // `lmstudio_chat` reads the sampling temperature from `KB_EVAL_TEMP`; set it ONCE here, before
+    // the worker pool is spawned below — every worker's `densify_doc` call uses the SAME constant
+    // `DENSIFY_TEMP` for the whole run, so a single write covers them all. Setting it per-worker
+    // (the old placement, inside `densify_doc`) would race N threads on a process-global env var,
+    // which is UB even though every writer agrees on the value.
+    std::env::set_var("KB_EVAL_TEMP", crate::distil::densify::DENSIFY_TEMP.to_string());
 
     // Each doc's progress is driven entirely by `densify_doc`'s own per-round callback plus the
     // gap top-up below, so `run_units_parallel`'s own post-work `pb.inc(weight)` must be a no-op

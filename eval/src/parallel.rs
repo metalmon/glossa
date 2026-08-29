@@ -41,10 +41,14 @@ impl GraphWriter {
         Self { g, lock: Arc::new(Mutex::new(())), root }
     }
 
-    /// Read-only access to the underlying store. Reads are WAL-safe and need no lock (only the
-    /// read-modify-write in [`Self::upsert`] does) — callers that need to inspect the graph
-    /// (e.g. reading a seed's existing groundings before synthesizing new nodes) share this SAME
-    /// handle rather than opening a second `GraphStore` against the same `graph.sqlite`.
+    /// Read-only access to the underlying store. Correctness needs no extra lock here (a read
+    /// mutates nothing), but reads do NOT run concurrently with each other or with a write: every
+    /// access funnels through `GraphStore`'s own `Mutex<Connection>`, so a read simply queues
+    /// behind an in-flight `upsert` at that mutex. Callers that need to inspect the graph (e.g.
+    /// reading a seed's existing groundings before synthesizing new nodes) share this SAME handle
+    /// rather than opening a second `GraphStore` against the same `graph.sqlite`. The pool's
+    /// parallelism win is on the LLM round-trips, not on DB access, which stays serialized either
+    /// way.
     pub fn store(&self) -> &GraphStore {
         &self.g
     }

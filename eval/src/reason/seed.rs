@@ -118,8 +118,10 @@ pub(crate) fn seed_source_text_all(
 /// by the caller — see `reason::run::run_reason_at`).
 ///
 /// `writer` and `idx` are shared across every worker in the pool (opened ONCE by
-/// `run_reason_at`, not per-seed): reads go straight through `writer.store()` (WAL-safe, no
-/// lock needed), and every write funnels through `writer.upsert(..)`, which serializes the N
+/// `run_reason_at`, not per-seed): reads go straight through `writer.store()`, which serializes
+/// on `GraphStore`'s own connection mutex against any in-flight write (correctness is fine
+/// either way — a read mutates nothing; the pool's parallelism win is on the LLM round-trips,
+/// not DB access), and every write funnels through `writer.upsert(..)`, which serializes the N
 /// worker threads in-process AND reuses the core file-lock so a concurrent `glossa` MCP writer
 /// can never interleave with an eval worker.
 pub fn chain_one_seed(

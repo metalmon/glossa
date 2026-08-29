@@ -127,9 +127,10 @@ enum Cmd {
         /// `[tuning] max_rounds`, then the built-in default, when unset.
         #[arg(long = "max-rounds")]
         max_rounds: Option<usize>,
-        /// Worker-pool size for the extract/judge stages (default 3). Falls back to `lab.toml`'s
-        /// `[tuning] jobs_build`, then the built-in default, when unset. `0` clamps to 1 (never
-        /// zero workers).
+        /// Worker-pool size for the extract stage only (default 3); judge stays sequential
+        /// (it writes directly via `apply_upsert`, not through the pool). Falls back to
+        /// `lab.toml`'s `[tuning] jobs_build`, then the built-in default, when unset. `0` clamps
+        /// to 1 (never zero workers).
         #[arg(long)]
         jobs: Option<usize>,
     },

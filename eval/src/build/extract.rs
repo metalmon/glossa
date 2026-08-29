@@ -294,17 +294,21 @@ pub(crate) fn doc_chunk_ords(idx: &DocIndex, doc: &str) -> anyhow::Result<Vec<u6
 /// grounding-required node types + descriptions). Returns how many nodes/MENTIONS edges were
 /// written across all rounds.
 ///
-/// `build_temp` sets the sampling temperature (via `KB_EVAL_TEMP`, read by `lmstudio_chat`).
+/// `build_temp` sets the sampling temperature (via `KB_EVAL_TEMP`, read by `lmstudio_chat`);
+/// the caller (`run_build`) writes this env var ONCE before spawning the worker pool — this fn
+/// only reads it, never writes it.
 /// `vision`: `kbx build --vision` (default OFF) — `read` here surfaces text only, so images are
 /// gated out via `gate_images`; the flag is threaded through for parity with the vision path.
 /// `max_rounds` bounds EACH round's agent loop (resolved CLI > lab.toml `[tuning]` >
 /// `DEFAULT_MAX_ROUNDS` by the caller — see `build::run_build`).
 ///
 /// `writer` and `idx` are shared across every worker in the pool (opened ONCE by `run_build`, not
-/// per-document): reads go straight through `idx` (WAL-safe, no lock needed), and every write
-/// funnels through `writer.upsert(..)`, which serializes the N worker threads in-process AND
-/// reuses the core file-lock so a concurrent `glossa` MCP writer can never interleave with an eval
-/// worker (mirrors `reason::seed::chain_one_seed`'s `GraphWriter` wiring).
+/// per-document): reads go straight through `idx` (tantivy's `IndexReader` is safe for concurrent
+/// readers, no lock needed — unlike `GraphStore`'s reads, which funnel through its own connection
+/// mutex; see `GraphWriter::store`'s doc comment), and every write funnels through
+/// `writer.upsert(..)`, which serializes the N worker threads in-process AND reuses the core
+/// file-lock so a concurrent `glossa` MCP writer can never interleave with an eval worker (mirrors
+/// `reason::seed::chain_one_seed`'s `GraphWriter` wiring).
 pub fn extract_doc(
     lab: &LabConfig,
     builder_md: &str,
@@ -321,8 +325,9 @@ pub fn extract_doc(
     // finishes (a big doc is otherwise many minutes at a standstill on a slow local model).
     mut on_progress: impl FnMut(u64),
 ) -> anyhow::Result<ExtractStats> {
-    // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP; set it once for this pass.
-    std::env::set_var("KB_EVAL_TEMP", build_temp.to_string());
+    // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP — the caller (`run_build`)
+    // sets it ONCE, before the worker pool is spawned, so this fn only ever reads it (concurrent
+    // `set_var` from N worker threads is UB; `env::var` is not).
 
     // Grounding-required node types + descriptions prepended to the builder prompt (the schema the
     // harvest may create; `filter_grounding_only` enforces it on write).
