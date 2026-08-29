@@ -377,6 +377,11 @@ enum GraphAction {
         /// Delete dangling nodes (last resort; prefer restoring the terminal).
         #[arg(long = "prune-dangling")]
         prune_dangling: bool,
+        /// Override the mass-wipe guard and force the dangling prune even when it looks like an
+        /// ontology mismatch (zero live terminals) or over half the reasoning layer. Human-only:
+        /// not exposed over MCP.
+        #[arg(long = "force")]
+        force: bool,
     },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
@@ -1409,13 +1414,23 @@ fn main() -> anyhow::Result<()> {
                 path,
                 prune_incomplete,
                 prune_ungrounded,
-                prune_dangling,
+                mut prune_dangling,
+                force,
             } => {
                 let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
+                if prune_dangling && !force {
+                    if let Some(reason) = glossa::graph::doctor::dangling_prune_risk(&report, &g, &ont)
+                    {
+                        prune_dangling = false;
+                        println!(
+                            "dangling prune REFUSED: {reason}\nre-run with --force to override."
+                        );
+                    }
+                }
                 if prune_incomplete || prune_ungrounded || prune_dangling {
                     let (inc, ung, dang) = glossa::graph::doctor::prune(
                         &g,

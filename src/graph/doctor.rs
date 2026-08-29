@@ -37,9 +37,17 @@ pub struct DoctorReport {
     pub stale: Vec<DoubtfulNode>,
     pub incomplete: Vec<DoubtfulNode>,
     /// Query-side nodes (type NOT `requires_grounding`) that reach no live grounded terminal —
-    /// derived/structural staleness. FLAGGED only, never auto-pruned by `prune()` (same policy as
-    /// `stale`: the terminal's source may return).
+    /// derived/structural staleness. UNLIKE `stale`, `dangling` IS prunable — opt-in via
+    /// `prune_dangling` (MCP) / `--prune-dangling` (CLI), same "last resort" policy as
+    /// `ungrounded`. Because a whole-layer dangling flood is the signature of an ontology
+    /// mismatch rather than genuine per-node rot, `dangling_prune_risk` gates the delete: an
+    /// agent (MCP) can never mass-prune, only a human can force it (CLI `--force`).
     pub dangling: Vec<DoubtfulNode>,
+    /// Count of `requires_grounding` nodes present in the graph, not ungrounded, not stale —
+    /// i.e. how many live terminals the current ontology recognizes. Computed once here and
+    /// reused by `dangling_prune_risk` so the mass-wipe check never recomputes (and can't drift
+    /// from) the same derivation `doctor()` used to flag `dangling` in the first place.
+    pub live_terminal_count: usize,
     pub unverifiable: usize,
 }
 
@@ -144,6 +152,7 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
     };
 
     let mut rep = DoctorReport::default();
+    rep.live_terminal_count = live_terminal_ids.len();
     for id in &ungrounded_ids {
         if let Some(d) = mk(id, Reason::Ungrounded) {
             rep.ungrounded.push(d);
@@ -218,6 +227,44 @@ pub fn prune(
     }
     // stale is intentionally NEVER pruned
     Ok((inc, ung, dang))
+}
+
+/// Returns `Some(reason)` when pruning the `dangling` bucket would be a mass-wipe — the signal of
+/// an ontology mismatch (e.g. a missing/changed `ontology.toml`) rather than genuine per-node rot.
+/// `None` = safe to prune. Two triggers:
+///   1. the graph has non-structural nodes but the ontology recognizes NO live grounded terminal
+///      (`report.live_terminal_count == 0`) — every non-structural node is trivially "dangling";
+///   2. dangling nodes exceed ~50% of the non-structural (reasoning) layer.
+///
+/// This only gates the DELETE — `doctor()` keeps reporting `dangling` regardless.
+pub fn dangling_prune_risk(report: &DoctorReport, g: &GraphStore, ont: &Ontology) -> Option<String> {
+    if report.dangling.is_empty() {
+        return None;
+    }
+    let structural: HashSet<String> = ont.structural().into_iter().collect();
+    let non_structural = g
+        .all_nodes()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| !structural.contains(&n.node_type))
+                .count()
+        })
+        .unwrap_or(0);
+    if non_structural > 0 && report.live_terminal_count == 0 {
+        return Some(
+            "the ontology recognizes no live grounded terminal in this graph — likely a missing \
+             or mismatched .glossa/ontology.toml; refusing to prune the whole reasoning layer"
+                .to_string(),
+        );
+    }
+    if report.dangling.len() * 2 > non_structural {
+        return Some(format!(
+            "dangling ({}) is over half the reasoning layer ({non_structural}) — refusing a mass delete",
+            report.dangling.len()
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -574,5 +621,124 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         let rep = doctor(&g, &ont, root).unwrap();
         let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
         assert!(dangling.contains(&"sym:orphan"));
+    }
+
+    #[test]
+    fn dangling_prune_risk_none_when_no_dangling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let rep = DoctorReport::default(); // dangling empty by construction
+        assert!(dangling_prune_risk(&rep, &g, &ont).is_none());
+    }
+
+    #[test]
+    fn dangling_prune_risk_flags_ontology_mismatch_zero_live_terminals() {
+        // Same shape as `doctor_flags_query_side_node_dangling_when_its_terminal_is_stale`: the
+        // only grounded terminal (res:1) went stale, so `live_terminal_count == 0` while
+        // non-structural nodes (sym:1/cau:1/res:1) are present — the ontology-mismatch trigger.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let nodes = vec![
+            node("sym:1", "Symptom", "S", prov("doc.md", None)),
+            node("cau:1", "Cause", "C", prov("doc.md", None)),
+            node("res:1", "Resolution", "R", prov("doc.md", Some(sig0))),
+            node("sec:1", "Section", "Sec", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:1", "CAUSED_BY", "cau:1", prov("doc.md", None)),
+            edge("cau:1", "RESOLVED_BY", "res:1", prov("doc.md", None)),
+            edge("res:1", "MENTIONS", "sec:1", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+        std::fs::write(&doc, b"v2-longer").unwrap(); // res:1 -> stale -> zero live terminals
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert_eq!(rep.live_terminal_count, 0);
+        assert!(!rep.dangling.is_empty());
+        let risk = dangling_prune_risk(&rep, &g, &ont);
+        assert!(risk.is_some(), "zero live terminals must refuse the prune");
+        assert!(risk.unwrap().contains("no live grounded terminal"));
+    }
+
+    #[test]
+    fn dangling_prune_risk_flags_majority_dangling_even_with_a_live_terminal() {
+        // One healthy chain (sym:a/cau:a/res:a, res:a live+grounded) plus four orphan Symptoms
+        // with no outgoing edge at all. non_structural = 3 + 4 = 7, dangling = 4 > 7/2 — the
+        // over-half-the-layer trigger, independent of the zero-live-terminal one.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        std::fs::write(root.join("doc.md"), b"v1").unwrap();
+        let mut nodes = vec![
+            node("sym:a", "Symptom", "A", prov("doc.md", None)),
+            node("cau:a", "Cause", "A cause", prov("doc.md", None)),
+            node("res:a", "Resolution", "A res", prov("doc.md", None)),
+            node("sec:a", "Section", "A sec", prov("doc.md", None)),
+        ];
+        for i in 0..4 {
+            nodes.push(node(
+                &format!("sym:orphan{i}"),
+                "Symptom",
+                "Orphan",
+                prov("doc.md", None),
+            ));
+        }
+        let edges = vec![
+            edge("sym:a", "CAUSED_BY", "cau:a", prov("doc.md", None)),
+            edge("cau:a", "RESOLVED_BY", "res:a", prov("doc.md", None)),
+            edge("res:a", "MENTIONS", "sec:a", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert!(rep.live_terminal_count > 0, "res:a must be a live terminal");
+        assert_eq!(rep.dangling.len(), 4, "the four orphan Symptoms must dangle");
+        let risk = dangling_prune_risk(&rep, &g, &ont);
+        assert!(risk.is_some(), "4-of-7 dangling must refuse the prune");
+        assert!(risk.unwrap().contains("over half"));
+    }
+
+    #[test]
+    fn dangling_prune_risk_none_for_small_dangling_fraction_with_live_terminal() {
+        // Same healthy chain, but only ONE orphan Symptom: non_structural = 3 + 1 = 4,
+        // dangling = 1, not over half, and a live terminal exists -> safe to prune.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        std::fs::write(root.join("doc.md"), b"v1").unwrap();
+        let nodes = vec![
+            node("sym:a", "Symptom", "A", prov("doc.md", None)),
+            node("cau:a", "Cause", "A cause", prov("doc.md", None)),
+            node("res:a", "Resolution", "A res", prov("doc.md", None)),
+            node("sec:a", "Section", "A sec", prov("doc.md", None)),
+            node("sym:orphan", "Symptom", "Orphan", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:a", "CAUSED_BY", "cau:a", prov("doc.md", None)),
+            edge("cau:a", "RESOLVED_BY", "res:a", prov("doc.md", None)),
+            edge("res:a", "MENTIONS", "sec:a", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        let rep = doctor(&g, &ont, root).unwrap();
+        assert!(rep.live_terminal_count > 0);
+        assert_eq!(rep.dangling.len(), 1, "only the orphan Symptom must dangle");
+        assert!(
+            dangling_prune_risk(&rep, &g, &ont).is_none(),
+            "a single dangling node in an otherwise-healthy graph must be safe to prune"
+        );
     }
 }

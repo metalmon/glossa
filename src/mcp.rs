@@ -1540,7 +1540,14 @@ impl GlossaServer {
         let mut out = crate::graph::ops::fmt_doctor_report(&report);
         let prune_incomplete = a.prune_incomplete.unwrap_or(false);
         let prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
-        let prune_dangling = a.prune_dangling.unwrap_or(false);
+        let mut prune_dangling = a.prune_dangling.unwrap_or(false);
+        let mut refusal: Option<String> = None;
+        if prune_dangling {
+            if let Some(reason) = crate::graph::doctor::dangling_prune_risk(&report, &g, &ont) {
+                prune_dangling = false;
+                refusal = Some(reason);
+            }
+        }
         if prune_incomplete || prune_ungrounded || prune_dangling {
             let (inc, ung, dang) = crate::graph::doctor::prune(
                 &g,
@@ -1554,6 +1561,11 @@ impl GlossaServer {
             .map_err(internal)?;
             out.push_str(&format!(
                 "pruned: incomplete={inc} ungrounded={ung} dangling={dang}\n"
+            ));
+        }
+        if let Some(reason) = refusal {
+            out.push_str(&format!(
+                "dangling prune REFUSED: {reason}. A human can override with: kb graph doctor <path> --prune-dangling --force\n"
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
