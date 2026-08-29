@@ -33,8 +33,8 @@ pub struct TrainArgs {
     pub rng_seed: Option<u64>,
     pub no_apply: bool,
     pub no_progress: bool,
-    /// Selection metric: `"exact"` (default, exact-match EM — byte-for-byte the pre-metric
-    /// behavior) or `"judge"` (graded LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0).
+    /// Selection metric: `"judge"` (default, graded LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0)
+    /// or `"exact"` (exact-match EM — byte-for-byte the pre-metric behavior).
     pub metric: String,
 }
 
@@ -87,7 +87,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             )
         })?;
 
-    // Selection metric: "exact" (default, exact-match EM) or "judge" (graded LLM judge). Judge
+    // Selection metric: "judge" (default, graded LLM judge) or "exact" (exact-match EM). Judge
     // needs both a [judge] endpoint in lab.toml and the workspace judge.md prompt; exact needs
     // neither and reproduces the pre-metric GEPA path exactly (cfg.judge == None).
     let judge_cfg = match args.metric.as_str() {
