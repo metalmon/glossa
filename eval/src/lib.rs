@@ -20,6 +20,7 @@ pub mod gepa_constraint;
 pub mod gepa_graph;
 pub mod judge;
 pub mod lab;
+pub mod parallel;
 pub mod prep;
 pub mod reason;
 pub mod report;
