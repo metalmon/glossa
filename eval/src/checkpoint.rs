@@ -90,6 +90,41 @@ mod tests {
         assert!(cp2.is_done("doc/a.md#judge:pair-1"));
     }
 
+    /// Thread-safety verdict (Task 8): `Checkpoint` holds only an immutable `PathBuf` — no
+    /// in-memory set, no cached directory listing, no shared file handle — so it is `Sync` for
+    /// free and every `mark`/`is_done`/`done_ids` call is an independent filesystem op. Distinct
+    /// unit ids sanitize to distinct filenames (the parallel worker pools in reason/build/distil
+    /// call `cp.mark` for their own unit from concurrent worker threads via a shared `&Checkpoint`
+    /// borrowed across a `thread::scope`), so concurrent marks write to distinct files with no
+    /// shared mutable state to corrupt. No guard needed; this test documents that N concurrent
+    /// marks are never lost.
+    #[test]
+    fn concurrent_marks_from_multiple_threads_are_all_recorded() {
+        let d = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::open(d.path()).unwrap();
+        let n = 32;
+        let ids: Vec<String> = (0..n).map(|i| format!("unit:{i}")).collect();
+
+        std::thread::scope(|s| {
+            for id in &ids {
+                let cp = &cp;
+                s.spawn(move || {
+                    cp.mark(id, "done").unwrap();
+                });
+            }
+        });
+
+        for id in &ids {
+            assert!(cp.is_done(id), "lost mark for {id}");
+        }
+        let done = cp.done_ids();
+        assert_eq!(done.len(), n, "expected {n} done ids, got {}", done.len());
+        for id in &ids {
+            let filename = sanitize_id(id);
+            assert!(done.contains(&filename), "done_ids missing {filename}");
+        }
+    }
+
     #[test]
     fn remove_clears_a_mark_and_is_a_noop_when_absent() {
         let d = tempfile::tempdir().unwrap();
