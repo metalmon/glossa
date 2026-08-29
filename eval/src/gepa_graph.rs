@@ -748,6 +748,7 @@ mod tests {
             paragraphs: vec![],
             supporting_titles: vec![],
             tags: vec![],
+            ..Default::default()
         }
     }
 

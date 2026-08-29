@@ -17,7 +17,9 @@ use kb_eval::distil::{self, DistilArgs};
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::LabConfig;
 use kb_eval::reason::{self, ReasonArgs};
-use kb_eval::report::{load_cases, summary_text, write_case, write_run, CaseResult, RunMeta};
+use kb_eval::report::{
+    lexical_text, load_cases, summary_text, write_case, write_run, CaseResult, RunMeta,
+};
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
 use kb_eval::train::{self, TrainArgs};
@@ -633,6 +635,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             answer,
             transcript,
             judge_raw,
+            hop_type: q.hop_type.clone(),
+            needs_graph: q.needs_graph.clone(),
         };
         write_case(&cases_dir, &r)
             .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
@@ -667,6 +671,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     };
     let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
     println!("{}", summary_text(&all_results));
+    println!("{}", lexical_text(&all_results));
     let footnote = if cache_is_estimated() {
         " (cache estimated from prompt re-send)"
     } else {

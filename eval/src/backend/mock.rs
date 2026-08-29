@@ -34,6 +34,7 @@ mod tests {
             answer_aliases: vec![],
             supporting_titles: vec![],
             tags: vec![],
+            ..Default::default()
         };
         assert_eq!(b.answer(Path::new("."), &q).unwrap(), "Bob Page");
         assert!(!b.needs_corpus());

@@ -1,6 +1,8 @@
-//! File-based run report: `write_run` renders `runs/<tag>/report.md` (counts + a per-case table)
-//! plus one `<id>.trace.md` per case (full transcript, answer, raw judge reply). Deterministic —
-//! the timestamp is a caller-supplied string, never read from the clock inside this module.
+//! File-based run report: `write_run` renders `runs/<tag>/report.md` (graded judge quality +
+//! counts, a by-question-type breakdown, then a demoted lexical EM/F1 section, then a per-case
+//! table) plus one `<id>.trace.md` per case (full transcript, answer, raw judge reply).
+//! Deterministic — the timestamp is a caller-supplied string, never read from the clock inside
+//! this module.
 
 use crate::judge::Verdict;
 use anyhow::Context;
@@ -21,6 +23,15 @@ pub struct CaseResult {
     pub answer: String,
     pub transcript: String,
     pub judge_raw: String,
+    /// Reasoning shape the case exercises (`lexical|multihop|mixed`), carried from `Question` for
+    /// the "By question type" report breakdown. `#[serde(default)]` so cases persisted by an
+    /// older binary (before this field existed) still deserialize under `--resume`.
+    #[serde(default)]
+    pub hop_type: String,
+    /// Whether answering the case requires graph-based reasoning (`yes|no|maybe`), same role as
+    /// `hop_type` on a separate axis.
+    #[serde(default)]
+    pub needs_graph: String,
 }
 
 /// Run-level metadata carried in the report header. `timestamp` is passed in by the caller (never
@@ -55,41 +66,137 @@ fn verdict_label(v: Verdict) -> &'static str {
     }
 }
 
-/// Aggregate headline stats — counts/percentages per verdict + EM/F1 means — rendered as plain
-/// text. Shared by `write_run` (the report.md `## Counts` section) and the CLI's post-run stdout
-/// print, so the two never drift apart.
-pub fn summary_text(results: &[CaseResult]) -> String {
-    let total = results.len();
-    let mut correct = 0usize;
-    let mut partial = 0usize;
-    let mut wrong = 0usize;
-    let mut unscored = 0usize;
-    let mut f1_sum = 0f32;
-    let mut em_sum = 0f32;
+/// Verdict tallies shared by `quality`, `summary_text`, and `lexical_text` so the three never
+/// disagree on how a run's cases are counted.
+struct Tally {
+    total: usize,
+    correct: usize,
+    partial: usize,
+    wrong: usize,
+    unscored: usize,
+    f1_sum: f32,
+    em_sum: f32,
+}
+
+fn tally(results: &[CaseResult]) -> Tally {
+    let mut t = Tally {
+        total: results.len(),
+        correct: 0,
+        partial: 0,
+        wrong: 0,
+        unscored: 0,
+        f1_sum: 0.0,
+        em_sum: 0.0,
+    };
     for r in results {
         match r.verdict {
-            Verdict::Correct => correct += 1,
-            Verdict::Partial => partial += 1,
-            Verdict::Wrong => wrong += 1,
-            Verdict::Unscored => unscored += 1,
+            Verdict::Correct => t.correct += 1,
+            Verdict::Partial => t.partial += 1,
+            Verdict::Wrong => t.wrong += 1,
+            Verdict::Unscored => t.unscored += 1,
         }
-        f1_sum += r.f1;
-        em_sum += r.em;
+        t.f1_sum += r.f1;
+        t.em_sum += r.em;
     }
+    t
+}
+
+/// Shared graded-quality arithmetic: `(correct*1.0 + partial*0.5) / total`, i.e. a correct case
+/// scores 1.0, a partial case scores 0.5, wrong/unscored score 0.0. Returns 0.0 for `total == 0`
+/// rather than dividing by zero. Factored out of `quality` so the overall headline and the
+/// by-question-type breakdown (`by_type_text`) never disagree on the formula.
+fn quality_score(correct: usize, partial: usize, total: usize) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    (correct as f32 + 0.5 * partial as f32) / total as f32
+}
+
+/// Primary headline metric for eval report golds: long free-text paragraph answers make
+/// exact-match (EM) essentially always 0 and token-F1 only a weak lexical proxy, so the graded
+/// LLM-judge verdict is the real signal. See `quality_score` for the formula.
+pub fn quality(results: &[CaseResult]) -> f32 {
+    let t = tally(results);
+    quality_score(t.correct, t.partial, t.total)
+}
+
+/// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
+/// rendered as plain text. Shared by `write_run` (the report.md primary section) and the CLI's
+/// post-run stdout print, so the two never drift apart. EM/F1 are NOT included here; see
+/// `lexical_text` for those (demoted to a secondary, clearly-labelled block).
+pub fn summary_text(results: &[CaseResult]) -> String {
+    let t = tally(results);
     let pct = |n: usize| -> f32 {
-        if total == 0 {
+        if t.total == 0 {
             0.0
         } else {
-            100.0 * n as f32 / total as f32
+            100.0 * n as f32 / t.total as f32
         }
     };
-    let f1_mean = if total == 0 { 0.0 } else { f1_sum / total as f32 };
-    let em_mean = if total == 0 { 0.0 } else { em_sum / total as f32 };
+    let q = quality(results);
 
     format!(
-        "correct  {correct} ({:.1}%)\npartial  {partial} ({:.1}%)\nwrong {wrong} ({:.1}%)\nunscored {unscored} ({:.1}%)\ntotal {total}\nEM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n",
-        pct(correct), pct(partial), pct(wrong), pct(unscored)
+        "judge quality (graded): {q:.3}  (correct + 0.5*partial) / total\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
+        t.correct, pct(t.correct), t.partial, pct(t.partial), t.wrong, pct(t.wrong), t.unscored, pct(t.unscored), t.total
     )
+}
+
+/// Secondary, lexical-only stats (EM mean / F1 mean). Kept for sanity-checking but demoted out of
+/// the primary summary because both metrics are unreliable for the long free-text paragraph
+/// answers these evals grade — EM is ~always 0 and F1 only weakly correlates with judge quality.
+pub fn lexical_text(results: &[CaseResult]) -> String {
+    let t = tally(results);
+    let f1_mean = if t.total == 0 {
+        0.0
+    } else {
+        t.f1_sum / t.total as f32
+    };
+    let em_mean = if t.total == 0 {
+        0.0
+    } else {
+        t.em_sum / t.total as f32
+    };
+    format!("EM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n")
+}
+
+/// One compact table grouping `results` by `key`, sorted alphabetically by group value (so the
+/// section is deterministic regardless of the run's case order) via `BTreeMap`. Cases with an
+/// empty group value are folded into `"(untyped)"`. Each row is the group's graded `quality`
+/// (`quality_score`, matching the overall headline) plus its correct/partial/wrong tally.
+fn by_type_table(dimension: &str, results: &[CaseResult], key: impl Fn(&CaseResult) -> &str) -> String {
+    let mut groups: std::collections::BTreeMap<&str, Vec<&CaseResult>> =
+        std::collections::BTreeMap::new();
+    for r in results {
+        let k = key(r);
+        let k = if k.is_empty() { "(untyped)" } else { k };
+        groups.entry(k).or_default().push(r);
+    }
+
+    let mut out = format!("### {dimension}\n\n");
+    out.push_str("| value | n | quality | correct | partial | wrong |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for (name, rs) in groups {
+        let correct = rs.iter().filter(|r| r.verdict == Verdict::Correct).count();
+        let partial = rs.iter().filter(|r| r.verdict == Verdict::Partial).count();
+        let wrong = rs.iter().filter(|r| r.verdict == Verdict::Wrong).count();
+        let n = rs.len();
+        let q = quality_score(correct, partial, n);
+        out.push_str(&format!("| {name} | {n} | {q:.3} | {correct} | {partial} | {wrong} |\n"));
+    }
+    out
+}
+
+/// "By question type" section: one subsection per grouping dimension carried on `CaseResult`
+/// (`hop_type`, `needs_graph`), each a compact per-value quality table. Answers "does the reader
+/// handle lexical (search-answerable) vs multihop (graph-needed) questions" at a glance.
+pub fn by_type_text(results: &[CaseResult]) -> String {
+    let mut out = String::new();
+    out.push_str(&by_type_table("hop_type", results, |r| r.hop_type.as_str()));
+    out.push('\n');
+    out.push_str(&by_type_table("needs_graph", results, |r| {
+        r.needs_graph.as_str()
+    }));
+    out
 }
 
 /// Sanitize a case id into a filesystem-safe filename stem: path separators and any non
@@ -168,8 +275,16 @@ pub fn write_run(
     out.push_str(&format!("- n: {}\n", meta.n));
     out.push_str(&format!("- timestamp: {}\n\n", meta.timestamp));
 
-    out.push_str("## Counts\n\n");
+    out.push_str("## Judge quality (primary)\n\n");
     out.push_str(&summary_text(results));
+    out.push('\n');
+
+    out.push_str("## By question type\n\n");
+    out.push_str(&by_type_text(results));
+    out.push('\n');
+
+    out.push_str("## Lexical (secondary — unreliable for free-text answers)\n\n");
+    out.push_str(&lexical_text(results));
     out.push('\n');
 
     out.push_str("## Cases\n\n");
@@ -220,6 +335,8 @@ mod tests {
                 reason: "ok".into(),
                 em: 0.0,
                 judge_raw: "VERDICT: correct".into(),
+                hop_type: "lexical".into(),
+                needs_graph: "no".into(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -231,11 +348,21 @@ mod tests {
                 reason: "no".into(),
                 em: 0.0,
                 judge_raw: "VERDICT: wrong".into(),
+                hop_type: "multihop".into(),
+                needs_graph: "yes".into(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
         let report = std::fs::read_to_string(&p).unwrap();
+        assert!(report.contains("judge quality (graded): 0.500"));
+        assert!(report.contains("## Judge quality (primary)"));
         assert!(report.contains("correct  1") && report.contains("wrong 1"));
+        assert!(report.contains("## By question type"));
+        assert!(report.contains("### hop_type") && report.contains("### needs_graph"));
+        assert!(report.contains("| lexical | 1 | 1.000 | 1 | 0 | 0 |"));
+        assert!(report.contains("| multihop | 1 | 0.000 | 0 | 0 | 1 |"));
+        assert!(report.contains("## Lexical (secondary"));
+        assert!(report.contains("EM mean:") && report.contains("F1 mean:"));
         assert!(report.contains("| q1 |") && report.contains("| q2 |"));
         assert!(dir.path().join("t1/q1.trace.md").exists());
     }
@@ -251,6 +378,18 @@ mod tests {
             reason: "r".into(),
             em: 0.0,
             judge_raw: String::new(),
+            hop_type: String::new(),
+            needs_graph: String::new(),
+        }
+    }
+
+    /// Like `case`, but also stamps `hop_type`/`needs_graph` for the by-question-type grouping
+    /// tests below.
+    fn case_typed(id: &str, verdict: Verdict, hop_type: &str, needs_graph: &str) -> CaseResult {
+        CaseResult {
+            hop_type: hop_type.into(),
+            needs_graph: needs_graph.into(),
+            ..case(id, verdict)
         }
     }
 
@@ -299,9 +438,8 @@ mod tests {
         assert_eq!(ids, vec!["a-b".to_string(), "a.b".to_string()]);
     }
 
-    #[test]
-    fn summary_text_reports_counts_and_means() {
-        let rs = vec![
+    fn quality_cases() -> Vec<CaseResult> {
+        vec![
             {
                 let mut c = case("q1", Verdict::Correct);
                 c.f1 = 1.0;
@@ -314,12 +452,96 @@ mod tests {
                 c.em = 0.0;
                 c
             },
-        ];
-        let s = summary_text(&rs);
+        ]
+    }
+
+    #[test]
+    fn summary_text_leads_with_graded_quality_and_reports_counts() {
+        let s = summary_text(&quality_cases());
+        assert!(s.contains("judge quality (graded): 0.500"));
+        // Headline quality line comes before the counts block.
+        assert!(s.find("judge quality").unwrap() < s.find("correct  1").unwrap());
         assert!(s.contains("correct  1 (50.0%)"));
         assert!(s.contains("wrong 1 (50.0%)"));
         assert!(s.contains("total 2"));
+        // EM/F1 are demoted out of the primary summary entirely.
+        assert!(!s.contains("EM mean"));
+        assert!(!s.contains("F1 mean"));
+    }
+
+    #[test]
+    fn lexical_text_reports_em_f1_means() {
+        let s = lexical_text(&quality_cases());
         assert!(s.contains("EM mean: 0.500"));
         assert!(s.contains("F1 mean: 0.500"));
+    }
+
+    #[test]
+    fn quality_scores_correct_full_partial_half_wrong_unscored_zero() {
+        let rs = vec![
+            case("q1", Verdict::Correct),
+            case("q2", Verdict::Partial),
+            case("q3", Verdict::Wrong),
+            case("q4", Verdict::Unscored),
+        ];
+        // (1.0 + 0.5 + 0.0 + 0.0) / 4 = 0.375
+        assert!((quality(&rs) - 0.375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quality_is_zero_for_empty_results() {
+        assert_eq!(quality(&[]), 0.0);
+    }
+
+    fn by_type_cases() -> Vec<CaseResult> {
+        vec![
+            case_typed("q1", Verdict::Correct, "lexical", "no"),
+            case_typed("q2", Verdict::Correct, "lexical", "no"),
+            case_typed("q3", Verdict::Partial, "multihop", "yes"),
+            case_typed("q4", Verdict::Wrong, "multihop", "yes"),
+            // No hop_type/needs_graph at all -- groups under "(untyped)".
+            case("q5", Verdict::Correct),
+        ]
+    }
+
+    #[test]
+    fn by_type_text_computes_per_group_quality_and_counts() {
+        let s = by_type_text(&by_type_cases());
+        assert!(s.contains("### hop_type"));
+        assert!(s.contains("### needs_graph"));
+        // lexical: 2 correct / 2 total -> quality 1.0
+        assert!(s.contains("| lexical | 2 | 1.000 | 2 | 0 | 0 |"));
+        // multihop: 1 partial + 1 wrong / 2 total -> (0 + 0.5) / 2 = 0.250
+        assert!(s.contains("| multihop | 2 | 0.250 | 0 | 1 | 1 |"));
+        // untyped case (q5) groups separately from lexical/multihop.
+        assert!(s.contains("| (untyped) | 1 | 1.000 | 1 | 0 | 0 |"));
+        // needs_graph axis: yes = the two multihop cases, no = the two lexical cases.
+        assert!(s.contains("| yes | 2 | 0.250 | 0 | 1 | 1 |"));
+        assert!(s.contains("| no | 2 | 1.000 | 2 | 0 | 0 |"));
+    }
+
+    #[test]
+    fn by_type_text_groups_empty_hop_type_as_untyped() {
+        let rs = vec![case("q1", Verdict::Correct), case("q2", Verdict::Wrong)];
+        let s = by_type_text(&rs);
+        // Both cases share the same (empty) hop_type/needs_graph -- one "(untyped)" row per
+        // dimension, not two.
+        assert_eq!(s.matches("(untyped)").count(), 2);
+        assert!(s.contains("| (untyped) | 2 | 0.500 | 1 | 0 | 1 |"));
+    }
+
+    #[test]
+    fn write_run_includes_by_question_type_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let rs = by_type_cases();
+        let p = write_run(dir.path(), "t2", &RunMeta::test(), &rs).unwrap();
+        let report = std::fs::read_to_string(&p).unwrap();
+        assert!(report.contains("## By question type"));
+        assert!(report.contains("| lexical | 2 | 1.000 | 2 | 0 | 0 |"));
+        // The section comes before the demoted lexical EM/F1 section.
+        assert!(
+            report.find("## By question type").unwrap()
+                < report.find("## Lexical (secondary").unwrap()
+        );
     }
 }
