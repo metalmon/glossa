@@ -30,6 +30,7 @@ use crate::backend::glossa_tools;
 use crate::backend::openai::{lmstudio_chat, run_agent_loop};
 use crate::build::extract::{doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::lab::LabConfig;
+use crate::parallel::GraphWriter;
 use crate::reason::schema_graph_block;
 use crate::reason::seed::SEED_GRAPH_UPSERT_DESC;
 use crate::workspace::KbxPaths;
@@ -113,20 +114,23 @@ fn existing_block(existing: &[(String, String)]) -> String {
 /// The `graph_upsert` exec arm's write body, factored out so it is testable without a live model
 /// or `run_agent_loop`: parse + partial-apply type-filter via [`parse_and_filter_upsert`] (NOT
 /// `filter_grounding_only` — densify's whole point is to also write ungrounded query-side nodes),
-/// then write through the CANONICAL `ops::graph_upsert`, stamped with the Task-1 `"distil"`
-/// origin. Returns the raw `ops::UpsertOutcome` (for stats accounting at the call site) plus the
-/// ids `run_agent_loop`'s unproductive-streak novelty tracker should see.
+/// then write through `writer.upsert` — which serializes this worker against every other worker
+/// in the pool AND reuses the core file-lock (see `parallel::GraphWriter`) — stamped with the
+/// Task-1 `"distil"` origin. Returns the raw `ops::UpsertOutcome` (for stats accounting at the
+/// call site) plus the ids `run_agent_loop`'s unproductive-streak novelty tracker should see.
+/// Errors (lock-busy/poisoned) propagate to the caller, which reports them to the model like any
+/// other tool error rather than panicking one worker's whole document pass.
 pub(crate) fn densify_write(
     idx: &DocIndex,
-    g: &GraphStore,
+    writer: &GraphWriter,
     ont: &Ontology,
     args: &Value,
     now: u64,
-) -> (ops::UpsertOutcome, Vec<String>, Vec<String>) {
+) -> anyhow::Result<(ops::UpsertOutcome, Vec<String>, Vec<String>)> {
     let (nodes, edges, notes) = parse_and_filter_upsert(args, ont);
-    let out = ops::graph_upsert(idx, g, ont, nodes, edges, now, "distil");
+    let out = writer.upsert(idx, ont, nodes, edges, now, "distil")?;
     let ids = upserted_node_ids(&out);
-    (out, ids, notes)
+    Ok((out, ids, notes))
 }
 
 /// Run the agentic densify pass over ONE document: the `lab.distil` strong model walks the
@@ -136,6 +140,13 @@ pub(crate) fn densify_write(
 /// unlike `extract_doc`'s terminals-only harvest. Errors clearly if `[distil]` is unset.
 /// `max_rounds` bounds EACH round's agent loop (resolved CLI > lab.toml `[tuning]` >
 /// `DEFAULT_MAX_ROUNDS` by the caller — see `distil::run::run_densify_at`).
+///
+/// `writer` and `idx` are shared across every worker in the pool (opened ONCE by
+/// `distil::run::run_densify_at`, not per-document): reads go straight through `idx`/
+/// `writer.store()` (WAL-safe, no lock needed), and every write funnels through
+/// `writer.upsert(..)`, which serializes the N worker threads in-process AND reuses the core
+/// file-lock so a concurrent `glossa` MCP writer can never interleave with an eval worker
+/// (mirrors `build::extract::extract_doc`/`reason::seed::chain_one_seed`'s `GraphWriter` wiring).
 pub fn densify_doc(
     paths: &KbxPaths,
     ont: &Ontology,
@@ -144,6 +155,8 @@ pub fn densify_doc(
     doc_path: &str,
     chunks_per_round: usize,
     max_rounds: usize,
+    writer: &GraphWriter,
+    idx: &DocIndex,
     // Called once per coverage round with the number of chunk ordinals newly covered that round
     // (mirrors `extract_doc`'s live-progress callback).
     mut on_progress: impl FnMut(u64),
@@ -157,9 +170,9 @@ pub fn densify_doc(
     // (same pattern `extract_doc` uses for its caller-supplied `build_temp`).
     std::env::set_var("KB_EVAL_TEMP", DENSIFY_TEMP.to_string());
 
+    // `root` is still needed for the search/grep exec arm below (`glossa_tools::exec`) — reads
+    // and writes themselves go through the shared `idx`/`writer`, not a fresh handle.
     let root = paths.root.as_path();
-    let g = GraphStore::open(root)?;
-    let idx = DocIndex::open_or_create(root)?;
     let trace = TraceLog::disabled();
     let spec = glossa::tools::ChainSpec::from_ontology(ont);
 
@@ -179,7 +192,7 @@ pub fn densify_doc(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let ords = doc_chunk_ords(&idx, doc_path)?;
+    let ords = doc_chunk_ords(idx, doc_path)?;
 
     let stats = RefCell::new(DensifyStats::default());
     let reads = RefCell::new(Vec::<u64>::new());
@@ -190,7 +203,7 @@ pub fn densify_doc(
     while let Some(&start) = ords.iter().find(|o| !covered.contains(o)) {
         reads.borrow_mut().clear();
 
-        let existing = existing_for_chunk(&g, &idx, doc_path, start);
+        let existing = existing_for_chunk(writer.store(), idx, doc_path, start);
         let user = format!(
             "Densify this document. Start at section {start}: call read(path=\"{doc_path}\", \
              n={start}) first.\n\nReasoning already grounded to this section:\n{}\n\nAdd only \
@@ -219,7 +232,12 @@ pub fn densify_doc(
                 eprintln!("[TOOL] {name} {args}");
             }
             if name == "graph_upsert" {
-                let (out, ids, notes) = densify_write(&idx, &g, ont, args, now);
+                let (out, ids, notes) = match densify_write(idx, writer, ont, args, now) {
+                    Ok(v) => v,
+                    // Lock-busy / poisoned-lock timeout: report to the model like any other tool
+                    // error rather than panicking one worker's whole document pass.
+                    Err(e) => return (format!("graph_upsert failed: {e}"), Vec::new(), Vec::new()),
+                };
                 if !out.rejected {
                     let mut s = stats.borrow_mut();
                     s.nodes += out.nodes;
@@ -265,7 +283,7 @@ pub fn densify_doc(
                 // search/grep — unbounded exploration for existing context, delegated to the
                 // shared registry (same as `reason::chain_one_seed`/`distil::gen::generate_one`).
                 let (body, ids, _images) =
-                    glossa_tools::exec(name, args, root, &idx, Some(&g), &spec, &trace);
+                    glossa_tools::exec(name, args, root, idx, Some(writer.store()), &spec, &trace);
                 (body, ids, Vec::new())
             }
         };
@@ -397,9 +415,10 @@ strict = true
     fn densify_write_keeps_query_side_node_and_stamps_distil_origin() {
         let dir = tempfile::tempdir().unwrap();
         let ont = dual_ontology();
-        let g = GraphStore::open(dir.path()).unwrap();
+        let g = std::sync::Arc::new(GraphStore::open(dir.path()).unwrap());
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         write_doc_chunk(&idx, "d.md", "S1");
+        let writer = GraphWriter::new(std::sync::Arc::clone(&g), dir.path().to_path_buf());
 
         let args = serde_json::json!({
             "nodes": [
@@ -411,7 +430,7 @@ strict = true
             ]
         });
 
-        let (out, ids, notes) = densify_write(&idx, &g, &ont, &args, 1_000);
+        let (out, ids, notes) = densify_write(&idx, &writer, &ont, &args, 1_000).unwrap();
         assert!(!out.rejected, "batch must not be rejected: {}", out.message);
         assert!(notes.is_empty(), "no node should be filtered: {notes:?}");
         assert_eq!(out.nodes, 2, "both the grounded terminal AND the query-side node must write");
@@ -451,15 +470,16 @@ strict = true
     fn densify_write_auto_grounds_terminal_from_source_path() {
         let dir = tempfile::tempdir().unwrap();
         let ont = dual_ontology();
-        let g = GraphStore::open(dir.path()).unwrap();
+        let g = std::sync::Arc::new(GraphStore::open(dir.path()).unwrap());
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         write_doc_chunk(&idx, "d.md", "S1");
+        let writer = GraphWriter::new(std::sync::Arc::clone(&g), dir.path().to_path_buf());
 
         let args = serde_json::json!({
             "nodes": [{"node_type": "Fact", "label": "auto grounded", "source_path": "d.md#1"}],
             "edges": []
         });
-        let (out, _ids, _notes) = densify_write(&idx, &g, &ont, &args, 1_000);
+        let (out, _ids, _notes) = densify_write(&idx, &writer, &ont, &args, 1_000).unwrap();
         assert!(!out.rejected, "{}", out.message);
         assert_eq!(out.edges, 1, "auto-derived MENTIONS edge must be written: {}", out.message);
 

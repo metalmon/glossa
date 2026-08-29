@@ -14,6 +14,7 @@ use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
 use crate::distil::gen::{generate_one, GenOutcome, Seed};
+use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
 use glossa::graph::ontology::Ontology;
@@ -24,6 +25,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Fallback for `chunks_per_round` when neither a CLI flag nor `lab.toml`'s `[tuning]
@@ -436,10 +438,9 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         lab.tuning.max_rounds,
         crate::distil::densify::DEFAULT_MAX_ROUNDS,
     );
-    // Worker-pool size for the densify doc loop. Unused for now — Task 6 (the distil worker pool
-    // via `parallel::run_units_parallel`/`GraphWriter`) consumes it; this task only wires the
-    // config plumbing through.
-    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_distil, DEFAULT_JOBS).max(1);
+    // Worker-pool size for the densify doc loop: CLI > lab.toml `[tuning] jobs_distil` > 3,
+    // clamped to at least 1 — drives the per-doc densify loop below via `run_units_parallel`.
+    let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_distil, DEFAULT_JOBS).max(1);
 
     // A fresh, short-lived handle: enumerate then drop before densify_doc opens its own
     // per-document GraphStore connection — same reasoning as `run_build`'s extract stage.
@@ -466,6 +467,14 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     .context("counting chunks per doc for densify-bar weights")?;
     let total_chunks = crate::build::extract_total_chunks(&docs, &chunk_counts);
 
+    // Densify shares ONE `GraphStore` (wrapped in a `GraphWriter`) across every worker in the
+    // pool, instead of each document opening its own connection against `graph.sqlite` — mirrors
+    // `build::run_build`'s/`reason::run_reason_at`'s `GraphWriter` wiring (Tasks 4/5). `idx`
+    // (opened above for the chunk-weight count) is reused as-is: reads go straight through it
+    // (WAL-safe, no lock needed).
+    let g = Arc::new(GraphStore::open(&paths.root).context("open graph store for densify")?);
+    let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
+
     // Densify state lives under its own stable `runs/distil/` dir — one corpus has exactly one
     // in-progress densify pass to resume/checkpoint, same convention as `runs/build/`/`runs/reason/`.
     let run_dir = paths.runs.join("distil");
@@ -482,50 +491,81 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // (ETA + tokens/resamples).
     pb.set_prefix("distilling");
     let ticker = StatusTicker::start(&pb);
-    let mut total = DensifyStats::default();
-    let mut docs_done: Vec<String> = Vec::new();
+
+    // Pre-filter (single-threaded, order-preserving): a doc already recorded done under
+    // `--resume` is skipped and accounted for in the bar right here — identical to what the old
+    // sequential loop did inline — BEFORE any doc is handed to the worker pool. The pool then
+    // only ever sees docs that must actually run, so `should_skip_densify`'s checkpoint read
+    // never needs to be reasoned about under concurrency (mirrors `run_build`'s/`run_reason_at`'s
+    // pre-filter).
+    let mut to_run: Vec<String> = Vec::with_capacity(docs.len());
     for doc in &docs {
         let w = crate::build::extract_doc_weight(doc, &chunk_counts) as u64;
         if should_skip_densify(&cp, doc, args.resume) {
             pb.inc(w);
             continue;
         }
-        // Advance the bar WITHIN the doc via densify_doc's per-round callback (real chunks
-        // covered), same as `run_build`'s extract stage: `covered` tracks what the callback
-        // advanced so the per-doc total can be reconciled to this doc's weight below.
-        let mut covered = 0u64;
-        let stats = densify_doc(
-            &paths,
-            &ontology,
-            &lab,
-            &distil_md,
-            doc,
-            chunks_per_round,
-            max_rounds,
-            |n| {
-                covered += n;
-                pb.inc(n);
-            },
-        )
-        .with_context(|| format!("densifying {doc}"))?;
+        to_run.push(doc.clone());
+    }
+
+    // Each doc's progress is driven entirely by `densify_doc`'s own per-round callback plus the
+    // gap top-up below, so `run_units_parallel`'s own post-work `pb.inc(weight)` must be a no-op
+    // here (`weight` always 0) — mirrors `run_build`'s extract loop. `--jobs 1` runs this same
+    // closure inline, in `docs` order, byte-for-byte the old sequential loop.
+    let results = run_units_parallel(
+        to_run,
+        jobs,
+        &pb,
+        |_doc| 0u64,
+        |doc: &String| -> Result<(String, DensifyStats)> {
+            let w = crate::build::extract_doc_weight(doc, &chunk_counts) as u64;
+            // Advance the bar WITHIN the doc via densify_doc's per-round callback (real chunks
+            // covered), same as `run_build`'s extract stage: `covered` tracks what the callback
+            // advanced so the per-doc total can be reconciled to this doc's weight below.
+            let mut covered = 0u64;
+            let stats = densify_doc(
+                &paths,
+                &ontology,
+                &lab,
+                &distil_md,
+                doc,
+                chunks_per_round,
+                max_rounds,
+                &writer,
+                &idx,
+                |n| {
+                    covered += n;
+                    pb.inc(n);
+                },
+            )
+            .with_context(|| format!("densifying {doc}"))?;
+            cp.mark(&distil_unit_id(doc), "done")
+                .with_context(|| format!("marking {doc} done"))?;
+            // A live indicatif bar owns the terminal: any per-doc message while it's live MUST go
+            // through `pb.println`, never a bare `println!` (the bug this task's brief calls out
+            // by name) — only the post-`finish_and_clear` summary below may use `println!`
+            // directly.
+            pb.println(format!(
+                "distil {doc}: {} node(s), {} edge(s), {} grounded",
+                stats.nodes, stats.edges, stats.grounded
+            ));
+            // Top up any gap so the bar stays aligned to this doc's weight, same as `run_build`.
+            if covered < w {
+                pb.inc(w - covered);
+            }
+            Ok((doc.clone(), stats))
+        },
+    )?;
+
+    let mut total = DensifyStats::default();
+    let mut docs_done: Vec<String> = Vec::new();
+    for (doc, stats) in results {
         total.nodes += stats.nodes;
         total.edges += stats.edges;
         total.grounded += stats.grounded;
-        cp.mark(&distil_unit_id(doc), "done")
-            .with_context(|| format!("marking {doc} done"))?;
-        docs_done.push(doc.clone());
-        // A live indicatif bar owns the terminal: any per-doc message while it's live MUST go
-        // through `pb.println`, never a bare `println!` (the bug this task's brief calls out by
-        // name) — only the post-`finish_and_clear` summary below may use `println!` directly.
-        pb.println(format!(
-            "distil {doc}: {} node(s), {} edge(s), {} grounded",
-            stats.nodes, stats.edges, stats.grounded
-        ));
-        // Top up any gap so the bar stays aligned to this doc's weight, same as `run_build`.
-        if covered < w {
-            pb.inc(w - covered);
-        }
+        docs_done.push(doc);
     }
+
     drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
     println!(
