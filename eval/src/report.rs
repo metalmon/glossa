@@ -1,6 +1,7 @@
-//! File-based run report: `write_run` renders `runs/<tag>/report.md` (counts + a per-case table)
-//! plus one `<id>.trace.md` per case (full transcript, answer, raw judge reply). Deterministic —
-//! the timestamp is a caller-supplied string, never read from the clock inside this module.
+//! File-based run report: `write_run` renders `runs/<tag>/report.md` (graded judge quality +
+//! counts, then a demoted lexical EM/F1 section, then a per-case table) plus one `<id>.trace.md`
+//! per case (full transcript, answer, raw judge reply). Deterministic — the timestamp is a
+//! caller-supplied string, never read from the clock inside this module.
 
 use crate::judge::Verdict;
 use anyhow::Context;
@@ -55,41 +56,91 @@ fn verdict_label(v: Verdict) -> &'static str {
     }
 }
 
-/// Aggregate headline stats — counts/percentages per verdict + EM/F1 means — rendered as plain
-/// text. Shared by `write_run` (the report.md `## Counts` section) and the CLI's post-run stdout
-/// print, so the two never drift apart.
-pub fn summary_text(results: &[CaseResult]) -> String {
-    let total = results.len();
-    let mut correct = 0usize;
-    let mut partial = 0usize;
-    let mut wrong = 0usize;
-    let mut unscored = 0usize;
-    let mut f1_sum = 0f32;
-    let mut em_sum = 0f32;
+/// Verdict tallies shared by `quality`, `summary_text`, and `lexical_text` so the three never
+/// disagree on how a run's cases are counted.
+struct Tally {
+    total: usize,
+    correct: usize,
+    partial: usize,
+    wrong: usize,
+    unscored: usize,
+    f1_sum: f32,
+    em_sum: f32,
+}
+
+fn tally(results: &[CaseResult]) -> Tally {
+    let mut t = Tally {
+        total: results.len(),
+        correct: 0,
+        partial: 0,
+        wrong: 0,
+        unscored: 0,
+        f1_sum: 0.0,
+        em_sum: 0.0,
+    };
     for r in results {
         match r.verdict {
-            Verdict::Correct => correct += 1,
-            Verdict::Partial => partial += 1,
-            Verdict::Wrong => wrong += 1,
-            Verdict::Unscored => unscored += 1,
+            Verdict::Correct => t.correct += 1,
+            Verdict::Partial => t.partial += 1,
+            Verdict::Wrong => t.wrong += 1,
+            Verdict::Unscored => t.unscored += 1,
         }
-        f1_sum += r.f1;
-        em_sum += r.em;
+        t.f1_sum += r.f1;
+        t.em_sum += r.em;
     }
+    t
+}
+
+/// Primary headline metric for eval report golds: long free-text paragraph answers make
+/// exact-match (EM) essentially always 0 and token-F1 only a weak lexical proxy, so the graded
+/// LLM-judge verdict is the real signal. `quality = (correct*1.0 + partial*0.5) / total`, i.e. a
+/// correct answer scores 1.0, a partial answer scores 0.5, wrong/unscored score 0.0. Returns 0.0
+/// for an empty result set rather than dividing by zero.
+pub fn quality(results: &[CaseResult]) -> f32 {
+    let t = tally(results);
+    if t.total == 0 {
+        return 0.0;
+    }
+    (t.correct as f32 + 0.5 * t.partial as f32) / t.total as f32
+}
+
+/// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
+/// rendered as plain text. Shared by `write_run` (the report.md primary section) and the CLI's
+/// post-run stdout print, so the two never drift apart. EM/F1 are NOT included here; see
+/// `lexical_text` for those (demoted to a secondary, clearly-labelled block).
+pub fn summary_text(results: &[CaseResult]) -> String {
+    let t = tally(results);
     let pct = |n: usize| -> f32 {
-        if total == 0 {
+        if t.total == 0 {
             0.0
         } else {
-            100.0 * n as f32 / total as f32
+            100.0 * n as f32 / t.total as f32
         }
     };
-    let f1_mean = if total == 0 { 0.0 } else { f1_sum / total as f32 };
-    let em_mean = if total == 0 { 0.0 } else { em_sum / total as f32 };
+    let q = quality(results);
 
     format!(
-        "correct  {correct} ({:.1}%)\npartial  {partial} ({:.1}%)\nwrong {wrong} ({:.1}%)\nunscored {unscored} ({:.1}%)\ntotal {total}\nEM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n",
-        pct(correct), pct(partial), pct(wrong), pct(unscored)
+        "judge quality (graded): {q:.3}  (correct + 0.5*partial) / total\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
+        t.correct, pct(t.correct), t.partial, pct(t.partial), t.wrong, pct(t.wrong), t.unscored, pct(t.unscored), t.total
     )
+}
+
+/// Secondary, lexical-only stats (EM mean / F1 mean). Kept for sanity-checking but demoted out of
+/// the primary summary because both metrics are unreliable for the long free-text paragraph
+/// answers these evals grade — EM is ~always 0 and F1 only weakly correlates with judge quality.
+pub fn lexical_text(results: &[CaseResult]) -> String {
+    let t = tally(results);
+    let f1_mean = if t.total == 0 {
+        0.0
+    } else {
+        t.f1_sum / t.total as f32
+    };
+    let em_mean = if t.total == 0 {
+        0.0
+    } else {
+        t.em_sum / t.total as f32
+    };
+    format!("EM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n")
 }
 
 /// Sanitize a case id into a filesystem-safe filename stem: path separators and any non
@@ -168,8 +219,12 @@ pub fn write_run(
     out.push_str(&format!("- n: {}\n", meta.n));
     out.push_str(&format!("- timestamp: {}\n\n", meta.timestamp));
 
-    out.push_str("## Counts\n\n");
+    out.push_str("## Judge quality (primary)\n\n");
     out.push_str(&summary_text(results));
+    out.push('\n');
+
+    out.push_str("## Lexical (secondary — unreliable for free-text answers)\n\n");
+    out.push_str(&lexical_text(results));
     out.push('\n');
 
     out.push_str("## Cases\n\n");
@@ -235,7 +290,11 @@ mod tests {
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
         let report = std::fs::read_to_string(&p).unwrap();
+        assert!(report.contains("judge quality (graded): 0.500"));
+        assert!(report.contains("## Judge quality (primary)"));
         assert!(report.contains("correct  1") && report.contains("wrong 1"));
+        assert!(report.contains("## Lexical (secondary"));
+        assert!(report.contains("EM mean:") && report.contains("F1 mean:"));
         assert!(report.contains("| q1 |") && report.contains("| q2 |"));
         assert!(dir.path().join("t1/q1.trace.md").exists());
     }
@@ -299,9 +358,8 @@ mod tests {
         assert_eq!(ids, vec!["a-b".to_string(), "a.b".to_string()]);
     }
 
-    #[test]
-    fn summary_text_reports_counts_and_means() {
-        let rs = vec![
+    fn quality_cases() -> Vec<CaseResult> {
+        vec![
             {
                 let mut c = case("q1", Verdict::Correct);
                 c.f1 = 1.0;
@@ -314,12 +372,44 @@ mod tests {
                 c.em = 0.0;
                 c
             },
-        ];
-        let s = summary_text(&rs);
+        ]
+    }
+
+    #[test]
+    fn summary_text_leads_with_graded_quality_and_reports_counts() {
+        let s = summary_text(&quality_cases());
+        assert!(s.contains("judge quality (graded): 0.500"));
+        // Headline quality line comes before the counts block.
+        assert!(s.find("judge quality").unwrap() < s.find("correct  1").unwrap());
         assert!(s.contains("correct  1 (50.0%)"));
         assert!(s.contains("wrong 1 (50.0%)"));
         assert!(s.contains("total 2"));
+        // EM/F1 are demoted out of the primary summary entirely.
+        assert!(!s.contains("EM mean"));
+        assert!(!s.contains("F1 mean"));
+    }
+
+    #[test]
+    fn lexical_text_reports_em_f1_means() {
+        let s = lexical_text(&quality_cases());
         assert!(s.contains("EM mean: 0.500"));
         assert!(s.contains("F1 mean: 0.500"));
+    }
+
+    #[test]
+    fn quality_scores_correct_full_partial_half_wrong_unscored_zero() {
+        let rs = vec![
+            case("q1", Verdict::Correct),
+            case("q2", Verdict::Partial),
+            case("q3", Verdict::Wrong),
+            case("q4", Verdict::Unscored),
+        ];
+        // (1.0 + 0.5 + 0.0 + 0.0) / 4 = 0.375
+        assert!((quality(&rs) - 0.375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quality_is_zero_for_empty_results() {
+        assert_eq!(quality(&[]), 0.0);
     }
 }
