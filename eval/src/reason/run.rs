@@ -6,11 +6,13 @@
 
 use crate::backend::openai::{cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker};
 use crate::checkpoint::Checkpoint;
+use crate::distil::Seed;
 use crate::lab::LabConfig;
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
-use glossa::graph::ontology::Ontology;
+use glossa::graph::ontology::{Ontology, RelationRole};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -85,6 +87,18 @@ pub fn should_skip(cp: &Checkpoint, seed_id: &str, resume: bool) -> bool {
     resume && cp.is_done(&unit_id(seed_id))
 }
 
+/// Grounded seeds that still need a query-side chain built: with `force`, every seed (today's
+/// full-rebuild behavior, unchanged); otherwise only the "lonely"/chainless ones — those whose id
+/// is NOT in `chained_ids` (ids that are the destination of a chaining-relation edge, i.e. already
+/// have a query-side chain from a prior `kbx reason` run). Pure and graph-free so it's unit-tested
+/// without a `GraphStore`; order is preserved (seed-pool's deterministic id sort survives).
+pub fn chainless_seeds(seeds: Vec<Seed>, chained_ids: &HashSet<String>, force: bool) -> Vec<Seed> {
+    if force {
+        return seeds;
+    }
+    seeds.into_iter().filter(|s| !chained_ids.contains(&s.id)).collect()
+}
+
 /// Orchestrate the `kbx reason` pipeline over the corpus at `path` (kb-style PATH resolution via
 /// `workspace::resolve`): load `lab.toml` + ontology + `reason.md`, pull the grounded seed pool,
 /// run `chain_one_seed` once per (non-`--limit`-excluded, non-`--resume`-skipped) seed,
@@ -117,7 +131,33 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
              carrying a MENTIONS edge) — run `kbx build` first"
         );
     }
+    let total_seeds = seeds.len();
+    // By default, skip grounded terminals that already have a query-side chain — mirrors
+    // `kbx build`'s delta-incremental NEW-∪-CHANGED behavior instead of reprocessing the whole
+    // seed pool every run. A terminal already has a chain iff some edge's `to` is this seed's id
+    // AND that edge's relation is `Chaining` per the ontology (not hardcoded per edge_type — see
+    // `RelationRole`). `--force` skips this filter entirely (today's full-rebuild behavior).
+    let chained_ids: HashSet<String> = if args.force {
+        HashSet::new()
+    } else {
+        g.all_edges()?
+            .into_iter()
+            .filter(|e| ontology.relation_role(&e.edge_type) == RelationRole::Chaining)
+            .map(|e| e.to)
+            .collect()
+    };
     drop(g); // chain_one_seed opens its own store per call
+    let seeds = chainless_seeds(seeds, &chained_ids, args.force);
+    if args.force {
+        println!("reason: {total_seeds} grounded terminal(s), --force set: rebuilding all");
+    } else {
+        let skipped = total_seeds - seeds.len();
+        println!(
+            "reason: {total_seeds} grounded terminal(s), {skipped} already have a query-side \
+             chain (skipped; use --force to rebuild), {} to process",
+            seeds.len()
+        );
+    }
 
     let fanout_max = crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
     let max_rounds = crate::lab::resolve(
@@ -187,6 +227,98 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
+
+    fn seed(id: &str) -> Seed {
+        Seed { id: id.to_string(), node_type: "Fact".to_string(), label: id.to_string() }
+    }
+
+    #[test]
+    fn chainless_seeds_force_returns_all_regardless_of_chained_ids() {
+        let seeds = vec![seed("a"), seed("b")];
+        let chained: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+        let out = chainless_seeds(seeds.clone(), &chained, true);
+        assert_eq!(out, seeds, "--force must reproduce today's full-rebuild: every seed kept");
+    }
+
+    #[test]
+    fn chainless_seeds_drops_chained_keeps_chainless_preserving_order() {
+        let seeds = vec![seed("a"), seed("b"), seed("c")];
+        let chained: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let out = chainless_seeds(seeds, &chained, false);
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"], "chained seed 'b' must be skipped; order preserved");
+    }
+
+    #[test]
+    fn chainless_seeds_no_chained_ids_keeps_everything() {
+        let seeds = vec![seed("a"), seed("b")];
+        let out = chainless_seeds(seeds.clone(), &HashSet::new(), false);
+        assert_eq!(out, seeds);
+    }
+
+    fn prov() -> Provenance {
+        Provenance {
+            source_path: "doc.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
+    }
+
+    /// Fixture-graph check that the chained_ids computation itself (relation_role ==
+    /// Chaining, filtered from `all_edges`) matches what `run_reason_at` wires up: a terminal
+    /// with an incoming chaining-role edge (RESOLVED_BY, undeclared -> defaults to Chaining per
+    /// `RelationRole`) is chained; one with only a grounding-role edge (MENTIONS, a CORE_EDGE ->
+    /// forced to Grounding) is chainless.
+    #[test]
+    fn chained_ids_from_graph_matches_chaining_role_not_grounding() {
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::load_or_default(dir.path());
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        for id in ["has-chain", "lonely"] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: Vec::new(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        // "has-chain" is the destination of a chaining-role edge -> already has a query-side chain.
+        g.put_edge(&Edge {
+            from: "step-1".into(),
+            to: "has-chain".into(),
+            edge_type: "RESOLVED_BY".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        // "lonely" only has a grounding-role MENTIONS edge -> NOT a chain, stays chainless.
+        g.put_edge(&Edge {
+            from: "lonely".into(),
+            to: "doc.md#1".into(),
+            edge_type: glossa::graph::MENTIONS.to_string(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        let chained_ids: HashSet<String> = g
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| ont.relation_role(&e.edge_type) == RelationRole::Chaining)
+            .map(|e| e.to)
+            .collect();
+
+        let seeds = vec![seed("has-chain"), seed("lonely")];
+        let out = chainless_seeds(seeds, &chained_ids, false);
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["lonely"], "only the chainless terminal must remain: {ids:?}");
+    }
 
     /// Step 1's TDD unit (per the brief): a seed id already recorded done in the checkpoint is
     /// skipped under `--resume`; a fresh id is not. Pure, tempdir-only — no model involved.
