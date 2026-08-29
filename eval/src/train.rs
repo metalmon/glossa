@@ -57,10 +57,9 @@ pub(crate) fn should_apply(seed_em: f64, best_em: f64, no_apply: bool) -> bool {
 pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let paths = workspace::resolve(path);
     let lab = LabConfig::load_at(&paths.lab)?;
-    // Worker-pool size for concurrent read-only rollouts. Unused for now — Task 7 (parallel
-    // rollouts in `gepa_graph::score_questions`) consumes it; this task only wires the config
-    // plumbing through.
-    let _jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_train, DEFAULT_JOBS).max(1);
+    // Worker-pool size for `gepa_graph::score_questions`'s concurrent read-only rollouts
+    // (CLI `--jobs` > `[tuning] jobs_train` > DEFAULT_JOBS), clamped to at least 1.
+    let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_train, DEFAULT_JOBS).max(1);
     let reflect_ep = lab
         .reflect
         .clone()
@@ -111,6 +110,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         seed: rng_seed,
         pareto_size: args.pareto_size,
         candidate_selection,
+        jobs,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

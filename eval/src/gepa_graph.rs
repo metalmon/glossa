@@ -28,6 +28,7 @@ use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::tools::ChainSpec;
 use glossa::trace::TraceLog;
+use indicatif::ProgressBar;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde_json::{json, Value};
@@ -55,6 +56,12 @@ pub struct GepaGraphConfig {
     pub seed: u64,
     pub pareto_size: usize,
     pub candidate_selection: CandidateSelection,
+    /// Worker-pool size for `score_questions`'s per-question rollouts. Rollouts are graph-READ
+    /// reader navigations only (train never writes) — safe to run `jobs` of them concurrently
+    /// sharing the one opened `GraphStore`/`DocIndex` (both read-only shareable). The GEPA
+    /// candidate/iteration loop in `run` stays sequential (Pareto selection is inherently serial).
+    /// `jobs == 1` runs the exact sequential loop used before parallelism landed.
+    pub jobs: usize,
 }
 
 pub struct GepaGraphResult {
@@ -198,6 +205,15 @@ fn rollout_one(
     }
 }
 
+/// Score `questions` with `cfg.jobs` concurrent read-only rollout workers.
+///
+/// The returned `Vec<RolloutOutcome>` MUST stay in `questions`' input order: `Candidate::em_val`
+/// is POSITIONAL (Pareto dominance in `dominates`/`pareto_frontier_win_counts` compares
+/// instance-by-instance across candidates scored against the SAME question set), so a caller
+/// zipping two `score_questions` calls' outputs — or this file's own `batch.iter().zip(&outcomes)`
+/// — silently mismatches questions to outcomes if order isn't preserved. `run_units_parallel`
+/// returns results in COMPLETION order, not input order, so each unit here carries its original
+/// index and results are sorted back into place before returning.
 fn score_questions(
     cfg: &GepaGraphConfig,
     url: &str,
@@ -208,10 +224,24 @@ fn score_questions(
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
 ) -> Vec<RolloutOutcome> {
-    questions
-        .iter()
-        .map(|q| rollout_one(cfg, url, tools, prompt, q, idx, graph, spec))
-        .collect()
+    let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
+    // No visible progress bar for train rollouts today (unlike build/reason/distil) — `run_train`
+    // reports per-iteration summaries via println!, not a bar. `run_units_parallel` still needs a
+    // `&ProgressBar` to report completion into; a hidden one is a correct no-op sink.
+    let pb = ProgressBar::hidden();
+    let mut indexed: Vec<(usize, RolloutOutcome)> = crate::parallel::run_units_parallel(
+        units,
+        cfg.jobs,
+        &pb,
+        |_unit| 1,
+        |(i, q)| Ok((*i, rollout_one(cfg, url, tools, prompt, q, idx, graph, spec))),
+    )
+    // `rollout_one` itself never returns `Err` (it catches its own agent-loop failure and scores
+    // an empty prediction) — the only `Result` here is `run_units_parallel`'s own plumbing, which
+    // is infallible for an infallible `work` closure.
+    .expect("rollout_one is infallible; run_units_parallel only errors on a failing work closure");
+    indexed.sort_unstable_by_key(|(i, _)| *i);
+    indexed.into_iter().map(|(_, o)| o).collect()
 }
 
 // --- reflection (caller-injected transport) -------------------------------------------------
@@ -737,6 +767,40 @@ mod tests {
         assert!(msg.contains("glossary(") && msg.contains("Tool-call trace"));
         assert!(msg.contains("Gold answer: Jane Doe"));
         assert!(msg.contains("=== NEW SYSTEM PROMPT ==="));
+    }
+
+    /// `score_questions` pairs each question with its input index, lets `run_units_parallel`
+    /// return results in whatever order workers finish (jobs>1 reorders by design), then sorts
+    /// back by index before returning. This is the load-bearing correctness property for Task 7:
+    /// `Candidate::em_val` is POSITIONAL (Pareto dominance compares instance-by-instance across
+    /// candidates scored against the same question set), so a reordered result vector would
+    /// silently mismatch questions to outcomes. Exercise the exact same index-carry-then-sort
+    /// pattern `score_questions` uses, with workers deliberately finishing OUT of input order
+    /// (later units sleep less), to prove the sort restores input order regardless.
+    #[test]
+    fn indexed_parallel_results_sort_back_to_input_order() {
+        let items: Vec<u32> = (0..12).map(|i| i * 10).collect();
+        let units: Vec<(usize, u32)> = items.iter().copied().enumerate().collect();
+        let pb = indicatif::ProgressBar::hidden();
+        let mut indexed: Vec<(usize, u32)> = crate::parallel::run_units_parallel(
+            units,
+            4,
+            &pb,
+            |_unit| 1,
+            |(i, v)| {
+                // Later-indexed units sleep less, so they tend to finish FIRST — forcing
+                // completion order to differ from input order.
+                std::thread::sleep(Duration::from_millis((items.len() as u64 - *i as u64) % 5));
+                Ok((*i, *v))
+            },
+        )
+        .unwrap();
+        indexed.sort_unstable_by_key(|(i, _)| *i);
+        let got: Vec<u32> = indexed.into_iter().map(|(_, v)| v).collect();
+        assert_eq!(
+            got, items,
+            "sorting by original index must restore input order despite parallel completion reordering"
+        );
     }
 
     #[test]

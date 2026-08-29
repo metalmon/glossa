@@ -858,6 +858,9 @@ fn run_optimize_graph(
             seed: rng_seed,
             pareto_size,
             candidate_selection,
+            // Legacy research binary has no `--jobs` flag; keep its rollouts sequential (no
+            // behaviour change).
+            jobs: 1,
         },
         qs,
         &reflect,
