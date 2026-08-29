@@ -123,6 +123,7 @@ mod tests {
             answer_aliases: vec![],
             supporting_titles: vec![],
             tags: vec![],
+            ..Default::default()
         }
     }
 

@@ -1,7 +1,8 @@
 //! File-based run report: `write_run` renders `runs/<tag>/report.md` (graded judge quality +
-//! counts, then a demoted lexical EM/F1 section, then a per-case table) plus one `<id>.trace.md`
-//! per case (full transcript, answer, raw judge reply). Deterministic — the timestamp is a
-//! caller-supplied string, never read from the clock inside this module.
+//! counts, a by-question-type breakdown, then a demoted lexical EM/F1 section, then a per-case
+//! table) plus one `<id>.trace.md` per case (full transcript, answer, raw judge reply).
+//! Deterministic — the timestamp is a caller-supplied string, never read from the clock inside
+//! this module.
 
 use crate::judge::Verdict;
 use anyhow::Context;
@@ -22,6 +23,15 @@ pub struct CaseResult {
     pub answer: String,
     pub transcript: String,
     pub judge_raw: String,
+    /// Reasoning shape the case exercises (`lexical|multihop|mixed`), carried from `Question` for
+    /// the "By question type" report breakdown. `#[serde(default)]` so cases persisted by an
+    /// older binary (before this field existed) still deserialize under `--resume`.
+    #[serde(default)]
+    pub hop_type: String,
+    /// Whether answering the case requires graph-based reasoning (`yes|no|maybe`), same role as
+    /// `hop_type` on a separate axis.
+    #[serde(default)]
+    pub needs_graph: String,
 }
 
 /// Run-level metadata carried in the report header. `timestamp` is passed in by the caller (never
@@ -91,17 +101,23 @@ fn tally(results: &[CaseResult]) -> Tally {
     t
 }
 
-/// Primary headline metric for eval report golds: long free-text paragraph answers make
-/// exact-match (EM) essentially always 0 and token-F1 only a weak lexical proxy, so the graded
-/// LLM-judge verdict is the real signal. `quality = (correct*1.0 + partial*0.5) / total`, i.e. a
-/// correct answer scores 1.0, a partial answer scores 0.5, wrong/unscored score 0.0. Returns 0.0
-/// for an empty result set rather than dividing by zero.
-pub fn quality(results: &[CaseResult]) -> f32 {
-    let t = tally(results);
-    if t.total == 0 {
+/// Shared graded-quality arithmetic: `(correct*1.0 + partial*0.5) / total`, i.e. a correct case
+/// scores 1.0, a partial case scores 0.5, wrong/unscored score 0.0. Returns 0.0 for `total == 0`
+/// rather than dividing by zero. Factored out of `quality` so the overall headline and the
+/// by-question-type breakdown (`by_type_text`) never disagree on the formula.
+fn quality_score(correct: usize, partial: usize, total: usize) -> f32 {
+    if total == 0 {
         return 0.0;
     }
-    (t.correct as f32 + 0.5 * t.partial as f32) / t.total as f32
+    (correct as f32 + 0.5 * partial as f32) / total as f32
+}
+
+/// Primary headline metric for eval report golds: long free-text paragraph answers make
+/// exact-match (EM) essentially always 0 and token-F1 only a weak lexical proxy, so the graded
+/// LLM-judge verdict is the real signal. See `quality_score` for the formula.
+pub fn quality(results: &[CaseResult]) -> f32 {
+    let t = tally(results);
+    quality_score(t.correct, t.partial, t.total)
 }
 
 /// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
@@ -141,6 +157,46 @@ pub fn lexical_text(results: &[CaseResult]) -> String {
         t.em_sum / t.total as f32
     };
     format!("EM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n")
+}
+
+/// One compact table grouping `results` by `key`, sorted alphabetically by group value (so the
+/// section is deterministic regardless of the run's case order) via `BTreeMap`. Cases with an
+/// empty group value are folded into `"(untyped)"`. Each row is the group's graded `quality`
+/// (`quality_score`, matching the overall headline) plus its correct/partial/wrong tally.
+fn by_type_table(dimension: &str, results: &[CaseResult], key: impl Fn(&CaseResult) -> &str) -> String {
+    let mut groups: std::collections::BTreeMap<&str, Vec<&CaseResult>> =
+        std::collections::BTreeMap::new();
+    for r in results {
+        let k = key(r);
+        let k = if k.is_empty() { "(untyped)" } else { k };
+        groups.entry(k).or_default().push(r);
+    }
+
+    let mut out = format!("### {dimension}\n\n");
+    out.push_str("| value | n | quality | correct | partial | wrong |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for (name, rs) in groups {
+        let correct = rs.iter().filter(|r| r.verdict == Verdict::Correct).count();
+        let partial = rs.iter().filter(|r| r.verdict == Verdict::Partial).count();
+        let wrong = rs.iter().filter(|r| r.verdict == Verdict::Wrong).count();
+        let n = rs.len();
+        let q = quality_score(correct, partial, n);
+        out.push_str(&format!("| {name} | {n} | {q:.3} | {correct} | {partial} | {wrong} |\n"));
+    }
+    out
+}
+
+/// "By question type" section: one subsection per grouping dimension carried on `CaseResult`
+/// (`hop_type`, `needs_graph`), each a compact per-value quality table. Answers "does the reader
+/// handle lexical (search-answerable) vs multihop (graph-needed) questions" at a glance.
+pub fn by_type_text(results: &[CaseResult]) -> String {
+    let mut out = String::new();
+    out.push_str(&by_type_table("hop_type", results, |r| r.hop_type.as_str()));
+    out.push('\n');
+    out.push_str(&by_type_table("needs_graph", results, |r| {
+        r.needs_graph.as_str()
+    }));
+    out
 }
 
 /// Sanitize a case id into a filesystem-safe filename stem: path separators and any non
@@ -223,6 +279,10 @@ pub fn write_run(
     out.push_str(&summary_text(results));
     out.push('\n');
 
+    out.push_str("## By question type\n\n");
+    out.push_str(&by_type_text(results));
+    out.push('\n');
+
     out.push_str("## Lexical (secondary — unreliable for free-text answers)\n\n");
     out.push_str(&lexical_text(results));
     out.push('\n');
@@ -275,6 +335,8 @@ mod tests {
                 reason: "ok".into(),
                 em: 0.0,
                 judge_raw: "VERDICT: correct".into(),
+                hop_type: "lexical".into(),
+                needs_graph: "no".into(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -286,6 +348,8 @@ mod tests {
                 reason: "no".into(),
                 em: 0.0,
                 judge_raw: "VERDICT: wrong".into(),
+                hop_type: "multihop".into(),
+                needs_graph: "yes".into(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -293,6 +357,10 @@ mod tests {
         assert!(report.contains("judge quality (graded): 0.500"));
         assert!(report.contains("## Judge quality (primary)"));
         assert!(report.contains("correct  1") && report.contains("wrong 1"));
+        assert!(report.contains("## By question type"));
+        assert!(report.contains("### hop_type") && report.contains("### needs_graph"));
+        assert!(report.contains("| lexical | 1 | 1.000 | 1 | 0 | 0 |"));
+        assert!(report.contains("| multihop | 1 | 0.000 | 0 | 0 | 1 |"));
         assert!(report.contains("## Lexical (secondary"));
         assert!(report.contains("EM mean:") && report.contains("F1 mean:"));
         assert!(report.contains("| q1 |") && report.contains("| q2 |"));
@@ -310,6 +378,18 @@ mod tests {
             reason: "r".into(),
             em: 0.0,
             judge_raw: String::new(),
+            hop_type: String::new(),
+            needs_graph: String::new(),
+        }
+    }
+
+    /// Like `case`, but also stamps `hop_type`/`needs_graph` for the by-question-type grouping
+    /// tests below.
+    fn case_typed(id: &str, verdict: Verdict, hop_type: &str, needs_graph: &str) -> CaseResult {
+        CaseResult {
+            hop_type: hop_type.into(),
+            needs_graph: needs_graph.into(),
+            ..case(id, verdict)
         }
     }
 
@@ -411,5 +491,57 @@ mod tests {
     #[test]
     fn quality_is_zero_for_empty_results() {
         assert_eq!(quality(&[]), 0.0);
+    }
+
+    fn by_type_cases() -> Vec<CaseResult> {
+        vec![
+            case_typed("q1", Verdict::Correct, "lexical", "no"),
+            case_typed("q2", Verdict::Correct, "lexical", "no"),
+            case_typed("q3", Verdict::Partial, "multihop", "yes"),
+            case_typed("q4", Verdict::Wrong, "multihop", "yes"),
+            // No hop_type/needs_graph at all -- groups under "(untyped)".
+            case("q5", Verdict::Correct),
+        ]
+    }
+
+    #[test]
+    fn by_type_text_computes_per_group_quality_and_counts() {
+        let s = by_type_text(&by_type_cases());
+        assert!(s.contains("### hop_type"));
+        assert!(s.contains("### needs_graph"));
+        // lexical: 2 correct / 2 total -> quality 1.0
+        assert!(s.contains("| lexical | 2 | 1.000 | 2 | 0 | 0 |"));
+        // multihop: 1 partial + 1 wrong / 2 total -> (0 + 0.5) / 2 = 0.250
+        assert!(s.contains("| multihop | 2 | 0.250 | 0 | 1 | 1 |"));
+        // untyped case (q5) groups separately from lexical/multihop.
+        assert!(s.contains("| (untyped) | 1 | 1.000 | 1 | 0 | 0 |"));
+        // needs_graph axis: yes = the two multihop cases, no = the two lexical cases.
+        assert!(s.contains("| yes | 2 | 0.250 | 0 | 1 | 1 |"));
+        assert!(s.contains("| no | 2 | 1.000 | 2 | 0 | 0 |"));
+    }
+
+    #[test]
+    fn by_type_text_groups_empty_hop_type_as_untyped() {
+        let rs = vec![case("q1", Verdict::Correct), case("q2", Verdict::Wrong)];
+        let s = by_type_text(&rs);
+        // Both cases share the same (empty) hop_type/needs_graph -- one "(untyped)" row per
+        // dimension, not two.
+        assert_eq!(s.matches("(untyped)").count(), 2);
+        assert!(s.contains("| (untyped) | 2 | 0.500 | 1 | 0 | 1 |"));
+    }
+
+    #[test]
+    fn write_run_includes_by_question_type_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let rs = by_type_cases();
+        let p = write_run(dir.path(), "t2", &RunMeta::test(), &rs).unwrap();
+        let report = std::fs::read_to_string(&p).unwrap();
+        assert!(report.contains("## By question type"));
+        assert!(report.contains("| lexical | 2 | 1.000 | 2 | 0 | 0 |"));
+        // The section comes before the demoted lexical EM/F1 section.
+        assert!(
+            report.find("## By question type").unwrap()
+                < report.find("## Lexical (secondary").unwrap()
+        );
     }
 }

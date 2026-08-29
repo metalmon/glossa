@@ -20,6 +20,14 @@ pub struct Question {
     /// Free-form case tags carried by `dataset.toml` (e.g. filtering a run to a subset);
     /// empty for formats that don't carry them (hotpot/musique/questions).
     pub tags: Vec<String>,
+    /// Reasoning shape the case exercises (`lexical|multihop|mixed`), eval metadata carried by
+    /// `dataset.toml`; empty (via `Default`) for formats that don't carry it
+    /// (hotpot/musique/questions). Not itself a serde attribute target -- `Question` is always
+    /// hand-built from a format-specific `Raw*` type; those carry the real `#[serde(default)]`.
+    pub hop_type: String,
+    /// Whether answering the case requires graph-based reasoning (`yes|no|maybe`), eval metadata
+    /// carried by `dataset.toml`; empty for formats that don't carry it.
+    pub needs_graph: String,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +80,7 @@ pub fn parse_hotpot(json: &str) -> anyhow::Result<Vec<Question>> {
                     .collect(),
                 supporting_titles: titles,
                 tags: Vec::new(),
+                ..Default::default()
             }
         })
         .collect())
@@ -134,6 +143,7 @@ pub fn parse_musique(jsonl: &str) -> anyhow::Result<Vec<Question>> {
                 .collect(),
             supporting_titles: titles,
             tags: Vec::new(),
+            ..Default::default()
         });
     }
     Ok(out)
@@ -192,6 +202,7 @@ pub fn parse_questions(jsonl: &str) -> anyhow::Result<Vec<Question>> {
             paragraphs: Vec::new(),
             supporting_titles: r.supporting_titles,
             tags: Vec::new(),
+            ..Default::default()
         });
     }
     Ok(out)

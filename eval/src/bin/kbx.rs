@@ -599,6 +599,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             answer,
             transcript,
             judge_raw,
+            hop_type: q.hop_type.clone(),
+            needs_graph: q.needs_graph.clone(),
         };
         write_case(&cases_dir, &r)
             .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
