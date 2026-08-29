@@ -7,12 +7,25 @@
 # LM Studio server that is `http://localhost:1234/v1/chat/completions`; for a hosted provider use
 # its complete `.../v1/chat/completions` URL.
 
+# [model] is the DEFAULT endpoint — the eval reader and every stage without its own section use it.
+# Per-stage endpoint fallback graph (each stage's own section wins; otherwise it falls back here):
+#   reason  -> [reason]  -> [distil] -> (none: `kbx reason` errors without one)
+#   build   -> [build]   -> [model]
+#   bridge  -> [bridge]  -> [model]
+#   distil  -> [distil]  (standalone; no fallback)
+#   judge   -> [judge]   (standalone; skipped when unset)
+#   reflect -> [reflect] (standalone; `kbx train` only)
 [model]
 endpoint = "http://localhost:1234/v1/chat/completions"
 model = "qwen3.5-4b"
 # api_key = "sk-..."                 # inline key, OR:
 # api_key_env = "OPENAI_API_KEY"     # read the key from this env var (keeps the secret out of this file)
 timeout_secs = 120
+
+# [build]                              # override the harvest model for `kbx build`; falls back to [model]
+# endpoint = "http://localhost:1234/v1/chat/completions"
+# model = "qwen3.5-4b"
+# timeout_secs = 120
 
 # [judge]                              # may be a DIFFERENT endpoint / model / key / timeout
 # endpoint = "http://localhost:1234/v1/chat/completions"
@@ -29,7 +42,7 @@ timeout_secs = 120
 # model = "big-model"
 # timeout_secs = 300
 
-[tuning]                              # reason/build/distil agent-loop tuning knobs.
+[tuning]                              # reason/build/distil/eval agent-loop tuning knobs.
                                        # Precedence: CLI flag > this section > built-in default.
 fanout_max = 3          # predecessors synthesized per backward step (reason)
 max_rounds = 30         # agent-loop rounds per unit (reason / build / distil)
@@ -38,3 +51,4 @@ jobs_build = 3          # worker-pool size for `kbx build`'s extract/judge stage
 jobs_reason = 3         # worker-pool size for `kbx reason`'s seed workers
 jobs_train = 3          # worker-pool size for `kbx train`'s read-only rollouts
 jobs_distil = 3         # worker-pool size for `kbx distil`'s densify workers
+jobs_eval = 3           # worker-pool size for `kbx eval`'s per-case reader+judge

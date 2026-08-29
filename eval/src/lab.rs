@@ -70,6 +70,11 @@ pub struct LabConfig {
     pub model: Endpoint,
     #[serde(default)]
     pub judge: Option<Endpoint>,
+    /// Harvest endpoint for `kbx build`'s extract stage. Its own model, separate from the eval
+    /// reader's `[model]`. Falls back to `[model]` when unset (see `build_endpoint`), so existing
+    /// `lab.toml` files without a `[build]` section keep today's behavior exactly.
+    #[serde(default)]
+    pub build: Option<Endpoint>,
     /// Endpoint used to reflect on/rewrite prompts (`kbx train`, a later plan).
     #[serde(default)]
     pub reflect: Option<Endpoint>,
@@ -123,6 +128,10 @@ pub struct Tuning {
     /// Worker-pool size for `kbx distil`'s densify workers. Same precedence as `jobs_build`.
     #[serde(default)]
     pub jobs_distil: Option<usize>,
+    /// Worker-pool size for `kbx eval`'s per-case reader+judge loop. Same precedence as
+    /// `jobs_build`.
+    #[serde(default)]
+    pub jobs_eval: Option<usize>,
 }
 
 /// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,
@@ -150,6 +159,12 @@ impl LabConfig {
     /// The endpoint `kbx reason` (phase-2) uses: `[reason]` if set, else `[distil]` as fallback.
     pub fn reason_endpoint(&self) -> Option<&Endpoint> {
         self.reason.as_ref().or(self.distil.as_ref())
+    }
+
+    /// The endpoint `kbx build`'s extract stage uses: `[build]` if set, else `[model]` (the default
+    /// endpoint). Mirrors `reason_endpoint`'s override-or-fallback shape.
+    pub fn build_endpoint(&self) -> &Endpoint {
+        self.build.as_ref().unwrap_or(&self.model)
     }
 }
 
@@ -270,6 +285,43 @@ mod tests {
         assert_eq!(lab.tuning.fanout_max, None);
         assert_eq!(lab.tuning.max_rounds, Some(40));
         assert_eq!(lab.tuning.chunks_per_round, None);
+    }
+
+    #[test]
+    fn build_endpoint_prefers_build_then_falls_back_to_model() {
+        // [build] present -> used
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "reader"
+            [build]
+            endpoint = "http://b"
+            model = "harvest"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.build_endpoint().model, "harvest");
+
+        // [build] absent -> falls back to [model]
+        let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"reader\"\n";
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.build_endpoint().model, "reader");
+    }
+
+    #[test]
+    fn tuning_parses_jobs_eval_and_defaults_to_none() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [tuning]
+            jobs_eval = 7
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.jobs_eval, Some(7));
+
+        let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.tuning.jobs_eval, None);
     }
 
     #[test]

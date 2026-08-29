@@ -334,10 +334,11 @@ pub fn extract_doc(
     let system = format!("{}\n\n{builder_md}", grounding_schema_block(ontology));
     let tools = build_tools_schema(BUILD_GRAPH_UPSERT_DESC);
 
-    let endpoint = lab.model.endpoint.clone();
-    let model = lab.model.model.clone();
-    let api_key = lab.model.resolve_key();
-    let timeout = Duration::from_secs(lab.model.timeout_secs);
+    let build_ep = lab.build_endpoint();
+    let endpoint = build_ep.endpoint.clone();
+    let model = build_ep.model.clone();
+    let api_key = build_ep.resolve_key();
+    let timeout = Duration::from_secs(build_ep.timeout_secs);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
