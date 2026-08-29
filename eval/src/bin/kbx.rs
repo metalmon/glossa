@@ -15,7 +15,8 @@ use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::distil::{self, DistilArgs};
 use kb_eval::judge::{judge, Judgement, Verdict};
-use kb_eval::lab::LabConfig;
+use kb_eval::lab::{self, LabConfig};
+use kb_eval::parallel::run_units_parallel;
 use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{
     lexical_text, load_cases, summary_text, write_case, write_run, CaseResult, RunMeta,
@@ -80,6 +81,11 @@ enum Cmd {
         /// Never draw the progress bar, even on a TTY.
         #[arg(long = "no-progress")]
         no_progress: bool,
+        /// Worker-pool size for the per-case reader+judge loop (default 3). Falls back to
+        /// `lab.toml`'s `[tuning] jobs_eval`, then the built-in default, when unset. `0` clamps to
+        /// 1 (never zero workers). `1` reproduces the sequential run exactly.
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
     Build {
@@ -312,6 +318,7 @@ fn main() -> Result<()> {
             no_judge,
             resume,
             no_progress,
+            jobs,
         } => run_eval(EvalArgs {
             path,
             tag,
@@ -323,6 +330,7 @@ fn main() -> Result<()> {
             no_judge,
             resume,
             no_progress,
+            jobs,
         }),
         Cmd::Build {
             path,
@@ -469,6 +477,7 @@ struct EvalArgs {
     no_judge: bool,
     resume: bool,
     no_progress: bool,
+    jobs: Option<usize>,
 }
 
 /// The concrete files/dirs an `eval` run reads from and writes to, after folding the workspace's
@@ -499,6 +508,10 @@ fn resolve_eval_paths(
         runs: paths.runs.clone(),
     }
 }
+
+/// Fallback worker-pool size for `kbx eval`'s per-case loop when neither `--jobs` nor `lab.toml`'s
+/// `[tuning] jobs_eval` overrides it — matches the other stages' `DEFAULT_JOBS` (3).
+const DEFAULT_JOBS_EVAL: usize = 3;
 
 fn run_eval(args: EvalArgs) -> Result<()> {
     let kbx_paths = workspace::resolve(args.path);
@@ -581,10 +594,15 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     pb.set_prefix("evaluating");
     let ticker = StatusTicker::start(&pb);
 
-    let mut results = Vec::with_capacity(cases.len());
-    for q in &cases {
-        let before = list_trace_files(&paths.root);
-
+    // Worker-pool size for the per-case reader+judge loop: CLI > lab.toml `[tuning] jobs_eval` > 3,
+    // clamped to at least 1. Eval scoring is READ-ONLY (graph reads are WAL-safe; the judge is a
+    // stateless cloud call), so cases parallelize like `train`'s rollouts. `--jobs 1` runs the
+    // closure inline in `cases` order — byte-for-byte the old sequential behavior. Each worker
+    // builds its OWN `OpenAiBackend` (never shared across threads) and retrieves its own trace file
+    // via `glossa::trace::last_trace_path()` (a thread-local set by `TraceLog::to_dir` on the SAME
+    // thread inside `answer()`), so concurrent cases never collide on trace attribution.
+    let jobs = lab::resolve(args.jobs, lab.tuning.jobs_eval, DEFAULT_JOBS_EVAL).max(1);
+    let results = run_units_parallel(cases, jobs, &pb, |_q| 1, |q| {
         let backend = OpenAiBackend {
             endpoint: lab.model.endpoint.clone(),
             model: lab.model.model.clone(),
@@ -601,7 +619,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             }
         };
 
-        let (tools, transcript) = read_new_trace(&paths.root, &before);
+        // This case's exact trace file — the one `answer()` created on THIS worker thread — read
+        // straight from the thread-local rather than diffing the trace dir (which races under
+        // concurrency). Best-effort: empty when tracing was disabled / no file was recorded.
+        let (tools, transcript) = match glossa::trace::last_trace_path() {
+            Some(p) => parse_trace_file(&p),
+            None => (Vec::new(), String::new()),
+        };
 
         let golds = gold_forms(q);
         let em = if relaxed_match_any(&answer, &golds) {
@@ -623,7 +647,15 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             _ => (Verdict::Unscored, String::new(), String::new()),
         };
 
-        pb.println(format!("case {}: em={em:.2} f1={f1:.2} verdict={verdict:?}", q.id));
+        // The graded JUDGE verdict is the real signal (EM is ~0 on paragraph answers); lead with
+        // the question's `hop_type` when present. `em`/`f1` still flow into `CaseResult` for the
+        // end-of-run report's secondary numbers.
+        let type_tag = if q.hop_type.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", q.hop_type)
+        };
+        pb.println(format!("case {}{type_tag}: {verdict:?}", q.id));
 
         let r = CaseResult {
             id: q.id.clone(),
@@ -640,9 +672,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         };
         write_case(&cases_dir, &r)
             .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
-        results.push(r);
-        pb.inc(1);
-    }
+        Ok(r)
+    })?;
     drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
 
@@ -691,43 +722,14 @@ fn gold_forms(q: &Question) -> Vec<String> {
         .collect()
 }
 
-/// Snapshot of trace-file names currently under `<corpus>/.glossa/traces`, taken before an
-/// `answer()` call so the file it writes (`TraceLog::to_dir` names it `<ts_ms>-<pid>.jsonl`) can
-/// be told apart from traces left by earlier cases in the same run.
-fn list_trace_files(corpus: &Path) -> HashSet<String> {
-    let dir = corpus.join(".glossa").join("traces");
-    let mut out = HashSet::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
-            if let Some(name) = ent.file_name().to_str() {
-                out.insert(name.to_string());
-            }
-        }
-    }
-    out
-}
-
-/// Diff the trace dir against the pre-call snapshot to find the file this one `answer()` call
-/// wrote, then return (deduped tool names in first-seen order, raw JSONL trace text). Best-effort:
-/// an empty pair when no new trace file turns up (e.g. the corpus has tracing disabled) — the run
-/// stays functional, it just carries no tool/transcript detail for that case.
-fn read_new_trace(corpus: &Path, before: &HashSet<String>) -> (Vec<String>, String) {
-    let dir = corpus.join(".glossa").join("traces");
-    let new_file = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd.flatten().find_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            if before.contains(&name) {
-                None
-            } else {
-                Some(e.path())
-            }
-        }),
-        Err(_) => None,
-    };
-    let Some(path) = new_file else {
-        return (Vec::new(), String::new());
-    };
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+/// Parse a single case's trace file (the exact path `TraceLog::to_dir` created on this case's
+/// worker thread, retrieved via `glossa::trace::last_trace_path`) into (deduped tool names in
+/// first-seen order, raw JSONL trace text). Best-effort: an empty pair when the file is missing or
+/// unreadable (e.g. the corpus has tracing disabled) — the run stays functional, it just carries no
+/// tool/transcript detail for that case. Attributing by the known path (not a directory diff) is
+/// race-free under the parallel case pool.
+fn parse_trace_file(path: &Path) -> (Vec<String>, String) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut tools = Vec::new();
     let mut seen = HashSet::new();
     for line in text.lines() {
@@ -840,28 +842,20 @@ mod tests {
     }
 
     #[test]
-    fn read_new_trace_is_empty_when_no_trace_dir() {
+    fn parse_trace_file_is_empty_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let before = list_trace_files(dir.path());
-        let (tools, transcript) = read_new_trace(dir.path(), &before);
+        let missing = dir.path().join("nope.jsonl");
+        let (tools, transcript) = parse_trace_file(&missing);
         assert!(tools.is_empty());
         assert!(transcript.is_empty());
     }
 
     #[test]
-    fn read_new_trace_picks_the_file_written_after_the_snapshot() {
+    fn parse_trace_file_dedups_tools_first_seen_order() {
         let dir = tempfile::tempdir().unwrap();
-        let traces = dir.path().join(".glossa").join("traces");
-        std::fs::create_dir_all(&traces).unwrap();
+        let file = dir.path().join("200-1-0.jsonl");
         std::fs::write(
-            traces.join("100-1.jsonl"),
-            "{\"ts_ms\":1,\"tool\":\"search\",\"args\":{},\"result\":[]}\n",
-        )
-        .unwrap();
-
-        let before = list_trace_files(dir.path());
-        std::fs::write(
-            traces.join("200-1.jsonl"),
+            &file,
             concat!(
                 "{\"ts_ms\":2,\"tool\":\"read\",\"args\":{},\"result\":{}}\n",
                 "{\"ts_ms\":3,\"tool\":\"read\",\"args\":{},\"result\":{}}\n",
@@ -870,9 +864,23 @@ mod tests {
         )
         .unwrap();
 
-        let (tools, transcript) = read_new_trace(dir.path(), &before);
+        let (tools, transcript) = parse_trace_file(&file);
         assert_eq!(tools, vec!["read".to_string(), "search".to_string()]);
         assert!(transcript.contains("read") && transcript.contains("search"));
+    }
+
+    #[test]
+    fn eval_cmd_parses_jobs_flag() {
+        let cli = Cli::try_parse_from(["kbx", "eval", "--jobs", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval { jobs, .. } => assert_eq!(jobs, Some(5)),
+            _ => panic!("expected Cmd::Eval"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "eval"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval { jobs, .. } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Eval"),
+        }
     }
 
     #[test]
