@@ -39,9 +39,11 @@ pub struct TrainArgs {
     pub no_apply: bool,
     pub no_progress: bool,
     /// Worker-pool size for concurrent read-only rollouts. `None` defers to `lab.toml`'s
-    /// `[tuning] jobs_train`, then `DEFAULT_JOBS` (3) — resolved in `run_train`. Stored for now;
-    /// the parallel rollout loop itself lands in a later task (`gepa_graph::score_questions`).
+    /// `[tuning] jobs_train`, then `DEFAULT_JOBS` (3) — resolved in `run_train`.
     pub jobs: Option<usize>,
+    /// Selection metric: `"judge"` (default, graded LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0)
+    /// or `"exact"` (exact-match EM — byte-for-byte the pre-metric behavior).
+    pub metric: String,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only on a STRICT EM
@@ -96,6 +98,23 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             )
         })?;
 
+    // Selection metric: "judge" (default, graded LLM judge) or "exact" (exact-match EM). Judge
+    // needs both a [judge] endpoint in lab.toml and the workspace judge.md prompt; exact needs
+    // neither and reproduces the pre-metric GEPA path exactly (cfg.judge == None).
+    let judge_cfg = match args.metric.as_str() {
+        "exact" => None,
+        "judge" => {
+            let ep = lab
+                .judge
+                .clone()
+                .context("--metric judge needs a [judge] endpoint in lab.toml")?;
+            let md = std::fs::read_to_string(&paths.judge)
+                .with_context(|| format!("read judge prompt {}", paths.judge.display()))?;
+            Some(gepa_graph::JudgeCfg { ep, md })
+        }
+        other => anyhow::bail!("unknown --metric {other:?} (expected \"exact\" or \"judge\")"),
+    };
+
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
     let cfg = GepaGraphConfig {
@@ -111,6 +130,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         pareto_size: args.pareto_size,
         candidate_selection,
         jobs,
+        judge: judge_cfg,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

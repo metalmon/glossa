@@ -156,6 +156,11 @@ enum Cmd {
         /// Candidate-selection strategy (e.g. "pareto").
         #[arg(long = "candidate-selection", default_value = "pareto")]
         candidate_selection: String,
+        /// Selection metric: "judge" (the default; graded LLM judge scoring
+        /// Correct=1.0/Partial=0.5/Wrong=0.0 via lab.toml's [judge] endpoint + judge.md) or
+        /// "exact" (exact-match EM; use for datasets with short factoid answers).
+        #[arg(long, default_value = "judge")]
+        metric: String,
         /// Override the workspace's default `dataset.toml`.
         #[arg(long)]
         dataset: Option<PathBuf>,
@@ -364,6 +369,7 @@ fn main() -> Result<()> {
             val_frac,
             pareto_size,
             candidate_selection,
+            metric,
             dataset,
             prompt,
             reflect_prompt,
@@ -388,6 +394,7 @@ fn main() -> Result<()> {
                 no_apply,
                 no_progress,
                 jobs,
+                metric,
             },
         ),
         Cmd::Reason {

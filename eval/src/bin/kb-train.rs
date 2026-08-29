@@ -861,6 +861,8 @@ fn run_optimize_graph(
             // Legacy research binary has no `--jobs` flag; keep its rollouts sequential (no
             // behaviour change).
             jobs: 1,
+            // Legacy research binary has no `--metric` flag; keep exact-EM (no behaviour change).
+            judge: None,
         },
         qs,
         &reflect,
