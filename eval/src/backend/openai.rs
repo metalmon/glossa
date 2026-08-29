@@ -1,14 +1,15 @@
 use super::{prompt, AgentBackend};
+use crate::backend::transport::{ChatTransport, ToolCall, TurnReply};
 use crate::dataset::Question;
 use anyhow::anyhow;
 use glossa::read::DocImage;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::path::Path;
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use indicatif::ProgressBar;
@@ -360,23 +361,26 @@ impl AgentBackend for OpenAiBackend {
 
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
         // The endpoint is the full chat-completions URL, used verbatim (no path is appended).
-        let url = self.endpoint.clone();
+        // `Endpoint` here is a plain data carrier for `OpenAiTransport::call` — same fields
+        // (`endpoint`/`model`/`api_key`/`timeout_secs`) `lmstudio_chat` used to take as loose
+        // arguments. `resolve_key()` with an empty `api_key_env` reduces to "use `api_key` if
+        // non-empty, else None" — the same behavior `self.api_key.as_deref()` had (an empty-string
+        // key is filtered out later by `chat_http` regardless, in both the old and new paths).
+        let ep = crate::lab::Endpoint {
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone().unwrap_or_default(),
+            api_key_env: String::new(),
+            timeout_secs: self.timeout.as_secs(),
+            api: crate::lab::ApiKind::default(),
+        };
         let graph = if self.use_graph {
             glossa::graph::store::GraphStore::open(work).ok()
         } else {
             None
         };
-        let tools = tools_schema(graph.is_some());
-        let chat = |messages: &[Value]| {
-            lmstudio_chat(
-                &url,
-                &self.model,
-                self.api_key.as_deref(),
-                &tools,
-                messages,
-                self.timeout,
-            )
-        };
+        let transport = crate::backend::transport::openai::OpenAiTransport;
+        let tools = transport.tools_schema(graph.is_some());
 
         let trace = TraceLog::to_dir(work);
         // Open the index once per question; the closure reuses it (cached reader) for every
@@ -394,13 +398,18 @@ impl AgentBackend for OpenAiBackend {
                 let snippet: String = body.chars().take(500).collect();
                 eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
             }
-            // The reader path never feeds vision input — `execute_tool` already discards
-            // whatever images `glossa_tools::exec` surfaced (e.g. from `read`). Only
-            // `build::extract::extract_doc`'s `--vision` path populates this slot.
-            (body, ids, Vec::<DocImage>::new())
+            // The reader path never feeds vision input — `execute_tool` already discards whatever
+            // images `glossa_tools::exec` surfaced (e.g. from `read`); only `build::extract::
+            // extract_doc`'s `--vision` path threads images (through the closure-based shim, whose
+            // `exec` is 3-tuple). This `answer` drives the generic loop DIRECTLY, whose `exec` is
+            // 2-tuple, so no image slot is needed here.
+            (body, ids)
         };
 
-        let messages = self.build_messages(q);
+        // `build_messages` already folds the system prompt in as the leading message (as the old
+        // path's raw `messages` array did), so `system` is passed as `None` here — `OpenAiTransport
+        // ::call` would otherwise prepend a SECOND system message.
+        let seed_messages = self.build_messages(q);
         // Next-best-action on a stuck (repeated) call: fan the fixated query across the
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
@@ -408,7 +417,16 @@ impl AgentBackend for OpenAiBackend {
                 name, args, work, &idx, graph.as_ref(), &spec, &trace,
             )
         };
-        let raw = run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS)?;
+        let raw = crate::backend::agent_loop::run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            seed_messages,
+            Some(&tools),
+            exec,
+            nba,
+            MAX_ROUNDS,
+        )?;
         Ok(prompt::parse_answer(&raw))
     }
 }
@@ -471,31 +489,8 @@ pub(crate) fn chat_once(
         "temperature": 0,
         "max_tokens": max_tokens,
     });
-    chat_http(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
+    chat_http_full(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
         .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
-}
-
-/// Shared tokio runtime backing the sync bridge below: the agent loop (`run_agent_loop` and every
-/// caller of `lmstudio_chat`/`chat_once`) is deliberately synchronous, but `reqwest`'s client is
-/// async-only. One process-wide multi-thread runtime lets every call just `block_on` instead of
-/// threading an executor through the whole sync call stack.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("failed to build the tokio runtime backing the http chat bridge")
-    })
-}
-
-/// Shared reqwest client (connection-pool + TLS-session reuse across chat calls). The per-request
-/// timeout is set on the `RequestBuilder`, so one client serves the reader and judge endpoints even
-/// when their `timeout_secs` differ.
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 /// True when an error body reflects a transient UPSTREAM failure of the gateway's own backend (its
@@ -504,7 +499,11 @@ fn http_client() -> &'static reqwest::Client {
 /// status (400) or an HTTP-200 `{"error"}` body, so status code alone misclassifies them as fatal.
 /// A genuine bad-request — bad key, malformed payload, unknown model — matches none of these and
 /// still fails fast, so a real config bug isn't hidden behind seconds of backoff.
-fn is_transient_upstream(body: &str) -> bool {
+///
+/// `pub(crate)` so the moved HTTP bridge in `transport::openai::chat_http_full` can share this one
+/// predicate (the accounting statics + this classifier stay HOME here; the transport calls back in)
+/// instead of duplicating the needle list.
+pub(crate) fn is_transient_upstream(body: &str) -> bool {
     let b = body.to_ascii_lowercase();
     [
         "fetch failed",
@@ -524,134 +523,35 @@ fn is_transient_upstream(body: &str) -> bool {
     .any(|needle| b.contains(needle))
 }
 
-/// Sync HTTP bridge: POST our JSON request `body` (the `{model, messages, tools, temperature}` shape
-/// `lmstudio_chat`/`chat_once` build) to an OpenAI-compatible `/v1/chat/completions` endpoint via
-/// `reqwest` and return the FULL parsed response body as a raw `Value` (validated to have
-/// `choices[0].message`, but NOT reduced to just that field — see below).
-///
-/// Deliberately RAW `Value` in and out — no typed OpenAI SDK structs — so provider-specific fields
-/// survive the round-trip. In particular reasoning models (MiMo on OpenCode Zen) return
-/// `reasoning_content` on assistant tool-call turns and require it echoed back on the next request;
-/// typed message structs drop it and the provider then rejects the follow-up with HTTP 400.
-///
-/// Returns the whole response (not just `choices[0].message`) so callers can also read
-/// `choices[0].finish_reason` (e.g. `lmstudio_chat`'s length-resample). Callers that only want the
-/// assistant message extract it themselves — `finish_reason` must NEVER be injected into the
-/// message object itself, since that object is echoed back into `messages` on the next request and
-/// a strict endpoint may 400 on an unrecognized field.
-///
-/// `endpoint` is the FULL chat-completions URL (e.g. `http://localhost:1234/v1/chat/completions`),
-/// POSTed verbatim — this function appends nothing. Callers configure the complete URL in
-/// `lab.toml`'s `endpoint`, so the reader/judge/build/reflect paths all hit the URL as given with
-/// no hidden path-rewriting (which previously double-appended `/v1` on the non-normalizing path).
-fn chat_http(
-    endpoint: &str,
-    api_key: Option<&str>,
-    body: &Value,
-    timeout: Duration,
-) -> anyhow::Result<Value> {
-    let url = endpoint.to_string();
-
-    // Trim trailing whitespace from every message: some strict providers (OpenCode Zen / mimo)
-    // return HTTP 400 when a message ends in a newline. Harmless to content semantics.
-    let mut body = body.clone();
-    if let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        for m in msgs {
-            if let Some(s) = m.get("content").and_then(Value::as_str) {
-                let trimmed = s.trim_end().to_string();
-                m["content"] = Value::String(trimmed);
-            }
-        }
+/// Tally one successful chat response's usage into the process-global running counters (see
+/// `usage_split_with_prefix`/`NEW_TOKENS`/`CACHED_TOKENS`/`CACHE_ESTIMATED`) and advance this
+/// thread's conversation-prefix tracker (`PREV_PROMPT_TOKENS`). Called once per successful HTTP
+/// round-trip from `transport::openai::chat_http_full` — the accounting subsystem lives HERE (one
+/// definition of every static), and the moved HTTP bridge calls back into it. `prev` is read from
+/// the CALLING THREAD's own cell BEFORE this call's own `prompt_tokens` overwrites it (see
+/// `PREV_PROMPT_TOKENS`'s doc comment for the per-thread sequential-calls assumption).
+pub(crate) fn record_usage(resp: &Value) {
+    let prev = PREV_PROMPT_TOKENS.with(|prev| prev.get());
+    let (new, cached, estimated) = usage_split_with_prefix(resp, prev);
+    NEW_TOKENS.fetch_add(new, Ordering::Relaxed);
+    CACHED_TOKENS.fetch_add(cached, Ordering::Relaxed);
+    if estimated {
+        CACHE_ESTIMATED.store(true, Ordering::Relaxed);
     }
-
-    // RAW JSON round-trip via reqwest — deliberately NOT async-openai's typed message structs.
-    // Reasoning models like MiMo (OpenCode Zen) return `reasoning_content` on assistant tool-call
-    // turns and REQUIRE it echoed back on the next request; the SDK's typed structs silently drop
-    // that field, causing HTTP 400 mid-loop. Passing raw `Value` messages preserves it end-to-end.
-    // reqwest still gives robust transport/TLS; we retry ONLY transient failures (transport drop,
-    // 429 rate-limit, 5xx) — a 4xx (bad key / malformed request) or a parse error is a hard error
-    // surfaced immediately, so a real config bug isn't hidden behind seconds of backoff.
-    let mut last_err = None;
-    for attempt in 1..=4u32 {
-        let (retryable, outcome): (bool, anyhow::Result<Value>) = runtime().block_on(async {
-            let mut rb = http_client().post(&url).timeout(timeout).json(&body);
-            if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-                rb = rb.bearer_auth(key);
-            }
-            let resp = match rb.send().await {
-                Ok(r) => r,
-                Err(e) => return (true, Err(anyhow!("send chat request: {e}"))),
-            };
-            let status = resp.status();
-            let text = match resp.text().await {
-                Ok(t) => t,
-                Err(e) => return (true, Err(anyhow!("read chat response body: {e}"))),
-            };
-            if !status.is_success() {
-                // 429 / 5xx are transient; so is a 4xx (often 400) whose BODY is an UPSTREAM
-                // failure the gateway surfaced with a client-error status (e.g. opencode zen's
-                // "Engine protocol predict request failed: fetch failed"). A genuine bad-request
-                // (bad key, malformed payload, unknown model) does NOT match and still fails fast.
-                let retryable = status.as_u16() == 429
-                    || status.is_server_error()
-                    || is_transient_upstream(&text);
-                return (
-                    retryable,
-                    Err(anyhow!(
-                        "chat endpoint returned {status}: {}",
-                        text.chars().take(400).collect::<String>()
-                    )),
-                );
-            }
-            match serde_json::from_str::<Value>(&text) {
-                Ok(v) => {
-                    // Some OpenAI-compatible servers (LM Studio) return HTTP 200 with an
-                    // `{"error": …}` body instead of a non-2xx status — surface it, don't discard
-                    // it behind a vague "no choices" message.
-                    if let Some(err) = v.get("error") {
-                        // Some gateways return HTTP 200 with an `{"error": …}` body; if that error
-                        // is an upstream transient (same wording as the non-2xx path), retry it too.
-                        let retryable = is_transient_upstream(&err.to_string());
-                        (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
-                    } else if v.pointer("/choices/0/message").is_some() {
-                        // Tally this call's usage into the process-global running counters (see
-                        // `usage_split_with_prefix`/`NEW_TOKENS`/`CACHED_TOKENS`) before handing the
-                        // response back. `prev` is the PREVIOUS request's `prompt_tokens` in this
-                        // same conversation, read from the CALLING THREAD's own cell (see
-                        // `PREV_PROMPT_TOKENS`'s doc comment for the per-thread sequential-calls
-                        // assumption this relies on) — read it BEFORE this call's own
-                        // `prompt_tokens` overwrites it below.
-                        let prev = PREV_PROMPT_TOKENS.with(|prev| prev.get());
-                        let (new, cached, estimated) = usage_split_with_prefix(&v, prev);
-                        NEW_TOKENS.fetch_add(new, Ordering::Relaxed);
-                        CACHED_TOKENS.fetch_add(cached, Ordering::Relaxed);
-                        if estimated {
-                            CACHE_ESTIMATED.store(true, Ordering::Relaxed);
-                        }
-                        PREV_PROMPT_TOKENS.with(|prev| prev.set(prompt_tokens(&v)));
-                        // Return the FULL response — see the doc comment above for why.
-                        (false, Ok(v))
-                    } else {
-                        (false, Err(anyhow!("chat response had no choices[0].message")))
-                    }
-                }
-                Err(e) => (false, Err(anyhow!("parse chat response json: {e}"))),
-            }
-        });
-        match outcome {
-            Ok(msg) => return Ok(msg),
-            Err(e) => {
-                last_err = Some(e);
-                if retryable && attempt < 4 {
-                    std::thread::sleep(Duration::from_millis(400 * attempt as u64));
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-    Err(last_err.unwrap())
+    PREV_PROMPT_TOKENS.with(|prev| prev.set(prompt_tokens(resp)));
 }
+
+/// The sync HTTP bridge (raw JSON round-trip + retry/backoff), `tools_schema`, `content_of`, and
+/// `parse_tool_args` MOVED to `transport::openai` (Task 2 of the multi-api-transport plan) as the
+/// shared core behind `OpenAiTransport`. Re-imported here so `chat_once`/`lmstudio_chat` (kept as
+/// thin back-compat wrappers — their 9 existing callers aren't migrated until Phase 2 Task 6) and
+/// `run_agent_loop`/the schema tests keep working unchanged. `chat_http` returns the assistant
+/// message (`choices[0].message`); `chat_http_full` returns the WHOLE response so `lmstudio_chat`'s
+/// length-resample can read `choices[0].finish_reason` and `chat_once` can extract the message
+/// itself. Both record token usage exactly once via `record_usage`.
+pub(crate) use crate::backend::transport::openai::{
+    chat_http, chat_http_full, content_of, parse_tool_args, tools_schema,
+};
 
 /// One OpenAI-compatible `/v1/chat/completions` call to an LM Studio-style endpoint, driven through
 /// the raw `reqwest` bridge (see `chat_http`). Returns the assistant `message` object (already extracted
@@ -709,7 +609,7 @@ pub(crate) fn lmstudio_chat(
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MAX_LENGTH_RESAMPLE);
     let mut length_resamples = 0usize;
-    let mut full = chat_http(url, api_key, &body, timeout)?;
+    let mut full = chat_http_full(url, api_key, &body, timeout)?;
     for _ in 0..GEN_LOOP_RETRIES {
         let content = full
             .pointer("/choices/0/message/content")
@@ -731,7 +631,7 @@ pub(crate) fn lmstudio_chat(
             length_resamples += 1;
         }
         RESAMPLES.fetch_add(1, Ordering::Relaxed);
-        full = chat_http(url, api_key, &body, timeout)?;
+        full = chat_http_full(url, api_key, &body, timeout)?;
     }
     full.pointer("/choices/0/message")
         .cloned()
@@ -774,36 +674,11 @@ fn looks_looped(text: &str) -> bool {
     false
 }
 
-/// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
-/// shared registry (`glossa::tools::registry::registry()`) instead of a hand-written per-tool
-/// JSON block — MCP and the eval agent can no longer drift apart on name/description/schema.
-/// Graph-gated descriptors (glossary/reach/sql) are included only when `graph_on`; registry
-/// order is preserved as-is (search/read/grep/glob first, then the graph tools), so ordering
-/// here is a byproduct of the registry, not a curated hand-order.
-pub(crate) fn tools_schema(graph_on: bool) -> Value {
-    let tools: Vec<Value> = glossa::tools::registry::registry()
-        .iter()
-        .filter(|d| !d.graph_gated || graph_on)
-        .map(|d| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
-                }
-            })
-        })
-        .collect();
-    Value::Array(tools)
-}
-
-/// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row that
-/// each surface zero new identifiers trips the steer. Named so the TDD tests and the loop agree on
-/// one number instead of a magic literal in two places. `pub(crate)` so callers outside this module
-/// (e.g. `build::extract`'s regression test for the graph_upsert ids fix) can size their fixtures
-/// off the real threshold instead of duplicating the literal.
-pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
+/// Unproductive-streak threshold. MOVED to `backend::agent_loop` (Task 3 of the multi-api-
+/// transport plan) along with the loop's dedup/streak/NBA logic; re-exported here so this
+/// module's own not-yet-moved tests (and `build::extract`'s regression test) keep compiling
+/// against `crate::backend::openai::UNPRODUCTIVE_STREAK_K` unchanged.
+pub(crate) use crate::backend::agent_loop::UNPRODUCTIVE_STREAK_K;
 
 /// Cap on how many images one `exec` call's tool result feeds the model in a single vision
 /// user-message, per Task-spec guard against a context flood (a figure-heavy scanned page can
@@ -853,122 +728,144 @@ fn vision_user_message(images: &[DocImage]) -> Option<Value> {
     Some(json!({ "role": "user", "content": Value::Array(content) }))
 }
 
-/// Drive a tool-calling chat to a final textual answer.
+/// Thin backward-compatible shim over `agent_loop::run_agent_loop`: adapts the pre-transport
+/// calling convention (`chat: Fn(&[Value]) -> Result<Value>`, returning the assistant `message`
+/// object already extracted from `choices[0].message`) onto the generic, transport-driven loop.
 ///
-/// `chat(messages)` returns the assistant `message` object (already extracted from
-/// `choices[0].message`). When it carries `tool_calls`, each is dispatched through `exec(name,
-/// args)` and the result fed back as a `role:"tool"` message, then the model is queried again —
-/// up to `max_rounds`. The first message without tool calls yields the answer.
-///
-/// Two independent stuck detectors sit on top of `exec`:
-/// - **Identical-repeat dedup**: the previous (tool, args) actually executed. When the model
-///   re-issues the SAME call, it isn't re-run (identical result) — `on_repeat` (the next-best-action)
-///   fires instead. This takes priority and doesn't touch the streak below (a dedup hit didn't
-///   execute, so it can't be "unproductive").
-/// - **Unproductive streak**: the model issues many DIFFERENT calls (varied tool/args — so they all
-///   really execute) that each surface no NEW identifier — a search-flood that never progresses.
-///   `exec` returns `(body, ids)`; `ids` are what a session-aware MCP server would track per call
-///   (search hit locations, a read's path, …). Any id not already in `seen` resets the streak;
-///   otherwise it grows. At `UNPRODUCTIVE_STREAK_K` the fed-back tool content becomes the steer
-///   (`glossa_tools::unproductive_steer`) instead of the (already-seen) body, and the counter resets
-///   so it fires once per streak, not on every call past the threshold.
+/// All dedup/streak/NBA logic now lives in exactly ONE place (`agent_loop::run_agent_loop`) — this
+/// function does not reimplement any of it, it only translates the closure into a one-off
+/// `ChatTransport` (`ClosureTransport`, below) so `run_agent_loop`'s three callers not yet migrated
+/// to `ChatTransport` directly (`build::extract`, `distil::chain`, `gepa_graph` — Phase 2 Task 6 of
+/// the multi-api-transport plan) keep compiling and behaving identically. `OpenAiBackend::answer`
+/// itself no longer goes through this shim — it drives `agent_loop::run_agent_loop` directly with
+/// a real `OpenAiTransport`.
 pub(crate) fn run_agent_loop<C, F, N>(
-    mut chat: C,
-    mut messages: Vec<Value>,
-    mut exec: F,
-    mut on_repeat: N,
+    chat: C,
+    messages: Vec<Value>,
+    exec: F,
+    on_repeat: N,
     max_rounds: usize,
 ) -> anyhow::Result<String>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
     F: FnMut(&str, &Value) -> (String, Vec<String>, Vec<DocImage>),
-    N: FnMut(&str, &Value) -> String,
+    N: Fn(&str, &Value) -> String,
 {
-    // This call is the start of a fresh CONVERSATION (one reason seed / one build doc / one eval
-    // case / …): reset the conversation-prefix tracker so the self-computed cache estimate (see
-    // `usage_split_with_prefix`/`PREV_PROMPT_TOKENS`) never carries the PREVIOUS conversation's
-    // tail `prompt_tokens` into this one's first request.
-    reset_conversation_prefix();
-
-    // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
-    // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
-    // the next-best-action. Default callers pass `repeat_nudge`; the reader path passes a fan-out.
-    let mut last_key: Option<String> = None;
-    // Novelty tracking for the unproductive-streak detector (see the doc comment above).
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut unproductive: usize = 0;
-    for _ in 0..max_rounds {
-        let msg = chat(&messages)?;
-        let calls: Vec<Value> = msg
-            .get("tool_calls")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        if calls.is_empty() {
-            return Ok(content_of(&msg));
+    // Images surfaced by `exec` during the current round ride here until the transport's
+    // `push_tool_results` drains them into ONE follow-up vision user message (build --vision only;
+    // every other caller's `exec` returns an empty image vec, so nothing is ever appended and the
+    // transcript stays byte-identical to the non-vision path). Shared via `Rc<RefCell<…>>` so the
+    // 2-tuple `exec` adapter below and the `ClosureTransport` both reach one buffer without either
+    // borrowing the other — the generic `agent_loop::run_agent_loop` seam is deliberately image-
+    // agnostic (its `exec` is `(String, Vec<String>)`), so vision threading lives HERE in the shim,
+    // keeping that one loop implementation free of any image concern. The per-conversation prefix
+    // reset (`reset_conversation_prefix`) now happens inside `agent_loop::run_agent_loop` itself, so
+    // this shim and `OpenAiBackend::answer` (which drives that loop directly) both get it.
+    let pending_images: Rc<std::cell::RefCell<Vec<DocImage>>> =
+        Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&pending_images);
+    let mut exec = exec;
+    let exec2 = move |name: &str, args: &Value| {
+        let (body, ids, images) = exec(name, args);
+        if !images.is_empty() {
+            sink.borrow_mut().extend(images);
         }
-        messages.push(msg.clone()); // echo the assistant turn that requested the tools
-        for call in &calls {
-            let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = call
-                .pointer("/function/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let args = parse_tool_args(call);
-            let key = format!("{name}\u{1}{}", serde_json::to_string(&args).unwrap_or_default());
-            let (result, images) = if last_key.as_deref() == Some(key.as_str()) {
-                (on_repeat(name, &args), Vec::new())
-            } else {
-                let (body, ids, images) = exec(name, &args);
-                last_key = Some(key);
-                let has_new = ids.into_iter().fold(false, |acc, i| seen.insert(i) || acc);
-                let text = if has_new {
-                    unproductive = 0;
-                    body
-                } else {
-                    unproductive += 1;
-                    if unproductive >= UNPRODUCTIVE_STREAK_K {
-                        unproductive = 0;
-                        crate::backend::glossa_tools::unproductive_steer(name)
-                    } else {
-                        body
-                    }
-                };
-                (text, images)
-            };
-            messages.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
-            // Vision (build --vision only; every other caller's exec always returns empty here):
-            // a tool-role message can't carry image content on this endpoint, so any images the
-            // call surfaced ride in ONE follow-up user message right after it.
-            if let Some(img_msg) = vision_user_message(&images) {
-                messages.push(img_msg);
-            }
+        (body, ids)
+    };
+    let transport = ClosureTransport::new(chat, pending_images);
+    // A blank `Endpoint`: `ClosureTransport::call` ignores it entirely (the wrapped closure
+    // already captures its own endpoint/model/api_key/tools, exactly as the old direct callers
+    // of `lmstudio_chat` did).
+    let ep = crate::lab::Endpoint {
+        endpoint: String::new(),
+        model: String::new(),
+        api_key: String::new(),
+        api_key_env: String::new(),
+        timeout_secs: 120,
+        api: crate::lab::ApiKind::default(),
+    };
+    crate::backend::agent_loop::run_agent_loop(
+        &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds,
+    )
+}
+
+/// Adapts a legacy `FnMut(&[Value]) -> Result<Value>` chat closure (OpenAI message-object shape)
+/// into a one-off `ChatTransport`, so `run_agent_loop`'s shim above can drive the generic loop.
+/// `push_assistant_turn`/`push_tool_results`/tool-call parsing mirror `OpenAiTransport`'s shapes
+/// exactly (same raw-message echo, same per-call `{role:"tool"}` push) — behavior-identical to the
+/// old inline loop. `pending_images` is the shim's shared vision buffer: `push_tool_results` drains
+/// it into a follow-up `role:"user"` image message right after the tool results (build --vision).
+struct ClosureTransport<C> {
+    chat: std::cell::RefCell<C>,
+    pending_images: Rc<std::cell::RefCell<Vec<DocImage>>>,
+}
+
+impl<C> ClosureTransport<C> {
+    fn new(chat: C, pending_images: Rc<std::cell::RefCell<Vec<DocImage>>>) -> Self {
+        Self {
+            chat: std::cell::RefCell::new(chat),
+            pending_images,
         }
     }
-    // Out of rounds: nudge for a final answer (the model often keeps requesting tools otherwise)
-    // and take whatever text it gives.
-    messages.push(json!({
-        "role": "user",
-        "content": "Stop searching. Give your final answer now on a single line beginning with `ANSWER:`."
-    }));
-    let msg = chat(&messages)?;
-    Ok(content_of(&msg))
 }
 
-fn content_of(msg: &Value) -> String {
-    msg.get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string()
-}
+impl<C> ChatTransport for ClosureTransport<C>
+where
+    C: FnMut(&[Value]) -> anyhow::Result<Value>,
+{
+    fn tools_schema(&self, graph_on: bool) -> Value {
+        tools_schema(graph_on)
+    }
 
-/// Tool-call `function.arguments` is a JSON-encoded string per the OpenAI spec, but some servers
-/// (incl. some LM Studio builds) return it as an already-parsed object. Accept both.
-fn parse_tool_args(call: &Value) -> Value {
-    match call.pointer("/function/arguments") {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-        Some(v @ Value::Object(_)) => v.clone(),
-        _ => json!({}),
+    fn call(
+        &self,
+        _ep: &crate::lab::Endpoint,
+        _system: Option<&str>,
+        messages: &[Value],
+        _tools: Option<&Value>,
+        _temperature: f64,
+    ) -> anyhow::Result<TurnReply> {
+        let msg = (self.chat.borrow_mut())(messages)?;
+        let tool_calls: Vec<ToolCall> = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|call| ToolCall {
+                        id: call.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                        name: call
+                            .pointer("/function/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        args: parse_tool_args(call),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(TurnReply {
+            text: Some(content_of(&msg)),
+            tool_calls,
+            raw: msg,
+        })
+    }
+
+    fn push_assistant_turn(&self, messages: &mut Vec<Value>, reply: &TurnReply) {
+        messages.push(reply.raw.clone());
+    }
+
+    fn push_tool_results(&self, messages: &mut Vec<Value>, results: &[(String, String)]) {
+        for (id, body) in results {
+            messages.push(json!({ "role": "tool", "tool_call_id": id, "content": body }));
+        }
+        // Vision (build --vision only): a `role:"tool"` message can't carry image content on this
+        // endpoint, so any images this round's `exec` surfaced (buffered by the shim's 2-tuple
+        // adapter) ride in ONE follow-up `role:"user"` message right after the tool results. Empty
+        // for every non-vision caller, so `vision_user_message` returns `None` and nothing is added.
+        let images: Vec<DocImage> = self.pending_images.borrow_mut().drain(..).collect();
+        if let Some(img_msg) = vision_user_message(&images) {
+            messages.push(img_msg);
+        }
     }
 }
 
@@ -1368,227 +1265,19 @@ mod tests {
         assert!(msgs[1]["content"].as_str().unwrap().contains("hi"));
     }
 
-    /// The configured `endpoint` is POSTed VERBATIM — nothing is appended (no `/v1/chat/completions`)
-    /// and nothing is stripped. A distinctive path that any rewriting would corrupt proves it, and
-    /// guards the old footgun where a `.../v1` endpoint got a second `/v1` on the chat_once path.
-    #[test]
-    fn chat_once_posts_endpoint_url_verbatim() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
+    // `chat_once_posts_endpoint_url_verbatim` and `parse_tool_args_handles_string_and_object`
+    // MOVED to `transport::openai`'s test module (Task 2 of the multi-api-transport plan) — they
+    // now exercise the moved `chat_http`/`parse_tool_args` core directly at its new home.
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let n = sock.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            sock.write_all(resp.as_bytes()).unwrap();
-            req
-        });
-
-        // A path any append (/v1/chat/completions) or strip (/v1) would mangle.
-        let endpoint = format!("http://127.0.0.1:{port}/custom/v1/chat/completions");
-        let out = chat_once(&endpoint, "m", &[json!({"role": "user", "content": "hi"})], None, 5).unwrap();
-        assert_eq!(out["content"], "ok");
-
-        let req = server.join().unwrap();
-        let request_line = req.lines().next().unwrap_or("");
-        assert_eq!(
-            request_line, "POST /custom/v1/chat/completions HTTP/1.1",
-            "endpoint must be POSTed verbatim; got: {request_line}"
-        );
-    }
-
-    #[test]
-    fn parse_tool_args_handles_string_and_object() {
-        let s = json!({ "function": { "arguments": "{\"query\":\"abc\"}" } });
-        assert_eq!(parse_tool_args(&s)["query"], "abc");
-        let o = json!({ "function": { "arguments": { "query": "abc" } } });
-        assert_eq!(parse_tool_args(&o)["query"], "abc");
-        let bad = json!({ "function": { "arguments": "not json" } });
-        assert_eq!(parse_tool_args(&bad), json!({}));
-    }
-
-    #[test]
-    fn loop_returns_direct_answer_when_no_tool_calls() {
-        let chat = |_: &[Value]| Ok(json!({ "role": "assistant", "content": "ANSWER: Bob" }));
-        let exec = |_: &str, _: &Value| (String::new(), Vec::new(), Vec::new());
-        let out = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
-        assert_eq!(out, "ANSWER: Bob");
-    }
-
-    #[test]
-    fn loop_dispatches_tool_then_answers() {
-        let round = RefCell::new(0usize);
-        let seen = RefCell::new(Vec::<(String, String)>::new());
-        let chat = |msgs: &[Value]| {
-            let mut r = round.borrow_mut();
-            *r += 1;
-            if *r == 1 {
-                // first turn requests a search
-                Ok(json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "function": { "name": "search", "arguments": "{\"query\":\"corliss\"}" }
-                    }]
-                }))
-            } else {
-                // by now the tool result must be in the transcript
-                let has_tool = msgs
-                    .iter()
-                    .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1");
-                assert!(has_tool, "tool result not fed back: {msgs:?}");
-                Ok(json!({ "role": "assistant", "content": "ANSWER: Chief of Protocol" }))
-            }
-        };
-        let exec = |name: &str, args: &Value| {
-            seen.borrow_mut().push((
-                name.to_string(),
-                args["query"].as_str().unwrap_or("").to_string(),
-            ));
-            (
-                "Meet_Corliss_Archer.md:p.1: ...  [9.0]".to_string(),
-                vec!["Meet_Corliss_Archer.md:p.1".to_string()],
-                Vec::new(),
-            )
-        };
-        let out =
-            run_agent_loop(chat, vec![json!({"role":"user","content":"q"})], exec, nudge, 4).unwrap();
-        assert_eq!(out, "ANSWER: Chief of Protocol");
-        assert_eq!(
-            seen.borrow().as_slice(),
-            &[("search".to_string(), "corliss".to_string())]
-        );
-    }
-
-    #[test]
-    fn loop_dedupes_consecutive_identical_tool_calls() {
-        // The model thrashes: same tool, same args, every round. The loop must execute it once,
-        // then feed back a nudge (not another live result) so the model is pushed to switch.
-        let execs = RefCell::new(0usize);
-        let round = RefCell::new(0usize);
-        let chat = |msgs: &[Value]| {
-            let mut r = round.borrow_mut();
-            *r += 1;
-            // Round 1 executes; round 2's identical call is deduped and its nudge lands in the
-            // transcript for round 3's chat onward (round 2 still sees round 1's live result).
-            if *r >= 3 {
-                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
-                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
-                let lc = c.to_lowercase();
-                assert!(
-                    lc.contains("different tool") || lc.contains("already"),
-                    "round {} expected a dedup nudge, got: {c:?}",
-                    *r
-                );
-            }
-            Ok(json!({
-                "role": "assistant", "content": "looping",
-                "tool_calls": [{ "id": "c", "function": { "name": "glossary", "arguments": "{\"name\":\"X\"}" } }]
-            }))
-        };
-        let exec = |_: &str, _: &Value| {
-            *execs.borrow_mut() += 1;
-            ("hit".to_string(), vec!["hit-id".to_string()], Vec::new())
-        };
-        let out = run_agent_loop(chat, vec![], exec, nudge, 5).unwrap();
-        assert_eq!(out, "looping");
-        assert_eq!(*execs.borrow(), 1, "identical consecutive calls must execute only once");
-    }
-
-    #[test]
-    fn loop_reexecutes_when_args_differ() {
-        // A different tool OR different args is NOT a dedup — it must run.
-        let execs = RefCell::new(0usize);
-        let round = RefCell::new(0usize);
-        let chat = |_: &[Value]| {
-            let mut r = round.borrow_mut();
-            *r += 1;
-            let name = if *r % 2 == 1 { "A" } else { "B" };
-            Ok(json!({
-                "role": "assistant", "content": "alternating",
-                "tool_calls": [{ "id": "c", "function": { "name": name, "arguments": "{\"name\":\"X\"}" } }]
-            }))
-        };
-        // Novelty tracking isn't under test here; empty ids keep it a no-op for the streak detector.
-        let exec = |_: &str, _: &Value| {
-            *execs.borrow_mut() += 1;
-            ("hit".to_string(), Vec::new(), Vec::new())
-        };
-        let _ = run_agent_loop(chat, vec![], exec, nudge, 4).unwrap();
-        assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
-    }
-
-    #[test]
-    fn loop_stops_at_max_rounds() {
-        // chat always asks for a tool; loop must terminate (max_rounds + 1 final call) not hang.
-        let calls = RefCell::new(0usize);
-        let chat = |_: &[Value]| {
-            *calls.borrow_mut() += 1;
-            Ok(json!({
-                "role": "assistant", "content": "giving up",
-                "tool_calls": [{ "id": "c", "function": { "name": "search", "arguments": "{\"query\":\"x\"}" } }]
-            }))
-        };
-        let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new(), Vec::new());
-        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
-        assert_eq!(out, "giving up");
-        assert_eq!(*calls.borrow(), 4); // 3 rounds + 1 final
-    }
-
-    #[test]
-    fn loop_unproductive_streak_feeds_steer_after_k_plus_one_calls() {
-        // K+1 tool calls with VARIED args (so none of them dedup — each really executes), but exec
-        // keeps surfacing the SAME already-seen id: an over-search spiral (many different probes,
-        // nothing new). By the (K+1)th call, the fed-back tool content must be the steer.
-        let round = RefCell::new(0usize);
-        let execs = RefCell::new(0usize);
-        let chat = |msgs: &[Value]| {
-            let mut r = round.borrow_mut();
-            *r += 1;
-            if *r == UNPRODUCTIVE_STREAK_K + 2 {
-                // By now K+1 tool calls have executed; the most recent tool result must be the steer.
-                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool");
-                let c = last_tool.and_then(|m| m["content"].as_str()).unwrap_or("");
-                let lc = c.to_lowercase();
-                assert!(
-                    lc.contains("no new information") && lc.contains("change approach"),
-                    "round {} expected the unproductive-streak steer, got: {c:?}",
-                    *r
-                );
-                return Ok(json!({ "role": "assistant", "content": "ANSWER: done" }));
-            }
-            let query = format!("query-{}", *r); // distinct args every round -> never dedups
-            Ok(json!({
-                "role": "assistant", "content": "searching",
-                "tool_calls": [{
-                    "id": format!("c{}", *r),
-                    "function": { "name": "search", "arguments": json!({"query": query}).to_string() }
-                }]
-            }))
-        };
-        let exec = |_: &str, _: &Value| {
-            *execs.borrow_mut() += 1;
-            // Always the same id, regardless of the (varied) query -> never novel after the first.
-            ("same old snippet".to_string(), vec!["doc.md:p.1".to_string()], Vec::new())
-        };
-        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
-        assert_eq!(out, "ANSWER: done");
-        assert_eq!(
-            *execs.borrow(),
-            UNPRODUCTIVE_STREAK_K + 1,
-            "each varied call must actually execute (not deduped)"
-        );
-    }
+    // `loop_returns_direct_answer_when_no_tool_calls`, `loop_dispatches_tool_then_answers`,
+    // `loop_dedupes_consecutive_identical_tool_calls`, `loop_reexecutes_when_args_differ`,
+    // `loop_stops_at_max_rounds`, and `loop_unproductive_streak_feeds_steer_after_k_plus_one_calls`
+    // MOVED to `backend::agent_loop`'s test module (Task 3 of the multi-api-transport plan) — they
+    // now drive the generic `agent_loop::run_agent_loop` through a mock `ChatTransport` instead of
+    // this module's closure-based shim. `loop_unproductive_streak_never_fires_when_calls_are_productive`
+    // and the graph-tool id-extraction regression tests below stay here: they exercise this
+    // module's `run_agent_loop` shim (still the closure-based entry point `build::extract`/
+    // `distil::chain`/`gepa_graph` use) and/or this module's own `execute_tool`.
 
     #[test]
     fn loop_unproductive_streak_never_fires_when_calls_are_productive() {

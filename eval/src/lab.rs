@@ -9,6 +9,27 @@ fn d120() -> u64 {
     120
 }
 
+/// Which wire-format chat API an [`Endpoint`] speaks. Defaults to `OpenAiChat` for back-compat
+/// with existing `lab.toml` files that predate this field. Each variant has its own
+/// `ChatTransport` impl (see `backend::transport::transport_for`): `OpenAiChat` ->
+/// `transport::openai::OpenAiTransport`, `Anthropic` -> `transport::anthropic::AnthropicTransport`,
+/// `OpenAiResponses` -> `transport::responses::ResponsesTransport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKind {
+    /// OpenAI-compatible `/v1/chat/completions`. Accepts both `"openai"` (back-compat alias) and
+    /// `"openai_chat"` in `lab.toml`.
+    #[default]
+    #[serde(rename = "openai", alias = "openai_chat")]
+    OpenAiChat,
+    /// Anthropic Messages API (`/v1/messages`).
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// OpenAI Responses API (`/v1/responses`).
+    #[serde(rename = "openai_responses")]
+    OpenAiResponses,
+}
+
 #[derive(serde::Deserialize, Clone)]
 pub struct Endpoint {
     pub endpoint: String,
@@ -22,11 +43,10 @@ pub struct Endpoint {
     /// Per-endpoint request timeout, in seconds.
     #[serde(default = "d120")]
     pub timeout_secs: u64,
-    /// USD per 1M tokens, for a rough running-cost estimate in the progress bar. `None` (the
-    /// default) leaves cost display off — local endpoints are free, so leaving this unset in
-    /// `lab.toml` is the common case, not an oversight.
+    /// Which chat API this endpoint speaks. Defaults to `OpenAiChat` when absent, so existing
+    /// `lab.toml` files parse unchanged.
     #[serde(default)]
-    pub price_per_1m: Option<f64>,
+    pub api: ApiKind,
 }
 
 impl Endpoint {
@@ -298,5 +318,52 @@ mod tests {
         assert_eq!(resolve(Some(9), Some(5), 3), 9, "CLI must win outright");
         assert_eq!(resolve(None, Some(5), 3), 5, "lab must win when CLI is unset");
         assert_eq!(resolve(None::<usize>, None, 3), 3, "default when both are unset");
+    }
+
+    #[test]
+    fn endpoint_without_api_defaults_to_openai_chat() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.api, ApiKind::OpenAiChat);
+    }
+
+    #[test]
+    fn endpoint_api_anthropic_parses() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            api = "anthropic"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.api, ApiKind::Anthropic);
+    }
+
+    #[test]
+    fn endpoint_api_openai_alias_parses_to_openai_chat() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            api = "openai"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.api, ApiKind::OpenAiChat);
+    }
+
+    #[test]
+    fn endpoint_api_openai_responses_parses() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            api = "openai_responses"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.api, ApiKind::OpenAiResponses);
     }
 }

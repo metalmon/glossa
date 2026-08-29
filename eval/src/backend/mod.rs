@@ -1,9 +1,11 @@
+pub mod agent_loop;
 pub mod cli;
 pub mod glossa_tools;
 pub mod mock;
 pub mod openai;
 pub mod prompt;
 pub mod tensorzero;
+pub mod transport;
 
 use crate::dataset::Question;
 use std::path::Path;
