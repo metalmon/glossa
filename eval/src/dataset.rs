@@ -7,7 +7,7 @@ pub struct Paragraph {
     pub sentences: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Question {
     pub id: String,
     pub question: String,
@@ -34,6 +34,40 @@ pub struct Question {
     /// `Default`) for formats/cases that don't carry it → the judge behaves gold-only, exactly as
     /// before.
     pub source: Vec<String>,
+    /// Whether the case is answerable FROM THE CORPUS. `false` marks a gold whose answer is
+    /// out-of-corpus (support-supplied / external knowledge): it must NOT participate in scoring
+    /// or GEPA (else it caps the achievable metric and misleads the reader score). Defaults to
+    /// `true` — a dataset without the field, or a `Question` built via `..Default::default()`,
+    /// keeps every case (byte-identical to pre-field behavior). The `dataset.toml` `[[case]]`
+    /// key `answerable` (parsed in `dataset_toml`, `#[serde(default = "default_true")]`) maps
+    /// here.
+    pub answerable: bool,
+}
+
+/// Serde/`Default` helper: `answerable` defaults to `true` so an absent field keeps every case.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+impl Default for Question {
+    // Hand-written (not derived) so `answerable` defaults to `true`: derive(Default) would make it
+    // `false`, which would silently drop every `..Default::default()`-built question from the
+    // active set. Every other field keeps its natural empty default.
+    fn default() -> Self {
+        Question {
+            id: String::new(),
+            question: String::new(),
+            answer: String::new(),
+            answer_aliases: Vec::new(),
+            paragraphs: Vec::new(),
+            supporting_titles: Vec::new(),
+            tags: Vec::new(),
+            hop_type: String::new(),
+            needs_graph: String::new(),
+            source: Vec::new(),
+            answerable: default_true(),
+        }
+    }
 }
 
 #[derive(Deserialize)]

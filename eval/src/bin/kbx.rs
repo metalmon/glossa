@@ -620,6 +620,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         .with_context(|| format!("reading dataset {}", paths.dataset.display()))?;
     let mut cases = parse_dataset_toml(&dataset_text)?;
 
+    // Drop cases marked `answerable = false` (out-of-corpus golds) BEFORE any resume/tag/limit
+    // slicing so they never enter scoring — they'd only cap the achievable metric. Absent field
+    // => all `true` => nothing dropped (unchanged behavior).
+    let before_answerable = cases.len();
+    cases.retain(|q| q.answerable);
+    let excluded_unanswerable = before_answerable - cases.len();
+    if excluded_unanswerable > 0 {
+        println!("excluded {excluded_unanswerable} unanswerable (answerable=false) — not scored");
+    }
+
     if let Some(t) = &args.tag_filter {
         cases.retain(|q| q.tags.iter().any(|x| x == t));
     }

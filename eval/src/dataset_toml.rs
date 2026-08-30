@@ -31,6 +31,12 @@ struct RawCase {
     /// EVIDENCE and credits a correct answer that exceeds the terse gold.
     #[serde(default)]
     source: Vec<String>,
+    /// Whether the case is answerable FROM THE CORPUS. Absent defaults to `true` (every case
+    /// kept, byte-identical to pre-field behavior); set `answerable = false` on a gold whose
+    /// answer is out-of-corpus so it is filtered out of scoring/GEPA, not counted against the
+    /// metric.
+    #[serde(default = "crate::dataset::default_true")]
+    answerable: bool,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +66,7 @@ pub fn parse_dataset_toml(text: &str) -> anyhow::Result<Vec<Question>> {
             hop_type: c.hop_type,
             needs_graph: c.needs_graph,
             source: c.source,
+            answerable: c.answerable,
         })
         .collect())
 }
@@ -124,5 +131,27 @@ answer="short"
         );
         // Absent `source` defaults to an empty vec (gold-only judging).
         assert!(cs[1].source.is_empty());
+    }
+
+    #[test]
+    fn answerable_defaults_true_and_parses_false() {
+        let t = r#"
+[[case]]
+id="q1"
+question="Q one?"
+answer="short"
+
+[[case]]
+id="q2"
+question="Q two?"
+answer="short"
+answerable=false
+"#;
+        let cs = parse_dataset_toml(t).unwrap();
+        assert_eq!(cs.len(), 2);
+        // Absent field defaults to true (every case kept — pre-field behavior).
+        assert!(cs[0].answerable);
+        // Explicit `answerable = false` is parsed through.
+        assert!(!cs[1].answerable);
     }
 }

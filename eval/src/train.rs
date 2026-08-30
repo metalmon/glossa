@@ -82,6 +82,19 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let dataset_text = std::fs::read_to_string(&dataset_path)
         .with_context(|| format!("read dataset {}", dataset_path.display()))?;
     let dataset = crate::dataset_toml::parse_dataset_toml(&dataset_text)?;
+    // Filter out `answerable = false` (out-of-corpus) golds before they reach GEPA — the whole
+    // `dataset` vec below flows into `gepa_graph::run`, which derives the train/val split,
+    // minibatches, rollouts, and Pareto set from it, so filtering here covers every GEPA site.
+    // Absent field => all `true` => nothing dropped (unchanged behavior).
+    let before_answerable = dataset.len();
+    let dataset: Vec<crate::dataset::Question> =
+        dataset.into_iter().filter(|q| q.answerable).collect();
+    let excluded_unanswerable = before_answerable - dataset.len();
+    if excluded_unanswerable > 0 {
+        println!(
+            "kbx train: excluded {excluded_unanswerable} unanswerable (answerable=false) — not optimized against"
+        );
+    }
 
     let reflect_md_path = args
         .reflect_prompt
