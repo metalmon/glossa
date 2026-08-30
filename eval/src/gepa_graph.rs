@@ -73,6 +73,14 @@ pub struct GepaGraphConfig {
     /// `Some` => graded judge metric (Correct=1.0/Partial=0.5/Wrong=0.0); `None` => exact-EM
     /// (default, backward-compatible with pre-metric GEPA).
     pub judge: Option<JudgeCfg>,
+    /// Optional `[user_sim]` endpoint: when `Some` (paired with `user_sim_prompt`), each rollout's
+    /// reader loop is dialogue-gated by a patient simulated user (see `backend::user_sim`), so
+    /// `kbx train` optimizes the prod prompt under the SAME dialogue dynamics eval uses. `None`
+    /// keeps today's behavior (a text-only turn ends the rollout).
+    pub user_sim: Option<crate::lab::Endpoint>,
+    /// The simulated-user persona prompt (`user_sim.md`) for the gate above; only used when
+    /// `user_sim` is also `Some`.
+    pub user_sim_prompt: Option<String>,
 }
 
 /// Verdict → graded score: Correct=1.0, Partial=0.5, Wrong/Unscored=0.0.
@@ -208,7 +216,17 @@ fn rollout_one(
             name, args, &cfg.work, idx, graph, spec, &trace,
         )
     };
-    let raw = match crate::backend::openai::run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS) {
+    // Simulated-user dialogue gate (opt-in): built only when BOTH the `[user_sim]` endpoint and its
+    // persona prompt are configured, so train rollouts see the same dialogue dynamics as eval.
+    // `None` -> today's behavior (a text-only reader turn ends the rollout).
+    let gate = match (&cfg.user_sim, &cfg.user_sim_prompt) {
+        (Some(ep), Some(prompt)) => Some(crate::backend::user_sim::UserSimGate::new(ep, prompt)),
+        _ => None,
+    };
+    let user_sim = gate
+        .as_ref()
+        .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
+    let raw = match crate::backend::openai::run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS, user_sim) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("graph rollout failed for q {}: {e:#}", q.id);

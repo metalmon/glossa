@@ -863,6 +863,9 @@ fn run_optimize_graph(
             jobs: 1,
             // Legacy research binary has no `--metric` flag; keep exact-EM (no behaviour change).
             judge: None,
+            // Legacy research binary has no `[user_sim]` wiring; gate off (no behaviour change).
+            user_sim: None,
+            user_sim_prompt: None,
         },
         qs,
         &reflect,

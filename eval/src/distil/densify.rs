@@ -300,7 +300,7 @@ pub fn densify_doc(
             )
         };
 
-        run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
+        run_agent_loop(chat, messages, exec, on_repeat, max_rounds, None)?;
 
         // Advance coverage monotonically (identical to `extract_doc`): `start` is unconditionally
         // marked covered after its round, plus whatever ordinals the round actually read.

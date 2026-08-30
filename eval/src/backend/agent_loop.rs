@@ -11,6 +11,7 @@
 //! streak/NBA logic itself lives in exactly ONE place: here.
 
 use crate::backend::transport::{ChatTransport, TurnReply};
+use crate::backend::user_sim::DialogueGate;
 use crate::lab::Endpoint;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -28,7 +29,11 @@ pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 /// `transport.call(ep, system, &messages, tools, temperature)` returns the normalized
 /// `TurnReply`. When it carries `tool_calls`, each is dispatched through `exec(name, args)` and
 /// the result fed back via `transport.push_tool_results`, then the model is queried again — up to
-/// `max_rounds`. The first reply with no tool calls yields `reply.text`.
+/// `max_rounds`. The first reply with no tool calls yields `reply.text` — UNLESS `user_sim` is
+/// `Some`, in which case that text-only turn is first shown to a patient simulated-user gate (see
+/// [`crate::backend::user_sim`]): a mere restated-question / thinking-out-loud turn is deflected
+/// back into the loop as a `role:"user"` message and the loop continues, while a substantive answer
+/// (or a gate error — fail-open) is returned. `None` reproduces the pre-gate behavior exactly.
 ///
 /// Two independent stuck detectors sit on top of `exec` (ported verbatim from the old inline
 /// loop, now operating on the neutral `ToolCall` shape instead of raw `Value` pointers):
@@ -60,6 +65,7 @@ pub fn run_agent_loop(
     mut exec: impl FnMut(&str, &Value) -> (String, Vec<String>),
     on_repeat: impl Fn(&str, &Value) -> String,
     max_rounds: usize,
+    user_sim: Option<&dyn DialogueGate>,
 ) -> anyhow::Result<String> {
     // This call is the start of a fresh CONVERSATION (one reason seed / one build doc / one eval
     // case / …), possibly on a dedicated worker thread under `kbx --jobs N`: reset THIS thread's
@@ -72,6 +78,17 @@ pub fn run_agent_loop(
 
     let temperature: Option<f64> = ep.resolve_temperature();
 
+    // The original question, for the optional simulated-user gate (see the `user_sim` handling
+    // below). Captured ONCE from the first `role:"user"` message in the seed transcript — both
+    // entry points seed `[system, user]`, so this is the reader's question. Empty when there is no
+    // user message (e.g. the shim's own unit tests, which never configure a gate anyway).
+    let question: String = messages
+        .iter()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|m| m.get("content").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+
     // Stuck-detection substrate: the previous (tool, args) actually executed. When the model
     // re-issues the SAME call, we don't re-run it (identical result) — we hand off to `on_repeat`,
     // the next-best-action. Default callers pass `repeat_nudge`; the reader path passes a fan-out.
@@ -83,7 +100,26 @@ pub fn run_agent_loop(
     for _ in 0..max_rounds {
         let reply: TurnReply = transport.call(ep, system, &messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
-            return Ok(reply.text.unwrap_or_default());
+            let text = reply.text.clone().unwrap_or_default();
+            match user_sim {
+                // No gate configured -> today's behavior EXACTLY: the first text-only turn is the
+                // final answer.
+                None => return Ok(text),
+                Some(gate) => match gate.judge(&question, &messages, &text) {
+                    // Substantive answer (or the gate failed open) -> accept and return it.
+                    Ok(None) => return Ok(text),
+                    // The assistant only kept asking: echo its turn, append the in-character user
+                    // deflection as a `role:"user"` message, and continue. Each deflection consumes
+                    // a round, so this is naturally capped by `max_rounds`.
+                    Ok(Some(deflection)) => {
+                        transport.push_assistant_turn(&mut messages, &reply);
+                        messages.push(json!({ "role": "user", "content": deflection }));
+                        continue;
+                    }
+                    // Fail-open on a gate error: return the text rather than hang the run.
+                    Err(_) => return Ok(text),
+                },
+            }
         }
         // Echo the assistant turn that requested the tools (mirrors the old `messages.push(msg.clone())`).
         transport.push_assistant_turn(&mut messages, &reply);
@@ -245,7 +281,7 @@ mod tests {
         let ep = test_endpoint();
         let transport = MockTransport::new(vec![reply_text("ANSWER: Bob")]);
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4).unwrap();
+        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
 
@@ -276,6 +312,7 @@ mod tests {
             exec,
             nudge,
             4,
+            None,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
@@ -309,7 +346,7 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), vec!["hit-id".to_string()])
         };
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5).unwrap();
+        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None).unwrap();
         assert_eq!(out, "looping");
         assert_eq!(*execs.borrow(), 1, "identical consecutive calls must execute only once");
         // From the 3rd call onward, the most recent tool result in the transcript must be a dedup
@@ -348,7 +385,7 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), Vec::new())
         };
-        let _ = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4).unwrap();
+        let _ = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
         assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
     }
 
@@ -363,7 +400,7 @@ mod tests {
             .collect();
         let transport = MockTransport::new(replies);
         let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3).unwrap();
+        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None).unwrap();
         // The trailing "give up" call's reply.text is what's returned regardless of it also
         // carrying tool_calls (the loop reads `text` unconditionally on the final call).
         assert_eq!(out, "giving up");
@@ -396,6 +433,7 @@ mod tests {
             exec,
             nudge,
             UNPRODUCTIVE_STREAK_K + 3,
+            None,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -413,5 +451,150 @@ mod tests {
             lc.contains("no new information") && lc.contains("change approach"),
             "expected the unproductive-streak steer, got: {c:?}"
         );
+    }
+
+    // --- simulated-user gate wiring -------------------------------------------------------------
+
+    /// A deterministic `DialogueGate` (no network, no rand): each `judge` call pops the next
+    /// scripted verdict, so a test can drive the loop's deflect/accept/error paths exactly. `Ok(Some
+    /// (..))` = deflect (feed back a user reply), `Ok(None)` = accept, `Err(..)` = gate error.
+    struct MockGate {
+        verdicts: RefCell<VecDeque<anyhow::Result<Option<String>>>>,
+        calls: RefCell<usize>,
+    }
+
+    impl MockGate {
+        fn new(verdicts: Vec<anyhow::Result<Option<String>>>) -> Self {
+            Self {
+                verdicts: RefCell::new(verdicts.into_iter().collect()),
+                calls: RefCell::new(0),
+            }
+        }
+    }
+
+    impl DialogueGate for MockGate {
+        fn judge(
+            &self,
+            _question: &str,
+            _messages: &[Value],
+            _proposed: &str,
+        ) -> anyhow::Result<Option<String>> {
+            *self.calls.borrow_mut() += 1;
+            self.verdicts
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Ok(None)) // exhausted -> accept, so a test can't hang the loop
+        }
+    }
+
+    /// A non-answer text-only turn: the gate deflects once, the loop appends a `role:"user"` message
+    /// and CONTINUES (a second `transport.call`), then the next turn is accepted.
+    #[test]
+    fn user_sim_deflects_non_answer_then_continues() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![
+            reply_text("QUESTION: who is Bob?"), // restated question -> deflected
+            reply_text("ANSWER: Bob Page"),      // real answer -> accepted
+        ]);
+        let gate = MockGate::new(vec![
+            Ok(Some("I don't know, that's what I was hoping you'd tell me.".to_string())),
+            Ok(None),
+        ]);
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"who is Bob?"})],
+            None,
+            exec,
+            nudge,
+            4,
+            Some(&gate),
+        )
+        .unwrap();
+        assert_eq!(out, "ANSWER: Bob Page");
+        // The loop must have made a SECOND call (didn't return the first text-only turn early)...
+        assert_eq!(transport.calls.borrow().len(), 2, "gate deflection must re-enter the loop");
+        // ...and the deflection must be the last message the 2nd call saw, as a `role:"user"` turn.
+        let second = &transport.calls.borrow()[1];
+        let last_user = second.iter().rev().find(|m| m["role"] == "user");
+        assert_eq!(
+            last_user.and_then(|m| m["content"].as_str()),
+            Some("I don't know, that's what I was hoping you'd tell me.")
+        );
+        assert_eq!(*gate.calls.borrow(), 2);
+    }
+
+    /// The gate signals DONE (`Ok(None)`) on the first text-only turn -> the loop returns that text,
+    /// no extra round.
+    #[test]
+    fn user_sim_accepts_substantive_answer_immediately() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![reply_text("ANSWER: Chief of Protocol")]);
+        let gate = MockGate::new(vec![Ok(None)]);
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            4,
+            Some(&gate),
+        )
+        .unwrap();
+        assert_eq!(out, "ANSWER: Chief of Protocol");
+        assert_eq!(transport.calls.borrow().len(), 1, "a DONE verdict must not re-enter the loop");
+        assert_eq!(*gate.calls.borrow(), 1);
+    }
+
+    /// `user_sim = None` -> non-regression: the first text-only turn is returned verbatim and the
+    /// gate is never consulted (there is none).
+    #[test]
+    fn no_user_sim_returns_first_text_turn_unchanged() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![reply_text("QUESTION: who is Bob?")]);
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"who is Bob?"})],
+            None,
+            exec,
+            nudge,
+            4,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, "QUESTION: who is Bob?");
+        assert_eq!(transport.calls.borrow().len(), 1);
+    }
+
+    /// A gate error fails OPEN: the loop returns the assistant's text rather than hanging or erroring.
+    #[test]
+    fn user_sim_fails_open_on_gate_error() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![reply_text("QUESTION: still thinking")]);
+        let gate = MockGate::new(vec![Err(anyhow::anyhow!("sim endpoint down"))]);
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            4,
+            Some(&gate),
+        )
+        .unwrap();
+        assert_eq!(out, "QUESTION: still thinking");
+        assert_eq!(transport.calls.borrow().len(), 1, "fail-open must not re-enter the loop");
+        assert_eq!(*gate.calls.borrow(), 1);
     }
 }

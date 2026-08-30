@@ -491,6 +491,7 @@ mod tests {
             exec,
             |_, _| "dup".to_string(),
             4,
+            None,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: final");

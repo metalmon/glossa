@@ -111,6 +111,15 @@ pub struct LabConfig {
     /// at a small local model to keep a large candidate set from costing a strong-model call each.
     #[serde(default)]
     pub bridge: Option<Endpoint>,
+    /// Optional endpoint for the reader's "simulated user" dialogue gate (see
+    /// `backend::user_sim`). When present, a text-only assistant turn is no longer accepted as the
+    /// final answer outright: this endpoint role-plays a patient user who deflects a non-answer
+    /// (restated question / "let me think") back into the loop and only signals DONE once the
+    /// assistant has actually answered. ABSENT (the default) reproduces today's behavior EXACTLY —
+    /// the first text-only turn is the answer. Reuses `Endpoint::temperature`, so
+    /// `[user_sim].temperature` works via `resolve_temperature()`.
+    #[serde(default)]
+    pub user_sim: Option<Endpoint>,
     /// Per-workspace overrides for the reason/build/distil agent-loop tuning knobs. Absent
     /// section == every field unset == identical behavior to today (see [`Tuning`]).
     #[serde(default)]
@@ -442,6 +451,30 @@ mod tests {
         let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
         let lab2: LabConfig = toml::from_str(toml2).unwrap();
         assert_eq!(lab2.model.temperature, None);
+    }
+
+    #[test]
+    fn user_sim_endpoint_parses_when_present_and_is_none_when_absent() {
+        // Present -> Some(endpoint), and its own temperature is read like any other endpoint.
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            [user_sim]
+            endpoint = "http://sim"
+            model = "sim-model"
+            temperature = 0.7
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert!(lab.user_sim.is_some());
+        let us = lab.user_sim.as_ref().unwrap();
+        assert_eq!(us.model, "sim-model");
+        assert_eq!(us.temperature, Some(0.7));
+
+        // Absent -> None (existing lab.toml files parse unchanged; today's behavior preserved).
+        let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert!(lab2.user_sim.is_none());
     }
 
     #[test]

@@ -552,6 +552,19 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         cases.retain(|q| !done_ids.contains(q.id.as_str()));
     }
 
+    // Simulated-user dialogue gate (opt-in): load the persona prompt only when `[user_sim]` is
+    // configured. Absent -> `None` -> the reader keeps today's behavior (a text-only turn is the
+    // final answer). Read once here; each per-case backend clones it.
+    let user_sim_prompt = if lab.user_sim.is_some() {
+        Some(
+            std::fs::read_to_string(&kbx_paths.user_sim).with_context(|| {
+                format!("reading user_sim prompt {}", kbx_paths.user_sim.display())
+            })?,
+        )
+    } else {
+        None
+    };
+
     let use_judge = !args.no_judge && lab.judge.is_some();
     let judge_md = if use_judge {
         Some(
@@ -611,6 +624,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             use_graph: true,
             system_prompt: Some(answer_md.clone()),
             temperature: lab.model.temperature,
+            user_sim: lab.user_sim.clone(),
+            user_sim_prompt: user_sim_prompt.clone(),
         };
         let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,

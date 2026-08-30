@@ -443,7 +443,7 @@ pub fn extract_doc(
             )
         };
 
-        run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
+        run_agent_loop(chat, messages, exec, on_repeat, max_rounds, None)?;
 
         // Advance coverage monotonically: `start` is unconditionally marked covered after its
         // round (regardless of what the round actually read), plus whatever ordinals the round
@@ -647,7 +647,7 @@ strict = true
         };
 
         let nudge = |name: &str, _args: &Value| format!("(dup {name}) you already called this");
-        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 

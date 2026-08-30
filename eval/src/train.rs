@@ -115,6 +115,18 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         other => anyhow::bail!("unknown --metric {other:?} (expected \"exact\" or \"judge\")"),
     };
 
+    // Simulated-user dialogue gate (opt-in): load the persona prompt only when `[user_sim]` is
+    // configured, so train rollouts optimize the prod prompt under the same dialogue dynamics eval
+    // uses. Absent -> `None` -> today's behavior (a text-only rollout turn ends the loop).
+    let user_sim_prompt = if lab.user_sim.is_some() {
+        Some(
+            std::fs::read_to_string(&paths.user_sim)
+                .with_context(|| format!("read user_sim prompt {}", paths.user_sim.display()))?,
+        )
+    } else {
+        None
+    };
+
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
     let cfg = GepaGraphConfig {
@@ -131,6 +143,8 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         candidate_selection,
         jobs,
         judge: judge_cfg,
+        user_sim: lab.user_sim.clone(),
+        user_sim_prompt,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

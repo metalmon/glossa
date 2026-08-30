@@ -19,6 +19,7 @@ const REFLECT_MD: &str = include_str!("../templates/reflect.md");
 const REASON_MD: &str = include_str!("../templates/reason.md");
 const DISTIL_MD: &str = include_str!("../templates/distil.md");
 const DISTIL_GOLDS_MD: &str = include_str!("../templates/distil_golds.md");
+const USER_SIM_MD: &str = include_str!("../templates/user_sim.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
 
 /// Write a fresh `kbx` workspace at `<root>/.glossa/kbx/`: `lab.toml`, `answer.md`, `builder.md`,
@@ -34,7 +35,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
     std::fs::create_dir_all(&paths.runs)
         .with_context(|| format!("create {}", paths.runs.display()))?;
 
-    let files: [(&Path, &str); 10] = [
+    let files: [(&Path, &str); 11] = [
         (&paths.lab, LAB_TOML),
         (&paths.answer, ANSWER_MD),
         (&paths.builder, BUILDER_MD),
@@ -44,6 +45,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
         (&paths.reason, REASON_MD),
         (&paths.distil, DISTIL_MD),
         (&paths.distil_golds, DISTIL_GOLDS_MD),
+        (&paths.user_sim, USER_SIM_MD),
         (&paths.dataset, DATASET_TOML),
     ];
 
@@ -75,6 +77,7 @@ mod tests {
             &p.reason,
             &p.distil,
             &p.distil_golds,
+            &p.user_sim,
             &p.dataset,
         ] {
             assert!(f.exists(), "missing {}", f.display());

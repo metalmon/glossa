@@ -330,6 +330,14 @@ pub struct OpenAiBackend {
     /// the `Endpoint` handed to the agent loop, where `Endpoint::resolve_temperature` still lets
     /// `KB_EVAL_TEMP` override it and `None` omits the field so the provider default applies.
     pub temperature: Option<f64>,
+    /// Optional `[user_sim]` endpoint for the simulated-user dialogue gate. `Some` builds a
+    /// [`crate::backend::user_sim::UserSimGate`] in `answer` (paired with `user_sim_prompt`) so a
+    /// text-only turn is dialogue-gated instead of accepted outright; `None` reproduces today's
+    /// behavior exactly (no gate). See `backend::user_sim`.
+    pub user_sim: Option<crate::lab::Endpoint>,
+    /// The simulated-user persona prompt (`user_sim.md`), used VERBATIM as the gate's system
+    /// message. Only consulted when `user_sim` is also `Some`; `None` disables the gate.
+    pub user_sim_prompt: Option<String>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -422,6 +430,18 @@ impl AgentBackend for OpenAiBackend {
                 name, args, work, &idx, graph.as_ref(), &spec, &trace,
             )
         };
+        // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the
+        // persona prompt are present. Absent -> `None` -> the loop keeps today's behavior exactly
+        // (a text-only turn is the final answer).
+        let gate = match (&self.user_sim, &self.user_sim_prompt) {
+            (Some(ep), Some(prompt)) => {
+                Some(crate::backend::user_sim::UserSimGate::new(ep, prompt))
+            }
+            _ => None,
+        };
+        let user_sim = gate
+            .as_ref()
+            .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
         let raw = crate::backend::agent_loop::run_agent_loop(
             &transport,
             &ep,
@@ -431,6 +451,7 @@ impl AgentBackend for OpenAiBackend {
             exec,
             nba,
             MAX_ROUNDS,
+            user_sim,
         )?;
         Ok(prompt::parse_answer(&raw))
     }
@@ -466,6 +487,8 @@ impl OpenAiBackend {
             use_graph: false,
             system_prompt: Some(s.to_string()),
             temperature: None,
+            user_sim: None,
+            user_sim_prompt: None,
         }
     }
 }
@@ -756,6 +779,7 @@ pub(crate) fn run_agent_loop<C, F, N>(
     exec: F,
     on_repeat: N,
     max_rounds: usize,
+    user_sim: Option<&dyn crate::backend::user_sim::DialogueGate>,
 ) -> anyhow::Result<String>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
@@ -797,7 +821,7 @@ where
         temperature: None,
     };
     crate::backend::agent_loop::run_agent_loop(
-        &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds,
+        &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds, user_sim,
     )
 }
 
@@ -1324,7 +1348,7 @@ mod tests {
             *c += 1;
             (format!("hit {}", *c), vec![format!("doc-{}.md", *c)], Vec::new()) // new id every call
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1462,7 +1486,7 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1518,7 +1542,7 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1625,7 +1649,7 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, n + 2, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1678,7 +1702,7 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1787,7 +1811,7 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], vec![stub_image(9)])
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1821,7 +1845,7 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], Vec::new())
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, 3).unwrap();
+        let out = run_agent_loop(chat, vec![], exec, nudge, 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 }

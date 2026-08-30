@@ -161,6 +161,9 @@ fn main() -> anyhow::Result<()> {
                         // Legacy `kb-eval run` CLI: no lab endpoint here, so per-endpoint
                         // temperature is env-only (`KB_EVAL_TEMP` via `resolve_temperature`).
                         temperature: None,
+                        // No `[user_sim]` config on the legacy CLI -> gate off (today's behavior).
+                        user_sim: None,
+                        user_sim_prompt: None,
                     })
                 }
                 BackendKind::Cli => {

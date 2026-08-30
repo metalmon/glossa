@@ -45,6 +45,18 @@ timeout_secs = 120
 # model = "big-model"
 # timeout_secs = 300
 
+# [user_sim]                           # OPT-IN simulated-user dialogue gate for the eval/train reader.
+                                       # When set, a text-only reader turn that only restates the
+                                       # question (instead of answering) is deflected back into the
+                                       # loop by a patient simulated user (persona: user_sim.md) that
+                                       # paces the reader and never reveals a fact; the loop returns
+                                       # only once the reader actually answers. OMIT this section to
+                                       # keep today's behavior exactly (a text-only turn is the answer).
+# endpoint = "http://localhost:1234/v1/chat/completions"
+# model = "qwen3.5-4b"
+# timeout_secs = 60
+# temperature = 0.7
+
 [tuning]                              # reason/build/distil/eval agent-loop tuning knobs.
                                        # Precedence: CLI flag > this section > built-in default.
 fanout_max = 3          # predecessors synthesized per backward step (reason)

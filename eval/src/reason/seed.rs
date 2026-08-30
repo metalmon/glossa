@@ -208,7 +208,7 @@ pub fn chain_one_seed(
         )
     };
 
-    run_agent_loop(chat, messages, exec, on_repeat, max_rounds)?;
+    run_agent_loop(chat, messages, exec, on_repeat, max_rounds, None)?;
     Ok(stats)
 }
 

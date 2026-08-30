@@ -6,6 +6,7 @@ pub mod openai;
 pub mod prompt;
 pub mod tensorzero;
 pub mod transport;
+pub mod user_sim;
 
 use crate::dataset::Question;
 use std::path::Path;

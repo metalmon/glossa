@@ -287,7 +287,7 @@ pub fn generate_one(
         )
     };
 
-    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS)?;
+    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS, None)?;
 
     let Some(proposal) = proposal.into_inner() else {
         return Ok(GenOutcome::Dropped(DropReason::NoProposal));
