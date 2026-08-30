@@ -121,6 +121,21 @@ struct Candidate {
     score_val: Vec<f64>,
 }
 
+/// A candidate's reflect-minibatch, scored ONCE the first time the candidate is a reflect parent
+/// and reused on every later iteration it parents again (kept in a `mb_cache` vec parallel to the
+/// pool). Canonical GEPA scores a candidate once and stores it; re-rolling the parent every
+/// iteration is ~half the rollouts and, because the reader is stochastic, makes the parent's own
+/// score swing by the reader's noise across iterations — so a child could never reliably "beat" it
+/// and nothing got accepted. Reusing the cached minibatch also keeps the child scored on the SAME
+/// questions.
+#[derive(Clone)]
+struct MbCache {
+    batch: Vec<Question>,
+    score: f64,
+    fails: Vec<FailCase>,
+}
+
+#[derive(Clone)]
 struct FailCase {
     question: String,
     gold: String,
@@ -130,7 +145,13 @@ struct FailCase {
 
 pub(crate) struct GraphReflectContext {
     parent_prompt: String,
-    parent_em: f64,
+    /// The parent's mean score on the reflect minibatch, in the ACTIVE metric (graded judge when
+    /// `judge` is true, else exact-match). Shown to the reflector as the single number to beat.
+    parent_score: f64,
+    /// True when the run optimizes by the graded judge (not exact-match). The reflect instruction
+    /// describes ONLY the active metric — never mixing EM framing into a judge run (that pushed the
+    /// teacher toward terse "shortest exact span" answers the judge then penalized).
+    judge: bool,
     fails: Vec<FailCase>,
     /// The reader's ACTUAL tool schema (`backend::openai::tools_schema(graph_on)`), threaded in so
     /// the reflect instruction renders its tool reference from the single source of truth instead of
@@ -393,16 +414,35 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
         ));
     }
     let tool_reference = render_tool_reference(&ctx.tools);
+    // Name ONLY the metric the run actually optimizes. Mixing an exact-match contract into a judge
+    // run pushed the teacher toward terse "shortest span" answers the judge then penalized (every
+    // child scored worse). The gold-vs-model in each failing case supplies the standard of a good
+    // answer, so we don't hand-describe the judge rubric here (it would drift from judge.md).
+    let (grading, objective, answer_contract, score_header) = if ctx.judge {
+        (
+            "Answers are graded by an automated judge that compares the model's answer to the gold \
+             answer — it rewards a correct, complete, well-grounded answer, NOT an exact string match.",
+            "rewrite the system prompt so the model answers more of these correctly (a higher judge score)",
+            "Preserve the answer format the current prompt already defines — do not force a terser one.",
+            "PARENT JUDGE SCORE ON MINIBATCH",
+        )
+    } else {
+        (
+            "Answers are graded by EXACT MATCH of the shortest answer span.",
+            "rewrite the system prompt so multi-hop exact-match improves",
+            "Keep the strict answer contract (one `ANSWER:` line, shortest exact span).",
+            "PARENT EXACT-MATCH ON MINIBATCH",
+        )
+    };
     format!(
         "You are improving the SYSTEM PROMPT for a multi-hop question-answering agent that navigates \
-         a PRE-BUILT REASONING GRAPH. Answers are graded by EXACT MATCH of the shortest answer span.\n\
+         a PRE-BUILT REASONING GRAPH. {grading}\n\
          The reader has these tools (reference only — the reader is given each tool's full \
          description by the API at call time, so this is context for YOU, not text to copy):\n\
          {tool_reference}\n\
          Below are FAILING rollouts: the question, the gold answer, the model's answer, and the \
          model's tool-call trace (tool name, arguments, truncated result per step).\n\
-         Diagnose the recurring navigation/answering mistakes and rewrite the system prompt so \
-         multi-hop exact-match improves. Preserve behavior that already works.\n\
+         Diagnose the recurring navigation/answering mistakes and {objective}. Preserve behavior that already works.\n\
          Write STRATEGY and POLICY that leverages these tools — when and why to reach for each, how \
          to compose multi-hop steps, and grounding discipline before answering. Do NOT copy tool \
          mechanics, descriptions, or parameter lists into the reader prompt: the reader already \
@@ -411,12 +451,12 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
          Output ONLY general, reusable behavior guidance for using the graph and tools. It MUST NOT \
          mention or reuse ANY specific entity name, answer, date, place, number, or other value from \
          the examples — those are test data and must never appear in the prompt.\n\
-         Keep the strict answer contract (one `ANSWER:` line, shortest exact span). \
+         {answer_contract} \
          Reply with ONLY the new system prompt text — no preamble, no quotes.\n\n\
-         === PARENT EXACT-MATCH ON MINIBATCH ===\nem={parent_em:.3}\n\n\
+         === {score_header} ===\nscore={parent_score:.3}\n\n\
          === CURRENT SYSTEM PROMPT ===\n{prompt}\n\n=== FAILING ROLLOUTS ===\n{cases}=== NEW SYSTEM PROMPT ===",
         tool_reference = tool_reference,
-        parent_em = ctx.parent_em,
+        parent_score = ctx.parent_score,
         prompt = ctx.parent_prompt,
         cases = cases,
     )
@@ -771,6 +811,9 @@ pub fn run(
     }];
     // Best full-Pareto mean seen so far, surfaced in the bar prefix each iteration.
     let mut best_pareto_so_far = mean(&pool[0].score_val);
+    // Per-candidate cached reflect-minibatch, indexed parallel to `pool` (see `MbCache`). Grows
+    // with `pool` on every accept; the seed starts uncached.
+    let mut mb_cache: Vec<Option<MbCache>> = vec![None];
 
     for it in 0..cfg.budget {
         // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
@@ -781,46 +824,56 @@ pub fn run(
         let parent_idx = select_parent_idx(&pool, cfg.candidate_selection, &mut rng);
         let parent_prompt = pool[parent_idx].prompt.clone();
 
-        let mut minibatch = None;
-        let mut parent_outcomes = None;
-        for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
-            let batch = sample_questions(&train, cfg.minibatch, &mut rng);
-            if batch.is_empty() {
-                break;
+        // Reuse this parent's cached minibatch (score + fails) if it has one; otherwise sample a
+        // minibatch that has failures, score the parent once, and cache it. Cloning the cache
+        // Option (cheap vs a rollout) drops the borrow so the None branch can write it back.
+        let (batch, parent_mb_score, fails) = match mb_cache[parent_idx].clone() {
+            Some(mb) => (mb.batch, mb.score, mb.fails),
+            None => {
+                let mut found = None;
+                for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
+                    let batch = sample_questions(&train, cfg.minibatch, &mut rng);
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let outcomes = score_questions(
+                        &cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec,
+                    );
+                    if outcomes.iter().any(|o| o.score < 1.0) {
+                        let score = mean(&scores(&outcomes));
+                        let fails: Vec<FailCase> = batch
+                            .iter()
+                            .zip(&outcomes)
+                            .filter(|(_, o)| o.score < 1.0)
+                            .map(|(q, o)| FailCase {
+                                question: q.question.clone(),
+                                gold: golds_of(q).join(" | "),
+                                pred: o.pred.clone(),
+                                steps: o.steps.clone(),
+                            })
+                            .collect();
+                        found = Some((batch, score, fails));
+                        break;
+                    }
+                }
+                let Some((batch, score, fails)) = found else {
+                    pb.println(format!("[iter {it}] no failures in sampled minibatch — skip"));
+                    continue;
+                };
+                mb_cache[parent_idx] = Some(MbCache { batch: batch.clone(), score, fails: fails.clone() });
+                (batch, score, fails)
             }
-            let outcomes =
-                score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec);
-            if outcomes.iter().any(|o| o.score < 1.0) {
-                minibatch = Some(batch);
-                parent_outcomes = Some(outcomes);
-                break;
-            }
-        }
-        let (Some(batch), Some(outcomes)) = (minibatch, parent_outcomes) else {
-            pb.println(format!("[iter {it}] no failures in sampled minibatch — skip"));
-            continue;
         };
-        let parent_mb_score = mean(&scores(&outcomes));
-        let fails: Vec<FailCase> = batch
-            .iter()
-            .zip(&outcomes)
-            .filter(|(_, o)| o.score < 1.0)
-            .map(|(q, o)| FailCase {
-                question: q.question.clone(),
-                gold: golds_of(q).join(" | "),
-                pred: o.pred.clone(),
-                steps: o.steps.clone(),
-            })
-            .collect();
         pb.println(format!(
-            "[iter {it}] reflect minibatch: {} rollouts (fails={}) parent_mb_score={parent_mb_score:.3}",
-            outcomes.len(),
+            "[iter {it}] reflect minibatch: {} cases (fails={}) parent_mb_score={parent_mb_score:.3}",
+            batch.len(),
             fails.len(),
         ));
 
         let ctx = GraphReflectContext {
             parent_prompt: parent_prompt.clone(),
-            parent_em: parent_mb_score,
+            parent_score: parent_mb_score,
+            judge: cfg.judge.is_some(),
             fails,
             tools: tools.clone(),
         };
@@ -861,6 +914,7 @@ pub fn run(
             prompt: child_prompt,
             score_val: scores(&child_pareto),
         });
+        mb_cache.push(None); // keep parallel to `pool`; the new child starts uncached
         let best_pareto = pool
             .iter()
             .map(|c| mean(&c.score_val))
@@ -1004,7 +1058,8 @@ mod tests {
         let tools = crate::backend::openai::tools_schema(true);
         let ctx = GraphReflectContext {
             parent_prompt: "seed graph prompt".to_string(),
-            parent_em: 0.25,
+            parent_score: 0.25,
+            judge: false,
             fails: vec![FailCase {
                 question: "Who directed the film?".to_string(),
                 gold: "Jane Doe".to_string(),
@@ -1019,12 +1074,24 @@ mod tests {
         };
         let msg = build_graph_reflect_instruction(&ctx);
         assert!(msg.contains("PARENT EXACT-MATCH ON MINIBATCH"));
-        assert!(msg.contains("em=0.250"));
+        assert!(msg.contains("score=0.250"));
         assert!(msg.contains("EXACT MATCH"));
         assert!(msg.contains("MUST NOT"), "leak guard instruction present");
         assert!(msg.contains("glossary(") && msg.contains("Tool-call trace"));
         assert!(msg.contains("Gold answer: Jane Doe"));
         assert!(msg.contains("=== NEW SYSTEM PROMPT ==="));
+
+        // Judge metric: the instruction names ONLY the judge — never EM / "shortest exact span",
+        // which pushed the teacher toward terse answers the judge then penalizes.
+        let judge_ctx = GraphReflectContext { judge: true, ..ctx };
+        let jmsg = build_graph_reflect_instruction(&judge_ctx);
+        assert!(jmsg.contains("PARENT JUDGE SCORE ON MINIBATCH"));
+        assert!(jmsg.contains("automated judge"));
+        assert!(!jmsg.contains("EXACT MATCH"), "judge run must not mention exact match");
+        assert!(
+            !jmsg.contains("shortest exact span"),
+            "judge run must not impose a terse answer contract"
+        );
 
         // --- tool-awareness: reference block derived from the schema, not a hardcoded list ---
         assert!(msg.contains("The reader has these tools"), "tool reference introduced as context");
