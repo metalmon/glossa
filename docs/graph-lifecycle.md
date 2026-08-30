@@ -222,7 +222,7 @@ Two operations are deliberately **terminal-only** because they are high-impact:
 | Build reasoning layer (batch) | ✅ `kbx build` + `kbx reason` | — (author incrementally via `graph_upsert`) |
 | Author a node/edge | ✅ `kb graph import` (file) | ✅ `graph_upsert` |
 | Diagnose health | ✅ `kb graph doctor` | ✅ `graph_doctor` |
-| Prune doubtful nodes | ✅ doctor `--prune-*` | [Planned] doubt-scoped prune via `graph_doctor` |
+| Prune doubtful nodes | ✅ doctor `--prune-*` | ✅ `graph_doctor` `prune_ungrounded`/`prune_incomplete`/`prune_dangling` |
 | Clean-slate a type / merge dups | ✅ `prune -t` / `generalize --merge` | — (by design) |
 | Inspect | ✅ `stats`/`ls`/`node`/`glossary`/`reach`/`sql` | ✅ `graph_stats`/`glossary`/`reach`/`sql`/… |
 
@@ -234,17 +234,11 @@ terminal** for a human to run deliberately.
 
 ## Roadmap (Planned)
 
-These improvements are designed and coming; this manual will drop the **[Planned]** tags as each
-ships:
+These improvements are designed but not yet shipped; this manual will drop the **[Planned]** tags as
+each ships:
 
-- **`--prune-dangling`** — a doctor prune flag to remove orphaned query-side branches in one pass.
-- **Agent doubt-scoped prune** — `graph_doctor` gains `prune_ungrounded` / `prune_incomplete` /
-  `prune_dangling`, so an agent can remediate exactly what it diagnosed.
 - **Consistent MCP re-index** — the `index` tool's forced rebuild will re-run `generalize`
   automatically, matching `kb index --force`.
-- **`kbx train` / `kbx distil`** — the last two verbs of the pipeline
-  (`build → reason → train → distil → eval`). `train` (prompt optimization) is partial today;
-  `distil` (densifying the graph with a stronger model) is being designed.
 
 ---
 
