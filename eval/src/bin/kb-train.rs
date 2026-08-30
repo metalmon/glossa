@@ -869,16 +869,19 @@ fn run_optimize_graph(
         },
         qs,
         &reflect,
+        // Legacy research binary has no progress bar; a hidden one is a no-op sink (behaviour
+        // byte-identical to the pre-bar `ProgressBar::hidden()` `score_questions` used internally).
+        &indicatif::ProgressBar::hidden(),
     )?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out, &result.prompt).with_context(|| format!("write {}", out.display()))?;
     println!(
-        "wrote best graph prompt -> {} (run={run_label}, baseline_em={:.3}, best_em={:.3}, candidates={})",
+        "wrote best graph prompt -> {} (run={run_label}, baseline_score={:.3}, best_score={:.3}, candidates={})",
         out.display(),
-        result.baseline_em,
-        result.best_em,
+        result.baseline_score,
+        result.best_score,
         result.candidates,
     );
     Ok(())

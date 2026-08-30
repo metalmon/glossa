@@ -11,12 +11,16 @@
 //! The CLI subcommand that parses flags into `TrainArgs` and calls `run_train` is a separate,
 //! later task — this module is pure engine glue.
 
+use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
 use crate::gepa::{self, CandidateSelection};
 use crate::gepa_graph::{self, GepaGraphConfig};
 use crate::lab::LabConfig;
 use crate::workspace;
 use anyhow::Context;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Fallback worker-pool size for concurrent read-only rollouts when neither `--jobs` nor
 /// `lab.toml`'s `[tuning] jobs_train` overrides it. Same single-source-of-truth rationale as
@@ -49,8 +53,8 @@ pub struct TrainArgs {
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only on a STRICT EM
 /// improvement over the seed prompt's own full-val EM, and never when `--no-apply` was passed
 /// (a dry-run: still writes `runs/<tag>/answer.md`, never touches the workspace file).
-pub(crate) fn should_apply(seed_em: f64, best_em: f64, no_apply: bool) -> bool {
-    !no_apply && best_em > seed_em
+pub(crate) fn should_apply(seed_score: f64, best_score: f64, no_apply: bool) -> bool {
+    !no_apply && best_score > seed_score
 }
 
 /// Run one `kbx train` pass: resolve the workspace, load `lab.toml`, GEPA-optimize `answer.md`
@@ -176,7 +180,38 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         Ok(child)
     };
 
-    let result = gepa_graph::run(cfg, dataset, &reflect)?;
+    // Visible progress bar for the long rollout-scoring passes (mirrors `kbx run`/build/reason):
+    // one bar owned here, driven per scoring pass by `gepa_graph::score_questions`. Hidden on a
+    // non-TTY or under `--no-progress`, exactly like `run_eval`.
+    let show_progress = !args.no_progress
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal();
+    let pb = if show_progress {
+        let pb = ProgressBar::new(dataset.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        pb.enable_steady_tick(Duration::from_millis(90));
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+    // Zero the shared token/resample counters before the run so the ticker's `{msg}` reflects only
+    // this run, then start the background ticker (ETA + tokens/resamples in `{msg}`). The static
+    // stage word `training` prefixes the bar; `gepa_graph::run` extends it per iteration.
+    reset_tokens();
+    reset_resamples();
+    pb.set_prefix("training");
+    let ticker = StatusTicker::start(&pb);
+
+    let result = gepa_graph::run(cfg, dataset, &reflect, &pb)?;
+
+    drop(ticker);
+    pb.finish_and_clear();
 
     let run_dir = paths.runs.join(&tag);
     std::fs::create_dir_all(&run_dir)
@@ -185,16 +220,16 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     std::fs::write(&winner_path, &result.prompt)
         .with_context(|| format!("write {}", winner_path.display()))?;
 
-    let apply = should_apply(result.baseline_em, result.best_em, args.no_apply);
+    let apply = should_apply(result.baseline_score, result.best_score, args.no_apply);
     let report = format!(
         "# kbx train — {tag}\n\n\
-         seed EM (baseline, full val): {baseline_em:.3}\n\
-         best EM (winner, full val):   {best_em:.3}\n\
+         seed score (baseline, full val): {baseline_score:.3}\n\
+         best score (winner, full val):   {best_score:.3}\n\
          candidates explored: {candidates}\n\
          applied to workspace answer.md: {apply}\n",
         tag = tag,
-        baseline_em = result.baseline_em,
-        best_em = result.best_em,
+        baseline_score = result.baseline_score,
+        best_score = result.best_score,
         candidates = result.candidates,
         apply = apply,
     );
@@ -220,9 +255,9 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     }
 
     println!(
-        "kbx train {tag}: seed_em={:.3} best_em={:.3} candidates={} winner={} applied={}",
-        result.baseline_em,
-        result.best_em,
+        "kbx train {tag}: seed_score={:.3} best_score={:.3} candidates={} winner={} applied={}",
+        result.baseline_score,
+        result.best_score,
         result.candidates,
         winner_path.display(),
         apply,

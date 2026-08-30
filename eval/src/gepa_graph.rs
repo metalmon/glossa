@@ -8,7 +8,7 @@
 //! caller's concern, not this module's).
 //!
 //! Structure mirrors `gepa_constraint.rs` (single-objective GEPA): one `Candidate { prompt,
-//! em_val }` scored per-question on a Pareto validation subset, minibatch reflection from the
+//! score_val }` scored per-question on a Pareto validation subset, minibatch reflection from the
 //! train split, accept-if-child-beats-parent-on-minibatch, best-on-full-val at the end.
 //!
 //! Deviation from the blueprint's "reuse gepa.rs Pareto helpers": those helpers are typed on
@@ -94,8 +94,8 @@ fn verdict_to_score(v: crate::judge::Verdict) -> f64 {
 
 pub struct GepaGraphResult {
     pub prompt: String,
-    pub baseline_em: f64,
-    pub best_em: f64,
+    pub baseline_score: f64,
+    pub best_score: f64,
     pub candidates: usize,
 }
 
@@ -118,7 +118,7 @@ struct RolloutOutcome {
 struct Candidate {
     prompt: String,
     /// Per-instance graded score on D_pareto (not full val).
-    em_val: Vec<f64>,
+    score_val: Vec<f64>,
 }
 
 struct FailCase {
@@ -292,7 +292,7 @@ fn rollout_one(
 
 /// Score `questions` with `cfg.jobs` concurrent read-only rollout workers.
 ///
-/// The returned `Vec<RolloutOutcome>` MUST stay in `questions`' input order: `Candidate::em_val`
+/// The returned `Vec<RolloutOutcome>` MUST stay in `questions`' input order: `Candidate::score_val`
 /// is POSITIONAL (Pareto dominance in `dominates`/`pareto_frontier_win_counts` compares
 /// instance-by-instance across candidates scored against the SAME question set), so a caller
 /// zipping two `score_questions` calls' outputs — or this file's own `batch.iter().zip(&outcomes)`
@@ -308,16 +308,19 @@ fn score_questions(
     idx: &DocIndex,
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
+    pb: &ProgressBar,
 ) -> Vec<RolloutOutcome> {
     let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
-    // No visible progress bar for train rollouts today (unlike build/reason/distil) — `run_train`
-    // reports per-iteration summaries via println!, not a bar. `run_units_parallel` still needs a
-    // `&ProgressBar` to report completion into; a hidden one is a correct no-op sink.
-    let pb = ProgressBar::hidden();
+    // Drive the SHARED training bar (owned + tick'd by `run_train`): each scoring pass sets the
+    // bar length to this pass's question count and rewinds the position to 0, so the bar visibly
+    // fills as rollouts complete (`run_units_parallel` reports completion via `pb.inc`). On a
+    // hidden bar (`--no-progress`/non-TTY) these are harmless no-ops.
+    pb.set_length(questions.len() as u64);
+    pb.set_position(0);
     let mut indexed: Vec<(usize, RolloutOutcome)> = crate::parallel::run_units_parallel(
         units,
         cfg.jobs,
-        &pb,
+        pb,
         |_unit| 1,
         |(i, q)| Ok((*i, rollout_one(cfg, url, tools, prompt, q, idx, graph, spec))),
     )
@@ -506,7 +509,7 @@ fn sample_questions(pool: &[Question], n: usize, rng: &mut StdRng) -> Vec<Questi
 }
 
 fn candidate_bits(c: &Candidate) -> &[f64] {
-    &c.em_val
+    &c.score_val
 }
 
 /// Graded Pareto dominance: `a` dominates `b` iff `a[i] >= b[i]` for every instance AND
@@ -605,7 +608,7 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
     if pool.len() == 1 {
         return 0;
     }
-    let n_inst = pool.first().map(|c| c.em_val.len()).unwrap_or(0);
+    let n_inst = pool.first().map(|c| c.score_val.len()).unwrap_or(0);
     if n_inst == 0 {
         return rng.gen_range(0..pool.len());
     }
@@ -637,8 +640,8 @@ fn select_parent_idx(pool: &[Candidate], sel: CandidateSelection, rng: &mut StdR
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
-                mean(&a.em_val)
-                    .partial_cmp(&mean(&b.em_val))
+                mean(&a.score_val)
+                    .partial_cmp(&mean(&b.score_val))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(i, _)| i)
@@ -653,6 +656,7 @@ pub fn run(
     cfg: GepaGraphConfig,
     questions: Vec<Question>,
     reflect: &dyn Fn(&str) -> Result<String>,
+    pb: &ProgressBar,
 ) -> Result<GepaGraphResult> {
     anyhow::ensure!(!questions.is_empty(), "no questions to optimize against");
     let idx = DocIndex::open_or_create(&cfg.work).context("open index for graph GEPA")?;
@@ -686,9 +690,10 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
+        pb,
     );
-    let baseline_em = mean(&scores(&baseline_out));
-    println!("baseline val: score={baseline_em:.3}");
+    let baseline_score = mean(&scores(&baseline_out));
+    println!("baseline val: score={baseline_score:.3}");
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let pareto_set = sample_questions(&val, cfg.pareto_size, &mut rng);
@@ -706,13 +711,19 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
+        pb,
     );
     let mut pool = vec![Candidate {
         prompt: cfg.seed_prompt.clone(),
-        em_val: scores(&base_pareto),
+        score_val: scores(&base_pareto),
     }];
+    // Best full-Pareto mean seen so far, surfaced in the bar prefix each iteration.
+    let mut best_pareto_so_far = mean(&pool[0].score_val);
 
     for it in 0..cfg.budget {
+        // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
+        // (ETA + tokens/resamples). No-op on a hidden bar.
+        pb.set_prefix(format!("training [iter {}/{}] best={best_pareto_so_far:.3}", it + 1, cfg.budget));
         let parent_idx = select_parent_idx(&pool, cfg.candidate_selection, &mut rng);
         let parent_prompt = pool[parent_idx].prompt.clone();
 
@@ -724,7 +735,7 @@ pub fn run(
                 break;
             }
             let outcomes =
-                score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec);
+                score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec, pb);
             if outcomes.iter().any(|o| o.score < 1.0) {
                 minibatch = Some(batch);
                 parent_outcomes = Some(outcomes);
@@ -735,7 +746,7 @@ pub fn run(
             println!("[iter {it}] no failures in sampled minibatch — skip");
             continue;
         };
-        let parent_em_mb = mean(&scores(&outcomes));
+        let parent_mb_score = mean(&scores(&outcomes));
         let fails: Vec<FailCase> = batch
             .iter()
             .zip(&outcomes)
@@ -748,14 +759,14 @@ pub fn run(
             })
             .collect();
         println!(
-            "[iter {it}] reflect minibatch: {} rollouts (fails={}) parent_mb_em={parent_em_mb:.3}",
+            "[iter {it}] reflect minibatch: {} rollouts (fails={}) parent_mb_score={parent_mb_score:.3}",
             outcomes.len(),
             fails.len(),
         );
 
         let ctx = GraphReflectContext {
             parent_prompt: parent_prompt.clone(),
-            parent_em: parent_em_mb,
+            parent_em: parent_mb_score,
             fails,
             tools: tools.clone(),
         };
@@ -773,10 +784,10 @@ pub fn run(
         }
 
         let child_mb =
-            score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec);
-        let child_em_mb = mean(&scores(&child_mb));
-        if child_em_mb <= parent_em_mb {
-            println!("[iter {it}] child_mb {child_em_mb:.3} <= parent_mb {parent_em_mb:.3} — discarded");
+            score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec, pb);
+        let child_mb_score = mean(&scores(&child_mb));
+        if child_mb_score <= parent_mb_score {
+            println!("[iter {it}] child_mb {child_mb_score:.3} <= parent_mb {parent_mb_score:.3} — discarded");
             continue;
         }
 
@@ -789,44 +800,47 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
+            pb,
         );
         pool.push(Candidate {
             prompt: child_prompt,
-            em_val: scores(&child_pareto),
+            score_val: scores(&child_pareto),
         });
         let best_pareto = pool
             .iter()
-            .map(|c| mean(&c.em_val))
+            .map(|c| mean(&c.score_val))
             .fold(f64::NEG_INFINITY, f64::max);
+        best_pareto_so_far = best_pareto;
         println!(
-            "[iter {it}] parent_idx={parent_idx} parent_mb={parent_em_mb:.3} -> child_mb={child_em_mb:.3} — accepted (pareto_em={best_pareto:.3}, pool_size={})",
+            "[iter {it}] parent_idx={parent_idx} parent_mb={parent_mb_score:.3} -> child_mb={child_mb_score:.3} — accepted (pareto_score={best_pareto:.3}, pool_size={})",
             pool.len(),
         );
     }
 
     println!("final full-val scoring: {} candidates", pool.len());
+    pb.set_prefix(format!("training [final val] best={best_pareto_so_far:.3}"));
     let mut best_prompt = pool[0].prompt.clone();
-    let mut best_em = f64::NEG_INFINITY;
+    let mut best_score = f64::NEG_INFINITY;
     for c in &pool {
-        let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec);
+        let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec, pb);
         let em = mean(&scores(&out));
-        if em > best_em {
-            best_em = em;
+        if em > best_score {
+            best_score = em;
             best_prompt = c.prompt.clone();
         }
     }
-    if !best_em.is_finite() {
-        best_em = 0.0;
+    if !best_score.is_finite() {
+        best_score = 0.0;
     }
     println!(
-        "gepa_graph final: em={best_em:.3} (baseline was {baseline_em:.3}), candidates={}",
+        "gepa_graph final: score={best_score:.3} (baseline was {baseline_score:.3}), candidates={}",
         pool.len(),
     );
 
     Ok(GepaGraphResult {
         prompt: best_prompt,
-        baseline_em,
-        best_em,
+        baseline_score,
+        best_score,
         candidates: pool.len(),
     })
 }
@@ -945,7 +959,7 @@ mod tests {
     /// `score_questions` pairs each question with its input index, lets `run_units_parallel`
     /// return results in whatever order workers finish (jobs>1 reorders by design), then sorts
     /// back by index before returning. This is the load-bearing correctness property for Task 7:
-    /// `Candidate::em_val` is POSITIONAL (Pareto dominance compares instance-by-instance across
+    /// `Candidate::score_val` is POSITIONAL (Pareto dominance compares instance-by-instance across
     /// candidates scored against the same question set), so a reordered result vector would
     /// silently mismatch questions to outcomes. Exercise the exact same index-carry-then-sort
     /// pattern `score_questions` uses, with workers deliberately finishing OUT of input order
@@ -997,8 +1011,8 @@ mod tests {
     #[test]
     fn select_parent_current_best_picks_highest_em() {
         let pool = vec![
-            Candidate { prompt: "weak".into(), em_val: vec![0.0, 0.0] },
-            Candidate { prompt: "strong".into(), em_val: vec![1.0, 1.0, 1.0] },
+            Candidate { prompt: "weak".into(), score_val: vec![0.0, 0.0] },
+            Candidate { prompt: "strong".into(), score_val: vec![1.0, 1.0, 1.0] },
         ];
         let mut rng = StdRng::seed_from_u64(1);
         assert_eq!(
@@ -1010,9 +1024,9 @@ mod tests {
     #[test]
     fn pareto_win_counts_prefer_frequent_winner() {
         let pool = vec![
-            Candidate { prompt: "a".into(), em_val: vec![1.0, 0.0, 0.0] },
-            Candidate { prompt: "b".into(), em_val: vec![0.0, 1.0, 1.0] },
-            Candidate { prompt: "c".into(), em_val: vec![0.0, 0.0, 0.0] },
+            Candidate { prompt: "a".into(), score_val: vec![1.0, 0.0, 0.0] },
+            Candidate { prompt: "b".into(), score_val: vec![0.0, 1.0, 1.0] },
+            Candidate { prompt: "c".into(), score_val: vec![0.0, 0.0, 0.0] },
         ];
         let (frontier, counts) = pareto_frontier_win_counts(&pool);
         assert!(frontier.contains(&0) && frontier.contains(&1));
@@ -1051,9 +1065,9 @@ mod tests {
         // Instance 0: only `b` reaches the max (1.0). Instance 1: `a`=1.0 is sole max, `b`=0.5.
         // Instance 2: `a` and `b` tie at 0.5. Neither dominates the other -> both on frontier.
         let pool = vec![
-            Candidate { prompt: "a".into(), em_val: vec![0.5, 1.0, 0.5] },
-            Candidate { prompt: "b".into(), em_val: vec![1.0, 0.5, 0.5] },
-            Candidate { prompt: "c".into(), em_val: vec![0.0, 0.0, 0.0] },
+            Candidate { prompt: "a".into(), score_val: vec![0.5, 1.0, 0.5] },
+            Candidate { prompt: "b".into(), score_val: vec![1.0, 0.5, 0.5] },
+            Candidate { prompt: "c".into(), score_val: vec![0.0, 0.0, 0.0] },
         ];
         let (frontier, counts) = pareto_frontier_win_counts(&pool);
         assert!(frontier.contains(&0) && frontier.contains(&1));
