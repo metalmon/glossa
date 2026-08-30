@@ -575,6 +575,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         None
     };
 
+    // Corpus index shared (read-only) across judge calls so the evidence-grounded judge can load
+    // the source chunks named by each case's `source` refs. Opened only when judging; best-effort
+    // (`None` on failure) — a case with no `source`, or an unavailable index, falls back to the
+    // gold-only judge prompt, byte-identical to before.
+    let judge_idx = if use_judge {
+        glossa::index::store::DocIndex::open_or_create(&paths.root).ok()
+    } else {
+        None
+    };
+
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
 
@@ -654,7 +664,15 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let f1 = token_f1_any(&answer, &golds);
 
         let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
-            (Some(jmd), Some(jep)) => match judge(jep, jmd, &q.question, &q.answer, &answer) {
+            (Some(jmd), Some(jep)) => match judge(
+                jep,
+                jmd,
+                &q.question,
+                &q.answer,
+                &answer,
+                &q.source,
+                judge_idx.as_ref(),
+            ) {
                 Ok(Judgement {
                     verdict,
                     reason,

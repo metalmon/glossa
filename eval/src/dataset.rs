@@ -28,6 +28,12 @@ pub struct Question {
     /// Whether answering the case requires graph-based reasoning (`yes|no|maybe`), eval metadata
     /// carried by `dataset.toml`; empty for formats that don't carry it.
     pub needs_graph: String,
+    /// Corpus chunk refs (`"<path>#<location>"`, e.g. `"a.pdf#p.1"`) behind this gold; a
+    /// multihop/composite gold may carry several. When present, the judge loads these chunks and
+    /// grades the candidate against the source EVIDENCE (not just the terse gold). Empty (via
+    /// `Default`) for formats/cases that don't carry it → the judge behaves gold-only, exactly as
+    /// before.
+    pub source: Vec<String>,
 }
 
 #[derive(Deserialize)]

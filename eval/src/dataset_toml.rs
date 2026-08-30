@@ -25,6 +25,12 @@ struct RawCase {
     /// role as `hop_type`, on a separate axis.
     #[serde(default)]
     needs_graph: String,
+    /// Source chunk refs (`"<path>#<location>"`) behind this gold, e.g.
+    /// `source = ["a.pdf#p.1", "b.pdf#p.2"]`. Optional — defaults to empty, in which case the
+    /// judge grades gold-only (unchanged behavior). When present, the judge loads these chunks as
+    /// EVIDENCE and credits a correct answer that exceeds the terse gold.
+    #[serde(default)]
+    source: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +59,7 @@ pub fn parse_dataset_toml(text: &str) -> anyhow::Result<Vec<Question>> {
             tags: c.tags,
             hop_type: c.hop_type,
             needs_graph: c.needs_graph,
+            source: c.source,
         })
         .collect())
 }
@@ -92,5 +99,30 @@ answer="short"
         // hop_type/needs_graph are optional and default to empty when the case omits them.
         assert!(cs[1].hop_type.is_empty());
         assert!(cs[1].needs_graph.is_empty());
+    }
+
+    #[test]
+    fn parses_source_refs_and_defaults_empty() {
+        let t = r#"
+[[case]]
+id="q1"
+question="Q one?"
+answer="short"
+source=["a.pdf#p.1", "b.pdf#p.2"]
+
+[[case]]
+id="q2"
+question="Q two?"
+answer="short"
+"#;
+        let cs = parse_dataset_toml(t).unwrap();
+        assert_eq!(cs.len(), 2);
+        // A case with `source` parses to its list of refs, in order.
+        assert_eq!(
+            cs[0].source,
+            vec!["a.pdf#p.1".to_string(), "b.pdf#p.2".to_string()]
+        );
+        // Absent `source` defaults to an empty vec (gold-only judging).
+        assert!(cs[1].source.is_empty());
     }
 }

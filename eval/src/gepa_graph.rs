@@ -260,7 +260,15 @@ fn rollout_one(
     // every candidate and GEPA has no gradient to climb. Judge only the primary gold `q.answer`
     // (aliases are exact-match forms).
     let score = match &cfg.judge {
-        Some(jc) => match crate::judge::judge(&jc.ep, &jc.md, &q.question, &q.answer, &pred) {
+        Some(jc) => match crate::judge::judge(
+            &jc.ep,
+            &jc.md,
+            &q.question,
+            &q.answer,
+            &pred,
+            &q.source,
+            Some(idx),
+        ) {
             Ok(j) => verdict_to_score(j.verdict),
             Err(e) => {
                 eprintln!("judge failed (scored 0): {e:#}");
