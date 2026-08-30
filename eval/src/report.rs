@@ -135,10 +135,43 @@ pub fn summary_text(results: &[CaseResult]) -> String {
     };
     let q = quality(results);
 
-    format!(
+    let mut s = format!(
         "judge quality (graded): {q:.3}  (correct + 0.5*partial) / total\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
         t.correct, pct(t.correct), t.partial, pct(t.partial), t.wrong, pct(t.wrong), t.unscored, pct(t.unscored), t.total
-    )
+    );
+    // Prominent per-hop-type breakdown right under the headline, so the multihop-vs-lexical gap is
+    // visible at a glance (the full table still lives in the "By question type" section below).
+    let hop = hop_summary_line(results);
+    if !hop.is_empty() {
+        s.push_str(&hop);
+    }
+    s
+}
+
+/// Compact headline breakdown line, e.g. `by hop_type: lexical 0.545 (22) · multihop 0.400 (5)` —
+/// graded `quality_score` and case count per `hop_type`, alphabetical (deterministic). Empty when
+/// there are no results.
+fn hop_summary_line(results: &[CaseResult]) -> String {
+    let mut g: std::collections::BTreeMap<&str, (usize, usize, usize)> =
+        std::collections::BTreeMap::new(); // value -> (correct, partial, n)
+    for r in results {
+        let k = if r.hop_type.is_empty() { "(untyped)" } else { r.hop_type.as_str() };
+        let e = g.entry(k).or_default();
+        e.2 += 1;
+        match r.verdict {
+            Verdict::Correct => e.0 += 1,
+            Verdict::Partial => e.1 += 1,
+            _ => {}
+        }
+    }
+    if g.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = g
+        .iter()
+        .map(|(k, (c, p, n))| format!("{k} {:.3} ({n})", quality_score(*c, *p, *n)))
+        .collect();
+    format!("by hop_type: {}\n", parts.join(" · "))
 }
 
 /// Secondary, lexical-only stats (EM mean / F1 mean). Kept for sanity-checking but demoted out of
