@@ -179,6 +179,11 @@ fn rollout_one(
 ) -> RolloutOutcome {
     let trace = TraceLog::disabled();
     let steps = std::cell::RefCell::new(Vec::<ToolStep>::new());
+    // Per-episode retrieval-plateau tracker (see `glossa_tools::RetrievalProgress`): train rollouts
+    // emit the SAME neutral "gain has plateaued" marker eval does, so GEPA optimizes the prompt
+    // under the identical signal. Owned per rollout; the POLICY stays in the prompt / GEPA, not the
+    // tool layer.
+    let mut progress = crate::backend::glossa_tools::RetrievalProgress::new();
     // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
     // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
@@ -192,7 +197,7 @@ fn rollout_one(
         )
     };
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-        let (body, ids, _images) =
+        let (mut body, ids, _images) =
             crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace);
         // Mirror openai::execute_tool: `read`'s surfaced id is its `path` arg (glossa_tools::exec
         // returns no ids for read itself).
@@ -205,6 +210,13 @@ fn rollout_one(
         } else {
             ids
         };
+        // Only id-surfacing RETRIEVAL calls feed the plateau window; on fire, append the neutral
+        // marker to this call's result (and thus to the step-trace the reflector reads).
+        if crate::backend::glossa_tools::is_retrieval_tool(name) {
+            if let Some(marker) = progress.observe(&ids) {
+                body.push_str(&marker);
+            }
+        }
         steps.borrow_mut().push(ToolStep {
             name: name.to_string(),
             args: args.clone(),

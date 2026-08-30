@@ -396,13 +396,25 @@ impl AgentBackend for OpenAiBackend {
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );
+        // Per-episode retrieval-plateau tracker (see `glossa_tools::RetrievalProgress`): a NEUTRAL
+        // "gain has plateaued" marker is appended to a retrieval tool's result once the reader's
+        // windowed marginal information-gain flatlines. Owned here so it resets per question; the
+        // POLICY (what to do about it) stays in the reader prompt / GEPA, not in the tool layer.
+        let mut progress = crate::backend::glossa_tools::RetrievalProgress::new();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
+            let (mut body, ids) = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
                 let snippet: String = body.chars().take(500).collect();
                 eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
+            }
+            // Only id-surfacing RETRIEVAL calls feed the plateau window; when it fires, append the
+            // neutral marker to THIS call's result text (non-retrieval/write tools are skipped).
+            if crate::backend::glossa_tools::is_retrieval_tool(name) {
+                if let Some(marker) = progress.observe(&ids) {
+                    body.push_str(&marker);
+                }
             }
             // The reader path never feeds vision input — `execute_tool` already discards whatever
             // images `glossa_tools::exec` surfaced (e.g. from `read`); only `build::extract::

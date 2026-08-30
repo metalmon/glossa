@@ -2,7 +2,112 @@ use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::{HashSet, VecDeque};
 use std::sync::OnceLock;
+
+/// Per-EPISODE retrieval-plateau tracker. A reader that spirals — issuing search after search that
+/// each land on already-seen ground — never actually gains information, but the loop's
+/// unproductive-streak guard (`unproductive_steer`) resets on ANY single new id, so a spiral of
+/// varied slightly-productive probes evades it. This tracker measures a WINDOWED marginal-
+/// information-gain PLATEAU instead: it records the number of NEW result-ids each retrieval call
+/// surfaces into a sliding window of the last [`RetrievalProgress::W`] calls, and once enough calls
+/// have run with a cumulative body of results, fires ONCE when that window's total new-id count
+/// falls to (or below) [`RetrievalProgress::G`].
+///
+/// What it emits is a NEUTRAL OBSERVATION appended to the tool result (see [`RetrievalProgress::
+/// observe`]) — a factual "gain has plateaued" marker with counts — NOT an instruction. The POLICY
+/// (answer now / stop searching / change approach) is deliberately left to the reader PROMPT / GEPA:
+/// baking a directive into the shared tool layer would break its reuse and pre-empt the very thing
+/// the prompt is being optimized to decide.
+///
+/// One tracker lives per EPISODE (one eval case / one train rollout); callers that don't opt in
+/// simply never construct one, so the tool result is byte-identical to today. Only RETRIEVAL tool
+/// calls (the id-surfacing ones — see [`is_retrieval_tool`]) feed `observe`; write/non-retrieval
+/// tools are skipped so their zero-id results don't spuriously drain the window.
+#[derive(Debug, Default)]
+pub struct RetrievalProgress {
+    /// Every distinct result-id seen so far this episode (the cumulative retrieval footprint).
+    seen: HashSet<String>,
+    /// New-id count for each of the last `W` retrieval calls (front = oldest). A plateau is a
+    /// window whose SUM has fallen to `<= G`.
+    window: VecDeque<usize>,
+    /// True once the plateau marker has been emitted for the CURRENT plateau; reset to false as
+    /// soon as a later call surfaces genuinely new ids, so a second, distinct plateau can fire
+    /// again rather than the signal being one-shot for the whole episode.
+    fired: bool,
+    /// Total retrieval calls observed this episode (the `>= M` gate below).
+    calls: usize,
+}
+
+impl RetrievalProgress {
+    /// Sliding-window size: judge the plateau over the last `W` retrieval calls.
+    pub const W: usize = 3;
+    /// Minimum retrieval calls before a plateau can fire — don't call it early on a reader that
+    /// simply hasn't searched much yet.
+    pub const M: usize = 4;
+    /// Minimum cumulative distinct ids before a plateau can fire — a reader that has surfaced
+    /// almost nothing isn't "plateaued", it just hasn't found the corpus yet.
+    pub const E: usize = 3;
+    /// New-id budget over the window: `sum(window) <= G` is the plateau condition. `0` = zero new
+    /// ids across the last `W` calls.
+    pub const G: usize = 0;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one RETRIEVAL call's surfaced `new_ids` and return `Some(marker)` exactly once when
+    /// the window-of-last-`W` marginal gain has plateaued (`calls >= M` AND `seen >= E` AND a full
+    /// window AND `sum(window) <= G`), else `None`. The marker is a neutral factual observation with
+    /// counts — no imperative. Firing flips `fired` so it emits once per plateau; a later call that
+    /// brings genuinely new ids clears `fired` so a subsequent plateau can fire again.
+    pub fn observe(&mut self, new_ids: &[String]) -> Option<String> {
+        self.calls += 1;
+        let mut new_count = 0usize;
+        for id in new_ids {
+            if self.seen.insert(id.clone()) {
+                new_count += 1;
+            }
+        }
+        self.window.push_back(new_count);
+        if self.window.len() > Self::W {
+            self.window.pop_front();
+        }
+        // Genuinely new ground re-arms the signal for a future, distinct plateau.
+        if new_count > 0 {
+            self.fired = false;
+        }
+        let window_sum: usize = self.window.iter().sum();
+        let plateaued = !self.fired
+            && self.calls >= Self::M
+            && self.seen.len() >= Self::E
+            && self.window.len() >= Self::W
+            && window_sum <= Self::G;
+        if plateaued {
+            self.fired = true;
+            return Some(format!(
+                "\n\n[retrieval: {} unique results gathered; {} new over the last {} searches — gain has plateaued]",
+                self.seen.len(),
+                window_sum,
+                self.window.len(),
+            ));
+        }
+        None
+    }
+}
+
+/// Whether a tool NAME surfaces retrieval result-ids that should feed [`RetrievalProgress`] — the
+/// id-producing reader tools (`search`/`glossary`/`related`/`neighbors`/`reach`/`sql`/`read`). Write
+/// and non-id tools (`glob`/`grep`/`get_source_file`/`graph_stats`/`resolve`, and any unknown name)
+/// are excluded so their zero-id results never spuriously count as "no new" and drain the plateau
+/// window. `read` qualifies because its caller substitutes its `path` arg as the surfaced id (see
+/// `openai::execute_tool` / `gepa_graph::rollout_one`), even though `exec` returns none for it.
+pub fn is_retrieval_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "search" | "glossary" | "related" | "neighbors" | "reach" | "sql" | "read"
+    )
+}
 
 /// Stable node identifiers surfaced by a graph tool's rendered body, for the unproductive-streak
 /// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
@@ -499,6 +604,98 @@ mod tests {
     use glossa::model::Chunk;
     use glossa::trace::TraceLog;
     use std::path::PathBuf;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A productive multi-hop — every call surfaces a genuinely NEW id — must NEVER fire: the
+    /// window sum stays >= 1 > G on every call, so `observe` returns `None` throughout, even well
+    /// past the M-call and E-id thresholds.
+    #[test]
+    fn plateau_never_fires_on_a_productive_multihop() {
+        let mut p = RetrievalProgress::new();
+        for i in 0..12 {
+            let id = format!("doc.md#{i}");
+            assert_eq!(
+                p.observe(&[id.clone()]),
+                None,
+                "a call that adds a new id ({id}) must not plateau"
+            );
+        }
+    }
+
+    /// The plateau fires only once `calls >= M`, `seen >= E`, and the last-`W` window sum `<= G`
+    /// all hold. Call 1 seeds E distinct ids; calls 2..=M add nothing, so by call M the window is
+    /// all-zero and the marker fires — not before.
+    #[test]
+    fn plateau_fires_once_thresholds_met_not_before() {
+        let mut p = RetrievalProgress::new();
+        // Call 1: E distinct ids in one shot -> seen >= E, but calls < M so no fire yet.
+        assert_eq!(p.observe(&ids(&["a", "b", "c"])), None, "call 1: below M");
+        // Calls 2..M-1: nothing new, still below the M-call gate.
+        for _ in 0..(RetrievalProgress::M - 2) {
+            assert_eq!(p.observe(&[]), None, "no-new call below M must stay quiet");
+        }
+        // Call M: window is now all-zero over the last W calls, seen >= E, calls == M -> FIRE.
+        let marker = p
+            .observe(&[])
+            .expect("plateau must fire once M/E/window-sum thresholds are all met");
+        assert!(marker.contains("plateaued"), "marker: {marker}");
+        assert!(marker.contains("3 unique results gathered"), "counts in marker: {marker}");
+    }
+
+    /// Fires ONCE per plateau: after firing it stays quiet on further no-new calls, then a call
+    /// that brings genuinely new ids re-arms it so a SECOND, distinct plateau fires again.
+    #[test]
+    fn plateau_fires_once_then_rearms_on_new_ids() {
+        let mut p = RetrievalProgress::new();
+        p.observe(&ids(&["a", "b", "c"])); // seed E ids (call 1)
+        for _ in 0..(RetrievalProgress::M - 2) {
+            p.observe(&[]);
+        }
+        assert!(p.observe(&[]).is_some(), "first plateau fires at call M");
+        // Still plateaued, but already fired -> silent.
+        assert_eq!(p.observe(&[]), None, "second no-new call must not re-fire the same plateau");
+        assert_eq!(p.observe(&[]), None, "still silent while plateaued");
+        // A genuinely new id re-arms the signal and refills the window with a non-zero count.
+        assert_eq!(p.observe(&ids(&["d"])), None, "new id: window sum > G, no fire, re-armed");
+        // Drain the window back to all-zero over W calls -> a fresh plateau fires again.
+        for _ in 0..(RetrievalProgress::W - 1) {
+            assert_eq!(p.observe(&[]), None, "window not yet fully drained");
+        }
+        assert!(p.observe(&[]).is_some(), "a distinct later plateau must fire again");
+    }
+
+    /// The marker is a NEUTRAL observation: it states the counts and that gain has plateaued, and
+    /// carries none of the imperative/policy words that belong in the prompt (that's GEPA's job).
+    #[test]
+    fn plateau_marker_is_a_neutral_observation_not_a_directive() {
+        let mut p = RetrievalProgress::new();
+        p.observe(&ids(&["a", "b", "c"]));
+        for _ in 0..(RetrievalProgress::M - 2) {
+            p.observe(&[]);
+        }
+        let marker = p.observe(&[]).expect("plateau fires").to_lowercase();
+        for imperative in ["stop", "answer", "must", "commit", "should", "change approach", "give up"] {
+            assert!(
+                !marker.contains(imperative),
+                "neutral marker must not contain the directive word {imperative:?}: {marker}"
+            );
+        }
+    }
+
+    /// `is_retrieval_tool` gates which tools feed the tracker: the id-surfacing reader tools do,
+    /// write/non-id tools don't (so their zero-id results can't drain the plateau window).
+    #[test]
+    fn is_retrieval_tool_selects_id_surfacing_tools() {
+        for t in ["search", "glossary", "related", "neighbors", "reach", "sql", "read"] {
+            assert!(is_retrieval_tool(t), "{t} surfaces ids");
+        }
+        for t in ["glob", "grep", "get_source_file", "graph_stats", "resolve", "unknown"] {
+            assert!(!is_retrieval_tool(t), "{t} must not feed the tracker");
+        }
+    }
 
     #[test]
     fn repeated_term_extracts_text_intent_only() {
