@@ -67,6 +67,20 @@ timeout_secs = 120
 # model = "big-model"
 # timeout_secs = 300
 
+# [reason]                             # phase-2 backward-synthesis endpoint for `kbx reason`;
+# endpoint = "http://localhost:1234/v1/chat/completions"   # its own model, separate from build/distil.
+# model = "big-model"                  # Falls back to [distil] when unset (then errors if neither is set).
+# timeout_secs = 300
+
+# [bridge]                             # cheap binary cross-doc-link judge for `kbx build` stage 3
+# endpoint = "http://localhost:1234/v1/chat/completions"   # ("is this a real link?" per candidate pair).
+# model = "qwen3.5-4b"                 # A small/fast model suffices. Falls back to [model] when unset.
+# timeout_secs = 120
+
+# Every endpoint section above accepts the SAME fields as [model]: api / temperature /
+# [<section>.rate_limit] / [[<section>.fallback]]. Only [model] is required; the rest are optional
+# and fall back per the graph at the top — omit any you don't need and its default applies.
+
 # [user_sim]                           # OPT-IN simulated-user dialogue gate for the eval/train reader.
                                        # When set, a text-only reader turn that only restates the
                                        # question (instead of answering) is deflected back into the
