@@ -704,7 +704,12 @@ pub fn run(
     let url = cfg.endpoint.clone();
 
     let (train, val) = crate::gepa::split_by_episode(&questions, |q| q.id.as_str(), cfg.val_frac);
-    println!(
+    // All user-facing progress lines below go through `pb.println` (not raw `println!`/`eprintln!`):
+    // the bar is LIVE for the whole run (created in `run_train` before this fn is called), and a raw
+    // print interleaved with indicatif's redraw garbles the bar's line. `pb.println` prints the line
+    // ABOVE the bar and redraws it cleanly underneath; on a hidden bar (`--no-progress`/non-TTY) it
+    // is equivalent to a plain `println!`.
+    pb.println(format!(
         "gepa_graph: {} questions ({} train, {} val), budget={}, minibatch={}, pareto_size={}, graph={}, selection={}, work={}",
         questions.len(),
         train.len(),
@@ -715,7 +720,7 @@ pub fn run(
         graph.is_some(),
         cfg.candidate_selection,
         cfg.work.display(),
-    );
+    ));
     anyhow::ensure!(!val.is_empty(), "empty validation split — need >=2 distinct question ids");
 
     // Dataset-wide common proper-noun-shaped tokens (interrogatives, shared nouns recurring across
@@ -736,15 +741,15 @@ pub fn run(
         pb,
     );
     let baseline_score = mean(&scores(&baseline_out));
-    println!("baseline val: score={baseline_score:.3}");
+    pb.println(format!("baseline val: score={baseline_score:.3}"));
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let pareto_set = sample_questions(&val, cfg.pareto_size, &mut rng);
-    println!(
+    pb.println(format!(
         "pareto set (D_pareto): {} of {} val",
         pareto_set.len(),
         val.len(),
-    );
+    ));
     let base_pareto = score_questions(
         &cfg,
         &url,
@@ -786,7 +791,7 @@ pub fn run(
             }
         }
         let (Some(batch), Some(outcomes)) = (minibatch, parent_outcomes) else {
-            println!("[iter {it}] no failures in sampled minibatch — skip");
+            pb.println(format!("[iter {it}] no failures in sampled minibatch — skip"));
             continue;
         };
         let parent_mb_score = mean(&scores(&outcomes));
@@ -801,11 +806,11 @@ pub fn run(
                 steps: o.steps.clone(),
             })
             .collect();
-        println!(
+        pb.println(format!(
             "[iter {it}] reflect minibatch: {} rollouts (fails={}) parent_mb_score={parent_mb_score:.3}",
             outcomes.len(),
             fails.len(),
-        );
+        ));
 
         let ctx = GraphReflectContext {
             parent_prompt: parent_prompt.clone(),
@@ -817,12 +822,12 @@ pub fn run(
         let child_prompt = match reflect(&instruction) {
             Ok(p) => p,
             Err(e) => {
-                println!("[iter {it}] reflection failed: {e:#}");
+                pb.println(format!("[iter {it}] reflection failed: {e:#}"));
                 continue;
             }
         };
         if let Some(reason) = leak_scan(&child_prompt, &batch, &common_tokens) {
-            println!("[iter {it}] child REJECTED by leak-scan: {reason}");
+            pb.println(format!("[iter {it}] child REJECTED by leak-scan: {reason}"));
             continue;
         }
 
@@ -830,7 +835,9 @@ pub fn run(
             score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec, pb);
         let child_mb_score = mean(&scores(&child_mb));
         if child_mb_score <= parent_mb_score {
-            println!("[iter {it}] child_mb {child_mb_score:.3} <= parent_mb {parent_mb_score:.3} — discarded");
+            pb.println(format!(
+                "[iter {it}] child_mb {child_mb_score:.3} <= parent_mb {parent_mb_score:.3} — discarded"
+            ));
             continue;
         }
 
@@ -854,13 +861,13 @@ pub fn run(
             .map(|c| mean(&c.score_val))
             .fold(f64::NEG_INFINITY, f64::max);
         best_pareto_so_far = best_pareto;
-        println!(
+        pb.println(format!(
             "[iter {it}] parent_idx={parent_idx} parent_mb={parent_mb_score:.3} -> child_mb={child_mb_score:.3} — accepted (pareto_score={best_pareto:.3}, pool_size={})",
             pool.len(),
-        );
+        ));
     }
 
-    println!("final full-val scoring: {} candidates", pool.len());
+    pb.println(format!("final full-val scoring: {} candidates", pool.len()));
     pb.set_prefix(format!("training [final val] best={best_pareto_so_far:.3}"));
     let mut best_prompt = pool[0].prompt.clone();
     let mut best_score = f64::NEG_INFINITY;
@@ -875,10 +882,10 @@ pub fn run(
     if !best_score.is_finite() {
         best_score = 0.0;
     }
-    println!(
+    pb.println(format!(
         "gepa_graph final: score={best_score:.3} (baseline was {baseline_score:.3}), candidates={}",
         pool.len(),
-    );
+    ));
 
     Ok(GepaGraphResult {
         prompt: best_prompt,

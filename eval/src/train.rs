@@ -200,7 +200,12 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         && std::io::stdout().is_terminal()
         && std::io::stderr().is_terminal();
     let pb = if show_progress {
-        let pb = ProgressBar::new(dataset.len() as u64);
+        // Length 0 at creation, not `dataset.len()`: the first scoring pass inside `gepa_graph::run`
+        // sizes the bar to ITS OWN pass length (`score_questions` calls `pb.set_length` before every
+        // pass — e.g. the baseline pass scores only `val`, a subset of `dataset`), so seeding the
+        // full dataset count here would flash a misleading total for the brief window between bar
+        // creation and that first `set_length` call.
+        let pb = ProgressBar::new(0);
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
