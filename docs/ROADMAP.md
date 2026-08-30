@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-08-15**. Version **0.3.3** (unreleased; last tag `v0.3.2`).
+Status as of **2026-08-30**. Version **0.4.0** (unreleased; last tag `v0.3.4`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -8,6 +8,8 @@ For the reasoning graph’s inference-method direction (abduction / deduction / 
 
 Legend used below: **Shipped** = in a release today; **Partial** = exists but incomplete vs the goal; **Open** = not built.
 
+> **New in 0.4.0** *(kbx pipeline)*: multi-API transport (`api = "openai" | "anthropic" | "openai_responses"` via one unified `ChatTransport`), opt-in rate-limit resilience (retry/backoff/throttle) with ordered per-stage fallback chains, per-endpoint temperature, parallel `kbx` pipeline workers (`build`/`reason`/`train`/`distil`/`eval`), a `user_sim` dialogue gate, an evidence-grounded judge, fine-tuning dataset export (SFT + DPO, Unsloth-ready), and anti-loop retrieval signals (plateau/repeat/streak, novelty-gated trimming). See [CHANGELOG.md](../CHANGELOG.md).
+>
 > **New in 0.3.2:** first-class **OpenDocument** extraction (odt/ods/odp), **chart-data extraction** (OOXML + ODF charts → searchable GFM tables, incl. ODF cell-range resolution), and **embedded-image delivery to vision** (ODF `Pictures/`, legacy `.doc`/`.xls` raster). Marked **Shipped** below.
 >
 > **New in 0.3.0:** baked ontology presets + `kb ontology` CLI, mandatory grounding (`requires_grounding`), valid-time Phase 1, graph doctor (ungrounded/stale/incomplete), the offline HTML graph explorer, and `get_source_file` (docx→pdf).
@@ -30,7 +32,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Mandatory grounding + valid-time** *(post-v0.2.7)*: `requires_grounding` / `requires_validity` enforced at `graph_upsert` and advertised by `get_ontology`; valid-time Phase 1 — `--as-of` / `as_of`, `SUPERSEDES`, per-node status (current/future/expired).
 - **Graph doctor** *(post-v0.2.7)*: `kb graph doctor` + MCP `graph_doctor` — ungrounded / stale (source `file_sig` drift) / incomplete report and targeted prune; `generalize` is derived-layer only; inline `⚠ stale` marker on reads.
 - **HTML graph explorer** *(post-v0.2.7)*: `kb graph dump -f html` — one self-contained offline interactive explorer (search → focused local view, light/dark, mobile-friendly).
-- **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks).
+- **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks). Alongside it, the **`kbx` pipeline** (`build`/`reason`/`distil`/`train`/`eval`) now covers multi-API transport, retry/backoff/fallback, per-endpoint temperature, parallel workers, the `user_sim` gate, an evidence-grounded judge, and fine-tuning dataset export — see [eval-and-training.md](eval-and-training.md).
 - **Dev pipeline:** `justfile` recipes; Windows-friendly eval tooling.
 - **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick.
 - **export-tz:** four jsonl streams (`search`, `grep`, `glob`, `read`); synthetic grep/glob rows when episodes lack those tool calls; `TrainCase.source` gold join when present.

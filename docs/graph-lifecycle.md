@@ -232,16 +232,6 @@ terminal** for a human to run deliberately.
 
 ---
 
-## Roadmap (Planned)
-
-These improvements are designed but not yet shipped; this manual will drop the **[Planned]** tags as
-each ships:
-
-- **Consistent MCP re-index** — the `index` tool's forced rebuild will re-run `generalize`
-  automatically, matching `kb index --force`.
-
----
-
 ## See also
 
 - [graph-and-ontology.md](graph-and-ontology.md) — data model, ontology file, doctor and operator

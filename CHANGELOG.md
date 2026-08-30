@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-30
+
+### Added
+
+- **Multi-API transport.** Per-endpoint `api = "openai" | "anthropic" | "openai_responses"` (including native Anthropic Messages) routes through one unified `ChatTransport`, so a stage can call whichever provider's native API fits without a shim.
+- **Rate-limit resilience + fallback chains.** Opt-in per-endpoint retry/backoff and throttling (`rpm`, `max_inflight`, `retry`, `backoff_ms`), plus an ordered `[[<stage>.fallback]]` chain so a stage degrades to a backup endpoint instead of failing outright.
+- **Per-endpoint temperature.** `Option<f64>` per endpoint; omitted falls back to the provider default, and `KB_EVAL_TEMP` overrides it at run time.
+- **Parallel kbx pipeline workers.** `[tuning] jobs_build/reason/train/distil/eval` runs cases concurrently across the pipeline, with a race-free per-case trace.
+- **`user_sim` dialogue gate.** An opt-in patient simulated-user turn deflects a non-answer back into the reader loop instead of accepting it, for both eval and train.
+- **Fine-tuning dataset export.** Collects SFT and DPO pairs (Unsloth-ready) from the reasoning graph; see [docs/finetuning-datasets.md](docs/finetuning-datasets.md).
+- **Anti-loop retrieval signals.** Neutral plateau/repeat/streak markers surface per-session in the MCP server and in the eval/train reader, with novelty-gated result trimming to curb context bloat; plateaus are also paired into judge-labeled DPO examples during export.
+
+### Changed
+
+- **Evidence-grounded judge.** The judge now grades an answer against the retrieved source evidence, not only against the gold string.
+- **`kbx train` progress.** A visible iteration-based progress bar and honest metric names replace the earlier opaque counters.
+
 ## [0.3.4] — 2026-08-21
 
 ### Fixed

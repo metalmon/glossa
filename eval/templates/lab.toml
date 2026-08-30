@@ -15,6 +15,7 @@
 #   distil  -> [distil]  (standalone; no fallback)
 #   judge   -> [judge]   (standalone; skipped when unset)
 #   reflect -> [reflect] (standalone; `kbx train` only)
+#   user_sim-> [user_sim](standalone, opt-in dialogue gate; skipped when unset)
 [model]
 endpoint = "http://localhost:1234/v1/chat/completions"
 model = "qwen3.5-4b"
@@ -77,7 +78,8 @@ timeout_secs = 120
 # model = "qwen3.5-4b"                 # A small/fast model suffices. Falls back to [model] when unset.
 # timeout_secs = 120
 
-# Every endpoint section above accepts the SAME fields as [model]: api / temperature /
+# Every endpoint section — [build] [judge] [reflect] [distil] [reason] [bridge] above AND
+# [user_sim] below — accepts the SAME fields as [model]: api / temperature /
 # [<section>.rate_limit] / [[<section>.fallback]]. Only [model] is required; the rest are optional
 # and fall back per the graph at the top — omit any you don't need and its default applies.
 
@@ -92,6 +94,7 @@ timeout_secs = 120
 # model = "qwen3.5-4b"
 # timeout_secs = 60
 # temperature = 0.7
+# (also accepts api / [user_sim.rate_limit] / [[user_sim.fallback]], like every endpoint section)
 
 [tuning]                              # reason/build/distil/eval agent-loop tuning knobs.
                                        # Precedence: CLI flag > this section > built-in default.
