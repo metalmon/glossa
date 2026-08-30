@@ -132,6 +132,11 @@ pub(crate) struct GraphReflectContext {
     parent_prompt: String,
     parent_em: f64,
     fails: Vec<FailCase>,
+    /// The reader's ACTUAL tool schema (`backend::openai::tools_schema(graph_on)`), threaded in so
+    /// the reflect instruction renders its tool reference from the single source of truth instead of
+    /// a hand-maintained name list that drifts (omitted graph_query/reach). See
+    /// [`render_tool_reference`].
+    tools: Value,
 }
 
 fn golds_of(q: &Question) -> Vec<String> {
@@ -306,6 +311,47 @@ fn score_questions(
 
 // --- reflection (caller-injected transport) -------------------------------------------------
 
+/// Render a compact tool reference from the reader's ACTUAL tool schema
+/// (`backend::openai::tools_schema(graph_on)`) — one line per tool as
+/// `- name — description (params: a, b, …)`. This is the single source of truth for what the
+/// reader can do, so the reflector's view can never drift from the real toolset (the old hardcoded
+/// name list silently omitted `graph_query`/`reach`). Description is first-sentence/first-line
+/// trimmed to keep the block compact; param names come from the schema's
+/// `function.parameters.properties` keys.
+fn render_tool_reference(tools: &Value) -> String {
+    let mut out = String::new();
+    for t in tools.as_array().into_iter().flatten() {
+        let f = t.get("function").unwrap_or(t);
+        let name = f.get("name").and_then(Value::as_str).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let desc_full = f.get("description").and_then(Value::as_str).unwrap_or("");
+        // First sentence or first line, whichever is shorter — keeps the reference terse.
+        let desc = desc_full
+            .split(['\n', '.'])
+            .next()
+            .unwrap_or(desc_full)
+            .trim();
+        let params: Vec<&str> = f
+            .pointer("/parameters/properties")
+            .and_then(Value::as_object)
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        out.push_str("- ");
+        out.push_str(name);
+        if !desc.is_empty() {
+            out.push_str(" — ");
+            out.push_str(desc);
+        }
+        if !params.is_empty() {
+            out.push_str(&format!(" (params: {})", params.join(", ")));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> String {
     let mut cases = String::new();
     for (i, f) in ctx.fails.iter().enumerate() {
@@ -325,14 +371,22 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
             steps,
         ));
     }
+    let tool_reference = render_tool_reference(&ctx.tools);
     format!(
         "You are improving the SYSTEM PROMPT for a multi-hop question-answering agent that navigates \
-         a PRE-BUILT REASONING GRAPH with the tools glossary, neighbors, path, related, search, read. \
-         Answers are graded by EXACT MATCH of the shortest answer span.\n\
+         a PRE-BUILT REASONING GRAPH. Answers are graded by EXACT MATCH of the shortest answer span.\n\
+         The reader has these tools (reference only — the reader is given each tool's full \
+         description by the API at call time, so this is context for YOU, not text to copy):\n\
+         {tool_reference}\n\
          Below are FAILING rollouts: the question, the gold answer, the model's answer, and the \
          model's tool-call trace (tool name, arguments, truncated result per step).\n\
          Diagnose the recurring navigation/answering mistakes and rewrite the system prompt so \
          multi-hop exact-match improves. Preserve behavior that already works.\n\
+         Write STRATEGY and POLICY that leverages these tools — when and why to reach for each, how \
+         to compose multi-hop steps, and grounding discipline before answering. Do NOT copy tool \
+         mechanics, descriptions, or parameter lists into the reader prompt: the reader already \
+         receives those from the API at call time, so duplicating them only bloats the prompt and \
+         drifts from the real schema.\n\
          Output ONLY general, reusable behavior guidance for using the graph and tools. It MUST NOT \
          mention or reuse ANY specific entity name, answer, date, place, number, or other value from \
          the examples — those are test data and must never appear in the prompt.\n\
@@ -340,6 +394,7 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
          Reply with ONLY the new system prompt text — no preamble, no quotes.\n\n\
          === PARENT EXACT-MATCH ON MINIBATCH ===\nem={parent_em:.3}\n\n\
          === CURRENT SYSTEM PROMPT ===\n{prompt}\n\n=== FAILING ROLLOUTS ===\n{cases}=== NEW SYSTEM PROMPT ===",
+        tool_reference = tool_reference,
         parent_em = ctx.parent_em,
         prompt = ctx.parent_prompt,
         cases = cases,
@@ -682,6 +737,7 @@ pub fn run(
             parent_prompt: parent_prompt.clone(),
             parent_em: parent_em_mb,
             fails,
+            tools: tools.clone(),
         };
         let instruction = build_graph_reflect_instruction(&ctx);
         let child_prompt = match reflect(&instruction) {
@@ -811,6 +867,10 @@ mod tests {
 
     #[test]
     fn reflect_instruction_has_leak_guard_and_markers() {
+        // Tool reference is rendered from the reader's ACTUAL schema (single source of truth),
+        // graph-ON so the graph tools (glossary/reach/sql) the old hardcoded list drifted from
+        // are present.
+        let tools = crate::backend::openai::tools_schema(true);
         let ctx = GraphReflectContext {
             parent_prompt: "seed graph prompt".to_string(),
             parent_em: 0.25,
@@ -824,6 +884,7 @@ mod tests {
                     result: "(no matches)".to_string(),
                 }],
             }],
+            tools: tools.clone(),
         };
         let msg = build_graph_reflect_instruction(&ctx);
         assert!(msg.contains("PARENT EXACT-MATCH ON MINIBATCH"));
@@ -833,6 +894,32 @@ mod tests {
         assert!(msg.contains("glossary(") && msg.contains("Tool-call trace"));
         assert!(msg.contains("Gold answer: Jane Doe"));
         assert!(msg.contains("=== NEW SYSTEM PROMPT ==="));
+
+        // --- tool-awareness: reference block derived from the schema, not a hardcoded list ---
+        assert!(msg.contains("The reader has these tools"), "tool reference introduced as context");
+        // Every real graph-ON tool name from the schema appears in the rendered block — including
+        // `reach`/`sql`, which the retired hardcoded sentence silently omitted.
+        for name in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
+            assert!(
+                msg.contains(&format!("- {name} —")),
+                "rendered tool reference must list `{name}` derived from the schema"
+            );
+        }
+        // A parameter name from the schema is rendered (proves params come from the schema, not
+        // prose). `query` is search's param; order-independent (serde_json may sort keys).
+        assert!(msg.contains("params:"), "tool params rendered from schema");
+        assert!(msg.contains("query"), "search's `query` param name rendered from schema");
+        // The retired hand-maintained tool-name sentence must be gone.
+        assert!(
+            !msg.contains("neighbors, path, related"),
+            "old hardcoded/drifting tool-name list must be removed"
+        );
+        // Reflector is told to write strategy, NOT to copy tool mechanics into the reader prompt.
+        assert!(
+            msg.contains("Do NOT copy tool mechanics"),
+            "guidance against duplicating tool mechanics present"
+        );
+        assert!(msg.contains("STRATEGY"), "reflector told to write strategy/policy");
     }
 
     /// `score_questions` pairs each question with its input index, lets `run_units_parallel`
