@@ -164,6 +164,10 @@ fn main() -> anyhow::Result<()> {
                         // No `[user_sim]` config on the legacy CLI -> gate off (today's behavior).
                         user_sim: None,
                         user_sim_prompt: None,
+                        // Legacy `kb-eval run` CLI has no lab endpoint -> no rate-limit/fallback
+                        // (today's behavior exactly).
+                        rate_limit: None,
+                        fallback: Vec::new(),
                     })
                 }
                 BackendKind::Cli => {

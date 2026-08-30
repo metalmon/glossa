@@ -585,8 +585,11 @@ impl AgentBackend for TensorZeroBackend {
                 {
                     Ok(r) => break r,
                     Err(e) => {
+                        // 5xx (gateway/provider hiccup) and 429 (rate-limit) are transient — mirror
+                        // the openai/anthropic/responses transports so the TZ path also survives a
+                        // rate-limit instead of zeroing out the question. A genuine 4xx still fails.
                         let retryable = match &e {
-                            ureq::Error::Status(code, _) => *code >= 500,
+                            ureq::Error::Status(code, _) => *code >= 500 || *code == 429,
                             ureq::Error::Transport(_) => true,
                         };
                         attempt += 1;

@@ -4,6 +4,7 @@ pub mod glossa_tools;
 pub mod mock;
 pub mod openai;
 pub mod prompt;
+pub mod resilience;
 pub mod tensorzero;
 pub mod transport;
 pub mod user_sim;

@@ -338,6 +338,14 @@ pub struct OpenAiBackend {
     /// The simulated-user persona prompt (`user_sim.md`), used VERBATIM as the gate's system
     /// message. Only consulted when `user_sim` is also `Some`; `None` disables the gate.
     pub user_sim_prompt: Option<String>,
+    /// Opt-in rate-limit/retry policy carried from the reader's `[model]` endpoint, folded back into
+    /// the `Endpoint` handed to the agent loop so `backend::resilience` throttles + retry-tunes this
+    /// endpoint. `None` (the default) reproduces today's behavior exactly.
+    pub rate_limit: Option<crate::lab::RateLimit>,
+    /// Opt-in fallback chain carried from the reader's `[model]` endpoint. On a hard failure the
+    /// agent loop advances through these via `resilience::call_resilient`. Empty (the default)
+    /// reproduces today's behavior exactly (no fallback).
+    pub fallback: Vec<crate::lab::Endpoint>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -386,6 +394,8 @@ impl AgentBackend for OpenAiBackend {
             timeout_secs: self.timeout.as_secs(),
             api: crate::lab::ApiKind::default(),
             temperature: self.temperature,
+            rate_limit: self.rate_limit.clone(),
+            fallback: self.fallback.clone(),
         };
         let graph = if self.use_graph {
             glossa::graph::store::GraphStore::open(work).ok()
@@ -489,6 +499,8 @@ impl OpenAiBackend {
             temperature: None,
             user_sim: None,
             user_sim_prompt: None,
+            rate_limit: None,
+            fallback: Vec::new(),
         }
     }
 }
@@ -523,8 +535,14 @@ pub(crate) fn chat_once(
     if let Some(t) = temperature {
         body["temperature"] = json!(t);
     }
-    chat_http_full(endpoint, api_key, &body, Duration::from_secs(timeout_secs))
-        .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
+    chat_http_full(
+        endpoint,
+        api_key,
+        &body,
+        Duration::from_secs(timeout_secs),
+        crate::backend::resilience::RetryPolicy::default(),
+    )
+    .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
 }
 
 /// True when an error body reflects a transient UPSTREAM failure of the gateway's own backend (its
@@ -643,7 +661,9 @@ pub(crate) fn lmstudio_chat(
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MAX_LENGTH_RESAMPLE);
     let mut length_resamples = 0usize;
-    let mut full = chat_http_full(url, api_key, &body, timeout)?;
+    // Back-compat shim path (`build`/`distil`/`reason`/`gepa`): keeps the historical retry defaults.
+    let retry = crate::backend::resilience::RetryPolicy::default();
+    let mut full = chat_http_full(url, api_key, &body, timeout, retry)?;
     for _ in 0..GEN_LOOP_RETRIES {
         let content = full
             .pointer("/choices/0/message/content")
@@ -665,7 +685,7 @@ pub(crate) fn lmstudio_chat(
             length_resamples += 1;
         }
         RESAMPLES.fetch_add(1, Ordering::Relaxed);
-        full = chat_http_full(url, api_key, &body, timeout)?;
+        full = chat_http_full(url, api_key, &body, timeout, retry)?;
     }
     full.pointer("/choices/0/message")
         .cloned()
@@ -819,6 +839,10 @@ where
         timeout_secs: 120,
         api: crate::lab::ApiKind::default(),
         temperature: None,
+        // Blank endpoint -> no throttle, no fallback (the shim's `ClosureTransport` captures the
+        // real endpoint). `call_resilient` therefore makes exactly one primary call, unchanged.
+        rate_limit: None,
+        fallback: Vec::new(),
     };
     crate::backend::agent_loop::run_agent_loop(
         &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds, user_sim,

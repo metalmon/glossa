@@ -21,9 +21,31 @@ model = "qwen3.5-4b"
 # api_key = "sk-..."                 # inline key, OR:
 # api_key_env = "OPENAI_API_KEY"     # read the key from this env var (keeps the secret out of this file)
 timeout_secs = 120
+# api = "openai"                     # wire format: "openai" (default) | "anthropic" | "openai_responses"
 # temperature = 0.7                  # optional sampling temperature; OMIT to use the provider/model
                                      # default. The KB_EVAL_TEMP env var overrides this at every
                                      # call site. Settable per endpoint (any section below).
+
+# OPT-IN rate-limit + retry policy for THIS endpoint. OMIT the whole `[<stage>.rate_limit]` table
+# (the default) to keep today's behavior EXACTLY: no throttle, and 4 retry attempts with a
+# 400ms*attempt linear backoff. Any subset of the four knobs may be set; unset knobs keep the
+# historical defaults. Settable under any endpoint section (e.g. `[judge.rate_limit]`).
+# [model.rate_limit]
+# rpm = 60             # max requests/minute (min-interval 60000/rpm ms between request starts)
+# max_inflight = 4     # max concurrent in-flight requests to this endpoint
+# retry = 4            # total attempts on a transient failure (429 / 5xx / transport drop). Default 4.
+# backoff_ms = 400     # linear backoff base: attempt n sleeps backoff_ms*n. Default 400.
+
+# OPT-IN fallback chain: on a HARD failure of this endpoint (retries exhausted / 5xx / timeout /
+# connect error) the resilience layer advances through these fallbacks IN ORDER, each with its OWN
+# `api`/`rate_limit`. FLAT chain — a fallback's own `fallback` is IGNORED (never recursed). Primary
+# success never touches a fallback. OMIT (the default) for no fallback. Repeat the block per link.
+# [[model.fallback]]
+# endpoint = "http://localhost:1234/v1/chat/completions"   # e.g. a local model backing a flaky cloud primary
+# model = "qwen3.5-4b"
+# timeout_secs = 120
+# [model.fallback.rate_limit]      # each fallback link may carry its own rate-limit/retry policy
+# retry = 2
 
 # [build]                              # override the harvest model for `kbx build`; falls back to [model]
 # endpoint = "http://localhost:1234/v1/chat/completions"

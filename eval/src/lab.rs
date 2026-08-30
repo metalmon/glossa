@@ -53,6 +53,41 @@ pub struct Endpoint {
     /// [`Endpoint::resolve_temperature`]).
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Opt-in per-endpoint rate-limit + retry policy (`backend::resilience`). `None` (absent from
+    /// `lab.toml`, the default) reproduces today's behavior EXACTLY: no throttle, and the transport
+    /// retries with the historical `4 attempts / 400ms*attempt` linear backoff (see
+    /// [`crate::backend::resilience::RetryPolicy`]). When present, `rpm`/`max_inflight` throttle the
+    /// endpoint and `retry`/`backoff_ms` override the retry constants.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimit>,
+    /// Opt-in fallback chain: on a HARD failure of this endpoint (retries exhausted / 5xx / timeout /
+    /// connect error) the resilience layer advances through these endpoints in order, each with its
+    /// OWN `api`/`rate_limit`. FLAT chain — a fallback's own `fallback` field is IGNORED (never
+    /// recursed) to bound the chain. Empty (the default, and absent from `lab.toml`) means no
+    /// fallback, byte-identical to today.
+    #[serde(default)]
+    pub fallback: Vec<Endpoint>,
+}
+
+/// Opt-in per-endpoint rate-limit + retry policy. Every field is optional so a partial `[<stage>]`
+/// `[<stage>.rate_limit]` table is valid and unspecified knobs keep their historical defaults. A
+/// wholly-absent `rate_limit` (the common case) means no throttling and the historical retry
+/// constants — see [`Endpoint::rate_limit`].
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RateLimit {
+    /// Max requests per minute for this endpoint (a min-interval throttle of `60_000/rpm` ms between
+    /// request starts). `None` = no rate throttle.
+    #[serde(default)]
+    pub rpm: Option<u32>,
+    /// Max concurrent in-flight requests to this endpoint (a blocking semaphore). `None` = uncapped.
+    #[serde(default)]
+    pub max_inflight: Option<u32>,
+    /// Total retry attempts on transient failure. `None` = the historical default of `4`.
+    #[serde(default)]
+    pub retry: Option<u32>,
+    /// Linear backoff base in ms: attempt `n` sleeps `backoff_ms * n`. `None` = the historical `400`.
+    #[serde(default)]
+    pub backoff_ms: Option<u64>,
 }
 
 impl Endpoint {

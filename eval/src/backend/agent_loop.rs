@@ -10,11 +10,34 @@
 //! `ChatTransport` directly is Phase 2 Task 6 of the plan) keep compiling unchanged. The dedup/
 //! streak/NBA logic itself lives in exactly ONE place: here.
 
-use crate::backend::transport::{ChatTransport, TurnReply};
+use crate::backend::transport::{transport_for, ChatTransport, TurnReply};
 use crate::backend::user_sim::DialogueGate;
 use crate::lab::Endpoint;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+
+/// One `transport.call`, wrapped in the resilience layer: throttle + fallback chain per the
+/// endpoint's opt-in `rate_limit`/`fallback`. For the PRIMARY link the already-built `transport` is
+/// reused verbatim (so the injected mock transport in tests, and today's real transport, drive the
+/// primary exactly as before); only fallback links build their own transport via `transport_for`.
+/// With `ep.fallback` empty and `ep.rate_limit` absent this is a single un-throttled `transport.call`
+/// — byte-identical to the pre-Phase-3 code path.
+fn resilient_call(
+    transport: &dyn ChatTransport,
+    ep: &Endpoint,
+    system: Option<&str>,
+    messages: &[Value],
+    tools: Option<&Value>,
+    temperature: Option<f64>,
+) -> anyhow::Result<TurnReply> {
+    crate::backend::resilience::call_resilient(ep, |link| {
+        if std::ptr::eq(link, ep) {
+            transport.call(link, system, messages, tools, temperature)
+        } else {
+            transport_for(link.api).call(link, system, messages, tools, temperature)
+        }
+    })
+}
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row
 /// that each surface zero new identifiers trips the steer. Named so the TDD tests and the loop
@@ -98,7 +121,7 @@ pub fn run_agent_loop(
     let mut unproductive: usize = 0;
 
     for _ in 0..max_rounds {
-        let reply: TurnReply = transport.call(ep, system, &messages, tools, temperature)?;
+        let reply: TurnReply = resilient_call(transport, ep, system, &messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
             let text = reply.text.clone().unwrap_or_default();
             match user_sim {
@@ -160,7 +183,7 @@ pub fn run_agent_loop(
         "role": "user",
         "content": "Stop searching. Give your final answer now on a single line beginning with `ANSWER:`."
     }));
-    let reply = transport.call(ep, system, &messages, tools, temperature)?;
+    let reply = resilient_call(transport, ep, system, &messages, tools, temperature)?;
     Ok(reply.text.unwrap_or_default())
 }
 
@@ -185,6 +208,8 @@ mod tests {
             timeout_secs: 30,
             api: crate::lab::ApiKind::default(),
             temperature: None,
+            rate_limit: None,
+            fallback: Vec::new(),
         }
     }
 

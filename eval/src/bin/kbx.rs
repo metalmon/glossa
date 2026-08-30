@@ -626,6 +626,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             temperature: lab.model.temperature,
             user_sim: lab.user_sim.clone(),
             user_sim_prompt: user_sim_prompt.clone(),
+            rate_limit: lab.model.rate_limit.clone(),
+            fallback: lab.model.fallback.clone(),
         };
         let answer = match backend.answer(&paths.root, q) {
             Ok(a) => a,

@@ -12,6 +12,7 @@
 
 use super::openai::parse_tool_args;
 use super::{http_client, runtime, ChatTransport, ToolCall, TurnReply};
+use crate::backend::resilience::RetryPolicy;
 use crate::lab::Endpoint;
 use anyhow::anyhow;
 use serde_json::{json, Value};
@@ -60,6 +61,7 @@ impl ChatTransport for ResponsesTransport {
             ep.resolve_key().as_deref(),
             &body,
             Duration::from_secs(ep.timeout_secs),
+            RetryPolicy::from_rate_limit(ep.rate_limit.as_ref()),
         )?;
 
         Ok(parse_response(resp))
@@ -206,11 +208,12 @@ fn responses_http(
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
+    retry: RetryPolicy,
 ) -> anyhow::Result<Value> {
     let url = endpoint.to_string();
 
     let mut last_err = None;
-    for attempt in 1..=4u32 {
+    for attempt in 1..=retry.attempts {
         let (retryable, outcome): (bool, anyhow::Result<Value>) = runtime().block_on(async {
             let mut rb = http_client().post(&url).timeout(timeout).json(body);
             if let Some(key) = api_key.filter(|k| !k.is_empty()) {
@@ -255,8 +258,8 @@ fn responses_http(
             Ok(v) => return Ok(v),
             Err(e) => {
                 last_err = Some(e);
-                if retryable && attempt < 4 {
-                    std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+                if retryable && attempt < retry.attempts {
+                    std::thread::sleep(retry.backoff(attempt));
                 } else {
                     break;
                 }
@@ -469,6 +472,8 @@ mod tests {
             timeout_secs: 5,
             api: crate::lab::ApiKind::OpenAiResponses,
             temperature: None,
+            rate_limit: None,
+            fallback: Vec::new(),
         };
 
         let transport = ResponsesTransport;

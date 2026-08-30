@@ -8,6 +8,7 @@
 //! Phase 2 Task 6 in the multi-api-transport plan).
 
 use super::{http_client, runtime, ChatTransport, ToolCall, TurnReply};
+use crate::backend::resilience::RetryPolicy;
 use crate::lab::Endpoint;
 use anyhow::anyhow;
 use serde_json::{json, Value};
@@ -48,12 +49,20 @@ impl ChatTransport for OpenAiTransport {
             body["tools"] = t.clone();
         }
 
-        let msg = chat_http(
+        // Retry/backoff comes from this endpoint's opt-in `rate_limit`; absent -> the historical
+        // 4-attempt / 400ms*attempt defaults (see `RetryPolicy::from_rate_limit`).
+        let retry = RetryPolicy::from_rate_limit(ep.rate_limit.as_ref());
+        let full = chat_http_full(
             &ep.endpoint,
             ep.resolve_key().as_deref(),
             &body,
             Duration::from_secs(ep.timeout_secs),
+            retry,
         )?;
+        let msg = full
+            .pointer("/choices/0/message")
+            .cloned()
+            .ok_or_else(|| anyhow!("chat response had no choices[0].message"))?;
 
         let tool_calls: Vec<ToolCall> = msg
             .get("tool_calls")
@@ -104,13 +113,18 @@ impl ChatTransport for OpenAiTransport {
 /// survive the round-trip. In particular reasoning models (MiMo on OpenCode Zen) return
 /// `reasoning_content` on assistant tool-call turns and require it echoed back on the next request;
 /// typed message structs drop it and the provider then rejects the follow-up with HTTP 400.
+// Retained as a thin message-extracting wrapper for the tests + external callers that don't carry a
+// `RateLimit`; `OpenAiTransport::call` now goes through `chat_http_full` directly to pass a policy.
+#[allow(dead_code)]
 pub(crate) fn chat_http(
     endpoint: &str,
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let full = chat_http_full(endpoint, api_key, body, timeout)?;
+    // Back-compat entry point: keeps the historical retry defaults (its callers don't carry an
+    // `Endpoint`/`RateLimit`); the `Endpoint`-aware paths go through `chat_http_full` with a policy.
+    let full = chat_http_full(endpoint, api_key, body, timeout, RetryPolicy::default())?;
     full.pointer("/choices/0/message")
         .cloned()
         .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
@@ -141,6 +155,7 @@ pub(crate) fn chat_http_full(
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
+    retry: RetryPolicy,
 ) -> anyhow::Result<Value> {
     use crate::backend::openai::{is_transient_upstream, record_usage};
     let url = endpoint.to_string();
@@ -162,7 +177,7 @@ pub(crate) fn chat_http_full(
     // turns and REQUIRE it echoed back on the next request; the SDK's typed structs silently drop
     // that field, causing HTTP 400 mid-loop. Passing raw `Value` messages preserves it end-to-end.
     let mut last_err = None;
-    for attempt in 1..=4u32 {
+    for attempt in 1..=retry.attempts {
         let (retryable, outcome): (bool, anyhow::Result<Value>) = runtime().block_on(async {
             let mut rb = http_client().post(&url).timeout(timeout).json(&body);
             if let Some(key) = api_key.filter(|k| !k.is_empty()) {
@@ -219,8 +234,8 @@ pub(crate) fn chat_http_full(
             Ok(v) => return Ok(v),
             Err(e) => {
                 last_err = Some(e);
-                if retryable && attempt < 4 {
-                    std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+                if retryable && attempt < retry.attempts {
+                    std::thread::sleep(retry.backoff(attempt));
                 } else {
                     break;
                 }
