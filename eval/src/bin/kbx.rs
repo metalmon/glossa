@@ -60,6 +60,15 @@ enum ExportShape {
     Sharegpt,
 }
 
+/// `export --dpo-focus` values (DPO only). Currently a single variant — kept as an enum (rather
+/// than a bare bool flag) so a future focus mode has a natural slot without a breaking CLI change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum DpoFocus {
+    /// Emit ONLY pairs whose rejected trajectory spiraled past a "gain has plateaued" signal
+    /// (kept searching instead of answering); skip questions lacking such a rejected candidate.
+    Plateau,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Scaffold a fresh eval workspace at `<path>/.glossa/kbx/`: lab.toml + prompts + dataset.toml + runs/.
@@ -146,6 +155,18 @@ enum Cmd {
         /// DPO only: max pairs emitted per question (default 1 = best Correct vs a Wrong).
         #[arg(long = "max-pairs", default_value_t = 1)]
         max_pairs: usize,
+        /// DPO only: restrict to plateau-contrastive pairs — rejected must have searched past a
+        /// "gain has plateaued" signal instead of answering. Questions lacking such a rejected
+        /// candidate are skipped (and counted). Without this flag, DPO pairing still BIASES the
+        /// rejected choice toward a spiraled trajectory when several Wrong ones exist, but falls
+        /// back to any Wrong so today's behavior is preserved when nothing plateaued.
+        #[arg(long = "dpo-focus", value_enum)]
+        dpo_focus: Option<DpoFocus>,
+        /// SFT only: stable-partition kept trajectories so ones containing a plateau turn come
+        /// first (a light up-weight of "reacted to the signal and still answered correctly"
+        /// demonstrations). Default off = today's input order.
+        #[arg(long = "sft-prefer-signal")]
+        sft_prefer_signal: bool,
     },
     /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
     Build {
@@ -404,6 +425,8 @@ fn main() -> Result<()> {
             shape,
             include_partial,
             max_pairs,
+            dpo_focus,
+            sft_prefer_signal,
         } => run_export(ExportArgs {
             path,
             from,
@@ -412,6 +435,8 @@ fn main() -> Result<()> {
             shape,
             include_partial,
             max_pairs,
+            dpo_focus,
+            sft_prefer_signal,
         }),
         Cmd::Build {
             path,
@@ -573,6 +598,8 @@ struct ExportArgs {
     shape: ExportShape,
     include_partial: bool,
     max_pairs: usize,
+    dpo_focus: Option<DpoFocus>,
+    sft_prefer_signal: bool,
 }
 
 /// The concrete files/dirs an `eval` run reads from and writes to, after folding the workspace's
@@ -948,21 +975,30 @@ fn run_export(args: ExportArgs) -> Result<()> {
                 ExportShape::Messages => SftShape::Messages,
                 ExportShape::Sharegpt => SftShape::Sharegpt,
             };
-            let rows = export_sft(&records, shape, args.include_partial);
+            let out = export_sft(&records, shape, args.include_partial, args.sft_prefer_signal);
             let summary = format!(
-                "SFT: {} lines from {} trajectories ({} tag(s))",
-                rows.len(),
+                "SFT: {} lines from {} trajectories ({} tag(s)), {} signal-reaction",
+                out.rows.len(),
                 records.len(),
-                tags.len()
+                tags.len(),
+                out.signal_reaction
             );
-            (rows, summary)
+            (out.rows, summary)
         }
         ExportFormat::Dpo => {
-            let out = export_dpo(&records, args.max_pairs.max(1));
+            let focus_plateau = matches!(args.dpo_focus, Some(DpoFocus::Plateau));
+            let out = export_dpo(&records, args.max_pairs.max(1), focus_plateau);
+            let skip_reason = if focus_plateau {
+                "lacked both classes or no spiraled-past-plateau rejected"
+            } else {
+                "lacked both classes"
+            };
             let summary = format!(
-                "DPO: {} pairs, {} question(s) skipped (lacked both classes), from {} trajectories",
+                "DPO: {} pairs ({} plateau-contrastive), {} question(s) skipped ({}), from {} trajectories",
                 out.pairs.len(),
+                out.plateau_contrastive,
                 out.questions_skipped,
+                skip_reason,
                 records.len()
             );
             (out.pairs, summary)

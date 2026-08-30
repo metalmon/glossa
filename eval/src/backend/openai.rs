@@ -412,11 +412,14 @@ impl OpenAiBackend {
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),
         );
-        // Per-episode retrieval-plateau tracker (see `glossa_tools::RetrievalProgress`): a NEUTRAL
-        // "gain has plateaued" marker is appended to a retrieval tool's result once the reader's
-        // windowed marginal information-gain flatlines. Owned here so it resets per question; the
-        // POLICY (what to do about it) stays in the reader prompt / GEPA, not in the tool layer.
-        let mut progress = crate::backend::glossa_tools::RetrievalProgress::new();
+        // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): this wrapper only
+        // acts on its PLATEAU kind — a NEUTRAL "gain has plateaued" observation applied via the
+        // signal's own render (drop the redundant body on a drained plateau, or append the marker
+        // when the call still turned up a little new ground). Repeat/Streak are left to the agent
+        // loop's own pre-exec dedup / unproductive-streak guard (`agent_loop.rs`) — acting on them
+        // here too would double up. Owned here so it resets per question; the POLICY (what to do
+        // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
+        let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
         let exec = |name: &str, args: &Value| {
             let (mut body, ids) = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
@@ -425,12 +428,11 @@ impl OpenAiBackend {
                 let snippet: String = body.chars().take(500).collect();
                 eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
             }
-            // Only id-surfacing RETRIEVAL calls feed the plateau window; when it fires, append the
-            // neutral marker to THIS call's result text (non-retrieval/write tools are skipped).
+            // Only id-surfacing RETRIEVAL calls feed the tracker; only its PLATEAU kind is acted on
+            // here — Repeat/Streak are the loop's job (see the comment above).
             if crate::backend::glossa_tools::is_retrieval_tool(name) {
-                if let Some(marker) = progress.observe(&ids) {
-                    body.push_str(&marker);
-                }
+                let key = format!("{name}:{args}");
+                body = crate::backend::glossa_tools::apply_plateau_render(&mut signals, name, &key, &ids, body);
             }
             // The reader path never feeds vision input — `execute_tool` already discards whatever
             // images `glossa_tools::exec` surfaced (e.g. from `read`); only `build::extract::

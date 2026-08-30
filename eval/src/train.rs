@@ -193,18 +193,16 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         Ok(child)
     };
 
-    // Visible progress bar for the long rollout-scoring passes (mirrors `kbx run`/build/reason):
-    // one bar owned here, driven per scoring pass by `gepa_graph::score_questions`. Hidden on a
-    // non-TTY or under `--no-progress`, exactly like `run_eval`.
+    // Visible progress bar for the long GEPA run (mirrors `kbx run`/build/reason): one bar owned
+    // here, driven per iteration by `gepa_graph::run` (length = budget, position = iterations done).
+    // Hidden on a non-TTY or under `--no-progress`, exactly like `run_eval`.
     let show_progress = !args.no_progress
         && std::io::stdout().is_terminal()
         && std::io::stderr().is_terminal();
     let pb = if show_progress {
-        // Length 0 at creation, not `dataset.len()`: the first scoring pass inside `gepa_graph::run`
-        // sizes the bar to ITS OWN pass length (`score_questions` calls `pb.set_length` before every
-        // pass — e.g. the baseline pass scores only `val`, a subset of `dataset`), so seeding the
-        // full dataset count here would flash a misleading total for the brief window between bar
-        // creation and that first `set_length` call.
+        // Length 0 at creation: `gepa_graph::run` sets the real length (= budget) once it starts, so
+        // the bar tracks GEPA iterations end-to-end (`[iter/budget]`). Seeding a count here would
+        // flash a misleading total for the brief window before that first `set_length`.
         let pb = ProgressBar::new(0);
         pb.set_style(
             ProgressStyle::with_template(

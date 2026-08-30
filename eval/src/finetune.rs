@@ -99,22 +99,102 @@ fn keep_for_sft(v: Verdict, include_partial: bool) -> bool {
     matches!(v, Verdict::Correct) || (include_partial && matches!(v, Verdict::Partial))
 }
 
+/// The stable substring the eval reader's plateau render (`glossa_tools::apply_plateau_render` /
+/// `retrieval_progress::plateau_marker`) always includes — "N unique results gathered; M new over
+/// the last W searches — **gain has plateaued**". Matching on JUST this tail deliberately excludes
+/// the repeat marker ("identical query already run this session — result unchanged") and the streak
+/// marker ("last K searches surfaced no new information"): this export feature is plateau-specific,
+/// not a general retrieval-signal detector.
+const PLATEAU_MARKER_SUBSTR: &str = "gain has plateaued";
+
+/// Whether a captured chat message is a plateau-signal TOOL result — a `role:"tool"` message whose
+/// rendered text contains [`PLATEAU_MARKER_SUBSTR`].
+fn is_plateau_tool_message(m: &Value) -> bool {
+    m.get("role").and_then(Value::as_str) == Some("tool") && message_text(m).contains(PLATEAU_MARKER_SUBSTR)
+}
+
+/// Index (into `messages`) of the LAST plateau-signal tool message, if the trajectory has one. A
+/// trajectory can plateau more than once (`ReaderSignals` re-arms after new ground); only the LAST
+/// occurrence matters for "did the reader keep searching AFTER being told gain had plateaued".
+fn last_plateau_turn_index(messages: &[Value]) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_plateau_tool_message(m))
+        .map(|(i, _)| i)
+        .last()
+}
+
+/// Whether a trajectory contains at least one plateau-signal tool message anywhere.
+fn has_plateau_turn(messages: &[Value]) -> bool {
+    last_plateau_turn_index(messages).is_some()
+}
+
+/// Whether an assistant message issued at least one tool call (a non-empty `tool_calls` array) —
+/// i.e. it kept searching rather than answering in plain text.
+fn is_tool_calling_assistant(m: &Value) -> bool {
+    m.get("role").and_then(Value::as_str) == Some("assistant")
+        && m.get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+}
+
+/// A trajectory "spiraled past" its plateau: it has a plateau-signal tool message AND at least one
+/// assistant message AFTER that last plateau turn still issued a tool call — i.e. the reader kept
+/// searching once told gain had flatlined, instead of answering. A trajectory with no plateau turn
+/// never spirals (there was nothing to spiral past). NOTE: this is purely a TRAJECTORY-SHAPE
+/// predicate — it says nothing about whether the answer ended up right or wrong; the judge verdict
+/// (not this predicate) is what decides chosen-vs-rejected eligibility (see [`export_dpo`]).
+fn spiraled_past_plateau(messages: &[Value]) -> bool {
+    match last_plateau_turn_index(messages) {
+        Some(idx) => messages[idx + 1..].iter().any(is_tool_calling_assistant),
+        None => false,
+    }
+}
+
+/// Outcome of an SFT export: the kept lines plus how many are "signal-reaction" demonstrations (a
+/// kept trajectory that contains a plateau turn — the reader saw the signal and, per its Correct/
+/// kept verdict, still landed a good answer).
+pub struct SftExport {
+    pub rows: Vec<Value>,
+    pub signal_reaction: usize,
+}
+
 /// Build the SFT lines from captured trajectories. One JSON object per kept trajectory (Correct,
-/// plus Partial when `include_partial`), in input order. `Messages` passes the captured `messages`
-/// through as `{"messages":[...]}`; `Sharegpt` maps them to `{"conversations":[{"from","value"}]}`.
+/// plus Partial when `include_partial`). `Messages` passes the captured `messages` through as
+/// `{"messages":[...]}`; `Sharegpt` maps them to `{"conversations":[{"from","value"}]}`.
+///
+/// `prefer_signal`: when set, stable-partitions the kept trajectories so ones containing a plateau
+/// turn come first (relative order preserved within each half) — a mild up-weight of "reacted to
+/// the signal and still answered correctly" demonstrations, with no other reordering machinery.
+/// Default (`false`) keeps today's input order exactly.
 pub fn export_sft(
     records: &[TrajectoryRecord],
     shape: SftShape,
     include_partial: bool,
-) -> Vec<Value> {
-    records
+    prefer_signal: bool,
+) -> SftExport {
+    let kept: Vec<&TrajectoryRecord> = records
         .iter()
         .filter(|r| keep_for_sft(r.verdict, include_partial))
+        .collect();
+    let signal_reaction = kept.iter().filter(|r| has_plateau_turn(&r.messages)).count();
+    let ordered: Vec<&TrajectoryRecord> = if prefer_signal {
+        let (with_signal, without_signal): (Vec<_>, Vec<_>) =
+            kept.into_iter().partition(|r| has_plateau_turn(&r.messages));
+        with_signal.into_iter().chain(without_signal).collect()
+    } else {
+        kept
+    };
+    let rows = ordered
+        .into_iter()
         .map(|r| match shape {
             SftShape::Messages => json!({ "messages": r.messages }),
             SftShape::Sharegpt => json!({ "conversations": to_conversations(&r.messages) }),
         })
-        .collect()
+        .collect();
+    SftExport { rows, signal_reaction }
 }
 
 /// Map an OpenAI/ChatML `messages` array to ShareGPT `conversations`: system→system, user→human,
@@ -176,19 +256,35 @@ fn final_completion(r: &TrajectoryRecord) -> String {
         .unwrap_or_else(|| r.answer.clone())
 }
 
-/// Outcome of a DPO export: the pair rows plus how many questions were skipped for lacking both a
-/// Correct and a Wrong trajectory.
+/// Outcome of a DPO export: the pair rows, how many questions were skipped (lacking both a Correct
+/// and a Wrong trajectory, or — under `focus_plateau` — lacking a Wrong that spiraled past a
+/// plateau), and how many emitted pairs are plateau-contrastive (rejected spiraled past a plateau).
 pub struct DpoExport {
     pub pairs: Vec<Value>,
     pub questions_skipped: usize,
+    pub plateau_contrastive: usize,
 }
 
 /// Build DPO `{prompt, chosen, rejected}` rows. Group the trajectories by question `id`; for each
-/// group that has BOTH a Correct and a Wrong trajectory, emit up to `max_pairs` rows pairing
-/// Correct[i] (chosen) with Wrong[i] (rejected). `prompt` is the shared system+user seed as a
+/// group that has BOTH a Correct and a Wrong trajectory, emit up to `max_pairs` rows pairing a
+/// chosen (Correct) with a rejected (Wrong) trajectory. `prompt` is the shared system+user seed as a
 /// messages array. Groups lacking either class are skipped and counted. Deterministic: groups are
-/// emitted in first-seen id order, trajectories in input order.
-pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize) -> DpoExport {
+/// emitted in first-seen id order, trajectories in input order (within a class).
+///
+/// Plateau-aware pairing (both driven purely by the JUDGE VERDICT — never by trajectory shape):
+/// - **chosen** candidates are ordered so a Correct trajectory that ALSO contains a plateau turn
+///   (it answered despite / after the signal) comes first; every OTHER Correct trajectory — INCLUDING
+///   one that kept searching past its own plateau turn and still landed Correct — remains fully
+///   eligible as chosen, just not prioritized to the front. CRITICAL: because chosen is drawn only
+///   from `Verdict::Correct`, a Correct trajectory can never end up rejected here, no matter how it
+///   reacted to a plateau — that's what prevents training premature give-up.
+/// - **rejected** candidates are ordered so a Wrong trajectory that [`spiraled_past_plateau`] (kept
+///   searching after the signal instead of answering) comes first; other Wrong trajectories follow.
+/// - `focus_plateau`: when set, the rejected pool is restricted to ONLY spiraled-Wrong trajectories
+///   — a question whose Wrong trajectories never spiraled is skipped (and counted). When unset, the
+///   full Wrong pool is used (spiraled ones biased to the front), so the feature degrades to today's
+///   any-Correct-vs-any-Wrong behavior when no trajectory plateaued at all.
+pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize, focus_plateau: bool) -> DpoExport {
     // Preserve first-seen id order for deterministic output.
     let mut order: Vec<String> = Vec::new();
     let mut groups: std::collections::HashMap<String, Vec<&TrajectoryRecord>> =
@@ -203,6 +299,7 @@ pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize) -> DpoExport {
 
     let mut pairs = Vec::new();
     let mut questions_skipped = 0usize;
+    let mut plateau_contrastive = 0usize;
     for id in &order {
         let group = &groups[id];
         let correct: Vec<&&TrajectoryRecord> = group
@@ -217,10 +314,35 @@ pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize) -> DpoExport {
             questions_skipped += 1;
             continue;
         }
-        let n = max_pairs.min(correct.len()).min(wrong.len());
+
+        // Chosen pool: Correct trajectories, plateau-turn ones biased to the front. Stable
+        // partition — every Correct trajectory stays eligible regardless of how it reacted.
+        let (chosen_signal, chosen_rest): (Vec<_>, Vec<_>) =
+            correct.into_iter().partition(|r| has_plateau_turn(&r.messages));
+        let chosen_pool: Vec<&&TrajectoryRecord> =
+            chosen_signal.into_iter().chain(chosen_rest).collect();
+
+        // Rejected pool: Wrong trajectories that spiraled past a plateau, biased to the front (or
+        // exclusively, under `focus_plateau`).
+        let (rejected_spiraled, rejected_rest): (Vec<_>, Vec<_>) =
+            wrong.into_iter().partition(|r| spiraled_past_plateau(&r.messages));
+        if focus_plateau && rejected_spiraled.is_empty() {
+            questions_skipped += 1;
+            continue;
+        }
+        let rejected_pool: Vec<&&TrajectoryRecord> = if focus_plateau {
+            rejected_spiraled
+        } else {
+            rejected_spiraled.into_iter().chain(rejected_rest).collect()
+        };
+
+        let n = max_pairs.min(chosen_pool.len()).min(rejected_pool.len());
         for i in 0..n {
-            let chosen = correct[i];
-            let rejected = wrong[i];
+            let chosen = chosen_pool[i];
+            let rejected = rejected_pool[i];
+            if spiraled_past_plateau(&rejected.messages) {
+                plateau_contrastive += 1;
+            }
             // TRL/Unsloth conversational DPO: `prompt` is the [system,user] seed; `chosen`/
             // `rejected` are message-lists holding the FINAL assistant answer turn (not raw
             // strings), so the preference signal is correct-answer vs wrong-answer given the prompt.
@@ -231,7 +353,7 @@ pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize) -> DpoExport {
             }));
         }
     }
-    DpoExport { pairs, questions_skipped }
+    DpoExport { pairs, questions_skipped, plateau_contrastive }
 }
 
 /// Serialize export rows to JSONL text (one compact object per line, trailing newline per row).
@@ -278,10 +400,11 @@ mod tests {
             rec("q2", Verdict::Wrong, "What is 3+3?", "ANSWER: 5"),
             rec("q3", Verdict::Partial, "What is 5+5?", "ANSWER: about 10"),
         ];
-        let lines = export_sft(&recs, SftShape::Messages, false);
-        assert_eq!(lines.len(), 1, "only the Correct trajectory is a demonstration");
+        let out = export_sft(&recs, SftShape::Messages, false, false);
+        assert_eq!(out.rows.len(), 1, "only the Correct trajectory is a demonstration");
+        assert_eq!(out.signal_reaction, 0, "no trajectory here has a plateau turn");
         // Line is `{"messages":[...]}` passed through verbatim, ending in the final answer turn.
-        let msgs = lines[0].get("messages").and_then(Value::as_array).unwrap();
+        let msgs = out.rows[0].get("messages").and_then(Value::as_array).unwrap();
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs.last().unwrap()["content"], "ANSWER: 4");
@@ -293,15 +416,15 @@ mod tests {
             rec("q1", Verdict::Correct, "What is 2+2?", "ANSWER: 4"),
             rec("q3", Verdict::Partial, "What is 5+5?", "ANSWER: about 10"),
         ];
-        assert_eq!(export_sft(&recs, SftShape::Messages, false).len(), 1);
-        assert_eq!(export_sft(&recs, SftShape::Messages, true).len(), 2);
+        assert_eq!(export_sft(&recs, SftShape::Messages, false, false).rows.len(), 1);
+        assert_eq!(export_sft(&recs, SftShape::Messages, true, false).rows.len(), 2);
     }
 
     #[test]
     fn sft_sharegpt_maps_roles() {
         let recs = vec![rec("q1", Verdict::Correct, "What is 2+2?", "ANSWER: 4")];
-        let lines = export_sft(&recs, SftShape::Sharegpt, false);
-        let conv = lines[0].get("conversations").and_then(Value::as_array).unwrap();
+        let out = export_sft(&recs, SftShape::Sharegpt, false, false);
+        let conv = out.rows[0].get("conversations").and_then(Value::as_array).unwrap();
         assert_eq!(conv[0]["from"], "system");
         assert_eq!(conv[1]["from"], "human"); // user -> human
         assert_eq!(conv[1]["value"], "What is 2+2?");
@@ -322,7 +445,7 @@ mod tests {
             // q3 only Wrong -> skipped.
             rec("q3", Verdict::Wrong, "What is 9+1?", "ANSWER: 11"),
         ];
-        let out = export_dpo(&recs, 1);
+        let out = export_dpo(&recs, 1, false);
         assert_eq!(out.pairs.len(), 1);
         assert_eq!(out.questions_skipped, 2);
         let p = &out.pairs[0];
@@ -345,19 +468,20 @@ mod tests {
             rec("q1", Verdict::Wrong, "What is 2+2?", "ANSWER: 5"),
             rec("q1", Verdict::Wrong, "What is 2+2?", "ANSWER: 3"),
         ];
-        assert_eq!(export_dpo(&recs, 1).pairs.len(), 1, "default caps at 1 pair/question");
-        assert_eq!(export_dpo(&recs, 2).pairs.len(), 2, "max_pairs=2 yields two pairs");
+        assert_eq!(export_dpo(&recs, 1, false).pairs.len(), 1, "default caps at 1 pair/question");
+        assert_eq!(export_dpo(&recs, 2, false).pairs.len(), 2, "max_pairs=2 yields two pairs");
         // Can't exceed the smaller class size.
-        assert_eq!(export_dpo(&recs, 9).pairs.len(), 2);
+        assert_eq!(export_dpo(&recs, 9, false).pairs.len(), 2);
     }
 
     #[test]
     fn empty_input_yields_empty_output_no_panic() {
         let recs: Vec<TrajectoryRecord> = Vec::new();
-        assert!(export_sft(&recs, SftShape::Messages, true).is_empty());
-        let out = export_dpo(&recs, 1);
+        assert!(export_sft(&recs, SftShape::Messages, true, false).rows.is_empty());
+        let out = export_dpo(&recs, 1, false);
         assert!(out.pairs.is_empty());
         assert_eq!(out.questions_skipped, 0);
+        assert_eq!(out.plateau_contrastive, 0);
         assert_eq!(parse_trajectories("").unwrap().len(), 0);
         assert_eq!(parse_trajectories("\n  \n").unwrap().len(), 0);
     }
@@ -388,5 +512,189 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "{\"a\":1}");
+    }
+
+    // ---- Part B: plateau-turn detection + plateau-focused DPO pairing -----------------------
+
+    /// A synthetic tool-call assistant turn (arithmetic placeholders only, no corpus values).
+    fn tool_call_msg(call_id: &str) -> Value {
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "search", "arguments": "{\"q\":\"n\"}"}}
+        ]})
+    }
+
+    /// A plain (non-plateau) tool result.
+    fn tool_result_msg(call_id: &str) -> Value {
+        json!({"role": "tool", "tool_call_id": call_id, "content": "some result body"})
+    }
+
+    /// A tool result carrying the stable plateau-marker substring (see
+    /// `retrieval_progress::plateau_marker` / `PLATEAU_MARKER_SUBSTR`) — this is what
+    /// `apply_plateau_render` (Part A) feeds back into the trajectory.
+    fn plateau_tool_msg(call_id: &str) -> Value {
+        json!({"role": "tool", "tool_call_id": call_id,
+               "content": "[retrieval: 3 unique results gathered; 0 new over the last 3 searches — gain has plateaued]"})
+    }
+
+    fn answer_msg(answer: &str) -> Value {
+        json!({"role": "assistant", "content": answer})
+    }
+
+    /// Build a synthetic trajectory record from an explicit `messages` sequence (a variant of
+    /// `rec` for tests that need to control plateau/spiral shape precisely).
+    fn rec_msgs(id: &str, verdict: Verdict, user: &str, answer: &str, messages: Vec<Value>) -> TrajectoryRecord {
+        TrajectoryRecord {
+            id: id.to_string(),
+            question: user.to_string(),
+            model: "test-model".to_string(),
+            tools: json!([{"type": "function", "function": {"name": "search"}}]),
+            messages,
+            answer: answer.to_string(),
+            verdict,
+            hop_type: String::new(),
+        }
+    }
+
+    fn seed(user: &str) -> Vec<Value> {
+        vec![
+            json!({"role": "system", "content": "You answer questions."}),
+            json!({"role": "user", "content": user}),
+        ]
+    }
+
+    #[test]
+    fn plateau_turn_detection_and_spiral_predicate() {
+        // No plateau turn at all -> has_plateau_turn false, spiraled false.
+        let mut m = seed("q");
+        m.push(tool_call_msg("c1"));
+        m.push(tool_result_msg("c1"));
+        m.push(answer_msg("a"));
+        assert!(!has_plateau_turn(&m));
+        assert!(!spiraled_past_plateau(&m));
+
+        // Plateau turn, but the reader answered right after (no assistant tool_calls after it) ->
+        // has_plateau_turn true, spiraled false.
+        let mut m = seed("q");
+        m.push(tool_call_msg("c1"));
+        m.push(plateau_tool_msg("c1"));
+        m.push(answer_msg("a"));
+        assert!(has_plateau_turn(&m));
+        assert!(!spiraled_past_plateau(&m), "answering right after the signal is not a spiral");
+
+        // Plateau turn, THEN another tool call -> spiraled true (kept searching past the signal).
+        let mut m = seed("q");
+        m.push(tool_call_msg("c1"));
+        m.push(plateau_tool_msg("c1"));
+        m.push(tool_call_msg("c2"));
+        m.push(tool_result_msg("c2"));
+        m.push(answer_msg("a"));
+        assert!(has_plateau_turn(&m));
+        assert!(spiraled_past_plateau(&m));
+    }
+
+    #[test]
+    fn dpo_plateau_focus_prefers_spiraled_rejected_and_never_uses_correct_as_rejected() {
+        // (i) Correct with a plateau turn, answered right after (not spiraled).
+        let mut i_msgs = seed("Q1");
+        i_msgs.push(tool_call_msg("c1"));
+        i_msgs.push(plateau_tool_msg("c1"));
+        i_msgs.push(answer_msg("ANSWER: correct-plain"));
+        let i = rec_msgs("q1", Verdict::Correct, "Q1", "ANSWER: correct-plain", i_msgs);
+
+        // (ii) Wrong that spiraled past a plateau.
+        let mut ii_msgs = seed("Q1");
+        ii_msgs.push(tool_call_msg("c1"));
+        ii_msgs.push(plateau_tool_msg("c1"));
+        ii_msgs.push(tool_call_msg("c2"));
+        ii_msgs.push(tool_result_msg("c2"));
+        ii_msgs.push(answer_msg("ANSWER: wrong-spiraled"));
+        let ii = rec_msgs("q1", Verdict::Wrong, "Q1", "ANSWER: wrong-spiraled", ii_msgs);
+
+        // (iii) Wrong with no plateau turn at all.
+        let mut iii_msgs = seed("Q1");
+        iii_msgs.push(tool_call_msg("c1"));
+        iii_msgs.push(tool_result_msg("c1"));
+        iii_msgs.push(answer_msg("ANSWER: wrong-no-plateau"));
+        let iii = rec_msgs("q1", Verdict::Wrong, "Q1", "ANSWER: wrong-no-plateau", iii_msgs);
+
+        // (iv) Correct that ALSO searched past a plateau turn — CRITICAL: must remain eligible as
+        // chosen and must NEVER be used as rejected, because the judge verdict is Correct.
+        let mut iv_msgs = seed("Q1");
+        iv_msgs.push(tool_call_msg("c1"));
+        iv_msgs.push(plateau_tool_msg("c1"));
+        iv_msgs.push(tool_call_msg("c2"));
+        iv_msgs.push(tool_result_msg("c2"));
+        iv_msgs.push(answer_msg("ANSWER: correct-spiraled"));
+        let iv = rec_msgs("q1", Verdict::Correct, "Q1", "ANSWER: correct-spiraled", iv_msgs);
+
+        // A second question with only a non-spiraled Wrong -> under --dpo-focus plateau it must be
+        // skipped for lacking a spiraled rejected (even though it has a plain Correct+Wrong pair).
+        let q2_correct = rec("q2", Verdict::Correct, "Q2", "ANSWER: 2-correct");
+        let mut q2_wrong_msgs = seed("Q2");
+        q2_wrong_msgs.push(tool_call_msg("c1"));
+        q2_wrong_msgs.push(tool_result_msg("c1"));
+        q2_wrong_msgs.push(answer_msg("ANSWER: 2-wrong"));
+        let q2_wrong = rec_msgs("q2", Verdict::Wrong, "Q2", "ANSWER: 2-wrong", q2_wrong_msgs);
+
+        let recs = vec![i.clone(), ii.clone(), iii.clone(), iv.clone(), q2_correct, q2_wrong];
+
+        // Default (no focus): rejected pool biases the spiraled Wrong (ii) to the front over the
+        // non-spiraled Wrong (iii); q2 still pairs (falls back to its only Wrong).
+        let out = export_dpo(&recs, 1, false);
+        assert_eq!(out.pairs.len(), 2, "both q1 and q2 pair without focus");
+        assert_eq!(out.questions_skipped, 0);
+        let q1_pair = out
+            .pairs
+            .iter()
+            .find(|p| p["chosen"][0]["content"] == "ANSWER: correct-plain" || p["chosen"][0]["content"] == "ANSWER: correct-spiraled")
+            .expect("q1 pair present");
+        assert_eq!(
+            q1_pair["rejected"][0]["content"], "ANSWER: wrong-spiraled",
+            "the spiraled Wrong is biased to the front even without --dpo-focus"
+        );
+        assert!(
+            out.pairs.iter().all(|p| p["rejected"][0]["content"] != "ANSWER: correct-plain"
+                && p["rejected"][0]["content"] != "ANSWER: correct-spiraled"),
+            "a Correct trajectory (i/iv) must never appear as rejected, spiraled or not"
+        );
+        assert_eq!(out.plateau_contrastive, 1, "only q1's pair is plateau-contrastive");
+
+        // --dpo-focus plateau: q1 pairs using the spiraled Wrong; q2 (no spiraled Wrong) is skipped.
+        let focused = export_dpo(&recs, 1, true);
+        assert_eq!(focused.pairs.len(), 1, "only q1 has a spiraled-Wrong rejected candidate");
+        assert_eq!(focused.questions_skipped, 1, "q2 is skipped for lacking a spiraled rejected");
+        assert_eq!(focused.plateau_contrastive, 1);
+        assert_eq!(focused.pairs[0]["rejected"][0]["content"], "ANSWER: wrong-spiraled");
+        assert!(
+            focused.pairs[0]["chosen"][0]["content"] == "ANSWER: correct-plain"
+                || focused.pairs[0]["chosen"][0]["content"] == "ANSWER: correct-spiraled",
+            "chosen must be one of q1's two Correct trajectories"
+        );
+    }
+
+    #[test]
+    fn sft_prefer_signal_stable_partitions_signal_reaction_first() {
+        // First in input order: a Correct trajectory with NO plateau turn.
+        let plain = rec("q1", Verdict::Correct, "Q1", "ANSWER: plain");
+        // Second: a Correct trajectory WITH a plateau turn (the "reacted to signal" demonstration).
+        let mut signal_msgs = seed("Q2");
+        signal_msgs.push(tool_call_msg("c1"));
+        signal_msgs.push(plateau_tool_msg("c1"));
+        signal_msgs.push(answer_msg("ANSWER: signal"));
+        let signal = rec_msgs("q2", Verdict::Correct, "Q2", "ANSWER: signal", signal_msgs);
+
+        let recs = vec![plain, signal];
+
+        // Default: today's input order (plain first).
+        let out = export_sft(&recs, SftShape::Messages, false, false);
+        assert_eq!(out.signal_reaction, 1);
+        assert_eq!(out.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: plain");
+        assert_eq!(out.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: signal");
+
+        // --sft-prefer-signal: the plateau-turn trajectory is partitioned to the front.
+        let out2 = export_sft(&recs, SftShape::Messages, false, true);
+        assert_eq!(out2.signal_reaction, 1);
+        assert_eq!(out2.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: signal");
+        assert_eq!(out2.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: plain");
     }
 }

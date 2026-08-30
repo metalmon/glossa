@@ -179,11 +179,12 @@ fn rollout_one(
 ) -> RolloutOutcome {
     let trace = TraceLog::disabled();
     let steps = std::cell::RefCell::new(Vec::<ToolStep>::new());
-    // Per-episode retrieval-plateau tracker (see `glossa_tools::RetrievalProgress`): train rollouts
-    // emit the SAME neutral "gain has plateaued" marker eval does, so GEPA optimizes the prompt
-    // under the identical signal. Owned per rollout; the POLICY stays in the prompt / GEPA, not the
-    // tool layer.
-    let mut progress = crate::backend::glossa_tools::RetrievalProgress::new();
+    // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): train rollouts act on
+    // the SAME PLATEAU render eval's `answer_capturing` does, so GEPA optimizes the prompt under
+    // the identical signal. Repeat/Streak stay the agent loop's job — not acted on here (see
+    // `openai::answer_capturing`'s exec closure for the twin comment). Owned per rollout; the
+    // POLICY stays in the prompt / GEPA, not the tool layer.
+    let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
     // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
     // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
@@ -210,12 +211,11 @@ fn rollout_one(
         } else {
             ids
         };
-        // Only id-surfacing RETRIEVAL calls feed the plateau window; on fire, append the neutral
-        // marker to this call's result (and thus to the step-trace the reflector reads).
+        // Only id-surfacing RETRIEVAL calls feed the tracker; only the PLATEAU kind is acted on
+        // here (Repeat/Streak are the loop's job) — render into the step-trace the reflector reads.
         if crate::backend::glossa_tools::is_retrieval_tool(name) {
-            if let Some(marker) = progress.observe(&ids) {
-                body.push_str(&marker);
-            }
+            let key = format!("{name}:{args}");
+            body = crate::backend::glossa_tools::apply_plateau_render(&mut signals, name, &key, &ids, body);
         }
         steps.borrow_mut().push(ToolStep {
             name: name.to_string(),
@@ -308,19 +308,17 @@ fn score_questions(
     idx: &DocIndex,
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
-    pb: &ProgressBar,
 ) -> Vec<RolloutOutcome> {
     let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
-    // Drive the SHARED training bar (owned + tick'd by `run_train`): each scoring pass sets the
-    // bar length to this pass's question count and rewinds the position to 0, so the bar visibly
-    // fills as rollouts complete (`run_units_parallel` reports completion via `pb.inc`). On a
-    // hidden bar (`--no-progress`/non-TTY) these are harmless no-ops.
-    pb.set_length(questions.len() as u64);
-    pb.set_position(0);
+    // The main training bar tracks GEPA ITERATIONS end-to-end (length = budget, position =
+    // iterations done; set in `run`), NOT individual scoring passes — so a pass must not rewind it.
+    // Per-rollout completion is fed to a throwaway hidden bar; within-pass liveness comes from the
+    // `StatusTicker`'s live `{msg}` (elapsed/ETA/tokens) and the per-pass `pb.println` lines.
+    let sink = ProgressBar::hidden();
     let mut indexed: Vec<(usize, RolloutOutcome)> = crate::parallel::run_units_parallel(
         units,
         cfg.jobs,
-        pb,
+        &sink,
         |_unit| 1,
         |(i, q)| Ok((*i, rollout_one(cfg, url, tools, prompt, q, idx, graph, spec))),
     )
@@ -723,6 +721,14 @@ pub fn run(
     ));
     anyhow::ensure!(!val.is_empty(), "empty validation split — need >=2 distinct question ids");
 
+    // Main bar tracks GEPA iterations end-to-end: length = budget (the only exactly-known, monotonic
+    // whole-run quantity — per-iteration rollout counts vary with resampling/accept branches), and
+    // position = iterations completed. This yields a real whole-run ETA (StatusTicker derives it from
+    // pos/len) instead of a jumpy per-pass one. The baseline/pareto passes below run at position 0.
+    pb.set_length(cfg.budget as u64);
+    pb.set_position(0);
+    pb.set_prefix("training · baseline");
+
     // Dataset-wide common proper-noun-shaped tokens (interrogatives, shared nouns recurring across
     // >=2 questions) that the per-minibatch leak-scan must NOT reject a child prompt over. Computed
     // ONCE over the FULL train+val set so the frequency is global, then threaded into every
@@ -738,7 +744,6 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
-        pb,
     );
     let baseline_score = mean(&scores(&baseline_out));
     pb.println(format!("baseline val: score={baseline_score:.3}"));
@@ -759,7 +764,6 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
-        pb,
     );
     let mut pool = vec![Candidate {
         prompt: cfg.seed_prompt.clone(),
@@ -771,7 +775,9 @@ pub fn run(
     for it in 0..cfg.budget {
         // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
         // (ETA + tokens/resamples). No-op on a hidden bar.
-        pb.set_prefix(format!("training [iter {}/{}] best={best_pareto_so_far:.3}", it + 1, cfg.budget));
+        // Position = iterations completed so far; the bar body renders `[it/budget]`.
+        pb.set_position(it as u64);
+        pb.set_prefix(format!("training · best={best_pareto_so_far:.3}"));
         let parent_idx = select_parent_idx(&pool, cfg.candidate_selection, &mut rng);
         let parent_prompt = pool[parent_idx].prompt.clone();
 
@@ -783,7 +789,7 @@ pub fn run(
                 break;
             }
             let outcomes =
-                score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec, pb);
+                score_questions(&cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec);
             if outcomes.iter().any(|o| o.score < 1.0) {
                 minibatch = Some(batch);
                 parent_outcomes = Some(outcomes);
@@ -832,7 +838,7 @@ pub fn run(
         }
 
         let child_mb =
-            score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec, pb);
+            score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec);
         let child_mb_score = mean(&scores(&child_mb));
         if child_mb_score <= parent_mb_score {
             pb.println(format!(
@@ -850,7 +856,6 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
-            pb,
         );
         pool.push(Candidate {
             prompt: child_prompt,
@@ -868,11 +873,12 @@ pub fn run(
     }
 
     pb.println(format!("final full-val scoring: {} candidates", pool.len()));
-    pb.set_prefix(format!("training [final val] best={best_pareto_so_far:.3}"));
+    pb.set_position(cfg.budget as u64);
+    pb.set_prefix(format!("training · final-val · best={best_pareto_so_far:.3}"));
     let mut best_prompt = pool[0].prompt.clone();
     let mut best_score = f64::NEG_INFINITY;
     for c in &pool {
-        let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec, pb);
+        let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec);
         let em = mean(&scores(&out));
         if em > best_score {
             best_score = em;

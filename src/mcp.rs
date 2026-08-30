@@ -54,6 +54,12 @@ pub struct GlossaServer {
     /// HTTP request metrics (streamable-http): shared with the axum middleware, rendered by
     /// `metrics_text`. Inert under stdio (no middleware records into it).
     http: Arc<crate::http_metrics::HttpMetrics>,
+    /// Per-SESSION anti-loop signal tracker (repeat/streak/plateau) over the retrieval tools —
+    /// see `crate::tools::retrieval_progress::ReaderSignals`. One stdio process IS one session,
+    /// so `new()` here is already correct; the streamable-http factory (`main.rs`,
+    /// `serve_streamable_http`) must give each NEW session its own fresh tracker rather than
+    /// sharing this `Arc` via `clone()` — see the factory closure's override there.
+    pub signals: Arc<Mutex<crate::tools::retrieval_progress::ReaderSignals>>,
 }
 
 #[derive(Default)]
@@ -183,6 +189,9 @@ impl GlossaServer {
             no_image: flags.no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
             http: Arc::new(crate::http_metrics::HttpMetrics::default()),
+            signals: Arc::new(Mutex::new(
+                crate::tools::retrieval_progress::ReaderSignals::new(),
+            )),
         }
     }
 
@@ -273,6 +282,31 @@ impl GlossaServer {
     /// Return the list of enabled tools (for config generation — not test-only).
     pub fn tool_specs(&self) -> Vec<rmcp::model::Tool> {
         self.tool_router.list_all()
+    }
+
+    /// Feed one retrieval call into the per-session anti-loop tracker and apply its render
+    /// decision to `body`. `tool` is the tool name, `key` a stable identity for THIS call
+    /// (`format!("{tool}:{args_json}")` or equivalent), `ids` the result-ids it surfaced. Only
+    /// the retrieval tools (`is_retrieval_tool`) should call this.
+    ///
+    /// `ResultRender::Full` passes `body` through unchanged; `ReplaceWith` drops the (redundant)
+    /// body entirely and returns just the neutral marker — the context-bloat fix for an exact
+    /// repeat or a fully-drained plateau; `OnlyNew` appends the marker to `body` (a filtered
+    /// re-render is only wired for `search`, which has per-hit ids to filter by — see `search`'s
+    /// handler; every other retrieval tool renders a single opaque string with no clean
+    /// per-id split, so it falls back to appending here too).
+    fn apply_signals(&self, tool: &str, key: &str, ids: Vec<String>, body: String) -> String {
+        use crate::tools::retrieval_progress::ResultRender;
+        let outcome = self
+            .signals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .observe(tool, key, &ids);
+        match outcome.render {
+            ResultRender::Full => body,
+            ResultRender::ReplaceWith { marker } => marker,
+            ResultRender::OnlyNew { marker, .. } => format!("{body}{marker}"),
+        }
     }
 
     /// Synchronous, sublinear freshness before serving a read: gate a full scan behind the cheap
@@ -1018,8 +1052,10 @@ fn read_common(
     page_image: bool,
     include_images: bool,
     trace: &crate::trace::TraceLog,
+    wrap_text: impl FnOnce(String) -> String,
 ) -> CallToolResult {
-    let out = crate::tools::read(root, idx, g, path, n, page_image, trace);
+    let mut out = crate::tools::read(root, idx, g, path, n, page_image, trace);
+    out.text = wrap_text(out.text);
     let mut content = Vec::new();
     // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
     // figure-heavy pages, and JPEG is far smaller. `to_jpeg` passes real JPEGs through untouched.
@@ -1058,7 +1094,8 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let (body, _hits) = crate::tools::search(
+        let key = format!("search:{a:?}");
+        let (body, hits) = crate::tools::search(
             &idx,
             &a.query,
             a.limit.unwrap_or(50),
@@ -1067,6 +1104,8 @@ impl GlossaServer {
             &self.trace,
             a.scope.as_deref(),
         );
+        let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
+        let body = self.apply_signals("search", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1080,6 +1119,8 @@ impl GlossaServer {
         let (idx, g) = self.open_index_graph()?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
+        let key = format!("read:{a:?}");
+        let ids = vec![a.path.clone()];
         Ok(read_common(
             &self.root,
             &idx,
@@ -1089,6 +1130,7 @@ impl GlossaServer {
             page_image,
             include_images,
             &self.trace,
+            |body| self.apply_signals("read", &key, ids, body),
         ))
     }
 
@@ -1137,19 +1179,21 @@ impl GlossaServer {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
         let stale = crate::tools::StaleChecker::new(self.root.clone());
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::glossary_with_query(
-                &idx,
-                &g,
-                &a.name,
-                Some(a.query.as_str()).filter(|s| !s.is_empty()),
-                &spec,
-                &self.trace,
-                a.as_of.as_deref(),
-                Some(&stale),
-                a.scope.as_deref(),
-            ),
-        )]))
+        let key = format!("glossary:{a:?}");
+        let body = crate::tools::glossary_with_query(
+            &idx,
+            &g,
+            &a.name,
+            Some(a.query.as_str()).filter(|s| !s.is_empty()),
+            &spec,
+            &self.trace,
+            a.as_of.as_deref(),
+            Some(&stale),
+            a.scope.as_deref(),
+        );
+        let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
+        let body = self.apply_signals("glossary", &key, ids, body);
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -1163,19 +1207,21 @@ impl GlossaServer {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let stale = crate::tools::StaleChecker::new(self.root.clone());
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::related(
-                &idx,
-                &g,
-                a.node.as_deref(),
-                a.path.as_deref(),
-                a.n,
-                &self.trace,
-                a.as_of.as_deref(),
-                Some(&stale),
-                a.scope.as_deref(),
-            ),
-        )]))
+        let key = format!("related:{a:?}");
+        let body = crate::tools::related(
+            &idx,
+            &g,
+            a.node.as_deref(),
+            a.path.as_deref(),
+            a.n,
+            &self.trace,
+            a.as_of.as_deref(),
+            Some(&stale),
+            a.scope.as_deref(),
+        );
+        let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
+        let body = self.apply_signals("related", &key, ids, body);
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -1190,21 +1236,23 @@ impl GlossaServer {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let direction = a.direction.as_deref().unwrap_or("both");
         let stale = crate::tools::StaleChecker::new(self.root.clone());
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::neighbors(
-                &idx,
-                &g,
-                a.node.as_deref(),
-                a.path.as_deref(),
-                a.n,
-                a.edge_types.as_deref(),
-                direction,
-                &self.trace,
-                a.as_of.as_deref(),
-                Some(&stale),
-                a.scope.as_deref(),
-            ),
-        )]))
+        let key = format!("neighbors:{a:?}");
+        let body = crate::tools::neighbors(
+            &idx,
+            &g,
+            a.node.as_deref(),
+            a.path.as_deref(),
+            a.n,
+            a.edge_types.as_deref(),
+            direction,
+            &self.trace,
+            a.as_of.as_deref(),
+            Some(&stale),
+            a.scope.as_deref(),
+        );
+        let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
+        let body = self.apply_signals("neighbors", &key, ids, body);
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     // keep in sync with registry::DESC_REACH (see search's comment above for why this is a literal).
@@ -1219,24 +1267,26 @@ impl GlossaServer {
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::reach(
-                &idx,
-                &g,
-                &ont,
-                a.from.as_deref(),
-                a.from_path.as_deref(),
-                a.from_n,
-                a.relation.as_deref(),
-                a.to.as_deref(),
-                a.to_path.as_deref(),
-                a.to_n,
-                a.max_depth.unwrap_or(6),
-                a.bridge.unwrap_or(true),
-                &self.trace,
-                a.scope.as_deref(),
-            ),
-        )]))
+        let key = format!("reach:{a:?}");
+        let body = crate::tools::reach(
+            &idx,
+            &g,
+            &ont,
+            a.from.as_deref(),
+            a.from_path.as_deref(),
+            a.from_n,
+            a.relation.as_deref(),
+            a.to.as_deref(),
+            a.to_path.as_deref(),
+            a.to_n,
+            a.max_depth.unwrap_or(6),
+            a.bridge.unwrap_or(true),
+            &self.trace,
+            a.scope.as_deref(),
+        );
+        let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
+        let body = self.apply_signals("reach", &key, ids, body);
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -1623,9 +1673,11 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         let g = GraphStore::open(&self.root).map_err(internal)?;
         let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::sql(&idx, &g, &a.sql, &self.trace),
-        )]))
+        let key = format!("sql:{a:?}");
+        let body = crate::tools::sql(&idx, &g, &a.sql, &self.trace);
+        let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
+        let body = self.apply_signals("sql", &key, ids, body);
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     // keep in sync with registry::DESC_GREP (see search's comment above for why this is a literal).
@@ -2064,6 +2116,124 @@ mod tests {
         assert!(
             format!("{out:?}").contains("doc.md/n.csp"),
             "external note edit picked up after reading the note"
+        );
+    }
+
+    // ---- per-session retrieval signals (repeat/streak/plateau) --------------------------------
+
+    #[tokio::test]
+    async fn search_exact_repeat_returns_replace_with_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let mk = || SearchArgs {
+            query: "alpha".into(),
+            limit: None,
+            glob: None,
+            file_type: None,
+            scope: None,
+        };
+        let out1 = srv.search(Parameters(mk())).await.unwrap();
+        let text1 = format!("{out1:?}");
+        assert!(
+            text1.contains("a.md"),
+            "first call should surface the real hit, not a marker: {text1}"
+        );
+
+        // MCP has no built-in loop dedup — the tracker must catch an exact-repeat (same
+        // tool+args) call and collapse it to the neutral repeat marker (ResultRender::ReplaceWith),
+        // dropping the redundant re-dump of the same body.
+        let out2 = srv.search(Parameters(mk())).await.unwrap();
+        let text2 = format!("{out2:?}");
+        assert!(
+            text2.contains("identical query already run this session"),
+            "an exact-repeat search must return the neutral repeat marker: {text2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_streak_of_zero_new_varied_calls_emits_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let mk = |q: &str| SearchArgs {
+            query: q.to_string(),
+            limit: None,
+            glob: None,
+            file_type: None,
+            scope: None,
+        };
+        // Three DISTINCT queries, each surfacing zero hits (zero ids): `ReaderSignals::STREAK_K`
+        // (3) consecutive varied zero-new calls must fire the streak signal on the third.
+        let _ = srv.search(Parameters(mk("nomatch-one"))).await.unwrap();
+        let _ = srv.search(Parameters(mk("nomatch-two"))).await.unwrap();
+        let out3 = srv.search(Parameters(mk("nomatch-three"))).await.unwrap();
+        let text3 = format!("{out3:?}");
+        assert!(
+            text3.contains("surfaced no new information"),
+            "the third consecutive zero-new varied search must carry the streak marker: {text3}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_factory_style_session_reset_does_not_leak_signals() {
+        // Mirrors the streamable-http factory closure in `main.rs::serve_streamable_http`: a NEW
+        // session clones the server (sharing index caches etc.) but must get its OWN fresh
+        // `signals` tracker — never the same `Arc` as another session.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let base = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let mk = || SearchArgs {
+            query: "alpha".into(),
+            limit: None,
+            glob: None,
+            file_type: None,
+            scope: None,
+        };
+
+        // Put `base`'s tracker into a "just saw this exact call" state.
+        let _ = base.search(Parameters(mk())).await.unwrap();
+
+        // A second "session" built the way the http factory builds one: clone, then swap in a
+        // brand-new tracker (NOT `base.signals.clone()`, which would share the Arc).
+        let mut session2 = base.clone();
+        session2.signals = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::retrieval_progress::ReaderSignals::new(),
+        ));
+
+        // The identical call on the FRESH session must be a first-ever call (Full render, real
+        // hits) — NOT flagged Repeat, which is what would happen if `signals` were still shared
+        // between the two sessions.
+        let out = session2.search(Parameters(mk())).await.unwrap();
+        let text = format!("{out:?}");
+        assert!(
+            text.contains("a.md") && !text.contains("identical query already run this session"),
+            "a fresh session's tracker must not see the base session's prior call: {text}"
+        );
+
+        // Meanwhile the ORIGINAL session's own repeat detection is untouched by session2's call.
+        let out_base_repeat = base.search(Parameters(mk())).await.unwrap();
+        assert!(
+            format!("{out_base_repeat:?}").contains("identical query already run this session"),
+            "the original session's own repeat detection must still work: {out_base_repeat:?}"
         );
     }
 

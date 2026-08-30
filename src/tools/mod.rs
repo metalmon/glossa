@@ -2,6 +2,7 @@
 //! (src/mcp.rs) and the kb-eval harness call these so prod and eval render identically.
 
 pub mod registry;
+pub mod retrieval_progress;
 
 use crate::grep::GrepOpts;
 use crate::index::store::{DocIndex, RankedHit};

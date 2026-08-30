@@ -1,156 +1,148 @@
 use glossa::index::store::DocIndex;
 use glossa::trace::TraceLog;
-use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
-use std::sync::OnceLock;
 
-/// Per-EPISODE retrieval-plateau tracker. A reader that spirals — issuing search after search that
-/// each land on already-seen ground — never actually gains information, but the loop's
-/// unproductive-streak guard (`unproductive_steer`) resets on ANY single new id, so a spiral of
-/// varied slightly-productive probes evades it. This tracker measures a WINDOWED marginal-
-/// information-gain PLATEAU instead: it records the number of NEW result-ids each retrieval call
-/// surfaces into a sliding window of the last [`RetrievalProgress::W`] calls, and once enough calls
-/// have run with a cumulative body of results, fires ONCE when that window's total new-id count
-/// falls to (or below) [`RetrievalProgress::G`].
+/// Relocated to core `glossa` (pure move, no behavior change) — see
+/// `glossa::tools::retrieval_progress` for the struct/fn docs and the moved unit tests. Re-exported
+/// here so existing call sites (`crate::backend::glossa_tools::RetrievalProgress`, `::is_retrieval_tool`,
+/// `::extract_node_ids`) keep resolving unchanged. `ReaderSignals`/`ResultRender`/`SignalKind` are the
+/// superset tracker (repeat+streak+plateau) the eval reader wrappers (`backend::openai::answer_capturing`,
+/// `gepa_graph::rollout_one`) act on for the PLATEAU kind only — see their `exec` closures.
+pub use glossa::tools::retrieval_progress::{
+    extract_node_ids, is_retrieval_tool, ReaderSignals, ResultRender, RetrievalProgress, SignalKind,
+};
+
+/// Apply ONE retrieval tool call's [`ReaderSignals::observe`] outcome to its result `body`, acting
+/// ONLY on the [`SignalKind::Plateau`] kind — Repeat/Streak are left untouched (the agent loop's own
+/// pre-exec dedup / unproductive-streak guard handles those; acting on them here too would double
+/// up). Factored out of `backend::openai::answer_capturing` and `gepa_graph::rollout_one`'s `exec`
+/// closures (both call this identically) so the render decision is unit-testable without a live
+/// model. `key` is the caller's stable `(tool,args)` identity (typically `format!("{name}:{args}")`).
 ///
-/// What it emits is a NEUTRAL OBSERVATION appended to the tool result (see [`RetrievalProgress::
-/// observe`]) — a factual "gain has plateaued" marker with counts — NOT an instruction. The POLICY
-/// (answer now / stop searching / change approach) is deliberately left to the reader PROMPT / GEPA:
-/// baking a directive into the shared tool layer would break its reuse and pre-empt the very thing
-/// the prompt is being optimized to decide.
-///
-/// One tracker lives per EPISODE (one eval case / one train rollout); callers that don't opt in
-/// simply never construct one, so the tool result is byte-identical to today. Only RETRIEVAL tool
-/// calls (the id-surfacing ones — see [`is_retrieval_tool`]) feed `observe`; write/non-retrieval
-/// tools are skipped so their zero-id results don't spuriously drain the window.
-#[derive(Debug, Default)]
-pub struct RetrievalProgress {
-    /// Every distinct result-id seen so far this episode (the cumulative retrieval footprint).
-    seen: HashSet<String>,
-    /// New-id count for each of the last `W` retrieval calls (front = oldest). A plateau is a
-    /// window whose SUM has fallen to `<= G`.
-    window: VecDeque<usize>,
-    /// True once the plateau marker has been emitted for the CURRENT plateau; reset to false as
-    /// soon as a later call surfaces genuinely new ids, so a second, distinct plateau can fire
-    /// again rather than the signal being one-shot for the whole episode.
-    fired: bool,
-    /// Total retrieval calls observed this episode (the `>= M` gate below).
-    calls: usize,
-}
-
-impl RetrievalProgress {
-    /// Sliding-window size: judge the plateau over the last `W` retrieval calls.
-    pub const W: usize = 3;
-    /// Minimum retrieval calls before a plateau can fire — don't call it early on a reader that
-    /// simply hasn't searched much yet.
-    pub const M: usize = 4;
-    /// Minimum cumulative distinct ids before a plateau can fire — a reader that has surfaced
-    /// almost nothing isn't "plateaued", it just hasn't found the corpus yet.
-    pub const E: usize = 3;
-    /// New-id budget over the window: `sum(window) <= G` is the plateau condition. `0` = zero new
-    /// ids across the last `W` calls.
-    pub const G: usize = 0;
-
-    pub fn new() -> Self {
-        Self::default()
+/// - [`ResultRender::ReplaceWith`] (a drained plateau: this call surfaced nothing new) drops the
+///   body entirely and returns just the marker — re-dumping already-seen content is pure bloat.
+/// - [`ResultRender::OnlyNew`] (the call still turned up a little new ground) appends the marker to
+///   the existing body.
+/// - [`ResultRender::Full`], or any non-Plateau kind (including `None`), leaves `body` unchanged.
+pub fn apply_plateau_render(
+    signals: &mut ReaderSignals,
+    name: &str,
+    key: &str,
+    ids: &[String],
+    body: String,
+) -> String {
+    let out = signals.observe(name, key, ids);
+    if out.kind != Some(SignalKind::Plateau) {
+        return body;
     }
-
-    /// Record one RETRIEVAL call's surfaced `new_ids` and return `Some(marker)` exactly once when
-    /// the window-of-last-`W` marginal gain has plateaued (`calls >= M` AND `seen >= E` AND a full
-    /// window AND `sum(window) <= G`), else `None`. The marker is a neutral factual observation with
-    /// counts — no imperative. Firing flips `fired` so it emits once per plateau; a later call that
-    /// brings genuinely new ids clears `fired` so a subsequent plateau can fire again.
-    pub fn observe(&mut self, new_ids: &[String]) -> Option<String> {
-        self.calls += 1;
-        let mut new_count = 0usize;
-        for id in new_ids {
-            if self.seen.insert(id.clone()) {
-                new_count += 1;
-            }
+    match out.render {
+        ResultRender::ReplaceWith { marker } => marker,
+        ResultRender::OnlyNew { marker, .. } => {
+            let mut body = body;
+            body.push_str(&marker);
+            body
         }
-        self.window.push_back(new_count);
-        if self.window.len() > Self::W {
-            self.window.pop_front();
-        }
-        // Genuinely new ground re-arms the signal for a future, distinct plateau.
-        if new_count > 0 {
-            self.fired = false;
-        }
-        let window_sum: usize = self.window.iter().sum();
-        let plateaued = !self.fired
-            && self.calls >= Self::M
-            && self.seen.len() >= Self::E
-            && self.window.len() >= Self::W
-            && window_sum <= Self::G;
-        if plateaued {
-            self.fired = true;
-            return Some(format!(
-                "\n\n[retrieval: {} unique results gathered; {} new over the last {} searches — gain has plateaued]",
-                self.seen.len(),
-                window_sum,
-                self.window.len(),
-            ));
-        }
-        None
+        ResultRender::Full => body,
     }
 }
 
-/// Whether a tool NAME surfaces retrieval result-ids that should feed [`RetrievalProgress`] — the
-/// id-producing reader tools (`search`/`glossary`/`related`/`neighbors`/`reach`/`sql`/`read`). Write
-/// and non-id tools (`glob`/`grep`/`get_source_file`/`graph_stats`/`resolve`, and any unknown name)
-/// are excluded so their zero-id results never spuriously count as "no new" and drain the plateau
-/// window. `read` qualifies because its caller substitutes its `path` arg as the surfaced id (see
-/// `openai::execute_tool` / `gepa_graph::rollout_one`), even though `exec` returns none for it.
-pub fn is_retrieval_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "search" | "glossary" | "related" | "neighbors" | "reach" | "sql" | "read"
-    )
-}
+#[cfg(test)]
+mod reader_signal_render_tests {
+    use super::*;
 
-/// Stable node identifiers surfaced by a graph tool's rendered body, for the unproductive-streak
-/// novelty tracker in `openai::run_agent_loop`. Every graph-tool renderer in `glossa::tools`
-/// (glossary's main hits AND its chain hops, related, neighbors, reach, and sql's
-/// id-column handles) funnels a grounded node through `tools::node_ref`'s anchor in ONE of two
-/// forms, both built from the SAME glued `<path>#<ord>` token (`tools.rs:532`):
-///   - **entity/reasoning node**: `tools::read_anchor` wraps it as `— read <path>#<ord> · <label>`
-///     (only emitted when the node has an outgoing MENTIONS edge to a section).
-///   - **structural node (Section/Document)**: `tools::endpoint_ref`/`node_ref` print the anchor
-///     BARE, with no "read" word at all — `<path>#<ord> · <label>` for a Section (glossary's
-///     exact-title stub at `tools.rs:765`, `edge_line`/neighbors at `tools.rs:1018`,
-///     `render_reach_chain` at `tools.rs:1190`), or `<path>  (document)` — no ord — for a Document.
-/// The first fix here only matched the "— read" form, so a totally normal move — `neighbors` on a
-/// Document returning its child Sections, or several glossary/reach calls landing on different
-/// Section/Document nodes — surfaced ZERO ids per call and falsely tripped the streak on a reader
-/// making real (structural) progress. The regex below matches the glued `<path>#<ord>` (or the
-/// Document's `<path>  (document)`) regardless of whether "— read " precedes it, so both forms count.
-/// It's still unambiguous against a glossary chain-hop line (`edge_type  [node_type]  label`, no
-/// bare id at all — see `tools::chain_lines`): that line has no `#<ord>` or `(document)` token, so
-/// it never matches — a generic `<token>  [Type]` scan would have misread the EDGE TYPE as a
-/// stable node id instead, collapsing distinct endpoints reached via the same relation into one
-/// false "already seen".
-/// The id is `path#ord` (Section) or bare `path` (Document) — the same shape a `read` call's own
-/// id takes for the no-`n` case. An ungrounded, non-structural node (no MENTIONS edge, so no
-/// anchor at all) contributes nothing from that line; that's fine, the streak only needs SOME
-/// calls in a burst to register progress, not every line.
-fn extract_node_ids(body: &str) -> Vec<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    // The ordinal branch requires the GLUED `path#n` anchor (zero spaces) — `tools::node_ref`
-    // emits exactly this tight form for every real anchor. Tolerating `\s*` here let a node's own
-    // label text (e.g. "issue #42") spuriously match as an anchor, causing false novelty for the
-    // loop detector; requiring glued-only fixes that. The bare `(document)` anchor is untouched
-    // and still requires the wider `\s{2,}` gap so a path token's own text doesn't
-    // false-positive into a document match.
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(\S+?)(?:#(\d+)|\s{2,}\(document\))").expect("valid regex")
-    });
-    re.captures_iter(body)
-        .map(|c| match c.get(2) {
-            Some(ord) => format!("{}#{}", &c[1], ord.as_str()),
-            None => c[1].to_string(),
-        })
-        .collect()
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A drained plateau (the firing call itself surfaces zero new ids) renders `ReplaceWith`:
+    /// `apply_plateau_render` must feed back JUST the marker, not `body + marker` — the bloat fix.
+    /// Call sequence mirrors `retrieval_progress`'s own
+    /// `reader_signals_plateau_fires_replace_with_on_zero_new`: q1 seeds >= E ids, q2/q3 are
+    /// zero-new (arming the window), q4's zero-new call ticks the unproductive streak to K=3 first
+    /// (Streak takes precedence over Plateau in the SAME call), and q5 — with the window now fully
+    /// drained — is where Plateau actually fires.
+    #[test]
+    fn drained_plateau_replaces_body_with_marker_only() {
+        let mut signals = ReaderSignals::new();
+        assert_eq!(
+            apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a", "b", "c"]), "hit-list body".into()),
+            "hit-list body",
+            "no signal yet on the seeding call"
+        );
+        assert_eq!(
+            apply_plateau_render(&mut signals, "search", "search:q2", &[], "body 2".into()),
+            "body 2"
+        );
+        assert_eq!(
+            apply_plateau_render(&mut signals, "search", "search:q3", &[], "body 3".into()),
+            "body 3"
+        );
+        // Call 4: Streak fires here (K=3 consecutive zero-new calls) — this helper ignores
+        // non-Plateau kinds, so the body must still pass through untouched.
+        assert_eq!(
+            apply_plateau_render(&mut signals, "search", "search:q4", &[], "body 4".into()),
+            "body 4",
+            "Streak kind must not alter the body (only Plateau is acted on here)"
+        );
+        // Call 5: the prior window has fully drained to all-zero and this call is zero-new too ->
+        // Plateau fires with ReplaceWith. The fed-back body must be ONLY the marker.
+        let rendered = apply_plateau_render(&mut signals, "search", "search:q5", &[], "body 5 (should be dropped)".into());
+        assert!(rendered.starts_with("\n\n[retrieval:"), "rendered: {rendered}");
+        assert!(rendered.contains("gain has plateaued"), "rendered: {rendered}");
+        assert!(
+            !rendered.contains("body 5"),
+            "a drained plateau must NOT retain the redundant body: {rendered}"
+        );
+    }
+
+    /// When the firing call still surfaces a little new ground, `OnlyNew` appends the marker to
+    /// the existing body rather than replacing it. Same q1..q4 setup as above; q5 brings one
+    /// genuinely new id (`d`) alongside an already-seen one (`a`).
+    #[test]
+    fn plateau_with_some_new_ids_appends_marker_to_body() {
+        let mut signals = ReaderSignals::new();
+        apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a", "b", "c"]), String::new());
+        apply_plateau_render(&mut signals, "search", "search:q2", &[], String::new());
+        apply_plateau_render(&mut signals, "search", "search:q3", &[], String::new());
+        let _ = apply_plateau_render(&mut signals, "search", "search:q4", &[], String::new()); // streak claims this one
+        let rendered = apply_plateau_render(
+            &mut signals,
+            "search",
+            "search:q5",
+            &ids(&["d", "a"]), // one genuinely new + one already-seen
+            "genuinely new hit".to_string(),
+        );
+        assert!(rendered.starts_with("genuinely new hit"), "rendered: {rendered}");
+        assert!(rendered.contains("gain has plateaued"), "rendered: {rendered}");
+    }
+
+    /// No signal fired (a productive run) leaves the body byte-identical.
+    #[test]
+    fn no_signal_leaves_body_unchanged() {
+        let mut signals = ReaderSignals::new();
+        let rendered = apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a"]), "unchanged".into());
+        assert_eq!(rendered, "unchanged");
+    }
+
+    /// Repeat and Streak kinds are NOT acted on here — even though they render `ReplaceWith`
+    /// internally, `apply_plateau_render` must leave the body alone for those kinds (the agent
+    /// loop owns them), only ever touching the body for `Plateau`.
+    #[test]
+    fn repeat_and_streak_kinds_are_ignored_body_untouched() {
+        let mut signals = ReaderSignals::new();
+        apply_plateau_render(&mut signals, "search", "same-key", &ids(&["a"]), String::new());
+        // Identical key -> Repeat internally, but body must be untouched by this helper.
+        let rendered = apply_plateau_render(&mut signals, "search", "same-key", &ids(&["a"]), "repeat body".into());
+        assert_eq!(rendered, "repeat body", "Repeat kind must not alter the body here");
+
+        let mut signals2 = ReaderSignals::new();
+        apply_plateau_render(&mut signals2, "search", "k0", &ids(&["a"]), String::new());
+        let mut last = String::new();
+        for i in 0..ReaderSignals::STREAK_K {
+            last = apply_plateau_render(&mut signals2, "search", &format!("k{}", i + 1), &[], format!("streak body {i}"));
+        }
+        assert_eq!(last, format!("streak body {}", ReaderSignals::STREAK_K - 1), "Streak kind must not alter the body here");
+    }
 }
 
 /// Run a BM25 search (optionally scoped by path glob / file_type); model-facing numbered text + titles.
@@ -605,98 +597,6 @@ mod tests {
     use glossa::trace::TraceLog;
     use std::path::PathBuf;
 
-    fn ids(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// A productive multi-hop — every call surfaces a genuinely NEW id — must NEVER fire: the
-    /// window sum stays >= 1 > G on every call, so `observe` returns `None` throughout, even well
-    /// past the M-call and E-id thresholds.
-    #[test]
-    fn plateau_never_fires_on_a_productive_multihop() {
-        let mut p = RetrievalProgress::new();
-        for i in 0..12 {
-            let id = format!("doc.md#{i}");
-            assert_eq!(
-                p.observe(&[id.clone()]),
-                None,
-                "a call that adds a new id ({id}) must not plateau"
-            );
-        }
-    }
-
-    /// The plateau fires only once `calls >= M`, `seen >= E`, and the last-`W` window sum `<= G`
-    /// all hold. Call 1 seeds E distinct ids; calls 2..=M add nothing, so by call M the window is
-    /// all-zero and the marker fires — not before.
-    #[test]
-    fn plateau_fires_once_thresholds_met_not_before() {
-        let mut p = RetrievalProgress::new();
-        // Call 1: E distinct ids in one shot -> seen >= E, but calls < M so no fire yet.
-        assert_eq!(p.observe(&ids(&["a", "b", "c"])), None, "call 1: below M");
-        // Calls 2..M-1: nothing new, still below the M-call gate.
-        for _ in 0..(RetrievalProgress::M - 2) {
-            assert_eq!(p.observe(&[]), None, "no-new call below M must stay quiet");
-        }
-        // Call M: window is now all-zero over the last W calls, seen >= E, calls == M -> FIRE.
-        let marker = p
-            .observe(&[])
-            .expect("plateau must fire once M/E/window-sum thresholds are all met");
-        assert!(marker.contains("plateaued"), "marker: {marker}");
-        assert!(marker.contains("3 unique results gathered"), "counts in marker: {marker}");
-    }
-
-    /// Fires ONCE per plateau: after firing it stays quiet on further no-new calls, then a call
-    /// that brings genuinely new ids re-arms it so a SECOND, distinct plateau fires again.
-    #[test]
-    fn plateau_fires_once_then_rearms_on_new_ids() {
-        let mut p = RetrievalProgress::new();
-        p.observe(&ids(&["a", "b", "c"])); // seed E ids (call 1)
-        for _ in 0..(RetrievalProgress::M - 2) {
-            p.observe(&[]);
-        }
-        assert!(p.observe(&[]).is_some(), "first plateau fires at call M");
-        // Still plateaued, but already fired -> silent.
-        assert_eq!(p.observe(&[]), None, "second no-new call must not re-fire the same plateau");
-        assert_eq!(p.observe(&[]), None, "still silent while plateaued");
-        // A genuinely new id re-arms the signal and refills the window with a non-zero count.
-        assert_eq!(p.observe(&ids(&["d"])), None, "new id: window sum > G, no fire, re-armed");
-        // Drain the window back to all-zero over W calls -> a fresh plateau fires again.
-        for _ in 0..(RetrievalProgress::W - 1) {
-            assert_eq!(p.observe(&[]), None, "window not yet fully drained");
-        }
-        assert!(p.observe(&[]).is_some(), "a distinct later plateau must fire again");
-    }
-
-    /// The marker is a NEUTRAL observation: it states the counts and that gain has plateaued, and
-    /// carries none of the imperative/policy words that belong in the prompt (that's GEPA's job).
-    #[test]
-    fn plateau_marker_is_a_neutral_observation_not_a_directive() {
-        let mut p = RetrievalProgress::new();
-        p.observe(&ids(&["a", "b", "c"]));
-        for _ in 0..(RetrievalProgress::M - 2) {
-            p.observe(&[]);
-        }
-        let marker = p.observe(&[]).expect("plateau fires").to_lowercase();
-        for imperative in ["stop", "answer", "must", "commit", "should", "change approach", "give up"] {
-            assert!(
-                !marker.contains(imperative),
-                "neutral marker must not contain the directive word {imperative:?}: {marker}"
-            );
-        }
-    }
-
-    /// `is_retrieval_tool` gates which tools feed the tracker: the id-surfacing reader tools do,
-    /// write/non-id tools don't (so their zero-id results can't drain the plateau window).
-    #[test]
-    fn is_retrieval_tool_selects_id_surfacing_tools() {
-        for t in ["search", "glossary", "related", "neighbors", "reach", "sql", "read"] {
-            assert!(is_retrieval_tool(t), "{t} surfaces ids");
-        }
-        for t in ["glob", "grep", "get_source_file", "graph_stats", "resolve", "unknown"] {
-            assert!(!is_retrieval_tool(t), "{t} must not feed the tracker");
-        }
-    }
-
     #[test]
     fn repeated_term_extracts_text_intent_only() {
         assert_eq!(
@@ -710,45 +610,6 @@ mod tests {
         assert_eq!(repeated_term("read", &json!({"path":"x.md","n":1})), None);
         assert_eq!(repeated_term("sql", &json!({"sql":"SELECT 1"})), None);
         assert_eq!(repeated_term("glossary", &json!({"name":"   "})), None);
-    }
-
-    /// Regression guard for fix round 2: the entity-node "— read" anchor and the BARE structural
-    /// (Section/Document) anchor must both be captured — the first version of this regex only
-    /// matched the "— read" form, so a Section/Document endpoint (rendered by `endpoint_ref`/
-    /// `node_ref` with no "read" word at all) surfaced zero ids.
-    #[test]
-    fn extract_node_ids_matches_entity_anchor_and_bare_structural_forms() {
-        // Entity/reasoning node: `tools::read_anchor`'s "— read <path>#<ord> · <label>" (glued,
-        // no space — the real form `tools::node_ref` emits).
-        let entity_line = "n1  [Entity]  Some Fact   — read doc.md#3 · SecTitle";
-        assert_eq!(extract_node_ids(entity_line), vec!["doc.md#3".to_string()]);
-
-        // Bare structural Section endpoint (edge_line / render_reach_chain / glossary's
-        // exact-title stub) — no "read" word, just the raw `node_ref` anchor.
-        let section_line = "CONTAINS       ->  doc.md#2 · SecB";
-        assert_eq!(extract_node_ids(section_line), vec!["doc.md#2".to_string()]);
-
-        // Bare structural Document endpoint — no ord at all.
-        let doc_line = "doc.md  (document)";
-        assert_eq!(extract_node_ids(doc_line), vec!["doc.md".to_string()]);
-
-        // A line with neither anchor form contributes nothing.
-        assert!(extract_node_ids("REFERENCES      ->  fact-9  [Entity]  no anchor here").is_empty());
-
-        // A single space before `#n` inside a node's own label text (NOT a real glued anchor)
-        // must NOT spuriously match — this is the false-novelty bug the tightened regex fixes.
-        assert!(
-            extract_node_ids("n2  [Entity]  reported issue #42 with no read anchor").is_empty(),
-            "a spaced '#n' inside label text must not be mistaken for a glued anchor"
-        );
-
-        // Multiple anchors on one body (e.g. several neighbors lines) all extract.
-        let multi = format!("{section_line}\n{entity_line}\n{doc_line}");
-        let mut ids = extract_node_ids(&multi);
-        ids.sort();
-        let mut want = vec!["doc.md".to_string(), "doc.md#2".to_string(), "doc.md#3".to_string()];
-        want.sort();
-        assert_eq!(ids, want);
     }
 
     #[test]
