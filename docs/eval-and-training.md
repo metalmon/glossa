@@ -110,22 +110,40 @@ Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/deri
 
 ### The `kbx` pipeline (reasoning-layer toolkit)
 
-The reasoning layer is built and evaluated by the **`kbx`** toolkit — a single binary with a
-verb per lifecycle stage. Over an indexed corpus:
+The reasoning layer is built and evaluated by the **`kbx`** toolkit — a single self-contained
+binary with a verb per lifecycle stage, configured by a per-workspace `lab.toml` (a model endpoint
+per role). It needs no TensorZero gateway. Over an indexed corpus:
 
-| Verb | Stage | Status |
-|---|---|---|
-| `kbx init` | Scaffold a `.glossa/kbx/` workspace (lab.toml, prompts, dataset) | built |
-| `kbx build` | Phase 1 — harvest grounded terminals from each document | built |
-| `kbx reason` | Phase 2 — synthesize the query-side reasoning layer | built |
-| `kbx train` | `(Q,A)` + GEPA optimization of the answer prompt | partial |
-| `kbx distil` | Densify the graph with a stronger model | planned (current subcommand is the superseded gold-generator; do not extend it) |
-| `kbx eval` | Score the reader (graph-on vs graph-off) | built |
+| Verb | Stage |
+|---|---|
+| `kbx init` | Scaffold a `.glossa/kbx/` workspace (lab.toml, prompts, dataset) |
+| `kbx build` | Phase 1 — harvest grounded terminals from each document |
+| `kbx reason` | Phase 2 — synthesize the query-side reasoning layer |
+| `kbx train` | `(Q,A)` + GEPA optimization of the answer prompt (iteration-based progress bar) |
+| `kbx distil` | Densify the graph with a stronger model |
+| `kbx eval` | Score the reader (graph-on vs graph-off), optionally graded by an LLM judge |
+| `kbx export` | Build SFT / DPO fine-tuning datasets from captured trajectories |
 
-For the operator-facing create / maintain workflows built on these verbs, see
-[graph-lifecycle.md](graph-lifecycle.md). The `enrich` recipe below is the earlier
-`kb-train`-based silver-graph path; it and the `kb-eval`/`kb-train` binaries remain until `kbx`
-grows `train` + `distil` to full parity.
+Endpoints, sampling, retries, and the optional gates are all configured in `lab.toml` — see the
+self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
+
+- **Multi-API transport** — each endpoint's `api` selects `openai` (default), `anthropic` (native
+  Messages), `openai_responses`, or `tensorzero` (native `/inference` with episode grouping and
+  judge feedback for TZ observability).
+- **Rate-limit resilience** — opt-in per-endpoint retry/backoff + throttle and an ordered fallback chain.
+- **Per-endpoint temperature**; **parallel workers** per stage via `[tuning] jobs_*`.
+- **user_sim dialogue gate** — an opt-in patient simulated user that deflects a non-answer back into
+  the reader loop instead of accepting it (eval + train).
+- **Evidence-grounded judge** — grades an answer against the retrieved source evidence, not only the gold string.
+- **Anti-loop retrieval signals** — neutral plateau/repeat/streak markers curb search spirals and feed
+  DPO-on-plateau fine-tuning pairs.
+
+For the operator-facing create / maintain workflows, see [graph-lifecycle.md](graph-lifecycle.md);
+for building fine-tuning datasets, [finetuning-datasets.md](finetuning-datasets.md).
+
+The remainder of this guide is the earlier **TensorZero-gateway apparatus** — the `kb-eval` /
+`kb-train` binaries, the `enrich` silver-graph path, and GEPA over the four retrieval micro-tasks.
+It remains supported for that research workflow; `kbx` is the current self-contained path.
 
 ### Index once
 

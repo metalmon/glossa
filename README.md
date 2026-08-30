@@ -117,7 +117,7 @@ Tool reference: [docs/mcp.md](docs/mcp.md). Service install: [docs/deploy/servic
 | [docs/mcp.md](docs/mcp.md) | MCP tools and IDE setup |
 | [docs/deploy/service.md](docs/deploy/service.md) | System service install |
 | [docs/graph-and-ontology.md](docs/graph-and-ontology.md) | Ontology, enrich, generalize |
-| [docs/eval-and-training.md](docs/eval-and-training.md) | kb-eval, kb-train, dataset format |
+| [docs/eval-and-training.md](docs/eval-and-training.md) | The `kbx` reasoning-layer pipeline + the legacy kb-eval/kb-train workflow |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Backlog and direction |
 | [docs/benchmarks.md](docs/benchmarks.md) | Eval run history |
 

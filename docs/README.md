@@ -16,7 +16,7 @@ User-facing documentation for the glossa knowledge-base engine.
 | [graph-and-ontology.md](graph-and-ontology.md) | Domain operators | Ontology overlay, enrich workflow, CLI mirror |
 | [graph-lifecycle.md](graph-lifecycle.md) | Operators / agent authors | Build & maintain the graph: create, health, add/edit/delete-a-document workflows |
 | [ontology-presets.md](ontology-presets.md) | Domain operators | Baked task ontologies, `--ontology` flag, `kb ontology` commands, catalog |
-| [eval-and-training.md](eval-and-training.md) | Benchmark developers | kb-eval, kb-train, dataset format, just recipes |
+| [eval-and-training.md](eval-and-training.md) | Benchmark developers | The `kbx` reasoning-layer pipeline (build/reason/train/distil/eval/export) + the legacy kb-eval/kb-train TensorZero workflow |
 | [finetuning-datasets.md](finetuning-datasets.md) | ML engineers | Build SFT/DPO datasets from your graph for Unsloth — teacher distillation + on-policy capture |
 | [deploy/service.md](deploy/service.md) | Ops | Service install (Linux / Windows / macOS) |
 | [deploy/mcp-server.md](deploy/mcp-server.md) | DevOps | Advanced HTTP deployment, multi-instance |

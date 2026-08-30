@@ -17,12 +17,12 @@ flowchart TB
   subgraph consumers [Consumers]
     cli[kb CLI]
     mcp[kb mcp]
-    train[kb-train enrich]
+    kbx[kbx build/reason]
   end
 
   pdf -->|extract + chunk| tantivy
   pdf -->|structural layer| sqlite
-  train -->|graph_upsert| sqlite
+  kbx -->|graph_upsert| sqlite
   ont -->|validates| sqlite
   cli --> tantivy
   cli --> sqlite
