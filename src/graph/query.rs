@@ -435,6 +435,433 @@ fn collect_from_function_arg_expr(a: &FunctionArgExpr, out: &mut Vec<String>) {
     }
 }
 
+/// Rewrite every `Expr::ILike` reachable from `q` into the equivalent `Expr::Like`, in place.
+/// SQLite has no `ILIKE` operator; with the Unicode-case-insensitive `like()` registered on the
+/// connection (see `graph::store::register_unicode_like`), `LIKE` is exactly equivalent to
+/// `ILIKE`, so this is a lossless dialect translation, not an approximation. The traversal shape
+/// mirrors [`collect_from_query`]/[`collect_from_set_expr`]/[`collect_from_table_factor`]/
+/// [`collect_from_expr`] (same set of expression positions those already walk to find embedded
+/// subqueries for the table whitelist), so every `WHERE`/`HAVING`/projection/`GROUP BY`/JOIN
+/// `ON`/subquery/CTE/function-argument position is covered — plus `ORDER BY` and `LIMIT`, which
+/// those table-collectors don't need to visit but this pass does for completeness.
+pub(crate) fn ilike_to_like_query(q: &mut Query) {
+    if let Some(with) = &mut q.with {
+        for cte in &mut with.cte_tables {
+            ilike_to_like_query(&mut cte.query);
+        }
+    }
+    ilike_to_like_set_expr(&mut q.body);
+    if let Some(order_by) = &mut q.order_by {
+        for oe in &mut order_by.exprs {
+            ilike_to_like_expr(&mut oe.expr);
+        }
+    }
+    if let Some(limit) = &mut q.limit {
+        ilike_to_like_expr(limit);
+    }
+    for e in &mut q.limit_by {
+        ilike_to_like_expr(e);
+    }
+}
+
+fn ilike_to_like_set_expr(expr: &mut SetExpr) {
+    match expr {
+        SetExpr::Select(select) => {
+            for twj in &mut select.from {
+                ilike_to_like_table_factor(&mut twj.relation);
+                for join in &mut twj.joins {
+                    ilike_to_like_table_factor(&mut join.relation);
+                    ilike_to_like_join_operator(&mut join.join_operator);
+                }
+            }
+            for item in &mut select.projection {
+                match item {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                        ilike_to_like_expr(e)
+                    }
+                    SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(..) => {}
+                }
+            }
+            if let Some(e) = &mut select.selection {
+                ilike_to_like_expr(e);
+            }
+            if let Some(e) = &mut select.prewhere {
+                ilike_to_like_expr(e);
+            }
+            if let Some(e) = &mut select.having {
+                ilike_to_like_expr(e);
+            }
+            if let Some(e) = &mut select.qualify {
+                ilike_to_like_expr(e);
+            }
+            match &mut select.group_by {
+                GroupByExpr::All(_) => {}
+                GroupByExpr::Expressions(exprs, _) => {
+                    for e in exprs {
+                        ilike_to_like_expr(e);
+                    }
+                }
+            }
+        }
+        SetExpr::Query(inner) => ilike_to_like_query(inner),
+        SetExpr::SetOperation { left, right, .. } => {
+            ilike_to_like_set_expr(left);
+            ilike_to_like_set_expr(right);
+        }
+        SetExpr::Values(_) | SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {}
+    }
+}
+
+/// The `ON` constraint of a JOIN is a very plausible home for an `ILIKE` (e.g. `JOIN edges e ON
+/// e.efrom LIKE ...`), so this is walked explicitly rather than relying on [`ilike_to_like_expr`]
+/// alone reaching it.
+fn ilike_to_like_join_operator(op: &mut JoinOperator) {
+    let constraint = match op {
+        JoinOperator::Inner(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c) => c,
+        _ => return,
+    };
+    if let JoinConstraint::On(e) = constraint {
+        ilike_to_like_expr(e);
+    }
+}
+
+fn ilike_to_like_table_factor(tf: &mut TableFactor) {
+    match tf {
+        TableFactor::Table { .. } => {}
+        TableFactor::Derived { subquery, .. } => ilike_to_like_query(subquery),
+        TableFactor::NestedJoin { table_with_joins, .. } => {
+            ilike_to_like_table_factor(&mut table_with_joins.relation);
+            for join in &mut table_with_joins.joins {
+                ilike_to_like_table_factor(&mut join.relation);
+                ilike_to_like_join_operator(&mut join.join_operator);
+            }
+        }
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => ilike_to_like_table_factor(table),
+        _ => {}
+    }
+}
+
+fn ilike_to_like_function(func: &mut Function) {
+    ilike_to_like_function_arguments(&mut func.parameters);
+    ilike_to_like_function_arguments(&mut func.args);
+    if let Some(f) = &mut func.filter {
+        ilike_to_like_expr(f);
+    }
+    for ob in &mut func.within_group {
+        ilike_to_like_expr(&mut ob.expr);
+    }
+}
+
+fn ilike_to_like_function_arguments(args: &mut FunctionArguments) {
+    match args {
+        FunctionArguments::None => {}
+        FunctionArguments::Subquery(q) => ilike_to_like_query(q),
+        FunctionArguments::List(list) => {
+            for a in &mut list.args {
+                ilike_to_like_function_arg(a);
+            }
+            for clause in &mut list.clauses {
+                ilike_to_like_function_arg_clause(clause);
+            }
+        }
+    }
+}
+
+fn ilike_to_like_function_arg_clause(clause: &mut FunctionArgumentClause) {
+    match clause {
+        FunctionArgumentClause::OrderBy(order_exprs) => {
+            for oe in order_exprs {
+                ilike_to_like_expr(&mut oe.expr);
+            }
+        }
+        FunctionArgumentClause::Limit(e) => ilike_to_like_expr(e),
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate { filler, .. }) => {
+            if let Some(f) = filler {
+                ilike_to_like_expr(f);
+            }
+        }
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Error) => {}
+        FunctionArgumentClause::Having(HavingBound(_, e)) => ilike_to_like_expr(e),
+        FunctionArgumentClause::IgnoreOrRespectNulls(_)
+        | FunctionArgumentClause::Separator(_)
+        | FunctionArgumentClause::JsonNullClause(_) => {}
+    }
+}
+
+fn ilike_to_like_function_arg(a: &mut FunctionArg) {
+    match a {
+        FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+            ilike_to_like_function_arg_expr(arg)
+        }
+        FunctionArg::ExprNamed { name, arg, .. } => {
+            ilike_to_like_expr(name);
+            ilike_to_like_function_arg_expr(arg);
+        }
+    }
+}
+
+fn ilike_to_like_function_arg_expr(a: &mut FunctionArgExpr) {
+    if let FunctionArgExpr::Expr(e) = a {
+        ilike_to_like_expr(e);
+    }
+}
+
+/// Recurse into every child expression position (same shape as [`collect_from_expr`], mutating
+/// instead of collecting), then — after children are already normalized — swap this node itself
+/// to `Expr::Like` if it is an `Expr::ILike`.
+fn ilike_to_like_expr(expr: &mut Expr) {
+    match expr {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => ilike_to_like_query(q),
+        Expr::InSubquery {
+            expr: e, subquery, ..
+        } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_query(subquery);
+        }
+        Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e)
+        | Expr::Nested(e)
+        | Expr::OuterJoin(e)
+        | Expr::Prior(e)
+        | Expr::UnaryOp { expr: e, .. }
+        | Expr::CompositeAccess { expr: e, .. }
+        | Expr::JsonAccess { value: e, .. }
+        | Expr::Collate { expr: e, .. }
+        | Expr::Named { expr: e, .. }
+        | Expr::Cast { expr: e, .. }
+        | Expr::Extract { expr: e, .. }
+        | Expr::Ceil { expr: e, .. }
+        | Expr::Floor { expr: e, .. } => ilike_to_like_expr(e),
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            ilike_to_like_expr(a);
+            ilike_to_like_expr(b);
+        }
+        Expr::InList { expr: e, list, .. } => {
+            ilike_to_like_expr(e);
+            for it in list {
+                ilike_to_like_expr(it);
+            }
+        }
+        Expr::InUnnest {
+            expr: e, array_expr, ..
+        } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_expr(array_expr);
+        }
+        Expr::Between {
+            expr: e, low, high, ..
+        } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_expr(low);
+            ilike_to_like_expr(high);
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. } => {
+            ilike_to_like_expr(left);
+            ilike_to_like_expr(right);
+        }
+        Expr::Like { expr: e, pattern, .. }
+        | Expr::ILike { expr: e, pattern, .. }
+        | Expr::SimilarTo { expr: e, pattern, .. }
+        | Expr::RLike { expr: e, pattern, .. } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_expr(pattern);
+        }
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            ilike_to_like_expr(timestamp);
+            ilike_to_like_expr(time_zone);
+        }
+        Expr::Convert { expr: e, styles, .. } => {
+            ilike_to_like_expr(e);
+            for s in styles {
+                ilike_to_like_expr(s);
+            }
+        }
+        Expr::Position { expr: e, r#in } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_expr(r#in);
+        }
+        Expr::Substring {
+            expr: e,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            ilike_to_like_expr(e);
+            if let Some(f) = substring_from {
+                ilike_to_like_expr(f);
+            }
+            if let Some(f) = substring_for {
+                ilike_to_like_expr(f);
+            }
+        }
+        Expr::Trim {
+            expr: e,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            ilike_to_like_expr(e);
+            if let Some(w) = trim_what {
+                ilike_to_like_expr(w);
+            }
+            if let Some(cs) = trim_characters {
+                for c in cs {
+                    ilike_to_like_expr(c);
+                }
+            }
+        }
+        Expr::Overlay {
+            expr: e,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            ilike_to_like_expr(e);
+            ilike_to_like_expr(overlay_what);
+            ilike_to_like_expr(overlay_from);
+            if let Some(f) = overlay_for {
+                ilike_to_like_expr(f);
+            }
+        }
+        Expr::MapAccess { column, keys } => {
+            ilike_to_like_expr(column);
+            for k in keys {
+                ilike_to_like_expr(&mut k.key);
+            }
+        }
+        Expr::Function(func) => ilike_to_like_function(func),
+        Expr::Method(m) => {
+            ilike_to_like_expr(&mut m.expr);
+            for f in &mut m.method_chain {
+                ilike_to_like_function(f);
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(o) = operand {
+                ilike_to_like_expr(o);
+            }
+            for c in conditions {
+                ilike_to_like_expr(c);
+            }
+            for r in results {
+                ilike_to_like_expr(r);
+            }
+            if let Some(e) = else_result {
+                ilike_to_like_expr(e);
+            }
+        }
+        Expr::GroupingSets(vv) | Expr::Cube(vv) | Expr::Rollup(vv) => {
+            for v in vv {
+                for e in v {
+                    ilike_to_like_expr(e);
+                }
+            }
+        }
+        Expr::Tuple(v) | Expr::Struct { values: v, .. } => {
+            for e in v {
+                ilike_to_like_expr(e);
+            }
+        }
+        Expr::Dictionary(fields) => {
+            for f in fields {
+                ilike_to_like_expr(&mut f.value);
+            }
+        }
+        Expr::Map(m) => {
+            for entry in &mut m.entries {
+                ilike_to_like_expr(&mut entry.key);
+                ilike_to_like_expr(&mut entry.value);
+            }
+        }
+        Expr::Subscript { expr: e, subscript } => {
+            ilike_to_like_expr(e);
+            match &mut **subscript {
+                Subscript::Index { index } => ilike_to_like_expr(index),
+                Subscript::Slice {
+                    lower_bound,
+                    upper_bound,
+                    stride,
+                } => {
+                    if let Some(e) = lower_bound {
+                        ilike_to_like_expr(e);
+                    }
+                    if let Some(e) = upper_bound {
+                        ilike_to_like_expr(e);
+                    }
+                    if let Some(e) = stride {
+                        ilike_to_like_expr(e);
+                    }
+                }
+            }
+        }
+        Expr::Array(arr) => {
+            for e in &mut arr.elem {
+                ilike_to_like_expr(e);
+            }
+        }
+        Expr::Interval(iv) => ilike_to_like_expr(&mut iv.value),
+        Expr::Lambda(l) => ilike_to_like_expr(&mut l.body),
+        // Leaves that cannot embed another expression or query.
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::IntroducedString { .. }
+        | Expr::TypedString { .. }
+        | Expr::MatchAgainst { .. }
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..) => {}
+    }
+
+    // Children are already normalized above; now swap this node itself if it's the ILike we're
+    // looking for. `mem::replace` with a throwaway placeholder lets us move the boxed
+    // sub-expressions out of the old `Expr::ILike` without cloning them.
+    if matches!(expr, Expr::ILike { .. }) {
+        let Expr::ILike {
+            negated,
+            expr: e,
+            pattern,
+            escape_char,
+            any,
+        } = std::mem::replace(expr, Expr::Value(Value::Null))
+        else {
+            unreachable!("just matched Expr::ILike above");
+        };
+        *expr = Expr::Like {
+            negated,
+            expr: e,
+            pattern,
+            escape_char,
+            any,
+        };
+    }
+}
+
 /// A `col = 'lit'` string literal found in a `WHERE`/`ON` clause, classified by the column
 /// it's compared against so the resolver knows what kind of graph value to fuzzy-match it to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1028,6 +1455,11 @@ pub(crate) fn schema_help(g: &GraphStore) -> String {
     );
     out.push_str("  edges_labeled(src_label, edge_type, dst_label, efrom, eto)\n\n");
 
+    out.push_str(
+        "Dialect: SQLite. LIKE is Unicode case-insensitive (incl. Cyrillic); ILIKE is accepted \
+         and treated as LIKE; no trailing ';' needed.\n\n",
+    );
+
     out.push_str("edge_type values currently in this graph:\n");
     if edge_types.is_empty() {
         out.push_str("  (none yet)\n");
@@ -1058,17 +1490,25 @@ const ID_COLUMNS: &[&str] = &["id", "efrom", "eto", "node_id"];
 /// concrete). If the best assignment yields no rows, that's still rendered (as "no rows") rather
 /// than treated as an error — the note above it explains what was substituted.
 pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
-    if sql.trim().is_empty() {
+    // Defense-in-depth: a trailing `;` would otherwise break the `SELECT * FROM ({sql})` wrap in
+    // `run_select`. Once `real_sql` below is always re-serialized from the parsed AST (which
+    // never round-trips a terminator), this is belt-and-suspenders, but cheap and harmless.
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if sql.is_empty() {
         return schema_help(g);
     }
-    let q = match parse_readonly_select(sql) {
+    let mut q = match parse_readonly_select(sql) {
         Ok(q) => q,
         Err(e) => return format!("{e}\n\n{}", schema_help(g)),
     };
+    // SQLite has no ILIKE; translate it away in the AST so BOTH branches below (which both
+    // serialize `real_sql` from `q`) send SQLite only `LIKE` — exact under the Unicode-CI `like()`
+    // registered on the connection (see `graph::store::register_unicode_like`).
+    ilike_to_like_query(&mut q);
 
     let lits = locate_literals(&q);
     let (real_sql, notes): (String, Vec<String>) = if lits.is_empty() {
-        (sql.to_string(), Vec::new())
+        (q.to_string(), Vec::new())
     } else {
         let chosen = resolve_assignment(g, &q, &lits);
         let real_sql = rewrite(&q, &chosen);
@@ -1081,15 +1521,33 @@ pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
 
     let rows = match g.run_select(&real_sql, 50) {
         Ok(rows) => rows,
-        Err(e) => return format!("query error: {e}\n\n{}", schema_help(g)),
+        Err(e) => return format!("query error: {}\n\n{}", query_error_text(&e), schema_help(g)),
     };
     let cols = match g.select_columns(&real_sql) {
         Ok(cols) => cols,
-        Err(e) => return format!("query error: {e}\n\n{}", schema_help(g)),
+        Err(e) => return format!("query error: {}\n\n{}", query_error_text(&e), schema_help(g)),
     };
 
     let body = render_rows(idx, g, &cols, &rows);
     if notes.is_empty() { body } else { format!("{}\n{body}", notes.join("\n")) }
+}
+
+/// Render a `run_select`/`select_columns` failure with full anyhow context (`{e:#}`, not `{e}` —
+/// the latter shows only the outer "prepare run_select"/"query run_select" wrapper, hiding the
+/// actual SQLite reason like `near ";": syntax error` or `no such column: n.foo`), plus — since
+/// `ILIKE` is translated away before it ever reaches SQLite (see [`ilike_to_like_query`]) but a
+/// model might still see the word from elsewhere (a stale hint, a copy-pasted error, ...) — a
+/// one-line hint whenever the error text itself happens to mention ILIKE.
+fn query_error_text(e: &anyhow::Error) -> String {
+    let msg = format!("{e:#}");
+    if msg.to_lowercase().contains("ilike") {
+        format!(
+            "{msg}\nhint: this backend is SQLite — ILIKE is accepted and treated as LIKE \
+             (Unicode case-insensitive); if you typed it elsewhere use LIKE."
+        )
+    } else {
+        msg
+    }
 }
 
 /// One transparency-note line for a resolved literal, or `None` when nothing about the query's
@@ -1517,5 +1975,71 @@ mod tests {
         );
         assert!(out.contains("query error"), "surfaces the real error: {out}");
         assert!(out.contains("edges_labeled"), "appends the schema: {out}");
+    }
+
+    #[test]
+    fn ilike_returns_same_rows_as_like_equivalent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# H\nx\n").unwrap();
+        crate::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:calib", "КаЛибРовка Аналоговых")).unwrap();
+
+        let via_like = crate::graph::query::run(
+            &g,
+            &idx,
+            "SELECT label FROM nodes WHERE label LIKE '%калибровка%'",
+        );
+        let via_ilike = crate::graph::query::run(
+            &g,
+            &idx,
+            "SELECT label FROM nodes WHERE label ILIKE '%калибровка%'",
+        );
+        assert!(
+            via_like.contains("КаЛибРовка Аналоговых"),
+            "LIKE (Unicode-CI) finds the row: {via_like}"
+        );
+        assert_eq!(via_like, via_ilike, "ILIKE must return exactly the same rows as LIKE");
+    }
+
+    #[test]
+    fn trailing_semicolon_does_not_break_the_subquery_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("g.md"), b"# H\nx\n").unwrap();
+        crate::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node_fact("f:a", "alpha")).unwrap();
+
+        let out = crate::graph::query::run(&g, &idx, "SELECT label FROM nodes LIMIT 5;");
+        assert!(!out.contains("query error"), "trailing ';' must not error: {out}");
+        assert!(out.contains("alpha"), "still returns the row: {out}");
+    }
+
+    #[test]
+    fn ilike_to_like_query_rewrites_ilike_in_where_and_join_on() {
+        // WHERE clause.
+        let stmts = Parser::parse_sql(&SQLiteDialect {}, "SELECT id FROM nodes WHERE label ILIKE '%x%'").unwrap();
+        let [Statement::Query(q)] = stmts.as_slice() else { panic!("expected one query") };
+        let mut q = (**q).clone();
+        ilike_to_like_query(&mut q);
+        let sql = q.to_string();
+        assert!(sql.contains("LIKE"), "ILIKE rewritten to LIKE: {sql}");
+        assert!(!sql.to_uppercase().contains("ILIKE"), "no ILIKE left: {sql}");
+
+        // JOIN ... ON with an alias.
+        let stmts = Parser::parse_sql(
+            &SQLiteDialect {},
+            "SELECT n.label FROM nodes n JOIN edges e ON e.efrom ILIKE n.id",
+        )
+        .unwrap();
+        let [Statement::Query(q)] = stmts.as_slice() else { panic!("expected one query") };
+        let mut q = (**q).clone();
+        ilike_to_like_query(&mut q);
+        let sql = q.to_string();
+        assert!(sql.contains("LIKE"), "ILIKE in JOIN ON rewritten: {sql}");
+        assert!(!sql.to_uppercase().contains("ILIKE"), "no ILIKE left in JOIN ON: {sql}");
+        assert!(sql.contains("JOIN"), "join structure preserved: {sql}");
     }
 }

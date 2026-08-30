@@ -1663,9 +1663,10 @@ impl GlossaServer {
         )]))
     }
 
-    // keep in sync with registry::DESC_SQL (see search's comment above for why this is a literal).
+    // keep in sync with registry::DESC_SQL (see search's comment above for why this is a literal;
+    // `sql_tool_description_matches_registry_desc_sql` below fails the build if these drift).
     #[tool(
-        description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto)."
+        description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed."
     )]
     async fn sql(
         &self,
@@ -1840,6 +1841,25 @@ impl ServerHandler for GlossaServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_tool_description_matches_registry_desc_sql() {
+        // The rmcp #[tool(description = "…")] attribute requires a literal, so the `sql` tool's
+        // description is duplicated by hand between here and registry::DESC_SQL — this test is
+        // the guard that keeps the two copies from silently drifting apart.
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Full, false, ServerFlags::default());
+        let specs = srv.tool_specs();
+        let sql_tool = specs
+            .iter()
+            .find(|t| t.name.as_ref() == "sql")
+            .expect("sql tool registered");
+        assert_eq!(
+            sql_tool.description.as_deref(),
+            Some(crate::tools::registry::DESC_SQL),
+            "mcp.rs's #[tool(description=…)] literal for `sql` has drifted from registry::DESC_SQL"
+        );
+    }
 
     #[test]
     fn arg_structs_accept_stringified_primitives() {

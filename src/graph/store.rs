@@ -1,6 +1,7 @@
 use crate::graph::ontology::Ontology;
 use crate::index::manifest::FileSig;
 use anyhow::Context;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -51,6 +52,114 @@ impl Drop for QueryAuthzGuard<'_> {
     fn drop(&mut self) {
         let _ = self.0.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     }
+}
+
+/// Pure implementation of SQLite `LIKE` matching semantics, but Unicode-case-folded — plain
+/// SQLite's built-in `like()` only case-folds ASCII, so e.g. Cyrillic `LIKE` is
+/// case-*sensitive* there. Semantics: `%` matches any sequence of zero or more characters, `_`
+/// matches exactly one character, every other pattern character matches literally; both `pattern`
+/// and `text` are folded with Rust's `char::to_lowercase` before matching (correct 1:1 folding for
+/// Cyrillic, not just ASCII). An optional `escape` char makes the *following* pattern character
+/// literal when that character is `%`, `_`, or the escape character itself; an escape character
+/// that precedes anything else (or is the pattern's last character) is treated leniently as a
+/// literal character in its own right, matching SQLite's own lenient behavior. The registered
+/// `like` SQL scalar function (see [`register_unicode_like`]) is a thin argument-order wrapper
+/// around this.
+fn like_match(pattern: &str, text: &str, escape: Option<char>) -> bool {
+    #[derive(Clone, Copy)]
+    enum Tok {
+        Lit(char),
+        AnyOne, // `_`
+        AnySeq, // `%`
+    }
+
+    // Fold the escape char the same way, so e.g. a Unicode escape char still matches post-fold
+    // (irrelevant for the conventional ASCII `\`, but keeps the rule uniform).
+    let escape = escape.and_then(|c| c.to_lowercase().next());
+
+    // Tokenize the lowered pattern into Lit/AnyOne/AnySeq, honoring `escape` as we go.
+    let pat_lower: Vec<char> = pattern.chars().flat_map(char::to_lowercase).collect();
+    let mut toks: Vec<Tok> = Vec::with_capacity(pat_lower.len());
+    let mut i = 0;
+    while i < pat_lower.len() {
+        let c = pat_lower[i];
+        if Some(c) == escape {
+            if let Some(&next) = pat_lower.get(i + 1) {
+                // The escape makes the following char literal, whatever it is.
+                toks.push(Tok::Lit(next));
+                i += 2;
+                continue;
+            }
+            // Trailing escape with nothing to escape: lenient — the escape char itself is literal.
+            toks.push(Tok::Lit(c));
+            i += 1;
+            continue;
+        }
+        toks.push(match c {
+            '%' => Tok::AnySeq,
+            '_' => Tok::AnyOne,
+            other => Tok::Lit(other),
+        });
+        i += 1;
+    }
+    let text_lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+
+    // Classic backtracking wildcard match: `%` tries every split point, `_`/Lit consume exactly
+    // one char and recurse. `toks`/`text` are small (SQL literals, not user files), so the
+    // exponential worst case never materializes in practice here.
+    fn matches(toks: &[Tok], text: &[char]) -> bool {
+        match toks.first() {
+            None => text.is_empty(),
+            Some(Tok::AnySeq) => {
+                // Collapse a run of consecutive `%` — purely an optimization, changes no result.
+                let mut rest = &toks[1..];
+                while matches!(rest.first(), Some(Tok::AnySeq)) {
+                    rest = &rest[1..];
+                }
+                (0..=text.len()).any(|split| matches(rest, &text[split..]))
+            }
+            Some(Tok::AnyOne) => !text.is_empty() && matches(&toks[1..], &text[1..]),
+            Some(Tok::Lit(c)) => matches!(text.first(), Some(t) if t == c) && matches(&toks[1..], &text[1..]),
+        }
+    }
+    matches(&toks, &text_lower)
+}
+
+/// Register a Unicode-case-insensitive `like` scalar function on `conn`. SQLite compiles both
+/// the `LIKE` operator and an explicit `like(...)` call to an invocation of a function literally
+/// named `like`, so redefining it changes what the `LIKE` keyword itself does, app-wide on this
+/// connection — this is also how `ILIKE` (rewritten to `LIKE` by the AST pass in `graph::query`)
+/// ends up Unicode-case-insensitive without SQLite ever seeing the word "ILIKE".
+///
+/// ARG ORDER (the classic gotcha): SQLite invokes `like(pattern, string)` / `like(pattern,
+/// string, escape)` for `string LIKE pattern [ESCAPE escape]` — arg0 is the pattern (the RHS of
+/// `LIKE`), arg1 is the string being matched (the LHS), arg2 (if present) is the escape char. A
+/// NULL pattern or string yields SQL NULL, per SQLite's own NULL-propagation rule for `LIKE`.
+fn register_unicode_like(conn: &Connection) -> anyhow::Result<()> {
+    conn.create_scalar_function(
+        "like",
+        -1, // variadic: called with 2 args for `LIKE`, 3 for `LIKE ... ESCAPE ...`
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| -> rusqlite::Result<Option<bool>> {
+            if ctx.len() < 2 {
+                return Err(rusqlite::Error::InvalidParameterCount(ctx.len(), 2));
+            }
+            let pattern: Option<String> = ctx.get(0)?;
+            let text: Option<String> = ctx.get(1)?;
+            let (Some(pattern), Some(text)) = (pattern, text) else {
+                return Ok(None); // NULL in, NULL out
+            };
+            let escape_char = if ctx.len() >= 3 {
+                let escape: Option<String> = ctx.get(2)?;
+                escape.and_then(|s| s.chars().next())
+            } else {
+                None
+            };
+            Ok(Some(like_match(&pattern, &text, escape_char)))
+        },
+    )
+    .context("register unicode-ci like()")?;
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -147,6 +256,10 @@ impl GraphStore {
         let gdir = dir.join(".glossa");
         std::fs::create_dir_all(&gdir).with_context(|| format!("create {gdir:?}"))?;
         let conn = Connection::open(gdir.join("graph.sqlite")).context("open sqlite")?;
+        // Once per connection (not per-query, unlike the authorizer above) — overrides SQLite's
+        // built-in ASCII-only-case-insensitive `like()` so `LIKE`/`ILIKE`-as-`LIKE` match
+        // Cyrillic (and any other Unicode script) regardless of case.
+        register_unicode_like(&conn)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
              CREATE TABLE IF NOT EXISTS nodes (
@@ -1969,6 +2082,63 @@ mod tests {
             g.select_columns("SELECT id, label FROM nodes").unwrap(),
             vec!["id", "label"]
         );
+    }
+
+    #[test]
+    fn like_match_is_unicode_case_insensitive_cyrillic() {
+        assert!(like_match("%калибровка%", "КАЛИБРОВКА аналоговых", None));
+        assert!(like_match("КаЛибРовка", "калибровка", None));
+    }
+
+    #[test]
+    fn like_match_is_case_insensitive_ascii() {
+        assert!(like_match("%foo%", "a FOO b", None));
+    }
+
+    #[test]
+    fn like_match_underscore_matches_exactly_one_char() {
+        assert!(like_match("a_c", "abc", None));
+        assert!(!like_match("a_c", "ac", None));
+        assert!(like_match("_", "я", None));
+    }
+
+    #[test]
+    fn like_match_percent_matches_any_sequence_incl_empty() {
+        assert!(like_match("a%c", "ac", None));
+        assert!(like_match("a%c", "abbbc", None));
+        assert!(like_match("100%", "100", None));
+    }
+
+    #[test]
+    fn like_match_literal_no_wildcard() {
+        assert!(like_match("abc", "ABC", None));
+        assert!(!like_match("abc", "abd", None));
+    }
+
+    #[test]
+    fn like_match_escape_char_makes_next_char_literal() {
+        assert!(like_match("100\\%", "100%", Some('\\')));
+        assert!(!like_match("100\\%", "1005", Some('\\')));
+        assert!(like_match("a\\_b", "a_b", Some('\\')));
+        assert!(!like_match("a\\_b", "axb", Some('\\')));
+    }
+
+    #[test]
+    fn run_select_uses_unicode_ci_like_on_the_live_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&Node {
+            id: "n:calib".into(),
+            node_type: "Fact".into(),
+            label: "КаЛибРовка Аналоговых".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+        let rows = g
+            .run_select("SELECT label FROM nodes WHERE label LIKE '%калибровка%'", 10)
+            .unwrap();
+        assert_eq!(rows, vec![vec!["КаЛибРовка Аналоговых".to_string()]]);
     }
 
     #[test]
