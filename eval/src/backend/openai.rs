@@ -353,6 +353,20 @@ pub struct OpenAiBackend {
     /// agent loop advances through these via `resilience::call_resilient`. Empty (the default)
     /// reproduces today's behavior exactly (no fallback).
     pub fallback: Vec<crate::lab::Endpoint>,
+    /// Which `ChatTransport` this backend's `[model]` endpoint speaks (`backend::transport::
+    /// transport_for`). Defaults to `OpenAiChat` (today's hardcoded behavior) so every existing
+    /// caller that doesn't set this field keeps driving `OpenAiTransport` unchanged; set to
+    /// `Tensorzero` to route the reader through `TzTransport`'s native `/inference` + `/feedback`.
+    pub api: crate::lab::ApiKind,
+    /// TensorZero function name (only consulted when `api == Tensorzero`; see
+    /// `crate::lab::Endpoint::function_name`).
+    pub function_name: Option<String>,
+    /// TensorZero feedback metric name for the graded judge score (only consulted when
+    /// `api == Tensorzero`; see `crate::lab::Endpoint::feedback_score_metric`).
+    pub feedback_score_metric: Option<String>,
+    /// TensorZero feedback metric name for the boolean correctness flag (only consulted when
+    /// `api == Tensorzero`; see `crate::lab::Endpoint::feedback_bool_metric`).
+    pub feedback_bool_metric: Option<String>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -385,23 +399,16 @@ impl OpenAiBackend {
         // arguments. `resolve_key()` with an empty `api_key_env` reduces to "use `api_key` if
         // non-empty, else None" — the same behavior `self.api_key.as_deref()` had (an empty-string
         // key is filtered out later by `chat_http` regardless, in both the old and new paths).
-        let ep = crate::lab::Endpoint {
-            endpoint: self.endpoint.clone(),
-            model: self.model.clone(),
-            api_key: self.api_key.clone().unwrap_or_default(),
-            api_key_env: String::new(),
-            timeout_secs: self.timeout.as_secs(),
-            api: crate::lab::ApiKind::default(),
-            temperature: self.temperature,
-            rate_limit: self.rate_limit.clone(),
-            fallback: self.fallback.clone(),
-        };
+        let ep = self.endpoint_config();
         let graph = if self.use_graph {
             glossa::graph::store::GraphStore::open(work).ok()
         } else {
             None
         };
-        let transport = crate::backend::transport::openai::OpenAiTransport;
+        // Selected by `self.api` (default `OpenAiChat`, unchanged for every existing caller) —
+        // `transport_for` builds `TzTransport` when `api = "tensorzero"`, so the eval reader gets
+        // native TZ episode grouping + feedback without a separate code path.
+        let transport = crate::backend::transport::transport_for(&ep);
         let tools = transport.tools_schema(graph.is_some());
 
         let trace = TraceLog::to_dir(work);
@@ -466,7 +473,7 @@ impl OpenAiBackend {
             .as_ref()
             .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
         let raw = crate::backend::agent_loop::run_agent_loop_capturing(
-            &transport,
+            transport.as_ref(),
             &ep,
             None,
             seed_messages,
@@ -515,7 +522,40 @@ impl OpenAiBackend {
             user_sim_prompt: None,
             rate_limit: None,
             fallback: Vec::new(),
+            api: crate::lab::ApiKind::default(),
+            function_name: None,
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
         }
+    }
+
+    /// Build the `Endpoint` this backend's `[model]` config resolves to — the SAME construction
+    /// `answer_capturing` uses for `transport_for`, factored out so [`post_feedback`] can hand it
+    /// to a freshly-built transport without re-running the reader.
+    fn endpoint_config(&self) -> crate::lab::Endpoint {
+        crate::lab::Endpoint {
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone().unwrap_or_default(),
+            api_key_env: String::new(),
+            timeout_secs: self.timeout.as_secs(),
+            api: self.api,
+            temperature: self.temperature,
+            rate_limit: self.rate_limit.clone(),
+            fallback: self.fallback.clone(),
+            function_name: self.function_name.clone(),
+            feedback_score_metric: self.feedback_score_metric.clone(),
+            feedback_bool_metric: self.feedback_bool_metric.clone(),
+        }
+    }
+
+    /// Post episode-level feedback through this backend's own transport (selected by `self.api`).
+    /// A no-op for every non-TensorZero transport (the default `ChatTransport::post_feedback`) —
+    /// only `TzTransport` overrides it, and `run_eval` only calls this when `episode::current()`
+    /// was `Some` after the reader ran, so off-TZ this is never reached in the first place.
+    pub fn post_feedback(&self, episode_id: &str, metrics: &[(&str, serde_json::Value)]) {
+        let ep = self.endpoint_config();
+        crate::backend::transport::transport_for(&ep).post_feedback(episode_id, metrics);
     }
 }
 
@@ -730,6 +770,9 @@ where
         // real endpoint). `call_resilient` therefore makes exactly one primary call, unchanged.
         rate_limit: None,
         fallback: Vec::new(),
+        function_name: None,
+        feedback_score_metric: None,
+        feedback_bool_metric: None,
     };
     crate::backend::agent_loop::run_agent_loop(
         &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds, user_sim,

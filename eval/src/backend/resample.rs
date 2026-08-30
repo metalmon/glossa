@@ -142,7 +142,7 @@ pub fn call_with_resample(
             if std::ptr::eq(link, ep) {
                 transport.call(link, system, messages, tools, temperature)
             } else {
-                transport_for(link.api).call(link, system, messages, tools, temperature)
+                transport_for(link).call(link, system, messages, tools, temperature)
             }
         })
     };
@@ -187,6 +187,9 @@ mod tests {
             temperature: None,
             rate_limit: None,
             fallback: Vec::new(),
+            function_name: None,
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
         }
     }
 

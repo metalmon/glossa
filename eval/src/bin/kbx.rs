@@ -635,6 +635,18 @@ fn resolve_eval_paths(
 /// `[tuning] jobs_eval` overrides it — matches the other stages' `DEFAULT_JOBS` (3).
 const DEFAULT_JOBS_EVAL: usize = 3;
 
+/// Graded score a `Verdict` maps to for the TensorZero feedback metric (`Correct=1.0/Partial=0.5/
+/// Wrong=0.0` — same scale `backend::tensorzero::TensorZeroBackend::judge_score` already uses).
+/// `Unscored` never reaches this function (the feedback post is gated on `verdict != Unscored` at
+/// the call site), so it's given the conservative 0.0 rather than treated as a real case.
+fn verdict_score(v: Verdict) -> f32 {
+    match v {
+        Verdict::Correct => 1.0,
+        Verdict::Partial => 0.5,
+        Verdict::Wrong | Verdict::Unscored => 0.0,
+    }
+}
+
 fn run_eval(args: EvalArgs) -> Result<()> {
     let kbx_paths = workspace::resolve(args.path);
     let lab = LabConfig::load_at(&kbx_paths.lab)
@@ -776,6 +788,10 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             user_sim_prompt: user_sim_prompt.clone(),
             rate_limit: lab.model.rate_limit.clone(),
             fallback: lab.model.fallback.clone(),
+            api: lab.model.api,
+            function_name: lab.model.function_name.clone(),
+            feedback_score_metric: lab.model.feedback_score_metric.clone(),
+            feedback_bool_metric: lab.model.feedback_bool_metric.clone(),
         };
 
         // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
@@ -793,6 +809,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             kb_eval::backend::agent_loop::CapturedEpisode,   // trajectory (empty unless captured)
         );
         let run_sample = |capture: bool| -> Sample {
+            // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
+            // episode id left over from a PRIOR case on the same thread (or the previous sample
+            // of THIS case) never leaks into this rollout — mirrors `TraceLog::to_dir`'s own
+            // per-call thread-local reset, just done explicitly here since episode-setting lives
+            // inside `TzTransport::call`, not the backend constructor. A no-op off TensorZero
+            // (nothing ever calls `kb_eval::episode::set`, so `current()` stays `None`).
+            kb_eval::episode::reset();
             let mut episode = kb_eval::backend::agent_loop::CapturedEpisode::default();
             let answer = if capture {
                 match backend.answer_capturing(&paths.root, q, Some(&mut episode)) {
@@ -843,6 +866,27 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 },
                 _ => (Verdict::Unscored, String::new(), String::new()),
             };
+
+            // TensorZero episode feedback: post the judge verdict on the episode this rollout
+            // grouped into. `episode::current()` is `Some` ONLY when the reader's transport is
+            // `TzTransport` (every other transport never calls `episode::set`) AND a judge
+            // actually scored this rollout (`Unscored` — no judge configured, or the judge call
+            // itself errored — posts nothing rather than a misleading 0.0). Off-TZ this whole
+            // block is inert: `current()` is always `None`, so `post_feedback` is never reached.
+            if verdict != Verdict::Unscored {
+                if let Some(eid) = kb_eval::episode::current() {
+                    let score_metric = lab.model.feedback_score_metric();
+                    let bool_metric = lab.model.feedback_bool_metric();
+                    backend.post_feedback(
+                        &eid,
+                        &[
+                            (score_metric.as_str(), serde_json::json!(verdict_score(verdict))),
+                            (bool_metric.as_str(), serde_json::json!(verdict == Verdict::Correct)),
+                        ],
+                    );
+                }
+            }
+
             (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode)
         };
 

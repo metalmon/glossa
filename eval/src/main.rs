@@ -168,6 +168,11 @@ fn main() -> anyhow::Result<()> {
                         // (today's behavior exactly).
                         rate_limit: None,
                         fallback: Vec::new(),
+                        // No `[model] api = "tensorzero"` on the legacy CLI -> OpenAiChat, unchanged.
+                        api: kb_eval::lab::ApiKind::default(),
+                        function_name: None,
+                        feedback_score_metric: None,
+                        feedback_bool_metric: None,
                     })
                 }
                 BackendKind::Cli => {

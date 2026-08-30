@@ -13,6 +13,7 @@ pub mod dataset;
 pub mod dataset_toml;
 pub mod distil;
 pub mod enrich;
+pub mod episode;
 pub mod export_tz;
 pub mod finetune;
 pub mod export_tz_constraint;

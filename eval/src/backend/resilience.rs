@@ -264,6 +264,9 @@ mod tests {
             temperature: None,
             rate_limit: None,
             fallback: Vec::new(),
+            function_name: None,
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
         }
     }
 

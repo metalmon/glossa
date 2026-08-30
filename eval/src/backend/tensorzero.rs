@@ -201,6 +201,64 @@ fn preprocess_tool_args_json(s: &str) -> String {
     t.trim().to_string()
 }
 
+/// Normalize a TensorZero `/inference` content array into `ChatTransport`'s neutral `TurnReply`.
+/// REUSES [`normalize_tool_call_arguments`] — the SAME healing `run_episode_gated` applies to
+/// every tool_call block (repair-or-reject unparseable `arguments`/`raw_arguments`) — so
+/// `TzTransport::call` (the native-transport seam) never echoes a poisoned `arguments: null`
+/// back into the transcript, exactly like the legacy closure-driven episode loop above.
+///
+/// `raw` carries the NORMALIZED content array (healed tool_call `arguments`, every other block
+/// untouched) under `{"content": [...]}`, so `TzTransport::push_assistant_turn` can echo it back
+/// verbatim — the same shape `run_episode_gated` pushes as the assistant's turn.
+pub(crate) fn turn_reply_from_content(
+    content: Vec<Value>,
+    finish_reason: Option<String>,
+) -> crate::backend::transport::TurnReply {
+    use crate::backend::transport::ToolCall;
+
+    let mut tool_calls = Vec::new();
+    let mut normalized_blocks = Vec::with_capacity(content.len());
+    for block in &content {
+        let typ = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if typ == "tool_call" {
+            let id = block
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = block
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let norm = normalize_tool_call_arguments(block);
+            tool_calls.push(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                args: norm.exec,
+            });
+            normalized_blocks.push(json!({
+                "type": "tool_call", "id": id, "name": name, "arguments": norm.echo
+            }));
+        } else {
+            normalized_blocks.push(block.clone());
+        }
+    }
+    let text: String = content
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+
+    crate::backend::transport::TurnReply {
+        text: Some(text),
+        tool_calls,
+        finish_reason,
+        raw: json!({ "content": normalized_blocks }),
+    }
+}
+
 /// Drive a TensorZero episode to a final outcome (no completion gate — the plain
 /// agentic loop, unchanged). See [`run_episode_gated`] to add an SOP-style gate.
 pub fn run_episode<C, X>(
@@ -830,6 +888,38 @@ mod retrieved_tests {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn turn_reply_from_content_extracts_text_and_tool_calls() {
+        let content = vec![
+            json!({ "type": "text", "text": "thinking..." }),
+            json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": {"q": "x"} }),
+        ];
+        let reply = turn_reply_from_content(content, Some("stop".to_string()));
+        assert_eq!(reply.text.as_deref(), Some("thinking..."));
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert_eq!(reply.tool_calls[0].id, "c1");
+        assert_eq!(reply.tool_calls[0].name, "search");
+        assert_eq!(reply.tool_calls[0].args, json!({"q": "x"}));
+        assert_eq!(reply.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(reply.raw["content"][1]["arguments"], json!({"q": "x"}));
+    }
+
+    /// A poisoned `arguments: null` + valid `raw_arguments` must be healed into the echoed
+    /// `raw.content` block (mirrors `echoes_raw_arguments_when_arguments_is_null` above, but
+    /// through the `ChatTransport`-facing `turn_reply_from_content` seam instead of the closure
+    /// loop).
+    #[test]
+    fn turn_reply_from_content_heals_null_arguments() {
+        let content = vec![json!({
+            "type": "tool_call", "id": "c1", "name": "read",
+            "arguments": Value::Null,
+            "raw_arguments": "{\"path\":\"a.md\"}"
+        })];
+        let reply = turn_reply_from_content(content, None);
+        assert_eq!(reply.tool_calls[0].args, json!({"path": "a.md"}));
+        assert_eq!(reply.raw["content"][0]["arguments"], json!("{\"path\":\"a.md\"}"));
+    }
 
     #[test]
     fn episode_executes_tool_then_answers() {

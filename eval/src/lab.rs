@@ -13,7 +13,8 @@ fn d120() -> u64 {
 /// with existing `lab.toml` files that predate this field. Each variant has its own
 /// `ChatTransport` impl (see `backend::transport::transport_for`): `OpenAiChat` ->
 /// `transport::openai::OpenAiTransport`, `Anthropic` -> `transport::anthropic::AnthropicTransport`,
-/// `OpenAiResponses` -> `transport::responses::ResponsesTransport`.
+/// `OpenAiResponses` -> `transport::responses::ResponsesTransport`, `Tensorzero` ->
+/// `transport::tensorzero::TzTransport`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKind {
@@ -28,6 +29,12 @@ pub enum ApiKind {
     /// OpenAI Responses API (`/v1/responses`).
     #[serde(rename = "openai_responses")]
     OpenAiResponses,
+    /// Native TensorZero gateway API (`/inference` + `/feedback`) — NOT the OpenAI-compatible
+    /// shim TensorZero also exposes. Groups every turn of one question into ONE TZ episode (see
+    /// `crate::episode`) and lets `kbx eval` post the judge verdict as episode feedback. Requires
+    /// `Endpoint::function_name`.
+    #[serde(rename = "tensorzero")]
+    Tensorzero,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -67,6 +74,20 @@ pub struct Endpoint {
     /// fallback, byte-identical to today.
     #[serde(default)]
     pub fallback: Vec<Endpoint>,
+    /// TensorZero function name to call at `/inference` (e.g. `"answer_hotpot"`). REQUIRED when
+    /// `api = "tensorzero"` — `TzTransport::call` errors clearly if it's missing; ignored by every
+    /// other `ApiKind`.
+    #[serde(default)]
+    pub function_name: Option<String>,
+    /// TensorZero feedback metric name for the judge's graded score (`Verdict` -> 1.0/0.5/0.0).
+    /// Defaults to `"judge"` (see [`Endpoint::feedback_score_metric`]) when absent, so an existing
+    /// `lab.toml` need not declare it to match a TZ config that already uses that name.
+    #[serde(default)]
+    pub feedback_score_metric: Option<String>,
+    /// TensorZero feedback metric name for the boolean correctness flag (`verdict == Correct`).
+    /// Defaults to `"correct"` (see [`Endpoint::feedback_bool_metric`]) when absent.
+    #[serde(default)]
+    pub feedback_bool_metric: Option<String>,
 }
 
 /// Opt-in per-endpoint rate-limit + retry policy. Every field is optional so a partial `[<stage>]`
@@ -116,6 +137,22 @@ impl Endpoint {
             }
         }
         self.temperature
+    }
+
+    /// The TZ feedback metric name for the graded judge score: `feedback_score_metric` if set,
+    /// else `"judge"`. Only consulted on the `Tensorzero` API kind.
+    pub fn feedback_score_metric(&self) -> String {
+        self.feedback_score_metric
+            .clone()
+            .unwrap_or_else(|| "judge".to_string())
+    }
+
+    /// The TZ feedback metric name for the boolean correctness flag: `feedback_bool_metric` if
+    /// set, else `"correct"`. Only consulted on the `Tensorzero` API kind.
+    pub fn feedback_bool_metric(&self) -> String {
+        self.feedback_bool_metric
+            .clone()
+            .unwrap_or_else(|| "correct".to_string())
     }
 }
 
@@ -522,5 +559,46 @@ mod tests {
         "#;
         let lab: LabConfig = toml::from_str(toml).unwrap();
         assert_eq!(lab.model.api, ApiKind::OpenAiResponses);
+    }
+
+    #[test]
+    fn endpoint_api_tensorzero_parses_with_function_name() {
+        let toml = r#"
+            [model]
+            endpoint = "http://localhost:3000"
+            model = "m"
+            api = "tensorzero"
+            function_name = "answer_hotpot"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.api, ApiKind::Tensorzero);
+        assert_eq!(lab.model.function_name.as_deref(), Some("answer_hotpot"));
+    }
+
+    #[test]
+    fn feedback_metric_names_default_when_absent_and_honor_overrides() {
+        let toml = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            api = "tensorzero"
+        "#;
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.model.function_name, None);
+        assert_eq!(lab.model.feedback_score_metric(), "judge");
+        assert_eq!(lab.model.feedback_bool_metric(), "correct");
+
+        let toml2 = r#"
+            [model]
+            endpoint = "http://x"
+            model = "m"
+            api = "tensorzero"
+            function_name = "f"
+            feedback_score_metric = "my_score"
+            feedback_bool_metric = "my_bool"
+        "#;
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.model.feedback_score_metric(), "my_score");
+        assert_eq!(lab2.model.feedback_bool_metric(), "my_bool");
     }
 }

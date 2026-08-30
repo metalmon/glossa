@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 pub mod anthropic;
 pub mod openai;
 pub mod responses;
+pub mod tensorzero;
 
 /// One tool call the model asked to run, in a shape neutral to the wire format that produced it
 /// (OpenAI's `tool_calls[].function`, Anthropic's `content[].type=="tool_use"`, …).
@@ -76,6 +77,12 @@ pub trait ChatTransport {
     /// shape (OpenAI: one `{role:"tool"}` message per result; Anthropic: one `{role:"user"}`
     /// message batching all `tool_result` blocks). `results` is `(tool_call_id, body)` pairs.
     fn push_tool_results(&self, messages: &mut Vec<serde_json::Value>, results: &[(String, String)]);
+
+    /// Post episode-level feedback (TensorZero's `/feedback`: one `(metric_name, value)` pair per
+    /// call). Default no-op for every non-TZ transport — only [`tensorzero::TzTransport`]
+    /// overrides this. Best-effort by contract: an implementation must log-and-swallow its own
+    /// errors rather than fail the caller (a feedback post must never zero out a scored episode).
+    fn post_feedback(&self, _episode_id: &str, _metrics: &[(&str, serde_json::Value)]) {}
 }
 
 /// Shared tokio runtime backing the sync-over-async HTTP bridge: every transport's `call` is
@@ -103,14 +110,19 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// Select the `ChatTransport` for an [`crate::lab::ApiKind`]. All three kinds now have their own
-/// transport (`OpenAiChat`, `Anthropic`, `OpenAiResponses`).
-pub fn transport_for(api: crate::lab::ApiKind) -> Box<dyn ChatTransport> {
+/// Select the `ChatTransport` for an [`crate::lab::Endpoint`]'s `api` kind. Takes the whole
+/// `Endpoint` (not just the bare [`crate::lab::ApiKind`]) because `Tensorzero` needs its gateway
+/// URL + timeout at CONSTRUCTION time — `TzTransport::post_feedback` has no `Endpoint` parameter
+/// of its own (see the `ChatTransport::post_feedback` default), so that state must be captured
+/// when the transport is built. Every other kind is a zero-sized unit struct and ignores `ep`
+/// here (it's threaded into `call()` per-request instead, as before).
+pub fn transport_for(ep: &crate::lab::Endpoint) -> Box<dyn ChatTransport> {
     use crate::lab::ApiKind;
-    match api {
+    match ep.api {
         ApiKind::OpenAiChat => Box::new(openai::OpenAiTransport),
         ApiKind::Anthropic => Box::new(anthropic::AnthropicTransport),
         ApiKind::OpenAiResponses => Box::new(responses::ResponsesTransport),
+        ApiKind::Tensorzero => Box::new(tensorzero::TzTransport::new(ep)),
     }
 }
 
@@ -148,17 +160,49 @@ mod tests {
         let _ = http_client();
     }
 
-    /// Phase 1: `transport_for` must return a usable transport for every `ApiKind`, including
-    /// the not-yet-built `Anthropic`/`OpenAiResponses` kinds (stubbed onto OpenAI chat rather
-    /// than panicking/`todo!`-ing).
+    fn test_endpoint(api: crate::lab::ApiKind) -> crate::lab::Endpoint {
+        crate::lab::Endpoint {
+            endpoint: "http://x".to_string(),
+            model: "m".to_string(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            timeout_secs: 30,
+            api,
+            temperature: None,
+            rate_limit: None,
+            fallback: Vec::new(),
+            function_name: Some("f".to_string()),
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
+        }
+    }
+
+    /// `transport_for` must return a usable transport for every `ApiKind`, including `Tensorzero`.
     #[test]
     fn transport_for_covers_every_api_kind() {
         for api in [
             crate::lab::ApiKind::OpenAiChat,
             crate::lab::ApiKind::Anthropic,
             crate::lab::ApiKind::OpenAiResponses,
+            crate::lab::ApiKind::Tensorzero,
         ] {
-            let _: Box<dyn ChatTransport> = transport_for(api);
+            let _: Box<dyn ChatTransport> = transport_for(&test_endpoint(api));
+        }
+    }
+
+    /// The default `post_feedback` on every non-TZ transport is a true no-op: it must not panic
+    /// and — since it does no I/O — leaves nothing to observe. This pins the contract that
+    /// `ChatTransport::post_feedback`'s default body is inert for OpenAI/Anthropic/Responses.
+    #[test]
+    fn non_tz_transports_post_feedback_is_a_noop() {
+        for api in [
+            crate::lab::ApiKind::OpenAiChat,
+            crate::lab::ApiKind::Anthropic,
+            crate::lab::ApiKind::OpenAiResponses,
+        ] {
+            let transport = transport_for(&test_endpoint(api));
+            // Must return without panicking / attempting network I/O.
+            transport.post_feedback("ep-1", &[("judge", serde_json::json!(1.0))]);
         }
     }
 }

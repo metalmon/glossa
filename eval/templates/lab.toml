@@ -22,10 +22,23 @@ model = "qwen3.5-4b"
 # api_key = "sk-..."                 # inline key, OR:
 # api_key_env = "OPENAI_API_KEY"     # read the key from this env var (keeps the secret out of this file)
 timeout_secs = 120
-# api = "openai"                     # wire format: "openai" (default) | "anthropic" | "openai_responses"
+# api = "openai"                     # wire format: "openai" (default) | "anthropic"
+                                     #   | "openai_responses" | "tensorzero"
 # temperature = 0.7                  # optional sampling temperature; OMIT to use the provider/model
                                      # default. The KB_EVAL_TEMP env var overrides this at every
                                      # call site. Settable per endpoint (any section below).
+
+# api = "tensorzero" native-gateway options (ignored by every other `api` value):
+# function_name = "answer_hotpot"       # REQUIRED when api = "tensorzero" — the TZ function to call
+                                        # at `/inference`. `endpoint` is the gateway base URL
+                                        # (e.g. "http://localhost:3000"), NOT a chat-completions path.
+# feedback_score_metric = "judge"       # TZ `/feedback` metric name for the graded judge score
+                                        # (Correct=1.0/Partial=0.5/Wrong=0.0). Default "judge".
+# feedback_bool_metric = "correct"      # TZ `/feedback` metric name for the boolean correctness flag
+                                        # (verdict == Correct). Default "correct".
+                                        # Every reader turn of one question groups into ONE TZ
+                                        # episode automatically; `kbx eval` posts both metrics on
+                                        # that episode after judging (skipped when no judge ran).
 
 # OPT-IN rate-limit + retry policy for THIS endpoint. OMIT the whole `[<stage>.rate_limit]` table
 # (the default) to keep today's behavior EXACTLY: no throttle, and 4 retry attempts with a
