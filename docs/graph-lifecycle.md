@@ -107,6 +107,30 @@ The report lists four kinds of doubt:
 A clean graph reports `0` for all four. Read the doubts as a to-do list; the next part shows the
 exact workflow for the common cause — your documents changing.
 
+### Deep-clean a noisy reasoning layer (prune → merge)
+
+A reasoning layer built by a small/local model accumulates noise: off-chain (`incomplete`) nodes,
+orphaned (`dangling`) branches, and **near-duplicate** nodes — the model phrases the same cause or
+resolution a little differently each pass. Before you rely on the graph (evaluation, serving),
+deep-clean it in this order:
+
+```bash
+cp .glossa/graph.sqlite .glossa/graph.sqlite.bak        # 1. always back up first
+kb graph doctor --prune-incomplete --prune-ungrounded --prune-dangling   # 2. prune the junk
+kb graph generalize --merge                             # 3. collapse near-duplicates
+kb graph doctor && kb graph stats                       # 4. verify: expect 0/0/0/0
+```
+
+**Prune before merge.** Pruning first means the dedup pass runs only over real, chain-complete
+reasoning nodes, so it never risks merging a good node into one that was about to be pruned. (The
+final graph is nearly identical either way — prune-first is simply the more principled default.)
+
+The prune is **guarded**: if it would clear the whole reasoning layer or looks like an ontology
+mismatch (zero live terminals), it refuses — pass `--force` to override (human-only, never over
+MCP). So the ontology (`.glossa/ontology.toml`) **must be present**, or the doctor mis-classifies
+every node as dangling. `generalize --merge` also recomputes the derived layer (similarity,
+communities, centrality); those edges are read-excluded, so the recompute is harmless.
+
 ---
 
 ## Part 3 — When your documents change
@@ -162,10 +186,10 @@ kb graph doctor                   # its terminals show `ungrounded`; their chain
 kb graph doctor --prune-ungrounded   # removes the orphaned answer nodes
 ```
 
-`--prune-ungrounded` ships today and clears the orphaned terminals. Their query-side chains then
-have nothing to reach and show up as `dangling` on the next `kb graph doctor`; for now, remove
-those with the agent's `graph_delete`, or leave them flagged. **[Planned]** a single
-`--prune-dangling` flag will clear the whole orphaned sub-tree in one pass — see the roadmap.
+`--prune-ungrounded` clears the orphaned terminals; `--prune-dangling` then clears their now-
+unreachable query-side chains in one pass. Combine the whole clean-up in one command:
+`kb graph doctor --prune-ungrounded --prune-dangling`. Both prunes are guarded against a mass-wipe
+(they refuse an ontology-mismatch or whole-layer wipe unless you pass `--force`).
 
 ---
 
