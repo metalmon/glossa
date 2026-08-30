@@ -52,3 +52,9 @@ jobs:
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
+
+      # kb-eval's `constraint` feature (CSP/marking-schema tooling) is opt-in and off by
+      # default — exercise it explicitly so CI still covers glossa-constraint + the
+      # kb-eval-constraint bin.
+      - name: cargo test (kb-eval, constraint feature)
+        run: cargo test -p kb-eval --release --locked --features constraint

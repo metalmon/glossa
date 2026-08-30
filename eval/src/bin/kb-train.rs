@@ -54,6 +54,7 @@ enum Cmd {
         k: usize,
     },
     /// Export constraint materialize/research/compile-fix datasets from TZ ClickHouse episodes.
+    #[cfg(feature = "constraint")]
     ExportTzConstraint {
         #[arg(long, default_value = "kb-test")]
         work: PathBuf,
@@ -84,6 +85,7 @@ enum Cmd {
         once: bool,
     },
     /// Bootstrap constraint GEPA materialize.jsonl from local gold tables.
+    #[cfg(feature = "constraint")]
     SyntheticConstraint {
         #[arg(long, default_value = "kb-val")]
         val_dir: PathBuf,
@@ -158,6 +160,7 @@ enum Cmd {
         candidate_selection: String,
     },
     /// GEPA-optimize constraint agent prompt slices (5 pools: discover → validate).
+    #[cfg(feature = "constraint")]
     OptimizeConstraint {
         #[arg(long, default_value = "gepa-constraint-out/discover.jsonl")]
         discover: PathBuf,
@@ -423,6 +426,7 @@ fn main() -> Result<()> {
             })
             .map(|_| ())
         }
+        #[cfg(feature = "constraint")]
         Cmd::ExportTzConstraint {
             work,
             out,
@@ -450,6 +454,7 @@ fn main() -> Result<()> {
             idle_stop,
             once,
         } => run_dump(work, out, k, poll_secs, idle_stop, once),
+        #[cfg(feature = "constraint")]
         Cmd::SyntheticConstraint {
             val_dir,
             doc,
@@ -556,6 +561,7 @@ fn main() -> Result<()> {
             pareto_size,
             candidate_selection,
         ),
+        #[cfg(feature = "constraint")]
         Cmd::OptimizeConstraint {
             discover,
             materialize,
@@ -887,6 +893,7 @@ fn run_optimize_graph(
     Ok(())
 }
 
+#[cfg(feature = "constraint")]
 fn load_sop_gepa_seed(sop_dir: &Path, out: &Path, tag: &str) -> Result<String> {
     if out.exists() {
         let content = std::fs::read_to_string(out)
@@ -900,6 +907,7 @@ fn load_sop_gepa_seed(sop_dir: &Path, out: &Path, tag: &str) -> Result<String> {
         .with_context(|| format!("extract GEPA:{tag} seed from SOP.md"))
 }
 
+#[cfg(feature = "constraint")]
 #[allow(clippy::too_many_arguments)]
 fn run_optimize_constraint(
     discover: PathBuf,

@@ -6,7 +6,9 @@ pub mod bridge_probe;
 pub mod build;
 pub mod checkpoint;
 pub mod constraint_gepa_sop;
+#[cfg(feature = "constraint")]
 pub mod constraint_score;
+#[cfg(feature = "constraint")]
 pub mod constraint_synthetic;
 pub mod corpus;
 pub mod dataset;
@@ -16,8 +18,10 @@ pub mod enrich;
 pub mod episode;
 pub mod export_tz;
 pub mod finetune;
+#[cfg(feature = "constraint")]
 pub mod export_tz_constraint;
 pub mod gepa;
+#[cfg(feature = "constraint")]
 pub mod gepa_constraint;
 pub mod gepa_graph;
 pub mod judge;

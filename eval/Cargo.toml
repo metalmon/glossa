@@ -18,6 +18,7 @@ path = "src/bin/kb-train.rs"
 [[bin]]
 name = "kb-eval-constraint"
 path = "src/bin/kb-eval-constraint.rs"
+required-features = ["constraint"]
 
 [[bin]]
 name = "convert-xlsx"
@@ -31,9 +32,16 @@ path = "src/bin/kb-dump-episode.rs"
 name = "kbx"
 path = "src/bin/kbx.rs"
 
+[features]
+# Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint) plus the
+# kb-eval constraint tooling (constraint_score/constraint_synthetic/gepa_constraint/
+# export_tz_constraint + the kb-eval-constraint bin). Rare/opt-in path; see `just build-kb-constraint`
+# and `just build-train-constraint`.
+constraint = ["glossa/constraint", "dep:glossa-constraint"]
+
 [dependencies]
-glossa = { path = "..", features = ["constraint"] }
-glossa-constraint = { path = "../constraint" }
+glossa = { path = ".." }
+glossa-constraint = { path = "../constraint", optional = true }
 anyhow = "1"
 regex = "1"
 toml = "1.1"

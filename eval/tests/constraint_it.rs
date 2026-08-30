@@ -1,3 +1,5 @@
+#![cfg(feature = "constraint")]
+
 use std::path::Path;
 
 use glossa::graph::store::{Edge, GraphStore, Node, Provenance};

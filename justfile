@@ -43,15 +43,24 @@ build:
 build-offline:
     {{preface}}cargo build --workspace {{release}} --locked --offline
 build-kb force="":
-    {{preface}}b='{{kb_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb: already built"; else cargo build {{release}} --bin kb --features constraint --locked; fi
+    {{preface}}b='{{kb_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb: already built"; else cargo build {{release}} --bin kb --locked; fi
 build-train force="":
     {{preface}}b='{{kb_train_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-train: already built"; else cargo build {{release}} -p kb-eval --bin kb-train --locked; fi
 build-train-offline force="":
     {{preface}}b='{{kb_train_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-train: already built"; else cargo build {{release}} -p kb-eval --bin kb-train --locked --offline; fi
 build-eval force="":
     {{preface}}b='{{kb_eval_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-eval: already built"; else cargo build {{release}} -p kb-eval --bin kb-eval --locked; fi
+# Opt-in: builds `kb` WITH the CSP/marking-schema solver (glossa-constraint). The default
+# `build-kb` is lean (no constraint_solve MCP tool) — use this only for constraint work.
+build-kb-constraint force="":
+    {{preface}}cargo build {{release}} --bin kb --locked --features constraint
+# Opt-in: builds `kb-train` WITH the constraint feature (needed for synthetic-constraint /
+# export-tz-constraint / optimize-constraint — those subcommands don't exist in the lean default build).
+build-train-constraint force="":
+    {{preface}}cargo build {{release}} -p kb-eval --bin kb-train --locked --features constraint
 test:
     {{preface}}cargo test --workspace {{release}} --locked
+    {{preface}}cargo test -p kb-eval {{release}} --locked --features constraint
 check:
     {{preface}}cargo check --workspace {{release}} --locked
 
@@ -155,15 +164,15 @@ gepa-reset:
 constraint_out := "gepa-constraint-out"
 sop_dir        := "eval/sops/example"              # SOP pack driving the constraint agent
 
-constraint-synthetic: build-train
+constraint-synthetic: build-train-constraint
     {{kb_train_bin}} synthetic-constraint --out {{constraint_out}}
 
-export-tz-constraint run="": build-train
+export-tz-constraint run="": build-train-constraint
     @mkdir -p {{constraint_out}}
     {{preface}}{{kb_train_bin}} export-tz-constraint --out {{constraint_out}} \
       $(if [ -n "{{run}}" ]; then echo --run {{run}}; fi)
 
-gepa-constraint budget="6" minibatch="8" run="": build-train constraint-synthetic
+gepa-constraint budget="6" minibatch="8" run="": build-train-constraint constraint-synthetic
     {{preface}}run_tag='{{run}}'; [[ -z "$run_tag" ]] && run_tag="gepa-c-$(date +%Y%m%d-%H%M)"; \
     {{kb_train_bin}} optimize-constraint \
       --materialize {{constraint_out}}/materialize.jsonl \
@@ -237,7 +246,7 @@ constraint-dump episode="" run="" latest="false" out="eval/results/episode-dump.
 # Requires: gateway up (just up), the `work` corpus indexed.
 # Override the target document: `just constraint-eval doc=spec_2019.docx`
 constraint-eval variant="" run="sop5-baseline" doc="spec_2019.docx": build-eval
-    {{preface}}cargo build --release -p kb-eval --bin kb-eval-constraint --locked
+    {{preface}}cargo build --release -p kb-eval --bin kb-eval-constraint --locked --features constraint
     {{preface}}run_tag='{{run}}'; run_tag="${run_tag#run=}"; \
     variant_arg='{{variant}}'; variant_arg="${variant_arg#variant=}"; \
     extra=''; [[ -n "$variant_arg" ]] && extra=" --variant $variant_arg"; \
