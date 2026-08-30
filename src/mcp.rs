@@ -1826,15 +1826,88 @@ impl GlossaServer {
 
 // Must use the instance router — bare `#[tool_handler]` defaults to
 // `Self::tool_router()` (a fresh router), so profile `disable_route` never reaches tools/list.
+/// The two MCP prompts this server advertises, with their `list_prompts` descriptions.
+/// Extracted so unit tests can check the catalog without constructing a `RequestContext`
+/// (rmcp's `Peer::new` is crate-private, so the trait method itself isn't unit-callable here).
+fn prompt_catalog() -> Vec<rmcp::model::Prompt> {
+    vec![
+        rmcp::model::Prompt::new(
+            "reader",
+            Some(
+                "How to answer questions over this corpus using its reasoning graph and \
+                 full-text tools.",
+            ),
+            None,
+        ),
+        rmcp::model::Prompt::new(
+            "editor",
+            Some(
+                "How to build and maintain this corpus's reasoning graph with read + \
+                 graph_upsert.",
+            ),
+            None,
+        ),
+    ]
+}
+
+/// `get_prompt`'s name-matching logic, extracted for the same reason as `prompt_catalog`.
+fn resolve_prompt(name: &str) -> Result<(&'static str, &'static str), McpError> {
+    match name {
+        "reader" => Ok((crate::prompts::READER, "Answer over the corpus")),
+        "editor" => Ok((crate::prompts::EDITOR, "Build/edit the reasoning graph")),
+        other => Err(McpError::invalid_params(
+            format!("unknown prompt '{other}'; available: reader, editor"),
+            None,
+        )),
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GlossaServer {
     fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        let mut info = ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .build(),
+        );
         info.protocol_version = ProtocolVersion::V_2025_06_18;
         info.server_info.name = "glossa".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some("glossa File-First knowledge-base search. `search` takes BM25 keywords (morphology-aware), returns hits led by a copy-ready `path#n` token; `read(path#n)` opens that chunk.".into());
         info
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::ListPromptsResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let mut r = rmcp::model::ListPromptsResult::default();
+        r.prompts = prompt_catalog();
+        std::future::ready(Ok(r))
+    }
+
+    fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::GetPromptResponse, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let (text, desc) = match resolve_prompt(request.name.as_str()) {
+            Ok(pair) => pair,
+            Err(e) => return std::future::ready(Err(e)),
+        };
+        let mut r = rmcp::model::GetPromptResult::default();
+        r.messages = vec![rmcp::model::PromptMessage::new_text(
+            rmcp::model::Role::User,
+            text,
+        )];
+        r.description = Some(desc.to_string());
+        std::future::ready(Ok(r.into()))
     }
 }
 
@@ -3010,6 +3083,47 @@ mod tests {
             idx.file_type_of("a.md/summary.md").unwrap().as_deref(),
             Some("note"),
             "read of a note path must not turn it into a corpus-doc chunk"
+        );
+    }
+
+    #[test]
+    fn list_prompts_returns_exactly_reader_and_editor() {
+        let catalog = prompt_catalog();
+        let names: Vec<&str> = catalog.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["reader", "editor"]);
+    }
+
+    #[test]
+    fn get_prompt_reader_returns_reader_text() {
+        let (text, _desc) = resolve_prompt("reader").expect("reader prompt must resolve");
+        assert_eq!(text, crate::prompts::READER);
+    }
+
+    #[test]
+    fn get_prompt_editor_returns_editor_text() {
+        let (text, _desc) = resolve_prompt("editor").expect("editor prompt must resolve");
+        assert_eq!(text, crate::prompts::EDITOR);
+    }
+
+    #[test]
+    fn get_prompt_unknown_name_is_invalid_params() {
+        let err = resolve_prompt("nope").expect_err("unknown prompt name must error");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("nope"),
+            "error message should name the bad prompt: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn get_info_advertises_prompts_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Full, false, ServerFlags::default());
+        let info = srv.get_info();
+        assert!(
+            info.capabilities.prompts.is_some(),
+            "get_info must advertise the prompts capability once enabled"
         );
     }
 }

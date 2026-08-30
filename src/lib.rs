@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod mcp_auth;
 pub mod model;
 pub mod ontology_templates;
+pub mod prompts;
 pub mod query;
 pub mod read;
 pub mod root;
