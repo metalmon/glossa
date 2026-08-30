@@ -17,11 +17,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`user_sim` dialogue gate.** An opt-in patient simulated-user turn deflects a non-answer back into the reader loop instead of accepting it, for both eval and train.
 - **Fine-tuning dataset export.** Collects SFT and DPO pairs (Unsloth-ready) from the reasoning graph; see [docs/finetuning-datasets.md](docs/finetuning-datasets.md).
 - **Anti-loop retrieval signals.** Neutral plateau/repeat/streak markers surface per-session in the MCP server and in the eval/train reader, with novelty-gated result trimming to curb context bloat; plateaus are also paired into judge-labeled DPO examples during export.
+- **Native TensorZero transport** (`api = "tensorzero"`). A stage's reader calls group into one TensorZero episode via `/inference`, and the graded judge verdict is posted back as `/feedback` on that episode — TensorZero observability and optimization data for the kbx pipeline, without the OpenAI-compatibility shim.
+- **MCP-served operating prompts.** The `kb` MCP server advertises the Prompts capability and exposes two prompts a connecting client can pull directly: `reader` (how to answer over the corpus) and `editor` (how to build/maintain the reasoning graph).
 
 ### Changed
 
 - **Evidence-grounded judge.** The judge now grades an answer against the retrieved source evidence, not only against the gold string.
 - **`kbx train` progress.** A visible iteration-based progress bar and honest metric names replace the earlier opaque counters.
+- **`kbx train` optimizes the active metric.** The GEPA reflector is told only the metric the run actually uses (the graded judge, not exact-match), so it stops pushing the reader toward terse "shortest-span" answers the judge then penalizes. A candidate's reflect-minibatch is scored once and cached (parallel to the pool) instead of re-rolled every iteration — roughly halving rollouts and giving a stable acceptance baseline.
+- **`constraint` is now an opt-in feature.** The CSP / marking-schema solver (`glossa-constraint`, the `constraint_solve` MCP tool) is no longer in the default build; build with `--features constraint` when you need it. Default `kb`/`kbx` builds ship a leaner tool set.
+- **Eval report breaks quality down by question type.** A per-`hop_type` line (lexical vs multihop) sits right under the overall graded score, so the gap is visible at a glance.
+
+### Fixed
+
+- **SQLite-dialect tolerance in the `sql` tool.** PostgreSQL habits no longer fail silently: `ILIKE` is accepted and rewritten to `LIKE`, a trailing `;` is stripped, and `LIKE` is Unicode-case-insensitive (including Cyrillic) via a custom function. On error the tool now surfaces the real SQLite reason (not a generic message) and declares the dialect in its description.
 
 ## [0.3.4] — 2026-08-21
 
