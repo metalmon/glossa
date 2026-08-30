@@ -14,8 +14,51 @@ use crate::backend::resample::{call_with_resample, ResamplePolicy};
 use crate::backend::transport::{ChatTransport, TurnReply};
 use crate::backend::user_sim::DialogueGate;
 use crate::lab::Endpoint;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+
+/// A recorded reader episode: the complete chat trajectory of one `run_agent_loop` invocation,
+/// captured for fine-tuning dataset collection (SFT/DPO). Filled ONLY when a caller threads a
+/// `Some(&mut CapturedEpisode)` sink into [`run_agent_loop`]; with `None` (every existing caller)
+/// nothing is recorded and the loop is byte-identical to before.
+///
+/// `messages` is the full conversation the loop drove — the seed system+user, every assistant
+/// turn (with its `tool_calls`), every `tool` result, and finally the assistant's answer turn
+/// (appended by the recorder, since the loop returns that text rather than pushing it) — so it can
+/// be replayed straight through an Unsloth `apply_chat_template`. `system`/`tools` mirror the
+/// arguments the loop was called with (the OpenAI backend folds its system prompt into
+/// `messages[0]` and passes `system: None`, so read the system role from `messages` there).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CapturedEpisode {
+    /// The `system` argument the loop was driven with, when the transport takes it out-of-band
+    /// (`None` for the OpenAI backend, which seeds the system message inside `messages`).
+    pub system: Option<String>,
+    /// The tools schema advertised to the model this episode (`None` when tools were disabled).
+    pub tools: Option<Value>,
+    /// The full trajectory, ending in the final `{"role":"assistant","content": <answer>}` turn.
+    pub messages: Vec<Value>,
+}
+
+/// Record the finished trajectory into `capture` (a no-op when it is `None`). Clones the running
+/// `messages`, appends the terminal assistant answer turn (the loop returns its text rather than
+/// pushing it), and stamps the `system`/`tools` the loop was driven with. Called at every return
+/// path so whichever branch terminates the loop yields a complete episode.
+fn record_episode(
+    capture: &mut Option<&mut CapturedEpisode>,
+    system: Option<&str>,
+    tools: Option<&Value>,
+    messages: &[Value],
+    final_text: &str,
+) {
+    if let Some(cap) = capture.as_deref_mut() {
+        let mut m = messages.to_vec();
+        m.push(json!({ "role": "assistant", "content": final_text }));
+        cap.system = system.map(str::to_string);
+        cap.tools = tools.cloned();
+        cap.messages = m;
+    }
+}
 
 /// One logical model turn = `resample(OUTER)` over `resilient(INNER)` over `transport.call`, via
 /// [`call_with_resample`]. The INNER resilience layer handles hard network/rate-limit/fallback
@@ -85,7 +128,31 @@ pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
 /// set it before the worker pool starts) keep steering the reader's sampling exactly as before.
 /// The `ChatTransport::call` signature takes `temperature` as an explicit argument rather than
 /// reading the env itself, so the resolution happens at the call site — here, not in a transport.
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent_loop(
+    transport: &dyn ChatTransport,
+    ep: &Endpoint,
+    system: Option<&str>,
+    messages: Vec<Value>,
+    tools: Option<&Value>,
+    exec: impl FnMut(&str, &Value) -> (String, Vec<String>),
+    on_repeat: impl Fn(&str, &Value) -> String,
+    max_rounds: usize,
+    user_sim: Option<&dyn DialogueGate>,
+) -> anyhow::Result<String> {
+    // Back-compat: every existing caller drives the loop with NO capture sink, which is
+    // byte-identical to the pre-capture loop. Only the eval `--capture` path calls
+    // `run_agent_loop_capturing` directly with a `Some` sink.
+    run_agent_loop_capturing(
+        transport, ep, system, messages, tools, exec, on_repeat, max_rounds, user_sim, None,
+    )
+}
+
+/// Capture-aware variant of [`run_agent_loop`]: identical behavior, plus it records the finished
+/// trajectory into `capture` when that sink is `Some`. See [`CapturedEpisode`]. With `capture:
+/// None` this is exactly [`run_agent_loop`] (which is the thin `None` wrapper over it).
+#[allow(clippy::too_many_arguments)]
+pub fn run_agent_loop_capturing(
     transport: &dyn ChatTransport,
     ep: &Endpoint,
     system: Option<&str>,
@@ -95,6 +162,7 @@ pub fn run_agent_loop(
     on_repeat: impl Fn(&str, &Value) -> String,
     max_rounds: usize,
     user_sim: Option<&dyn DialogueGate>,
+    mut capture: Option<&mut CapturedEpisode>,
 ) -> anyhow::Result<String> {
     // This call is the start of a fresh CONVERSATION (one reason seed / one build doc / one eval
     // case / …), possibly on a dedicated worker thread under `kbx --jobs N`: reset THIS thread's
@@ -133,10 +201,16 @@ pub fn run_agent_loop(
             match user_sim {
                 // No gate configured -> today's behavior EXACTLY: the first text-only turn is the
                 // final answer.
-                None => return Ok(text),
+                None => {
+                    record_episode(&mut capture, system, tools, &messages, &text);
+                    return Ok(text);
+                }
                 Some(gate) => match gate.judge(&question, &messages, &text) {
                     // Substantive answer (or the gate failed open) -> accept and return it.
-                    Ok(None) => return Ok(text),
+                    Ok(None) => {
+                        record_episode(&mut capture, system, tools, &messages, &text);
+                        return Ok(text);
+                    }
                     // The assistant only kept asking: echo its turn, append the in-character user
                     // deflection as a `role:"user"` message, and continue. Each deflection consumes
                     // a round, so this is naturally capped by `max_rounds`.
@@ -146,7 +220,10 @@ pub fn run_agent_loop(
                         continue;
                     }
                     // Fail-open on a gate error: return the text rather than hang the run.
-                    Err(_) => return Ok(text),
+                    Err(_) => {
+                        record_episode(&mut capture, system, tools, &messages, &text);
+                        return Ok(text);
+                    }
                 },
             }
         }
@@ -190,7 +267,9 @@ pub fn run_agent_loop(
         "content": "Stop searching. Give your final answer now on a single line beginning with `ANSWER:`."
     }));
     let reply = resilient_call(transport, ep, system, &messages, tools, temperature)?;
-    Ok(reply.text.unwrap_or_default())
+    let text = reply.text.unwrap_or_default();
+    record_episode(&mut capture, system, tools, &messages, &text);
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -485,6 +564,67 @@ mod tests {
             lc.contains("no new information") && lc.contains("change approach"),
             "expected the unproductive-streak steer, got: {c:?}"
         );
+    }
+
+    // --- trajectory capture (fine-tuning dataset collection) ------------------------------------
+
+    /// With a `Some(&mut CapturedEpisode)` sink, the loop records the COMPLETE trajectory: the seed
+    /// user turn, the assistant tool-request turn, the tool result, and the final assistant answer
+    /// turn (appended by the recorder), plus the advertised tools schema.
+    #[test]
+    fn capture_records_full_trajectory() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![
+            reply_tool_call("call_1", "search", json!({"query": "n"})),
+            reply_text("ANSWER: 4"),
+        ]);
+        let exec = |_: &str, _: &Value| ("body".to_string(), vec!["id-1".to_string()]);
+        let tools = json!([{"type": "function", "function": {"name": "search"}}]);
+        let mut episode = CapturedEpisode::default();
+        let out = run_agent_loop_capturing(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"What is 2+2?"})],
+            Some(&tools),
+            exec,
+            nudge,
+            4,
+            None,
+            Some(&mut episode),
+        )
+        .unwrap();
+        assert_eq!(out, "ANSWER: 4");
+        assert_eq!(episode.tools, Some(tools));
+        let roles: Vec<&str> = episode
+            .messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "assistant"]);
+        assert_eq!(episode.messages.last().unwrap()["content"], "ANSWER: 4");
+    }
+
+    /// `run_agent_loop` (the `None`-sink wrapper) still returns the answer and records nothing —
+    /// the non-capturing path every existing caller uses.
+    #[test]
+    fn none_capture_wrapper_returns_answer() {
+        let ep = test_endpoint();
+        let transport = MockTransport::new(vec![reply_text("ANSWER: 4")]);
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            4,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, "ANSWER: 4");
     }
 
     // --- simulated-user gate wiring -------------------------------------------------------------

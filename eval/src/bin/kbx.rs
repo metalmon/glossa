@@ -14,6 +14,10 @@ use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::distil::{self, DistilArgs};
+use kb_eval::finetune::{
+    export_dpo, export_sft, load_trajectories_for_tag, to_jsonl, write_trajectories, SftShape,
+    TrajectoryRecord,
+};
 use kb_eval::judge::{judge, Judgement, Verdict};
 use kb_eval::lab::{self, LabConfig};
 use kb_eval::parallel::run_units_parallel;
@@ -28,6 +32,7 @@ use kb_eval::workspace::{self, KbxPaths};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -35,6 +40,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// `export --format` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ExportFormat {
+    /// Supervised fine-tuning demonstrations from Correct trajectories.
+    Sft,
+    /// Preference pairs (Correct vs Wrong) for DPO.
+    Dpo,
+}
+
+/// `export --shape` values (SFT only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ExportShape {
+    /// `{"messages":[...]}` for Unsloth `apply_chat_template` (default).
+    Messages,
+    /// `{"conversations":[...]}` for `standardize_sharegpt`.
+    Sharegpt,
 }
 
 #[derive(Subcommand)]
@@ -86,6 +109,43 @@ enum Cmd {
         /// 1 (never zero workers). `1` reproduces the sequential run exactly.
         #[arg(long)]
         jobs: Option<usize>,
+        /// Record each case's full chat trajectory (system+user, every tool round, final answer)
+        /// to `runs/<tag>/trajectories.jsonl`, joining the judge verdict as the reward — the raw
+        /// material for `kbx export`. OFF by default: no file, no overhead, byte-identical.
+        #[arg(long)]
+        capture: bool,
+        /// With `--capture`, run each case this many times so several varied trajectories per
+        /// question accumulate (the reader is stochastic at temp>0) — needed for DPO pairs.
+        /// Ignored without `--capture`; the reported EM/F1/verdict still come from the first sample.
+        #[arg(long, default_value_t = 1)]
+        samples: usize,
+    },
+    /// Post-process captured `runs/<tag>/trajectories.jsonl` into an Unsloth-ready fine-tuning
+    /// dataset: SFT (`messages`/`sharegpt`) from Correct trajectories, or DPO
+    /// (`prompt`/`chosen`/`rejected`) pairing a Correct against a Wrong trajectory per question.
+    /// Pure deterministic post-process — no network.
+    Export {
+        /// Corpus root (kb-style PATH resolution) whose `runs/` holds the captured trajectories.
+        path: Option<PathBuf>,
+        /// Run tag(s) to read `runs/<tag>/trajectories.jsonl` from (comma-separated for several).
+        #[arg(long)]
+        from: String,
+        /// Dataset kind to emit.
+        #[arg(long, value_enum)]
+        format: ExportFormat,
+        /// Output JSONL file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// SFT output shape: `messages` (default, for `apply_chat_template`) or `sharegpt`
+        /// (`conversations`, for `standardize_sharegpt`). Ignored for DPO.
+        #[arg(long, value_enum, default_value = "messages")]
+        shape: ExportShape,
+        /// SFT only: also keep Partial-verdict trajectories as demonstrations (default: Correct only).
+        #[arg(long = "include-partial")]
+        include_partial: bool,
+        /// DPO only: max pairs emitted per question (default 1 = best Correct vs a Wrong).
+        #[arg(long = "max-pairs", default_value_t = 1)]
+        max_pairs: usize,
     },
     /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
     Build {
@@ -319,6 +379,8 @@ fn main() -> Result<()> {
             resume,
             no_progress,
             jobs,
+            capture,
+            samples,
         } => run_eval(EvalArgs {
             path,
             tag,
@@ -331,6 +393,25 @@ fn main() -> Result<()> {
             resume,
             no_progress,
             jobs,
+            capture,
+            samples,
+        }),
+        Cmd::Export {
+            path,
+            from,
+            format,
+            out,
+            shape,
+            include_partial,
+            max_pairs,
+        } => run_export(ExportArgs {
+            path,
+            from,
+            format,
+            out,
+            shape,
+            include_partial,
+            max_pairs,
         }),
         Cmd::Build {
             path,
@@ -478,6 +559,20 @@ struct EvalArgs {
     resume: bool,
     no_progress: bool,
     jobs: Option<usize>,
+    /// Capture full chat trajectories to `runs/<tag>/trajectories.jsonl`.
+    capture: bool,
+    /// With `--capture`, samples per case (varied trajectories for DPO). Default 1.
+    samples: usize,
+}
+
+struct ExportArgs {
+    path: Option<PathBuf>,
+    from: String,
+    format: ExportFormat,
+    out: PathBuf,
+    shape: ExportShape,
+    include_partial: bool,
+    max_pairs: usize,
 }
 
 /// The concrete files/dirs an `eval` run reads from and writes to, after folding the workspace's
@@ -625,6 +720,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // via `glossa::trace::last_trace_path()` (a thread-local set by `TraceLog::to_dir` on the SAME
     // thread inside `answer()`), so concurrent cases never collide on trace attribution.
     let jobs = lab::resolve(args.jobs, lab.tuning.jobs_eval, DEFAULT_JOBS_EVAL).max(1);
+    // `--capture` accumulates one `TrajectoryRecord` per sampled episode across all workers into
+    // this shared buffer (a `Mutex`, like the pool's own results), flushed to
+    // `runs/<tag>/trajectories.jsonl` after the pool drains. Without `--capture` it stays empty and
+    // the per-case path is byte-identical to before (the reader runs exactly once, via `answer`).
+    let n_samples = if args.capture { args.samples.max(1) } else { 1 };
+    let trajectories: Mutex<Vec<TrajectoryRecord>> = Mutex::new(Vec::new());
     let results = run_units_parallel(cases, jobs, &pb, |_q| 1, |q| {
         let backend = OpenAiBackend {
             endpoint: lab.model.endpoint.clone(),
@@ -639,49 +740,102 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             rate_limit: lab.model.rate_limit.clone(),
             fallback: lab.model.fallback.clone(),
         };
-        let answer = match backend.answer(&paths.root, q) {
-            Ok(a) => a,
-            Err(e) => {
-                pb.println(format!("case {}: agent error: {e}", q.id));
-                format!("(error: {e})")
+
+        // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
+        // (`answer`); `capture=true` drives `answer_capturing`, recording the full trajectory into
+        // `episode`. Returns everything the CaseResult and a `TrajectoryRecord` both need.
+        type Sample = (
+            String,                                          // answer
+            Vec<String>,                                     // tools (deduped names)
+            String,                                          // transcript
+            f32,                                             // em
+            f32,                                             // f1
+            Verdict,                                         // verdict (reward)
+            String,                                          // reason
+            String,                                          // judge_raw
+            kb_eval::backend::agent_loop::CapturedEpisode,   // trajectory (empty unless captured)
+        );
+        let run_sample = |capture: bool| -> Sample {
+            let mut episode = kb_eval::backend::agent_loop::CapturedEpisode::default();
+            let answer = if capture {
+                match backend.answer_capturing(&paths.root, q, Some(&mut episode)) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        pb.println(format!("case {}: agent error: {e}", q.id));
+                        format!("(error: {e})")
+                    }
+                }
+            } else {
+                match backend.answer(&paths.root, q) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        pb.println(format!("case {}: agent error: {e}", q.id));
+                        format!("(error: {e})")
+                    }
+                }
+            };
+
+            // This sample's exact trace file — the one `answer*()` created on THIS worker thread —
+            // read straight from the thread-local rather than diffing the trace dir (which races
+            // under concurrency). Best-effort: empty when tracing was disabled / no file recorded.
+            let (tools, transcript) = match glossa::trace::last_trace_path() {
+                Some(p) => parse_trace_file(&p),
+                None => (Vec::new(), String::new()),
+            };
+
+            let golds = gold_forms(q);
+            let em = if relaxed_match_any(&answer, &golds) { 1.0 } else { 0.0 };
+            let f1 = token_f1_any(&answer, &golds);
+
+            let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
+                (Some(jmd), Some(jep)) => match judge(
+                    jep,
+                    jmd,
+                    &q.question,
+                    &q.answer,
+                    &answer,
+                    &q.source,
+                    judge_idx.as_ref(),
+                ) {
+                    Ok(Judgement {
+                        verdict,
+                        reason,
+                        raw,
+                    }) => (verdict, reason, raw),
+                    Err(e) => (Verdict::Unscored, format!("judge error: {e}"), String::new()),
+                },
+                _ => (Verdict::Unscored, String::new(), String::new()),
+            };
+            (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode)
+        };
+
+        // Sample 0 produces the reported CaseResult (and its trajectory when capturing).
+        let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode) =
+            run_sample(args.capture);
+
+        // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
+        if args.capture {
+            let push = |ans: &str, ep: &kb_eval::backend::agent_loop::CapturedEpisode, v: Verdict| {
+                trajectories
+                    .lock()
+                    .expect("trajectories mutex poisoned")
+                    .push(TrajectoryRecord {
+                        id: q.id.clone(),
+                        question: q.question.clone(),
+                        model: lab.model.model.clone(),
+                        tools: ep.tools.clone().unwrap_or(serde_json::Value::Null),
+                        messages: ep.messages.clone(),
+                        answer: ans.to_string(),
+                        verdict: v,
+                        hop_type: q.hop_type.clone(),
+                    });
+            };
+            push(&answer, &episode, verdict);
+            for _ in 1..n_samples {
+                let s = run_sample(true);
+                push(&s.0, &s.8, s.5);
             }
-        };
-
-        // This case's exact trace file — the one `answer()` created on THIS worker thread — read
-        // straight from the thread-local rather than diffing the trace dir (which races under
-        // concurrency). Best-effort: empty when tracing was disabled / no file was recorded.
-        let (tools, transcript) = match glossa::trace::last_trace_path() {
-            Some(p) => parse_trace_file(&p),
-            None => (Vec::new(), String::new()),
-        };
-
-        let golds = gold_forms(q);
-        let em = if relaxed_match_any(&answer, &golds) {
-            1.0
-        } else {
-            0.0
-        };
-        let f1 = token_f1_any(&answer, &golds);
-
-        let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
-            (Some(jmd), Some(jep)) => match judge(
-                jep,
-                jmd,
-                &q.question,
-                &q.answer,
-                &answer,
-                &q.source,
-                judge_idx.as_ref(),
-            ) {
-                Ok(Judgement {
-                    verdict,
-                    reason,
-                    raw,
-                }) => (verdict, reason, raw),
-                Err(e) => (Verdict::Unscored, format!("judge error: {e}"), String::new()),
-            },
-            _ => (Verdict::Unscored, String::new(), String::new()),
-        };
+        }
 
         // The graded JUDGE verdict is the real signal (EM is ~0 on paragraph answers); lead with
         // the question's `hop_type` when present. `em`/`f1` still flow into `CaseResult` for the
@@ -712,6 +866,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     })?;
     drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
+
+    // Flush captured trajectories (reward-joined) to `runs/<tag>/trajectories.jsonl` for
+    // `kbx export`. No-op without `--capture` (the buffer is empty).
+    if args.capture {
+        let recs = trajectories
+            .into_inner()
+            .expect("trajectories mutex poisoned");
+        let tpath = write_trajectories(&runs_dir.join(&tag), &recs)?;
+        println!("captured {} trajectories -> {}", recs.len(), tpath.display());
+    }
 
     // Merge prior (resumed) cases with the ones just run. Dedup by id — a case just re-run wins
     // over its stale, previously-persisted copy.
@@ -746,6 +910,65 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     };
     println!("tokens: {}{footnote}", token_summary());
     println!("wrote {}", report_path.display());
+    Ok(())
+}
+
+/// `kbx export`: post-process captured trajectories into an Unsloth-ready JSONL dataset.
+/// Pure, deterministic, network-free — it only reads `runs/<tag>/trajectories.jsonl` for each tag
+/// in `--from`, filters/pairs by the joined judge verdict, and writes `--out`.
+fn run_export(args: ExportArgs) -> Result<()> {
+    let runs_dir = workspace::resolve(args.path).runs;
+    let tags: Vec<String> = args
+        .from
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut records: Vec<TrajectoryRecord> = Vec::new();
+    for tag in &tags {
+        records.extend(load_trajectories_for_tag(&runs_dir, tag).with_context(|| {
+            format!("loading trajectories for tag '{tag}' under {}", runs_dir.display())
+        })?);
+    }
+
+    let (rows, summary) = match args.format {
+        ExportFormat::Sft => {
+            let shape = match args.shape {
+                ExportShape::Messages => SftShape::Messages,
+                ExportShape::Sharegpt => SftShape::Sharegpt,
+            };
+            let rows = export_sft(&records, shape, args.include_partial);
+            let summary = format!(
+                "SFT: {} lines from {} trajectories ({} tag(s))",
+                rows.len(),
+                records.len(),
+                tags.len()
+            );
+            (rows, summary)
+        }
+        ExportFormat::Dpo => {
+            let out = export_dpo(&records, args.max_pairs.max(1));
+            let summary = format!(
+                "DPO: {} pairs, {} question(s) skipped (lacked both classes), from {} trajectories",
+                out.pairs.len(),
+                out.questions_skipped,
+                records.len()
+            );
+            (out.pairs, summary)
+        }
+    };
+
+    if let Some(parent) = args.out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating output dir {}", parent.display()))?;
+        }
+    }
+    std::fs::write(&args.out, to_jsonl(&rows))
+        .with_context(|| format!("writing {}", args.out.display()))?;
+    println!("{summary}");
+    println!("wrote {}", args.out.display());
     Ok(())
 }
 
@@ -1079,6 +1302,74 @@ mod tests {
         match cli.cmd {
             Cmd::Distil { jobs, .. } => assert!(jobs.is_none()),
             _ => panic!("expected Cmd::Distil"),
+        }
+    }
+
+    #[test]
+    fn eval_capture_defaults_off_and_samples_one() {
+        let cli = Cli::try_parse_from(["kbx", "eval"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval { capture, samples, .. } => {
+                assert!(!capture, "--capture must default OFF (non-breaking)");
+                assert_eq!(samples, 1, "--samples must default to 1");
+            }
+            _ => panic!("expected Cmd::Eval"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "eval", "--capture", "--samples", "4"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval { capture, samples, .. } => {
+                assert!(capture);
+                assert_eq!(samples, 4);
+            }
+            _ => panic!("expected Cmd::Eval"),
+        }
+    }
+
+    #[test]
+    fn export_dataset_parses_sft_defaults() {
+        let cli = Cli::try_parse_from([
+            "kbx", "export", "--from", "tagA", "--format", "sft", "--out", "d.jsonl",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Export { from, format, out, shape, include_partial, max_pairs, .. } => {
+                assert_eq!(from, "tagA");
+                assert_eq!(format, ExportFormat::Sft);
+                assert_eq!(out, PathBuf::from("d.jsonl"));
+                assert_eq!(shape, ExportShape::Messages, "shape must default to messages");
+                assert!(!include_partial);
+                assert_eq!(max_pairs, 1);
+            }
+            _ => panic!("expected Cmd::Export"),
+        }
+    }
+
+    #[test]
+    fn export_dataset_parses_dpo_and_sharegpt() {
+        let cli = Cli::try_parse_from([
+            "kbx", "export", "--from", "a,b", "--format", "dpo", "--out", "o.jsonl",
+            "--max-pairs", "3",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Export { from, format, max_pairs, .. } => {
+                assert_eq!(from, "a,b");
+                assert_eq!(format, ExportFormat::Dpo);
+                assert_eq!(max_pairs, 3);
+            }
+            _ => panic!("expected Cmd::ExportDataset"),
+        }
+        let cli = Cli::try_parse_from([
+            "kbx", "export", "--from", "t", "--format", "sft", "--out", "o.jsonl",
+            "--shape", "sharegpt", "--include-partial",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Export { shape, include_partial, .. } => {
+                assert_eq!(shape, ExportShape::Sharegpt);
+                assert!(include_partial);
+            }
+            _ => panic!("expected Cmd::ExportDataset"),
         }
     }
 }

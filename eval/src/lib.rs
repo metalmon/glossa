@@ -14,6 +14,7 @@ pub mod dataset_toml;
 pub mod distil;
 pub mod enrich;
 pub mod export_tz;
+pub mod finetune;
 pub mod export_tz_constraint;
 pub mod gepa;
 pub mod gepa_constraint;

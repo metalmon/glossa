@@ -363,6 +363,22 @@ impl AgentBackend for OpenAiBackend {
     }
 
     fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
+        self.answer_capturing(work, q, None)
+    }
+}
+
+impl OpenAiBackend {
+    /// Capture-aware reader. Identical to [`AgentBackend::answer`], but when `capture` is `Some`
+    /// it records the full chat trajectory (the seed system+user, every assistant/tool round, and
+    /// the final answer turn) into the sink for fine-tuning dataset collection (`kbx eval
+    /// --capture`). `capture: None` reproduces `answer` exactly — the trait method just delegates
+    /// here with `None`, so the non-capturing path is byte-identical to before.
+    pub fn answer_capturing(
+        &self,
+        work: &Path,
+        q: &Question,
+        capture: Option<&mut crate::backend::agent_loop::CapturedEpisode>,
+    ) -> anyhow::Result<String> {
         // The endpoint is the full chat-completions URL, used verbatim (no path is appended).
         // `Endpoint` here is a plain data carrier for `OpenAiTransport::call` — same fields
         // (`endpoint`/`model`/`api_key`/`timeout_secs`) `lmstudio_chat` used to take as loose
@@ -447,7 +463,7 @@ impl AgentBackend for OpenAiBackend {
         let user_sim = gate
             .as_ref()
             .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
-        let raw = crate::backend::agent_loop::run_agent_loop(
+        let raw = crate::backend::agent_loop::run_agent_loop_capturing(
             &transport,
             &ep,
             None,
@@ -457,6 +473,7 @@ impl AgentBackend for OpenAiBackend {
             nba,
             MAX_ROUNDS,
             user_sim,
+            capture,
         )?;
         Ok(prompt::parse_answer(&raw))
     }
