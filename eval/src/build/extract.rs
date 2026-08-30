@@ -16,7 +16,8 @@
 //! unit test; the `graph_upsert` exec arm's parse/filter/write behavior is unit-testable and
 //! covered below without a live model.
 
-use crate::backend::openai::{lmstudio_chat, run_agent_loop};
+use crate::backend::openai::run_agent_loop;
+use crate::backend::transport::openai::agent_chat_full;
 use crate::lab::LabConfig;
 use crate::parallel::GraphWriter;
 use crate::reason::grounding_schema_block;
@@ -368,8 +369,11 @@ pub fn extract_doc(
             json!({ "role": "user", "content": user }),
         ];
 
+        // One-shot chat returning the FULL response; the resample loop is applied provider-neutrally
+        // by the agent loop (`backend::resample::call_with_resample`), so this closure no longer
+        // resamples itself.
         let chat = |messages: &[Value]| {
-            lmstudio_chat(
+            agent_chat_full(
                 &endpoint,
                 &model,
                 api_key.as_deref(),

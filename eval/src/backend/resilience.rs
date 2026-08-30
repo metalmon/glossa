@@ -271,6 +271,7 @@ mod tests {
         TurnReply {
             text: Some(text.to_string()),
             tool_calls: vec![],
+            finish_reason: None,
             raw: json!({}),
         }
     }

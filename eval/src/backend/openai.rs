@@ -1,7 +1,6 @@
 use super::{prompt, AgentBackend};
 use crate::backend::transport::{ChatTransport, ToolCall, TurnReply};
 use crate::dataset::Question;
-use anyhow::anyhow;
 use glossa::read::DocImage;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
@@ -87,15 +86,23 @@ pub fn reset_tokens() {
     reset_conversation_prefix();
 }
 
-/// Process-global running count of resamples performed by `lmstudio_chat`'s resample loop (both the
-/// length-cap path and the degenerate-loop path) across every chat call — mirrors `NEW_TOKENS` so a
-/// run loop can surface `resamples()` on the same progress-bar message instead of the resample
-/// diagnostic colliding with the bar via a raw `eprintln!`.
+/// Process-global running count of resamples performed by the provider-neutral resample layer
+/// ([`crate::backend::resample::call_with_resample`], driven by the agent loop for every stage) —
+/// across the length-cap path, the degenerate-loop path, and the empty-no-tool-turn path. Mirrors
+/// `NEW_TOKENS` so a run loop can surface `resamples()` on the same progress-bar message instead of
+/// the resample diagnostic colliding with the bar via a raw `eprintln!`.
 static RESAMPLES: AtomicU64 = AtomicU64::new(0);
 
 /// Current value of the running resample counter (see `RESAMPLES`).
 pub fn resamples() -> u64 {
     RESAMPLES.load(Ordering::Relaxed)
+}
+
+/// Tally one resample into the process-global counter. Called by
+/// [`crate::backend::resample::call_with_resample`] each time it resamples a degenerate completion
+/// — the counter subsystem (like the token counters) lives HERE, and the resample layer calls in.
+pub(crate) fn note_resample() {
+    RESAMPLES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Zero the running resample counter. Call at the start of a run loop, alongside `reset_tokens()`,
@@ -350,30 +357,6 @@ pub struct OpenAiBackend {
 
 const MAX_ROUNDS: usize = 50;
 
-/// Default `min_p` nucleus-sampling floor for the agent-loop chat call (`lmstudio_chat`),
-/// overridable via `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that otherwise widen at
-/// high temperature, cutting down on degenerate generation loops without forcing low-temperature
-/// (deterministic) sampling. NOT sent by `chat_once` — that path targets a strict provider that may
-/// reject non-OpenAI fields, and its temperature is resolved by the caller (omitted when unset).
-const DEFAULT_MIN_P: f64 = 0.1;
-/// Cap on completion length per call. Bounds a runaway generation (a degenerate loop can otherwise
-/// spew thousands of tokens before the server stops) while staying generous enough not to clip a
-/// legitimate multi-node `graph_upsert` batch or a normal reader answer. Overridable via
-/// `KB_EVAL_MAX_TOKENS`.
-const DEFAULT_MAX_TOKENS: u64 = 16384;
-
-/// How many times to resample a completion whose content is a degenerate repetition loop before
-/// giving up and returning the last (best-effort) result.
-const GEN_LOOP_RETRIES: usize = 2;
-
-/// Cap on how many times a single call resamples on `finish_reason == "length"` alone before giving
-/// up and accepting the truncated best-effort completion. A chronically-verbose model that overflows
-/// `max_tokens` every round would otherwise burn up to `GEN_LOOP_RETRIES` full generations per call
-/// (observed: ~3x tokens wasted on an over-cap chat) — length overruns are rarely fixed by a single
-/// stochastic resample, so this is capped tighter than the generic loop-resample bound. Overridable
-/// via `KB_EVAL_MAX_LENGTH_RESAMPLE`.
-const DEFAULT_MAX_LENGTH_RESAMPLE: usize = 1;
-
 impl AgentBackend for OpenAiBackend {
     fn needs_corpus(&self) -> bool {
         true
@@ -522,10 +505,7 @@ pub(crate) fn chat_once(
     // One-shot (e.g. the file-prompt judge): NO `tools` field at all — a strict provider (the
     // MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
     // NOTE: no `min_p` here either — it's a non-OpenAI extension a strict provider may 400 on.
-    let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS);
+    let max_tokens: u64 = crate::backend::transport::openai::agent_max_tokens();
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -594,139 +574,15 @@ pub(crate) fn record_usage(resp: &Value) {
 }
 
 /// The sync HTTP bridge (raw JSON round-trip + retry/backoff), `tools_schema`, `content_of`, and
-/// `parse_tool_args` MOVED to `transport::openai` (Task 2 of the multi-api-transport plan) as the
-/// shared core behind `OpenAiTransport`. Re-imported here so `chat_once`/`lmstudio_chat` (kept as
-/// thin back-compat wrappers — their 9 existing callers aren't migrated until Phase 2 Task 6) and
-/// `run_agent_loop`/the schema tests keep working unchanged. `chat_http` returns the assistant
-/// message (`choices[0].message`); `chat_http_full` returns the WHOLE response so `lmstudio_chat`'s
-/// length-resample can read `choices[0].finish_reason` and `chat_once` can extract the message
-/// itself. Both record token usage exactly once via `record_usage`.
+/// `parse_tool_args` live in `transport::openai` as the shared core behind `OpenAiTransport`.
+/// Re-imported here so `chat_once` and the schema tests keep working unchanged. `chat_http` returns
+/// the assistant message (`choices[0].message`); `chat_http_full` returns the WHOLE response so
+/// `chat_once` can extract the message itself. Both record token usage exactly once via
+/// `record_usage`. (The retired `lmstudio_chat` is gone — its body-building lives in
+/// `transport::openai::agent_chat_full` and its resample loop in `backend::resample`.)
 pub(crate) use crate::backend::transport::openai::{
     chat_http, chat_http_full, content_of, parse_tool_args, tools_schema,
 };
-
-/// One OpenAI-compatible `/v1/chat/completions` call to an LM Studio-style endpoint, driven through
-/// the raw `reqwest` bridge (see `chat_http`). Returns the assistant `message` object (already extracted
-/// from `choices[0].message`). Samples at `temperature: 0.8` — temp 0 is not a reliable greedy mode
-/// on this reasoning model/backend (unstable outputs), so runs are stochastic and must be averaged
-/// over N. Also sends `min_p` (default `DEFAULT_MIN_P`, overridable via `KB_EVAL_MIN_P`) to trim the
-/// low-probability tail at that temperature. Shared by the eval backend and the graph GEPA optimizer
-/// so both drive the same server the same way.
-///
-/// Resamples up to `GEN_LOOP_RETRIES` times before giving up and returning the last (best-effort)
-/// result — sampling is stochastic, so a resample almost always breaks the problem — when either:
-/// - the completion looks like a degenerate generation loop (see `looks_looped`), or
-/// - the completion hit the token cap (`finish_reason == "length"`): the model burned its budget on
-///   verbose content-reasoning and either never emitted the tool call or emitted a truncated one
-///   whose JSON args don't parse. A resample at the same (stochastic) temperature is often terser.
-/// See `should_resample` for the (unit-tested) decision predicate.
-///
-/// `url` is the FULL chat-completions URL and is passed through to `chat_http` verbatim.
-pub(crate) fn lmstudio_chat(
-    url: &str,
-    model: &str,
-    api_key: Option<&str>,
-    tools: &Value,
-    messages: &[Value],
-    timeout: Duration,
-) -> anyhow::Result<Value> {
-    // Sampling temperature: overridable via KB_EVAL_TEMP for noise-sensitivity runs (default 0.8).
-    let temperature: f64 = std::env::var("KB_EVAL_TEMP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.8);
-    let min_p: f64 = std::env::var("KB_EVAL_MIN_P")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MIN_P);
-    let max_tokens: u64 = std::env::var("KB_EVAL_MAX_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS);
-    let body = json!({
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-        "temperature": temperature,
-        "min_p": min_p,
-        "max_tokens": max_tokens
-    });
-    // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
-    // with descriptions) sent to the endpoint, to prove what the model actually receives.
-    if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
-        let _ = std::fs::write(&p, serde_json::to_string(&body)?);
-    }
-    let max_length_resample: usize = std::env::var("KB_EVAL_MAX_LENGTH_RESAMPLE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_LENGTH_RESAMPLE);
-    let mut length_resamples = 0usize;
-    // Back-compat shim path (`build`/`distil`/`reason`/`gepa`): keeps the historical retry defaults.
-    let retry = crate::backend::resilience::RetryPolicy::default();
-    let mut full = chat_http_full(url, api_key, &body, timeout, retry)?;
-    for _ in 0..GEN_LOOP_RETRIES {
-        let content = full
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
-        let finish = full
-            .pointer("/choices/0/finish_reason")
-            .and_then(|f| f.as_str())
-            .unwrap_or("");
-        if !should_resample(finish, content) {
-            break;
-        }
-        if finish == "length" {
-            // Length overruns get a tighter, separately-tracked cap: resampling rarely fixes a
-            // chronically-verbose model, so don't spend the full GEN_LOOP_RETRIES budget on it.
-            if length_resamples >= max_length_resample {
-                break;
-            }
-            length_resamples += 1;
-        }
-        RESAMPLES.fetch_add(1, Ordering::Relaxed);
-        full = chat_http_full(url, api_key, &body, timeout, retry)?;
-    }
-    full.pointer("/choices/0/message")
-        .cloned()
-        .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
-}
-
-/// Decision predicate for `lmstudio_chat`'s resample loop: true when the completion should be
-/// resampled rather than accepted — either it hit the token cap (`finish_reason == "length"`, a
-/// truncated verbose turn that likely never emitted a valid tool call) or its content looks like a
-/// degenerate repetition loop (see `looks_looped`). Pure and separated from the loop so the decision
-/// itself is unit-testable without a mock HTTP server.
-fn should_resample(finish: &str, content: &str) -> bool {
-    finish == "length" || looks_looped(content)
-}
-
-/// Detect a degenerate generation loop: the tail of `text` is N identical consecutive blocks of some
-/// short period (a phrase/line the model repeated until it ran out of tokens). Byte-level, so it also
-/// catches whitespace-y repeats; returns false for normal prose. Pure — unit-tested.
-fn looks_looped(text: &str) -> bool {
-    let t = text.trim_end();
-    let b = t.as_bytes();
-    let n = b.len();
-    if n < 60 {
-        return false;
-    } // too short to judge
-    let tail = 1200.min(n);
-    const REPS: usize = 4; // need >=4 identical consecutive blocks
-    for p in 4..=(tail / REPS) {
-        // period (block length) in bytes
-        let span = REPS * p;
-        if span > tail {
-            break;
-        }
-        let start = n - span;
-        let unit = &b[n - p..];
-        if (0..REPS).all(|k| &b[start + k * p..start + (k + 1) * p] == unit) {
-            return true;
-        }
-    }
-    false
-}
 
 /// Unproductive-streak threshold. MOVED to `backend::agent_loop` (Task 3 of the multi-api-
 /// transport plan) along with the loop's dedup/streak/NBA logic; re-exported here so this
@@ -849,12 +705,19 @@ where
     )
 }
 
-/// Adapts a legacy `FnMut(&[Value]) -> Result<Value>` chat closure (OpenAI message-object shape)
-/// into a one-off `ChatTransport`, so `run_agent_loop`'s shim above can drive the generic loop.
-/// `push_assistant_turn`/`push_tool_results`/tool-call parsing mirror `OpenAiTransport`'s shapes
-/// exactly (same raw-message echo, same per-call `{role:"tool"}` push) — behavior-identical to the
-/// old inline loop. `pending_images` is the shim's shared vision buffer: `push_tool_results` drains
-/// it into a follow-up `role:"user"` image message right after the tool results (build --vision).
+/// Adapts a legacy `FnMut(&[Value]) -> Result<Value>` chat closure into a one-off `ChatTransport`,
+/// so `run_agent_loop`'s shim above can drive the generic loop. `push_assistant_turn`/
+/// `push_tool_results`/tool-call parsing mirror `OpenAiTransport`'s shapes exactly (same raw-message
+/// echo, same per-call `{role:"tool"}` push). `pending_images` is the shim's shared vision buffer:
+/// `push_tool_results` drains it into a follow-up `role:"user"` image message right after the tool
+/// results (build --vision).
+///
+/// The closure returns EITHER the FULL chat response (the real callers, via
+/// `transport::openai::agent_chat_full` — so `choices[0].finish_reason` is available to the
+/// resample layer) OR a bare assistant message object (this module's shim unit tests). `call`
+/// accepts both: it uses the full-response shape when `choices[0].message` is present (also lifting
+/// `finish_reason`), and otherwise treats the returned `Value` as the message itself
+/// (`finish_reason` then `None`).
 struct ClosureTransport<C> {
     chat: std::cell::RefCell<C>,
     pending_images: Rc<std::cell::RefCell<Vec<DocImage>>>,
@@ -885,7 +748,19 @@ where
         _tools: Option<&Value>,
         _temperature: Option<f64>,
     ) -> anyhow::Result<TurnReply> {
-        let msg = (self.chat.borrow_mut())(messages)?;
+        let v = (self.chat.borrow_mut())(messages)?;
+        // Full response (real callers) vs bare message (shim tests): a full response carries
+        // `choices[0].message` + `choices[0].finish_reason`; a bare message IS the message.
+        let has_choices = v.pointer("/choices/0/message").is_some();
+        let finish_reason = v
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let msg = if has_choices {
+            v.pointer("/choices/0/message").cloned().unwrap_or(v)
+        } else {
+            v
+        };
         let tool_calls: Vec<ToolCall> = msg
             .get("tool_calls")
             .and_then(Value::as_array)
@@ -906,6 +781,7 @@ where
         Ok(TurnReply {
             text: Some(content_of(&msg)),
             tool_calls,
+            finish_reason,
             raw: msg,
         })
     }
@@ -1926,267 +1802,5 @@ mod schema_tests {
                 "graph-OFF must advertise ungated tool {ungated}; got {names:?}"
             );
         }
-    }
-
-    #[test]
-    fn looks_looped_detects_repeated_tail() {
-        let text = "Some normal preamble. ".to_string() + &"the same phrase over and over. ".repeat(10);
-        assert!(looks_looped(&text));
-    }
-
-    #[test]
-    fn looks_looped_detects_short_cycle() {
-        let text = "prefix ".to_string() + &"ABABAB".repeat(20);
-        assert!(looks_looped(&text));
-    }
-
-    #[test]
-    fn looks_looped_passes_normal_prose() {
-        let text = "The quick brown fox jumps over the lazy dog. It was a bright cold day in April, \
-                     and the clocks were striking thirteen. Meanwhile, a different sentence follows, \
-                     varying its wording and structure so no short block repeats consecutively.";
-        assert!(!looks_looped(text));
-    }
-
-    #[test]
-    fn looks_looped_short_text_is_false() {
-        assert!(!looks_looped("too short"));
-    }
-
-    #[test]
-    fn should_resample_on_length_or_loop_but_not_normal() {
-        // Hit the token cap: resample regardless of content.
-        assert!(should_resample("length", "any content, even short"));
-        // Looked like a degenerate repetition loop, even though it finished "normally".
-        let looped = "prefix ".to_string() + &"ABABAB".repeat(20);
-        assert!(should_resample("stop", &looped));
-        // Normal, complete, non-looping content: accept it.
-        assert!(!should_resample("stop", "ANSWER: a short normal answer"));
-    }
-
-    /// Serializes every end-to-end `lmstudio_chat` resample test in this module: they all share the
-    /// global `RESAMPLES` counter and some of them also mutate the `KB_EVAL_MAX_LENGTH_RESAMPLE` env
-    /// var, so running them concurrently (the default for `cargo test`) would let one test's counter
-    /// deltas or env var leak into another's assertions.
-    static RESAMPLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that restores `KB_EVAL_MAX_LENGTH_RESAMPLE` to whatever it was before `set()` (or
-    /// removes it if it was unset), on drop — including an early return via a failed `assert!` —
-    /// so a test that overrides the cap can never leak the override into a later test in the same
-    /// process.
-    struct MaxLengthResampleEnvGuard {
-        prev: Option<String>,
-    }
-    impl MaxLengthResampleEnvGuard {
-        fn set(val: &str) -> Self {
-            let prev = std::env::var("KB_EVAL_MAX_LENGTH_RESAMPLE").ok();
-            std::env::set_var("KB_EVAL_MAX_LENGTH_RESAMPLE", val);
-            Self { prev }
-        }
-    }
-    impl Drop for MaxLengthResampleEnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("KB_EVAL_MAX_LENGTH_RESAMPLE", v),
-                None => std::env::remove_var("KB_EVAL_MAX_LENGTH_RESAMPLE"),
-            }
-        }
-    }
-
-    /// Spins up a one-shot mock HTTP server that answers `bodies.len()` sequential POSTs, in order,
-    /// with each of `bodies` as the raw JSON response — shared by every resample-loop end-to-end test
-    /// below so the socket/response plumbing (mirroring `chat_once_posts_endpoint_url_verbatim`'s
-    /// pattern) is written once. Returns the endpoint URL, a live request counter, and the server's
-    /// join handle (call `.join()` after the `lmstudio_chat` call returns).
-    fn mock_chat_server(
-        bodies: Vec<&'static str>,
-    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let requests_srv = requests.clone();
-        let server = std::thread::spawn(move || {
-            for body in bodies {
-                let (mut sock, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf).unwrap();
-                requests_srv.fetch_add(1, Ordering::SeqCst);
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                sock.write_all(resp.as_bytes()).unwrap();
-            }
-        });
-        (format!("http://127.0.0.1:{port}/v1/chat/completions"), requests, server)
-    }
-
-    /// Mirrors `chat_once_posts_endpoint_url_verbatim`'s mock-server pattern, but drives
-    /// `lmstudio_chat`'s resample loop: the first response hits the token cap
-    /// (`finish_reason:"length"`), so it must resample once; the second response is a normal
-    /// completion, so the loop stops there and returns it. Proves the length branch actually fires
-    /// end-to-end (not just the pure predicate), that the returned message is the GOOD (second) one
-    /// (not the truncated first one), and that the process-global `resamples()` counter tallies it.
-    #[test]
-    fn lmstudio_chat_resamples_once_on_length_then_returns_good_message() {
-        use std::sync::atomic::Ordering;
-        let _guard = RESAMPLE_TEST_LOCK.lock().unwrap();
-        reset_resamples();
-
-        let (endpoint, requests, server) = mock_chat_server(vec![
-            // Truncated at the cap: no tool call, no finish content that matters — only
-            // finish_reason drives the resample.
-            r#"{"choices":[{"message":{"role":"assistant","content":"...truncated verbose reasoning"},"finish_reason":"length"}]}"#,
-            r#"{"choices":[{"message":{"role":"assistant","content":"ANSWER: ok"},"finish_reason":"stop"}]}"#,
-        ]);
-        let msg = lmstudio_chat(
-            &endpoint,
-            "m",
-            None,
-            &json!([]),
-            &[json!({"role": "user", "content": "hi"})],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(
-            requests.load(Ordering::SeqCst),
-            2,
-            "must resample exactly once after a finish_reason=length turn"
-        );
-        assert_eq!(msg["content"], "ANSWER: ok", "must return the second (good) message, not the truncated first one");
-        assert_eq!(resamples(), 1, "the counter must tally the one resample this call made");
-    }
-
-    /// A chronically-verbose model hits the token cap on EVERY turn. With the default
-    /// `DEFAULT_MAX_LENGTH_RESAMPLE == 1`, the loop must resample only once on `finish_reason:
-    /// "length"`, then give up and accept the second (still-truncated) completion rather than
-    /// burning a third generation — this is the fix for the token-thrashing bug (a chronically
-    /// verbose model no longer costs up to `GEN_LOOP_RETRIES` full generations per call).
-    #[test]
-    fn length_resample_capped_at_default_accepts_second_truncated_completion() {
-        use std::sync::atomic::Ordering;
-        let _guard = RESAMPLE_TEST_LOCK.lock().unwrap();
-        reset_resamples();
-
-        let (endpoint, requests, server) = mock_chat_server(vec![
-            r#"{"choices":[{"message":{"role":"assistant","content":"...truncated A"},"finish_reason":"length"}]}"#,
-            r#"{"choices":[{"message":{"role":"assistant","content":"...truncated B"},"finish_reason":"length"}]}"#,
-        ]);
-        let msg = lmstudio_chat(
-            &endpoint,
-            "m",
-            None,
-            &json!([]),
-            &[json!({"role": "user", "content": "hi"})],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(requests.load(Ordering::SeqCst), 2, "must resample exactly once, not twice, before giving up");
-        assert_eq!(resamples(), 1, "the counter must reflect exactly one resample");
-        assert_eq!(
-            msg["content"], "...truncated B",
-            "must give up and return the second (still-truncated) completion, not keep resampling"
-        );
-    }
-
-    /// A normal, complete first response (`finish_reason: "stop"`, no repetition loop) must never
-    /// trigger a resample at all.
-    #[test]
-    fn normal_completion_never_resamples() {
-        use std::sync::atomic::Ordering;
-        let _guard = RESAMPLE_TEST_LOCK.lock().unwrap();
-        reset_resamples();
-
-        let (endpoint, requests, server) = mock_chat_server(vec![
-            r#"{"choices":[{"message":{"role":"assistant","content":"ANSWER: ok"},"finish_reason":"stop"}]}"#,
-        ]);
-        let msg = lmstudio_chat(
-            &endpoint,
-            "m",
-            None,
-            &json!([]),
-            &[json!({"role": "user", "content": "hi"})],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(requests.load(Ordering::SeqCst), 1, "a normal completion must not be resampled");
-        assert_eq!(resamples(), 0);
-        assert_eq!(msg["content"], "ANSWER: ok");
-    }
-
-    /// The length-resample cap must not shrink the unrelated degenerate-loop resample path: a
-    /// completion that finishes normally (`finish_reason: "stop"`) but whose content looks like a
-    /// repetition loop must still resample up to the full `GEN_LOOP_RETRIES` (2) times before giving
-    /// up, exactly as before this change.
-    #[test]
-    fn loop_resample_path_still_honors_gen_loop_retries() {
-        use std::sync::atomic::Ordering;
-        let _guard = RESAMPLE_TEST_LOCK.lock().unwrap();
-        reset_resamples();
-
-        let looped = format!(
-            r#"{{"choices":[{{"message":{{"role":"assistant","content":"prefix {}"}},"finish_reason":"stop"}}]}}"#,
-            "ABABAB".repeat(20)
-        );
-        let looped: &'static str = Box::leak(looped.into_boxed_str());
-        let (endpoint, requests, server) = mock_chat_server(vec![looped, looped, looped]);
-        let msg = lmstudio_chat(
-            &endpoint,
-            "m",
-            None,
-            &json!([]),
-            &[json!({"role": "user", "content": "hi"})],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(
-            requests.load(Ordering::SeqCst),
-            3,
-            "must resample the full GEN_LOOP_RETRIES (2) times for a persistent repetition loop, unbounded by the length cap"
-        );
-        assert_eq!(resamples(), 2);
-        assert!(msg["content"].as_str().unwrap().contains("ABABAB"), "gives up and returns the last best-effort completion");
-    }
-
-    /// `KB_EVAL_MAX_LENGTH_RESAMPLE=0` must disable length-resampling entirely: even a single
-    /// `finish_reason: "length"` turn is accepted as-is, with zero resamples.
-    #[test]
-    fn max_length_resample_zero_never_resamples_on_length() {
-        use std::sync::atomic::Ordering;
-        let _guard = RESAMPLE_TEST_LOCK.lock().unwrap();
-        reset_resamples();
-        let _env = MaxLengthResampleEnvGuard::set("0");
-
-        let (endpoint, requests, server) = mock_chat_server(vec![
-            r#"{"choices":[{"message":{"role":"assistant","content":"...truncated"},"finish_reason":"length"}]}"#,
-        ]);
-        let msg = lmstudio_chat(
-            &endpoint,
-            "m",
-            None,
-            &json!([]),
-            &[json!({"role": "user", "content": "hi"})],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(requests.load(Ordering::SeqCst), 1, "KB_EVAL_MAX_LENGTH_RESAMPLE=0 must accept the first completion outright");
-        assert_eq!(resamples(), 0);
-        assert_eq!(msg["content"], "...truncated");
     }
 }

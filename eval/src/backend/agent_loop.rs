@@ -10,18 +10,22 @@
 //! `ChatTransport` directly is Phase 2 Task 6 of the plan) keep compiling unchanged. The dedup/
 //! streak/NBA logic itself lives in exactly ONE place: here.
 
-use crate::backend::transport::{transport_for, ChatTransport, TurnReply};
+use crate::backend::resample::{call_with_resample, ResamplePolicy};
+use crate::backend::transport::{ChatTransport, TurnReply};
 use crate::backend::user_sim::DialogueGate;
 use crate::lab::Endpoint;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-/// One `transport.call`, wrapped in the resilience layer: throttle + fallback chain per the
-/// endpoint's opt-in `rate_limit`/`fallback`. For the PRIMARY link the already-built `transport` is
-/// reused verbatim (so the injected mock transport in tests, and today's real transport, drive the
-/// primary exactly as before); only fallback links build their own transport via `transport_for`.
-/// With `ep.fallback` empty and `ep.rate_limit` absent this is a single un-throttled `transport.call`
-/// — byte-identical to the pre-Phase-3 code path.
+/// One logical model turn = `resample(OUTER)` over `resilient(INNER)` over `transport.call`, via
+/// [`call_with_resample`]. The INNER resilience layer handles hard network/rate-limit/fallback
+/// failures (per the endpoint's opt-in `rate_limit`/`fallback`); the OUTER resample layer retries a
+/// soft-degenerate OUTPUT (length cap, repetition loop, empty no-tool turn) up to
+/// [`ResamplePolicy`]'s bounds. For the PRIMARY link the already-built `transport` is reused
+/// verbatim (so the injected mock transport in tests, and today's real transport, drive the primary
+/// exactly as before); only fallback links build their own transport. With `ep.fallback` empty,
+/// `ep.rate_limit` absent, and a non-degenerate first reply this is a single un-throttled
+/// `transport.call` returned unchanged.
 fn resilient_call(
     transport: &dyn ChatTransport,
     ep: &Endpoint,
@@ -30,13 +34,15 @@ fn resilient_call(
     tools: Option<&Value>,
     temperature: Option<f64>,
 ) -> anyhow::Result<TurnReply> {
-    crate::backend::resilience::call_resilient(ep, |link| {
-        if std::ptr::eq(link, ep) {
-            transport.call(link, system, messages, tools, temperature)
-        } else {
-            transport_for(link.api).call(link, system, messages, tools, temperature)
-        }
-    })
+    call_with_resample(
+        transport,
+        ep,
+        system,
+        messages,
+        tools,
+        temperature,
+        ResamplePolicy::default(),
+    )
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row
@@ -268,6 +274,7 @@ mod tests {
         TurnReply {
             text: Some(s.to_string()),
             tool_calls: vec![],
+            finish_reason: Some("stop".to_string()),
             raw: json!({ "role": "assistant", "content": s }),
         }
     }
@@ -280,6 +287,7 @@ mod tests {
                 name: name.to_string(),
                 args,
             }],
+            finish_reason: Some("tool_calls".to_string()),
             raw: json!({ "role": "assistant", "content": null }),
         }
     }
@@ -297,6 +305,7 @@ mod tests {
                 name: name.to_string(),
                 args,
             }],
+            finish_reason: Some("tool_calls".to_string()),
             raw: json!({ "role": "assistant", "content": text }),
         }
     }

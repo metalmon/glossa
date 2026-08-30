@@ -27,10 +27,19 @@ pub struct ToolCall {
 /// `raw` is the provider's own response payload verbatim — kept so a transport's
 /// `push_assistant_turn` can echo back provider-specific fields (e.g. OpenAI's
 /// `reasoning_content`, Anthropic's `thinking` blocks) that a typed round-trip would drop.
+///
+/// `finish_reason` is the provider's stop reason NORMALIZED to a neutral string so the
+/// provider-neutral resample layer ([`crate::backend::resample`]) can detect a length-truncated
+/// turn identically across APIs: OpenAI's `choices[0].finish_reason` passes through verbatim
+/// (`"length"`, `"stop"`, `"tool_calls"`, …); Anthropic's `stop_reason == "max_tokens"` and the
+/// Responses API's `max_output_tokens` incompletion both normalize to `"length"`. `None` when the
+/// provider reported no stop reason (or a transport that doesn't surface one) — the resample layer
+/// then falls back to the content-only degeneracy checks.
 #[derive(Debug, Clone)]
 pub struct TurnReply {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    pub finish_reason: Option<String>,
     pub raw: serde_json::Value,
 }
 
@@ -119,6 +128,7 @@ mod tests {
                 name: "search".into(),
                 args: json!({"q": "y"}),
             }],
+            finish_reason: None,
             raw: json!({}),
         };
         assert_eq!(reply.text.as_deref(), Some("x"));

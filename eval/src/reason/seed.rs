@@ -3,7 +3,8 @@
 //! write triad.
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::{lmstudio_chat, run_agent_loop};
+use crate::backend::openai::run_agent_loop;
+use crate::backend::transport::openai::agent_chat_full;
 use crate::build::extract::{extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::distil::Seed;
 use crate::lab::LabConfig;
@@ -158,8 +159,10 @@ pub fn chain_one_seed(
     let timeout = Duration::from_secs(ep.timeout_secs);
     let tools = extract_tools_schema(SEED_GRAPH_UPSERT_DESC);
 
+    // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
+    // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
-        lmstudio_chat(&endpoint, &model, api_key.as_deref(), &tools, messages, timeout)
+        agent_chat_full(&endpoint, &model, api_key.as_deref(), &tools, messages, timeout)
     };
 
     let now = std::time::SystemTime::now()

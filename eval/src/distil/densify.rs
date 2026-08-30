@@ -27,7 +27,8 @@
 //! same split).
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::{lmstudio_chat, run_agent_loop};
+use crate::backend::openai::run_agent_loop;
+use crate::backend::transport::openai::agent_chat_full;
 use crate::build::extract::{doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::lab::LabConfig;
 use crate::parallel::GraphWriter;
@@ -221,8 +222,10 @@ pub fn densify_doc(
             json!({ "role": "user", "content": user }),
         ];
 
+        // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
+        // (`backend::resample::call_with_resample`).
         let chat = |messages: &[Value]| {
-            lmstudio_chat(
+            agent_chat_full(
                 &endpoint,
                 &model,
                 api_key.as_deref(),

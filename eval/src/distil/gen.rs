@@ -11,7 +11,8 @@
 //! (question, answer) pair instead.
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::{chat_once, lmstudio_chat, run_agent_loop};
+use crate::backend::openai::{chat_once, run_agent_loop};
+use crate::backend::transport::openai::agent_chat_full;
 use crate::reason::schema_graph_block;
 use crate::lab::LabConfig;
 use crate::score::contains_match;
@@ -239,8 +240,10 @@ pub fn generate_one(
     let timeout = Duration::from_secs(distil_ep.timeout_secs);
     let tools = distil_tools_schema();
 
+    // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
+    // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
-        lmstudio_chat(
+        agent_chat_full(
             &endpoint,
             &model,
             api_key.as_deref(),

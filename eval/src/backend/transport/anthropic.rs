@@ -160,9 +160,17 @@ fn parse_response(resp: Value) -> TurnReply {
         })
         .collect();
 
+    // Normalize Anthropic's `stop_reason` to the neutral `finish_reason` the resample layer reads:
+    // `"max_tokens"` (its length-cap signal) maps to `"length"` so a truncated turn resamples the
+    // same way an OpenAI `finish_reason == "length"` one does; any other stop reason passes through.
+    let finish_reason = resp.get("stop_reason").and_then(Value::as_str).map(|r| {
+        if r == "max_tokens" { "length".to_string() } else { r.to_string() }
+    });
+
     TurnReply {
         text: Some(text),
         tool_calls,
+        finish_reason,
         raw: resp,
     }
 }
@@ -335,6 +343,7 @@ mod tests {
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
             }],
+            finish_reason: None,
             raw: json!({
                 "content": [
                     {"type": "thinking", "thinking": "reasoning..."},
@@ -361,6 +370,7 @@ mod tests {
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
             }],
+            finish_reason: None,
             raw: json!({ "no_content_here": true }),
         };
         AnthropicTransport.push_assistant_turn(&mut messages, &reply);

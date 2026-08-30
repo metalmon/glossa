@@ -179,9 +179,23 @@ fn parse_response(resp: Value) -> TurnReply {
         })
         .collect();
 
+    // Normalize the Responses API's incompletion signal to the neutral `finish_reason` the resample
+    // layer reads: an `incomplete` status whose `incomplete_details.reason` is `max_output_tokens`
+    // (its length-cap signal) maps to `"length"`, so a truncated turn resamples like an OpenAI
+    // `finish_reason == "length"` one. Other/absent statuses leave `finish_reason` as `None`.
+    let finish_reason = if resp.get("status").and_then(Value::as_str) == Some("incomplete")
+        && resp.pointer("/incomplete_details/reason").and_then(Value::as_str)
+            == Some("max_output_tokens")
+    {
+        Some("length".to_string())
+    } else {
+        None
+    };
+
     TurnReply {
         text: Some(text),
         tool_calls,
+        finish_reason,
         raw: resp,
     }
 }
@@ -356,6 +370,7 @@ mod tests {
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
             }],
+            finish_reason: None,
             raw: json!({
                 "output": [
                     {"type": "reasoning", "summary": []},
@@ -380,6 +395,7 @@ mod tests {
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
             }],
+            finish_reason: None,
             raw: json!({ "no_output_here": true }),
         };
         ResponsesTransport.push_assistant_turn(&mut messages, &reply);

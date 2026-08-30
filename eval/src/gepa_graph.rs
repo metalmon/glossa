@@ -174,8 +174,10 @@ fn rollout_one(
 ) -> RolloutOutcome {
     let trace = TraceLog::disabled();
     let steps = std::cell::RefCell::new(Vec::<ToolStep>::new());
+    // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
+    // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
-        crate::backend::openai::lmstudio_chat(
+        crate::backend::transport::openai::agent_chat_full(
             url,
             &cfg.model,
             cfg.api_key.as_deref(),
