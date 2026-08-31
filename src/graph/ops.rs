@@ -20,6 +20,16 @@ use serde_json::Value;
 pub struct UpsertNode {
     pub node_type: String,
     pub label: String,
+    /// OPTIONAL call-scoped handle for this node. NOT persisted — the real id is always
+    /// derived from `node_type` + `label` exactly as without it. Assign a short `id`
+    /// (e.g. `"n1"`) so an edge in the SAME call can reference this node by that handle in
+    /// its `from`/`to`. The success response returns the handle → real id mapping so later
+    /// calls (where handles no longer apply) can reference the created node by its real id.
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
+    pub id: Option<String>,
     /// Document section this node is grounded in (`path#n`). Omit (or send blank) to
     /// create the node UNGROUNDED — allowed only for node types that are not
     /// `requires_grounding` per the ontology; a `requires_grounding` type with no
@@ -471,6 +481,10 @@ pub struct UpsertOutcome {
     pub dump: Vec<String>,
     /// requested_id → canonical_id when dedup merged into an existing node
     pub merged: Vec<(String, String)>,
+    /// declared handle → canonical id, for the nodes whose caller gave them an `id` handle.
+    /// Surfaced on success so the model can reference the created node by its real id in LATER
+    /// calls (where the call-scoped handle no longer applies).
+    pub handles: Vec<(String, String)>,
     /// Malformed items that were dropped (partial apply) or caused full rejection
     pub dropped: Vec<String>,
 }
@@ -506,6 +520,12 @@ pub fn format_upsert_response(out: &UpsertOutcome) -> String {
         parts.push("Merged (already existed, edges attached):".into());
         for (from, to) in &out.merged {
             parts.push(format!("- {from} → {to}"));
+        }
+    }
+    if !out.handles.is_empty() {
+        parts.push("Handles (use these real ids to reference the node in LATER calls):".into());
+        for (handle, id) in &out.handles {
+            parts.push(format!("- {handle} → {id}"));
         }
     }
     if !out.dropped.is_empty() {
@@ -577,6 +597,8 @@ pub fn graph_upsert(
         /// grounding auto-derive (4a) can still resolve a `<path>#<n>` reference to
         /// the real chunk it names.
         source_path_raw: String,
+        /// The optional call-scoped `id` handle the caller gave this node (see `UpsertNode.id`).
+        id_handle: Option<String>,
     }
     let mut valid_nodes: Vec<(SanitizedNode, String)> = Vec::new();
     for nd in &nodes {
@@ -647,6 +669,7 @@ pub fn graph_upsert(
                 valid_to_raw: nd.valid_to.clone(),
                 valid_to_norm,
                 source_path_raw: nd.source_path.clone(),
+                id_handle: nd.id.clone(),
             },
             canonical,
         ));
@@ -687,6 +710,52 @@ pub fn graph_upsert(
             .clone();
         label_type_to_id.insert((norm.clone(), nd.node_type.clone()), id.clone());
         label_to_id.insert(norm, id);
+    }
+
+    // (2b) Call-scoped handles. A node may carry an optional `id` handle so an edge in THIS
+    // call can wire to it before it is committed (the model often invents short handles like
+    // "task-1" for nodes it labels with long prose). The handle maps to the node's derived
+    // canonical id (from `norm_to_id`); it is NOT persisted. Handles must be unique within the
+    // call — two nodes claiming the same handle is ambiguous, so the whole call is rejected
+    // (consistent with the grounding/validity guarantees below).
+    let mut handle_to_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut handle_errs: Vec<String> = Vec::new();
+    for (nd, _) in &valid_nodes {
+        let Some(h) = nd
+            .id_handle
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        else {
+            continue;
+        };
+        let id = norm_to_id[&(normalize_label(&nd.label), nd.node_type.clone())].clone();
+        if handle_to_id.contains_key(h) {
+            handle_errs.push(format!(
+                "handle `{h}` declared by two nodes — handles must be unique in a call"
+            ));
+        } else {
+            handle_to_id.insert(h.to_string(), id);
+        }
+    }
+    if !handle_errs.is_empty() {
+        let mut dropped = handle_errs;
+        dropped.extend(errs);
+        let out = UpsertOutcome {
+            message: String::new(),
+            nodes: 0,
+            edges: 0,
+            rejected: true,
+            dump: vec![],
+            merged: vec![],
+            handles: vec![],
+            dropped,
+        };
+        return UpsertOutcome {
+            message: format_upsert_response(&out),
+            ..out
+        };
     }
 
     // (3) build NodeSpec list (valid nodes only)
@@ -765,6 +834,33 @@ pub fn graph_upsert(
         label_type_to_id: &label_type_to_id,
         batch_ids: &batch_ids,
     };
+    // Referenceable-endpoint lists for the no-match feedback: the labels of THIS call's nodes
+    // and the `id` handles the caller declared. Capped so a large batch does not produce a wall
+    // of text. Built once, reused by both the `from` and `to` no-match branches below.
+    let fmt_capped = |items: &[String], cap: usize| -> String {
+        let shown: Vec<String> = items
+            .iter()
+            .take(cap)
+            .map(|s| format!("\"{s}\""))
+            .collect();
+        let mut s = shown.join(", ");
+        if items.len() > cap {
+            s.push_str(", …");
+        }
+        s
+    };
+    let call_labels: Vec<String> = valid_nodes.iter().map(|(nd, _)| nd.label.clone()).collect();
+    let call_handles: Vec<String> = {
+        let mut h: Vec<String> = handle_to_id.keys().cloned().collect();
+        h.sort();
+        h
+    };
+    let labels_str = fmt_capped(&call_labels, 8);
+    let handles_str = if call_handles.is_empty() {
+        "(none declared — give a node a short `id` to reference it)".to_string()
+    } else {
+        fmt_capped(&call_handles, 8)
+    };
     let mut edgespecs: Vec<EdgeSpec> = Vec::new();
     for ue in &edges {
         let (of, ot, oet) = (ue.from.clone(), ue.to.clone(), ue.edge_type.clone());
@@ -836,7 +932,10 @@ pub fn graph_upsert(
         }
 
         // resolve from endpoint
-        if batch_ids.contains(&from_ep) {
+        if let Some(id) = handle_to_id.get(&from_ep) {
+            // a call-scoped handle the caller assigned to one of THIS call's nodes
+            from_resolved = Some(id.clone());
+        } else if batch_ids.contains(&from_ep) {
             from_resolved = Some(from_ep.clone());
         } else if g.get_node(&from_ep).ok().flatten().is_some() {
             // an existing graph node referenced by its id (e.g. a grounded terminal
@@ -866,7 +965,7 @@ pub fn graph_upsert(
                         }
                         EndpointResolution::NoMatch => {
                             errs.push(format!(
-                            "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" matches no node — add a node with that label"
+                            "edge {of} -{oet}-> {ot} dropped: endpoint \"{of}\" is not a node in this call and not an existing node — reference one of THIS call's nodes by its exact label [{labels_str}] or by the `id` handle you gave it [{handles_str}], or use an existing node id / a section path#n"
                         ));
                             edge_ok = false;
                         }
@@ -876,7 +975,10 @@ pub fn graph_upsert(
         }
 
         // resolve to endpoint
-        if batch_ids.contains(&to_ep) {
+        if let Some(id) = handle_to_id.get(&to_ep) {
+            // a call-scoped handle the caller assigned to one of THIS call's nodes
+            to_resolved = Some(id.clone());
+        } else if batch_ids.contains(&to_ep) {
             to_resolved = Some(to_ep.clone());
         } else if g.get_node(&to_ep).ok().flatten().is_some() {
             // an existing graph node referenced by its id (e.g. a grounded terminal
@@ -906,7 +1008,7 @@ pub fn graph_upsert(
                         }
                         EndpointResolution::NoMatch => {
                             errs.push(format!(
-                            "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" matches no node — add a node with that label"
+                            "edge {of} -{oet}-> {ot} dropped: endpoint \"{ot}\" is not a node in this call and not an existing node — reference one of THIS call's nodes by its exact label [{labels_str}] or by the `id` handle you gave it [{handles_str}], or use an existing node id / a section path#n"
                         ));
                             edge_ok = false;
                         }
@@ -1017,6 +1119,7 @@ pub fn graph_upsert(
             rejected: true,
             dump: vec![],
             merged: vec![],
+            handles: vec![],
             dropped,
         };
         return UpsertOutcome {
@@ -1061,6 +1164,7 @@ pub fn graph_upsert(
             rejected: true,
             dump: vec![],
             merged: vec![],
+            handles: vec![],
             dropped,
         };
         return UpsertOutcome {
@@ -1123,6 +1227,7 @@ pub fn graph_upsert(
             rejected: true,
             dump: hint_dump,
             merged: vec![],
+            handles: vec![],
             dropped: errs,
         };
         return UpsertOutcome {
@@ -1175,6 +1280,17 @@ pub fn graph_upsert(
                     errs.push(format!("node \"{target}\" validity not recorded: {e}"));
                 }
             }
+            // Surface each declared handle → the id the node actually landed under (remapped
+            // through `merged` for a node that deduped into an existing id), so the model can
+            // reference the created node by its real id in a LATER call.
+            let mut handles: Vec<(String, String)> = handle_to_id
+                .iter()
+                .map(|(handle, id)| {
+                    let target = canonical_of.get(id.as_str()).copied().unwrap_or(id.as_str());
+                    (handle.clone(), target.to_string())
+                })
+                .collect();
+            handles.sort();
             let out = UpsertOutcome {
                 message: String::new(),
                 nodes: result.nodes_written,
@@ -1182,6 +1298,7 @@ pub fn graph_upsert(
                 rejected: false,
                 dump,
                 merged: result.merged,
+                handles,
                 dropped: errs,
             };
             UpsertOutcome {
@@ -1197,6 +1314,7 @@ pub fn graph_upsert(
                 rejected: true,
                 dump,
                 merged: vec![],
+                handles: vec![],
                 dropped: vec![format!("graph_upsert failed: {e}")],
             };
             UpsertOutcome {
@@ -1643,6 +1761,7 @@ strict = false
         UpsertNode {
             node_type: node_type.into(),
             label: label.into(),
+            id: None,
             source_path: src.into(),
             aliases: vec![],
             valid_from: None,
@@ -2050,8 +2169,10 @@ strict = false
         assert_eq!(out.nodes, 1, "the Symptom node is written");
         assert_eq!(out.edges, 0, "the edge to an unknown node is dropped");
         assert!(
-            out.message.contains("dropped") && out.message.contains("matches no node"),
-            "message should explain the dropped edge: {}",
+            out.message.contains("dropped")
+                && out.message.contains("is not a node in this call")
+                && !out.message.contains("add a node with that label"),
+            "message should explain the dropped edge actionably: {}",
             out.message
         );
     }
@@ -3390,7 +3511,7 @@ strict = true
     /// Task 12 regression guard: the new existing-node-id check must not accept arbitrary
     /// strings — only real node ids. A string that looks like nothing the resolver knows
     /// (not a same-batch id, not a `path#n` ref, not a label, not a real node id) is still
-    /// dropped with the usual "matches no node" error.
+    /// dropped with the actionable "is not a node in this call" error.
     #[test]
     fn graph_upsert_edge_by_unknown_id_still_drops() {
         let dir = tempfile::tempdir().unwrap();
@@ -3420,7 +3541,170 @@ strict = true
             "edge to an unknown, non-existent id string must still be dropped: {:?}",
             out.dropped
         );
-        assert!(out.message.contains("matches no node"), "{}", out.message);
+        assert!(
+            out.message.contains("is not a node in this call"),
+            "{}",
+            out.message
+        );
+    }
+
+    /// An edge may wire two same-call nodes by the short `id` HANDLES the model invents
+    /// (`from:"n1", to:"n2"`) even though the nodes carry only long prose labels. The nodes
+    /// AND the edge land.
+    #[test]
+    fn graph_upsert_edge_wired_by_handle_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let nodes = vec![
+            UpsertNode {
+                id: Some("n1".into()),
+                ..unode("Symptom", "Connection loss", "case1.docx")
+            },
+            UpsertNode {
+                id: Some("n2".into()),
+                ..unode("Resolution", "Restart the module", "case1.docx")
+            },
+        ];
+        let edges = vec![uedge("n1", "RESOLVED_BY", "n2", "case1.docx")];
+
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.nodes, 2, "both nodes written: {}", out.message);
+        assert_eq!(out.edges, 1, "handle-wired edge lands: {:?}", out.dropped);
+
+        let from_id = id_for(&ont, "Symptom", "Connection loss");
+        let to_id = id_for(&ont, "Resolution", "Restart the module");
+        let outs = g.outgoing(&from_id).unwrap();
+        assert!(
+            outs.iter()
+                .any(|e| e.edge_type == "RESOLVED_BY" && e.to == to_id),
+            "edge must connect the two handle-declared nodes: {outs:?}"
+        );
+    }
+
+    /// The success response surfaces each declared handle → the node's real canonical id, so a
+    /// LATER call (where handles no longer apply) can reference the created node by that id.
+    #[test]
+    fn graph_upsert_success_returns_handle_to_id_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let nodes = vec![UpsertNode {
+            id: Some("n1".into()),
+            ..unode("Symptom", "Connection loss", "case1.docx")
+        }];
+        let out = graph_upsert(&idx, &g, &ont, nodes, vec![], 1_000_000, "agent");
+        assert!(!out.rejected, "{}", out.message);
+        let real_id = id_for(&ont, "Symptom", "Connection loss");
+        assert_eq!(out.handles, vec![("n1".to_string(), real_id.clone())]);
+        assert!(
+            out.message.contains("Handles") && out.message.contains(&format!("n1 → {real_id}")),
+            "success message surfaces the handle→id map: {}",
+            out.message
+        );
+    }
+
+    /// Two nodes claiming the SAME handle is ambiguous — the whole call is rejected with the
+    /// collision message (nothing written).
+    #[test]
+    fn graph_upsert_duplicate_handle_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        let nodes = vec![
+            UpsertNode {
+                id: Some("dup".into()),
+                ..unode("Symptom", "Connection loss", "case1.docx")
+            },
+            UpsertNode {
+                id: Some("dup".into()),
+                ..unode("Resolution", "Restart", "case1.docx")
+            },
+        ];
+        let out = graph_upsert(&idx, &g, &ont, nodes, vec![], 1_000_000, "agent");
+        assert!(out.rejected, "duplicate handle rejects: {}", out.message);
+        assert_eq!(out.nodes, 0);
+        assert!(
+            out.message.contains("handle `dup` declared by two nodes")
+                && out.message.contains("must be unique in a call"),
+            "{}",
+            out.message
+        );
+    }
+
+    /// A no-match endpoint gets an ACTIONABLE message that lists the call's node labels and the
+    /// declared handles — and never the old misdirecting "add a node with that label".
+    #[test]
+    fn graph_upsert_no_match_endpoint_names_labels_and_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        // node has a handle "n1"; the edge references a garbage endpoint "task-9" that is
+        // neither a label, a handle, an existing id, nor a section ref.
+        let nodes = vec![UpsertNode {
+            id: Some("n1".into()),
+            ..unode("Symptom", "Connection loss", "case1.docx")
+        }];
+        let edges = vec![uedge("task-9", "RESOLVED_BY", "n1", "case1.docx")];
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
+
+        // the Symptom node still writes; only the bogus edge drops.
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.edges, 0, "bogus-endpoint edge dropped: {:?}", out.dropped);
+        let msg = &out.message;
+        assert!(
+            msg.contains("is not a node in this call"),
+            "actionable phrasing: {msg}"
+        );
+        assert!(
+            !msg.contains("add a node with that label"),
+            "must NOT keep the misdirecting old message: {msg}"
+        );
+        assert!(
+            msg.contains("Connection loss"),
+            "names the call's node label: {msg}"
+        );
+        assert!(msg.contains("n1"), "names the declared handle: {msg}");
+    }
+
+    /// Regression: with handles now in the resolution chain, an edge wired by an exact LABEL
+    /// still lands exactly as before (the handle branch only fires for a declared handle).
+    #[test]
+    fn graph_upsert_edge_by_label_still_lands_with_handles_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "case1.docx");
+
+        // Both nodes declare handles, but the edge references them by their exact LABELS.
+        let nodes = vec![
+            UpsertNode {
+                id: Some("n1".into()),
+                ..unode("Symptom", "Connection loss", "case1.docx")
+            },
+            UpsertNode {
+                id: Some("n2".into()),
+                ..unode("Resolution", "Restart", "case1.docx")
+            },
+        ];
+        let edges = vec![uedge("Connection loss", "RESOLVED_BY", "Restart", "case1.docx")];
+        let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
+        assert!(!out.rejected, "{}", out.message);
+        assert_eq!(out.edges, 1, "label-wired edge still lands: {:?}", out.dropped);
     }
 
     #[test]

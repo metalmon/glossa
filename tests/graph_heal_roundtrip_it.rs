@@ -33,6 +33,7 @@ fn unode() -> UpsertNode {
     UpsertNode {
         node_type: "Resolution".into(),
         label: "Module restart".into(),
+        id: None,
         source_path: "case1.docx".into(),
         aliases: vec![],
         valid_from: None,

@@ -1524,7 +1524,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Create/update reasoning nodes and directed edges. A GROUNDED node (backed by document evidence) needs a human-readable `label`, `node_type`, and `source_path` set to the exact `path#n` token a search/grep/read result showed you — the same copy-ready reference, unchanged: just the path, `#`, and the INTEGER chunk number, nothing appended (no clause like `4.1`, no note in parentheses). An UNGROUNDED node — a query-side/entry node with no document backing — must OMIT `source_path` entirely; do not invent or guess a value for it. Reference endpoints in `edges` the same way: by label, or a document section as that same `path#n` token. When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+        description = "Create/update reasoning nodes and directed edges. A GROUNDED node (backed by document evidence) needs a human-readable `label`, `node_type`, and `source_path` set to the exact `path#n` token a search/grep/read result showed you — the same copy-ready reference, unchanged: just the path, `#`, and the INTEGER chunk number, nothing appended (no clause like `4.1`, no note in parentheses). An UNGROUNDED node — a query-side/entry node with no document backing — must OMIT `source_path` entirely; do not invent or guess a value for it. Reference endpoints in `edges` the same way: by label, or a document section as that same `path#n` token. When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). To wire an edge to a node you are creating in THIS SAME call, give that node a short `id` handle (e.g. `\"n1\"`) and reference it from an edge's `from`/`to` by that handle — handles are call-scoped, must be unique within the call, and are not persisted; the response returns each handle's real id so you can reference the created node in LATER calls. The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
     )]
     async fn graph_upsert(
         &self,
@@ -2116,7 +2116,31 @@ mod tests {
         let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
         assert_eq!(a.nodes.len(), 1);
         assert_eq!(a.nodes[0].label, "a");
+        assert!(a.nodes[0].id.is_none(), "no id handle given → None");
         assert!(a.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_upsert_args_parse_node_id_handle() {
+        // A node may carry a call-scoped `id` handle; an edge references it by that handle.
+        // The loose deserializer also accepts a non-string primitive coerced to a string.
+        let json = r#"{
+            "nodes":[
+                {"id":"n1","node_type":"Symptom","label":"A","source_path":"a.md"},
+                {"id":2,"node_type":"Resolution","label":"B","source_path":"a.md"}
+            ],
+            "edges":[{"from":"n1","edge_type":"RESOLVED_BY","to":"n2","source_path":"a.md"}]
+        }"#;
+        let a: GraphUpsertArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(a.nodes.len(), 2);
+        assert_eq!(a.nodes[0].id.as_deref(), Some("n1"));
+        assert_eq!(
+            a.nodes[1].id.as_deref(),
+            Some("2"),
+            "loose deser coerces a numeric handle to a string"
+        );
+        assert_eq!(a.edges.len(), 1);
+        assert_eq!(a.edges[0].from, "n1");
     }
 
     #[test]

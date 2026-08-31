@@ -724,6 +724,7 @@ strict = true
         ops::UpsertNode {
             node_type: ty.into(),
             label: label.into(),
+            id: None,
             source_path: src.into(),
             aliases: vec![],
             valid_from: None,

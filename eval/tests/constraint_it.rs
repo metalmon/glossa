@@ -514,6 +514,7 @@ fn agent_style_upsert_builds_enum_constraint() {
     let unode = |t: &str, l: &str, aliases: Vec<&str>| glossa::graph::ops::UpsertNode {
         node_type: t.into(),
         label: l.into(),
+        id: None,
         source_path: "spec.docx".into(),
         aliases: aliases.iter().map(|s| s.to_string()).collect(),
         valid_from: None,

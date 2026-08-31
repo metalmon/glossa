@@ -339,6 +339,7 @@ mod tests {
                         let node = UpsertNode {
                             node_type: "Resolution".into(),
                             label: format!("node {t}-{i}"),
+                            id: None,
                             source_path: String::new(),
                             aliases: vec![],
                             valid_from: None,
