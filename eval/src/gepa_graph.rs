@@ -112,6 +112,10 @@ struct RolloutOutcome {
     score: f64,
     pred: String,
     steps: Vec<ToolStep>,
+    /// The judge's free-text reason for its verdict, captured at scoring time so the reflector can
+    /// tell the teacher WHY a case was marked wrong. `None` on the exact-match path (no judge) or
+    /// when the judge call errored.
+    judge_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -141,6 +145,10 @@ struct FailCase {
     gold: String,
     pred: String,
     steps: Vec<ToolStep>,
+    /// The judge's reason for marking this case wrong (signal B), carried from its `RolloutOutcome`
+    /// so `build_graph_reflect_instruction` can show the teacher WHY it failed. `None` on the
+    /// exact-match path or a judge error.
+    judge_reason: Option<String>,
 }
 
 pub(crate) struct GraphReflectContext {
@@ -236,7 +244,13 @@ fn rollout_one(
         // here (Repeat/Streak are the loop's job) — render into the step-trace the reflector reads.
         if crate::backend::glossa_tools::is_retrieval_tool(name) {
             let key = format!("{name}:{args}");
-            body = crate::backend::glossa_tools::apply_plateau_render(&mut signals, name, &key, &ids, body);
+            body = crate::backend::glossa_tools::apply_plateau_render(
+                &mut signals,
+                name,
+                &key,
+                &ids,
+                body,
+            );
         }
         steps.borrow_mut().push(ToolStep {
             name: name.to_string(),
@@ -266,7 +280,9 @@ fn rollout_one(
     let user_sim = gate
         .as_ref()
         .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
-    let raw = match crate::backend::openai::run_agent_loop(chat, messages, exec, nba, MAX_ROUNDS, user_sim) {
+    let raw = match crate::backend::openai::run_agent_loop(
+        chat, messages, exec, nba, MAX_ROUNDS, user_sim,
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("graph rollout failed for q {}: {e:#}", q.id);
@@ -280,7 +296,7 @@ fn rollout_one(
     // judge exists for corpora whose gold answers are long paragraphs, where exact-EM is ~0 for
     // every candidate and GEPA has no gradient to climb. Judge only the primary gold `q.answer`
     // (aliases are exact-match forms).
-    let score = match &cfg.judge {
+    let (score, judge_reason) = match &cfg.judge {
         Some(jc) => match crate::judge::judge(
             &jc.ep,
             &jc.md,
@@ -290,24 +306,29 @@ fn rollout_one(
             &q.source,
             Some(idx),
         ) {
-            Ok(j) => verdict_to_score(j.verdict),
+            // Keep the judge's reason alongside the score — the reflector surfaces it to the
+            // teacher as WHY this case was wrong (signal B). Dropping it here is what left the
+            // teacher guessing at the failure mode.
+            Ok(j) => (verdict_to_score(j.verdict), Some(j.reason)),
             Err(e) => {
                 eprintln!("judge failed (scored 0): {e:#}");
-                0.0
+                (0.0, None)
             }
         },
         None => {
-            if crate::score::exact_match_any(&pred, &golds_of(q)) {
+            let s = if crate::score::exact_match_any(&pred, &golds_of(q)) {
                 1.0
             } else {
                 0.0
-            }
+            };
+            (s, None)
         }
     };
     RolloutOutcome {
         score,
         pred,
         steps: steps.into_inner(),
+        judge_reason,
     }
 }
 
@@ -341,7 +362,12 @@ fn score_questions(
         cfg.jobs,
         &sink,
         |_unit| 1,
-        |(i, q)| Ok((*i, rollout_one(cfg, url, tools, prompt, q, idx, graph, spec))),
+        |(i, q)| {
+            Ok((
+                *i,
+                rollout_one(cfg, url, tools, prompt, q, idx, graph, spec),
+            ))
+        },
     )
     // `rollout_one` itself never returns `Err` (it catches its own agent-loop failure and scores
     // an empty prediction) — the only `Result` here is `run_units_parallel`'s own plumbing, which
@@ -396,23 +422,66 @@ fn render_tool_reference(tools: &Value) -> String {
 
 pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> String {
     let mut cases = String::new();
+    let mut retrieval_gaps = 0usize;
     for (i, f) in ctx.fails.iter().enumerate() {
         let mut steps = String::new();
         for (j, s) in f.steps.iter().enumerate() {
-            steps.push_str(&format!("  step {}: {}({}) -> {}\n", j + 1, s.name, s.args, s.result));
+            steps.push_str(&format!(
+                "  step {}: {}({}) -> {}\n",
+                j + 1,
+                s.name,
+                s.args,
+                s.result
+            ));
         }
         if steps.is_empty() {
             steps.push_str("  (no tool calls)\n");
         }
+        // Signal A — retrieval hit/miss: did the gold answer's material actually surface in any
+        // tool result? If yes, the reader HAD the evidence and still answered wrong (a
+        // reasoning/answering error this prompt CAN address). If no, retrieval never surfaced it —
+        // a graph/coverage gap that rewording THIS prompt cannot fix.
+        let retrieved = gold_retrieved(&f.gold, &f.steps);
+        if !retrieved {
+            retrieval_gaps += 1;
+        }
+        let retrieval_line = if retrieved {
+            "Retrieval: the gold answer's material DID appear in a tool result — the reader had the \
+             evidence and still answered wrong (a reasoning/answering error this prompt CAN address)."
+        } else {
+            "Retrieval: the gold answer's material NEVER appeared in any tool result — retrieval did \
+             not surface it (a graph/coverage gap; rewording this prompt will NOT fix this case)."
+        };
+        // Signal B — the judge's own reason for the verdict, when present.
+        let judge_line = match &f.judge_reason {
+            Some(r) if !r.trim().is_empty() => format!("Judge reason (why wrong): {}\n", r.trim()),
+            _ => String::new(),
+        };
         cases.push_str(&format!(
-            "--- Failing case {} ---\nQuestion: {}\nGold answer: {}\nModel answer: {}\nTool-call trace:\n{}\n",
+            "--- Failing case {} ---\nQuestion: {}\nGold answer: {}\nModel answer: {}\n{}\n{}Tool-call trace:\n{}\n",
             i + 1,
             f.question,
             f.gold,
             f.pred,
+            retrieval_line,
+            judge_line,
             steps,
         ));
     }
+    // Aggregate steer: tell the teacher up front how many failures are unwinnable retrieval gaps,
+    // so it concentrates the rewrite on the cases the prompt can actually move.
+    let gap_summary = if ctx.fails.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Of the {} failing cases below, {} are RETRIEVAL GAPS — the gold answer never surfaced \
+             in any tool result, so NO prompt wording can make the reader answer them. Focus your \
+             rewrite on the remaining cases, where the evidence WAS retrieved but the reader still \
+             missed it.\n",
+            ctx.fails.len(),
+            retrieval_gaps,
+        )
+    };
     let tool_reference = render_tool_reference(&ctx.tools);
     // Name ONLY the metric the run actually optimizes. Mixing an exact-match contract into a judge
     // run pushed the teacher toward terse "shortest span" answers the judge then penalized (every
@@ -440,8 +509,11 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
          The reader has these tools (reference only — the reader is given each tool's full \
          description by the API at call time, so this is context for YOU, not text to copy):\n\
          {tool_reference}\n\
-         Below are FAILING rollouts: the question, the gold answer, the model's answer, and the \
-         model's tool-call trace (tool name, arguments, truncated result per step).\n\
+         Below are FAILING rollouts. Each case gives the question, the gold answer, the model's \
+         answer, a RETRIEVAL note (whether the gold's material was surfaced by the tools at all), \
+         the JUDGE's reason it was wrong (when available), and the model's tool-call trace (tool \
+         name, arguments, truncated result per step).\n\
+         {gap_summary}\
          Diagnose the recurring navigation/answering mistakes and {objective}. Preserve behavior that already works.\n\
          Write STRATEGY and POLICY that leverages these tools — when and why to reach for each, how \
          to compose multi-hop steps, and grounding discipline before answering. Do NOT copy tool \
@@ -456,10 +528,41 @@ pub(crate) fn build_graph_reflect_instruction(ctx: &GraphReflectContext) -> Stri
          === {score_header} ===\nscore={parent_score:.3}\n\n\
          === CURRENT SYSTEM PROMPT ===\n{prompt}\n\n=== FAILING ROLLOUTS ===\n{cases}=== NEW SYSTEM PROMPT ===",
         tool_reference = tool_reference,
+        gap_summary = gap_summary,
         parent_score = ctx.parent_score,
         prompt = ctx.parent_prompt,
         cases = cases,
     )
+}
+
+/// Signal A heuristic: did the gold answer's material actually surface in the rollout's tool
+/// results? Checks each `|`-joined gold alternative against the concatenated (lowercased) step
+/// results — a direct substring hit, or (for a multi-word gold) any distinctive token (length >=
+/// 4) present. Deliberately LENIENT toward "retrieved": a false "retrieved" only costs the teacher
+/// one prompt-focused case, whereas a false "gap" would wrongly tell it to give up on a case the
+/// prompt could actually fix. Returns false when there are no tool results at all.
+fn gold_retrieved(gold: &str, steps: &[ToolStep]) -> bool {
+    let hay: String = steps
+        .iter()
+        .map(|s| s.result.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if hay.trim().is_empty() {
+        return false;
+    }
+    gold.split(" | ").any(|alt| {
+        let a = alt.trim().to_lowercase();
+        if a.is_empty() {
+            return false;
+        }
+        if hay.contains(&a) {
+            return true;
+        }
+        tokens_lower(alt)
+            .iter()
+            .filter(|t| t.len() >= 4)
+            .any(|t| hay.contains(t.as_str()))
+    })
 }
 
 // --- leak guard -----------------------------------------------------------------------------
@@ -759,7 +862,10 @@ pub fn run(
         cfg.candidate_selection,
         cfg.work.display(),
     ));
-    anyhow::ensure!(!val.is_empty(), "empty validation split — need >=2 distinct question ids");
+    anyhow::ensure!(
+        !val.is_empty(),
+        "empty validation split — need >=2 distinct question ids"
+    );
 
     // Main bar tracks GEPA iterations end-to-end: length = budget (the only exactly-known, monotonic
     // whole-run quantity — per-iteration rollout counts vary with resampling/accept branches), and
@@ -837,7 +943,14 @@ pub fn run(
                         break;
                     }
                     let outcomes = score_questions(
-                        &cfg, &url, &tools, &parent_prompt, &batch, &idx, graph.as_ref(), &spec,
+                        &cfg,
+                        &url,
+                        &tools,
+                        &parent_prompt,
+                        &batch,
+                        &idx,
+                        graph.as_ref(),
+                        &spec,
                     );
                     if outcomes.iter().any(|o| o.score < 1.0) {
                         let score = mean(&scores(&outcomes));
@@ -850,6 +963,7 @@ pub fn run(
                                 gold: golds_of(q).join(" | "),
                                 pred: o.pred.clone(),
                                 steps: o.steps.clone(),
+                                judge_reason: o.judge_reason.clone(),
                             })
                             .collect();
                         found = Some((batch, score, fails));
@@ -857,10 +971,16 @@ pub fn run(
                     }
                 }
                 let Some((batch, score, fails)) = found else {
-                    pb.println(format!("[iter {it}] no failures in sampled minibatch — skip"));
+                    pb.println(format!(
+                        "[iter {it}] no failures in sampled minibatch — skip"
+                    ));
                     continue;
                 };
-                mb_cache[parent_idx] = Some(MbCache { batch: batch.clone(), score, fails: fails.clone() });
+                mb_cache[parent_idx] = Some(MbCache {
+                    batch: batch.clone(),
+                    score,
+                    fails: fails.clone(),
+                });
                 (batch, score, fails)
             }
         };
@@ -890,8 +1010,16 @@ pub fn run(
             continue;
         }
 
-        let child_mb =
-            score_questions(&cfg, &url, &tools, &child_prompt, &batch, &idx, graph.as_ref(), &spec);
+        let child_mb = score_questions(
+            &cfg,
+            &url,
+            &tools,
+            &child_prompt,
+            &batch,
+            &idx,
+            graph.as_ref(),
+            &spec,
+        );
         let child_mb_score = mean(&scores(&child_mb));
         if child_mb_score <= parent_mb_score {
             pb.println(format!(
@@ -928,11 +1056,22 @@ pub fn run(
 
     pb.println(format!("final full-val scoring: {} candidates", pool.len()));
     pb.set_position(cfg.budget as u64);
-    pb.set_prefix(format!("training · final-val · best={best_pareto_so_far:.3}"));
+    pb.set_prefix(format!(
+        "training · final-val · best={best_pareto_so_far:.3}"
+    ));
     let mut best_prompt = pool[0].prompt.clone();
     let mut best_score = f64::NEG_INFINITY;
     for c in &pool {
-        let out = score_questions(&cfg, &url, &tools, &c.prompt, &val, &idx, graph.as_ref(), &spec);
+        let out = score_questions(
+            &cfg,
+            &url,
+            &tools,
+            &c.prompt,
+            &val,
+            &idx,
+            graph.as_ref(),
+            &spec,
+        );
         let em = mean(&scores(&out));
         if em > best_score {
             best_score = em;
@@ -983,9 +1122,20 @@ mod tests {
 
     #[test]
     fn leak_scan_catches_alias_and_proper_noun() {
-        let mb = vec![q("e1", "Where is Foobar located?", "Paris", &["City of Light"])];
-        assert!(leak_scan("… known as the City of Light …", &mb, &HashSet::new()).is_some(), "alias leaked");
-        assert!(leak_scan("… mention Foobar directly …", &mb, &HashSet::new()).is_some(), "proper noun leaked");
+        let mb = vec![q(
+            "e1",
+            "Where is Foobar located?",
+            "Paris",
+            &["City of Light"],
+        )];
+        assert!(
+            leak_scan("… known as the City of Light …", &mb, &HashSet::new()).is_some(),
+            "alias leaked"
+        );
+        assert!(
+            leak_scan("… mention Foobar directly …", &mb, &HashSet::new()).is_some(),
+            "proper noun leaked"
+        );
     }
 
     #[test]
@@ -999,7 +1149,10 @@ mod tests {
         let clean = "Start from an entity, call glossary, then read the source chunk. Do not stop \
                      at the first node; follow neighbors until the answer is grounded. Reply with one \
                      ANSWER line holding the shortest exact span.";
-        assert!(leak_scan(clean, &mb, &HashSet::new()).is_none(), "clean prompt wrongly rejected");
+        assert!(
+            leak_scan(clean, &mb, &HashSet::new()).is_none(),
+            "clean prompt wrongly rejected"
+        );
     }
 
     #[test]
@@ -1043,11 +1196,42 @@ mod tests {
             q("e2", "What shipped in the update?", "Bee", &[]),
         ];
         let common = common_proper_noun_tokens(&qs);
-        assert!(!common.contains("foobar"), "single-question entity is not common");
+        assert!(
+            !common.contains("foobar"),
+            "single-question entity is not common"
+        );
         assert!(
             leak_scan("please mention Foobar in guidance", &qs, &common).is_some(),
             "single-question proper noun must still be flagged"
         );
+    }
+
+    #[test]
+    fn gold_retrieved_detects_hit_and_miss() {
+        let step = |result: &str| ToolStep {
+            name: "read".to_string(),
+            args: json!({}),
+            result: result.to_string(),
+        };
+        // Direct substring hit.
+        assert!(gold_retrieved(
+            "widget_alpha",
+            &[step("the parameter widget_alpha sets the ceiling")]
+        ));
+        // Never surfaced -> gap.
+        assert!(!gold_retrieved("widget_alpha", &[step("(no matches)")]));
+        // Distinctive-token hit for a multi-word gold.
+        assert!(gold_retrieved(
+            "restart procedure",
+            &[step("to RESTART the device, hold the button")]
+        ));
+        // `|`-joined alternatives: a hit on any alternative counts.
+        assert!(gold_retrieved(
+            ".zzz | image file",
+            &[step("write the .zzz to the card")]
+        ));
+        // No tool results at all -> not retrieved.
+        assert!(!gold_retrieved("anything", &[]));
     }
 
     #[test]
@@ -1069,6 +1253,9 @@ mod tests {
                     args: json!({"name": "the film"}),
                     result: "(no matches)".to_string(),
                 }],
+                judge_reason: Some(
+                    "expected the director's name; the model gave 'unknown'".to_string(),
+                ),
             }],
             tools: tools.clone(),
         };
@@ -1081,20 +1268,42 @@ mod tests {
         assert!(msg.contains("Gold answer: Jane Doe"));
         assert!(msg.contains("=== NEW SYSTEM PROMPT ==="));
 
+        // Signal A — the gold "Jane Doe" never appears in the "(no matches)" result, so the case is
+        // flagged a RETRIEVAL GAP and the aggregate steer reports 1 of 1.
+        assert!(
+            msg.contains("NEVER appeared in any tool result"),
+            "retrieval-gap note present when the gold was never surfaced"
+        );
+        assert!(
+            msg.contains("1 are RETRIEVAL GAPS"),
+            "aggregate retrieval-gap count present"
+        );
+        // Signal B — the judge's reason is surfaced to the teacher.
+        assert!(
+            msg.contains("Judge reason (why wrong): expected the director's name"),
+            "judge reason line present when judge_reason is Some"
+        );
+
         // Judge metric: the instruction names ONLY the judge — never EM / "shortest exact span",
         // which pushed the teacher toward terse answers the judge then penalizes.
         let judge_ctx = GraphReflectContext { judge: true, ..ctx };
         let jmsg = build_graph_reflect_instruction(&judge_ctx);
         assert!(jmsg.contains("PARENT JUDGE SCORE ON MINIBATCH"));
         assert!(jmsg.contains("automated judge"));
-        assert!(!jmsg.contains("EXACT MATCH"), "judge run must not mention exact match");
+        assert!(
+            !jmsg.contains("EXACT MATCH"),
+            "judge run must not mention exact match"
+        );
         assert!(
             !jmsg.contains("shortest exact span"),
             "judge run must not impose a terse answer contract"
         );
 
         // --- tool-awareness: reference block derived from the schema, not a hardcoded list ---
-        assert!(msg.contains("The reader has these tools"), "tool reference introduced as context");
+        assert!(
+            msg.contains("The reader has these tools"),
+            "tool reference introduced as context"
+        );
         // Every real graph-ON tool name from the schema appears in the rendered block — including
         // `reach`/`sql`, which the retired hardcoded sentence silently omitted.
         for name in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
@@ -1106,7 +1315,10 @@ mod tests {
         // A parameter name from the schema is rendered (proves params come from the schema, not
         // prose). `query` is search's param; order-independent (serde_json may sort keys).
         assert!(msg.contains("params:"), "tool params rendered from schema");
-        assert!(msg.contains("query"), "search's `query` param name rendered from schema");
+        assert!(
+            msg.contains("query"),
+            "search's `query` param name rendered from schema"
+        );
         // The retired hand-maintained tool-name sentence must be gone.
         assert!(
             !msg.contains("neighbors, path, related"),
@@ -1117,7 +1329,10 @@ mod tests {
             msg.contains("Do NOT copy tool mechanics"),
             "guidance against duplicating tool mechanics present"
         );
-        assert!(msg.contains("STRATEGY"), "reflector told to write strategy/policy");
+        assert!(
+            msg.contains("STRATEGY"),
+            "reflector told to write strategy/policy"
+        );
     }
 
     /// `score_questions` pairs each question with its input index, lets `run_units_parallel`
@@ -1169,14 +1384,23 @@ mod tests {
         let ids2: Vec<_> = v2.iter().map(|x| x.id.clone()).collect();
         assert_eq!(ids1, ids2, "split must be deterministic");
         assert_eq!(t1.len(), 3);
-        assert!(t1.iter().all(|x| !ids1.contains(&x.id)), "no train/val id overlap");
+        assert!(
+            t1.iter().all(|x| !ids1.contains(&x.id)),
+            "no train/val id overlap"
+        );
     }
 
     #[test]
     fn select_parent_current_best_picks_highest_em() {
         let pool = vec![
-            Candidate { prompt: "weak".into(), score_val: vec![0.0, 0.0] },
-            Candidate { prompt: "strong".into(), score_val: vec![1.0, 1.0, 1.0] },
+            Candidate {
+                prompt: "weak".into(),
+                score_val: vec![0.0, 0.0],
+            },
+            Candidate {
+                prompt: "strong".into(),
+                score_val: vec![1.0, 1.0, 1.0],
+            },
         ];
         let mut rng = StdRng::seed_from_u64(1);
         assert_eq!(
@@ -1188,9 +1412,18 @@ mod tests {
     #[test]
     fn pareto_win_counts_prefer_frequent_winner() {
         let pool = vec![
-            Candidate { prompt: "a".into(), score_val: vec![1.0, 0.0, 0.0] },
-            Candidate { prompt: "b".into(), score_val: vec![0.0, 1.0, 1.0] },
-            Candidate { prompt: "c".into(), score_val: vec![0.0, 0.0, 0.0] },
+            Candidate {
+                prompt: "a".into(),
+                score_val: vec![1.0, 0.0, 0.0],
+            },
+            Candidate {
+                prompt: "b".into(),
+                score_val: vec![0.0, 1.0, 1.0],
+            },
+            Candidate {
+                prompt: "c".into(),
+                score_val: vec![0.0, 0.0, 0.0],
+            },
         ];
         let (frontier, counts) = pareto_frontier_win_counts(&pool);
         assert!(frontier.contains(&0) && frontier.contains(&1));
@@ -1229,9 +1462,18 @@ mod tests {
         // Instance 0: only `b` reaches the max (1.0). Instance 1: `a`=1.0 is sole max, `b`=0.5.
         // Instance 2: `a` and `b` tie at 0.5. Neither dominates the other -> both on frontier.
         let pool = vec![
-            Candidate { prompt: "a".into(), score_val: vec![0.5, 1.0, 0.5] },
-            Candidate { prompt: "b".into(), score_val: vec![1.0, 0.5, 0.5] },
-            Candidate { prompt: "c".into(), score_val: vec![0.0, 0.0, 0.0] },
+            Candidate {
+                prompt: "a".into(),
+                score_val: vec![0.5, 1.0, 0.5],
+            },
+            Candidate {
+                prompt: "b".into(),
+                score_val: vec![1.0, 0.5, 0.5],
+            },
+            Candidate {
+                prompt: "c".into(),
+                score_val: vec![0.0, 0.0, 0.0],
+            },
         ];
         let (frontier, counts) = pareto_frontier_win_counts(&pool);
         assert!(frontier.contains(&0) && frontier.contains(&1));
