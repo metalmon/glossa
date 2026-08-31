@@ -248,13 +248,16 @@ pub struct GraphStore {
     /// `w_sim` changed. The on-disk cache (`.glossa/ppr_transition.json`) is keyed by that content
     /// signature with `w_sim` folded in, so it survives the process and self-heals on a delete /
     /// in-place edit / re-index / `w_sim` change that a count would miss.
-    ppr_transition: Mutex<
-        Option<(
-            (DbFileSig, u32),
-            std::sync::Arc<crate::graph::ppr::Transition>,
-        )>,
-    >,
+    ppr_transition: Mutex<PprTransitionCache>,
 }
+
+/// Cache slot for the PPR transition matrix: `((DB file signature, w_sim bits), matrix)`. A named
+/// alias so the field type stays readable and clippy-clean (`type_complexity`) — see
+/// `GraphStore::ppr_transition`.
+type PprTransitionCache = Option<(
+    (DbFileSig, u32),
+    std::sync::Arc<crate::graph::ppr::Transition>,
+)>;
 
 /// Cheap freshness signature of the graph DB: (mtime_nanos, len) of `graph.sqlite` and its `-wal`
 /// sidecar. Any commit changes the `-wal` (or the main file on checkpoint), so this catches writes
