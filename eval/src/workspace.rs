@@ -14,6 +14,8 @@ pub struct KbxPaths {
     pub reason: PathBuf,
     pub distil: PathBuf,
     pub distil_golds: PathBuf,
+    /// `--aliases-only` enrichment prompt (`aliases.md`).
+    pub aliases: PathBuf,
     /// Persona prompt for the reader's simulated-user dialogue gate (`backend::user_sim`). Loaded
     /// only when `[user_sim]` is configured in `lab.toml`; otherwise never read.
     pub user_sim: PathBuf,
@@ -35,6 +37,7 @@ impl KbxPaths {
             reason: f("reason.md"),
             distil: f("distil.md"),
             distil_golds: f("distil_golds.md"),
+            aliases: f("aliases.md"),
             user_sim: f("user_sim.md"),
             kbx_dir: kbx,
             root,

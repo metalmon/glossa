@@ -18,13 +18,11 @@ use crate::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, run_agent_loop, token_summary, StatusTicker,
 };
 use crate::backend::transport::openai::agent_chat_full;
-use crate::build::extract::extract_tools_schema;
 use crate::distil::run::DistilArgs;
 use crate::distil::seed_pool;
 use crate::lab::{Endpoint, LabConfig};
 use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::reason::schema_graph_block;
-use crate::reason::seed::SEED_GRAPH_UPSERT_DESC;
 use crate::workspace::KbxPaths;
 use anyhow::{Context, Result};
 use glossa::graph::lock::with_graph_write_lock;
@@ -50,12 +48,15 @@ const DEFAULT_JOBS: usize = 3;
 /// must not put an unbounded node list into a single agent prompt.
 const CHAIN_CAP: usize = 32;
 
-/// A concise role for the enricher; the concrete per-chain instructions live in the user message
-/// (`build_alias_user_message`). Ontology-general — names no concrete types.
-const ALIAS_SYSTEM: &str = "You improve search recall on an existing troubleshooting knowledge \
-     graph by adding ALIASES (alternate phrasings) to nodes that already exist. You never create \
-     nodes or edges — only add aliases to the listed nodes. Use read/search/grep/reach to \
-     understand a case before choosing aliases.";
+/// Round cap for one chain's enrichment loop. The model has only `graph_update` (no read/reach), so
+/// it adds aliases and stops in a round or two; this is just a ceiling against a spinning model.
+const ALIAS_MAX_ROUNDS: usize = 4;
+
+/// The enricher's system prompt — FILE-FIRST: the editable `aliases.md` in the workspace overrides
+/// it; this embedded copy (the shipped template) is only the fallback when that file is absent.
+/// Loaded once in `enrich_aliases_at` and threaded into every chain, so the behaviour is edited in
+/// the `.md`, never here. Per-chain data (context + poor-node list) lives in the user message.
+const DEFAULT_ALIASES_MD: &str = include_str!("../../templates/aliases.md");
 
 /// One chain's worth of enrichment work: the poor nodes to enrich plus a grounded `anchor`
 /// terminal the model can `reach(...)` to read the case's source once.
@@ -176,7 +177,31 @@ fn gather_chain(
 /// The per-chain user message: read the case's source once (via `reach(anchor)`), then add the
 /// short user-phrasings to the harness-listed poor nodes and call `graph_update` once. First-pass
 /// wording — structured and simple, to be tuned later from episode dumps. Pure and model-free.
-fn build_alias_user_message(anchor: &str, poor: &[Node]) -> String {
+/// The grounded source text of a chain's `anchor` terminal, truncated — fed to the model as the
+/// case's context so it needs no `read`/`reach` tools. Empty when the anchor is ungrounded (a
+/// singleton query-side node) or its chunk can't be read; the poor-node labels still carry meaning.
+fn alias_context(
+    g: &GraphStore,
+    root: &Path,
+    idx: &DocIndex,
+    anchor: &str,
+    trace: &TraceLog,
+) -> String {
+    let src = match g.get_node(anchor).ok().flatten() {
+        Some(n) => n.prov.source_path,
+        None => return String::new(),
+    };
+    let Some((path, ord)) = src.rsplit_once('#') else {
+        return String::new();
+    };
+    let Ok(n) = ord.parse::<u64>() else {
+        return String::new();
+    };
+    let (text, _imgs) = glossa_tools::run_read(root, idx, Some(g), path, n, false, trace);
+    text.chars().take(2000).collect()
+}
+
+fn build_alias_user_message(context: &str, poor: &[Node]) -> String {
     let mut list = String::new();
     for n in poor {
         let aliases = if n.aliases.is_empty() {
@@ -189,15 +214,13 @@ fn build_alias_user_message(anchor: &str, poor: &[Node]) -> String {
             n.id, n.node_type, n.label, aliases
         ));
     }
-    format!(
-        "You are enriching search ALIASES for a troubleshooting chain. Read its grounded source \
-         once to understand the case: use reach({anchor}) and read the path#n it lands on.\n\nAdd \
-         aliases ONLY to these nodes (they are alias-poor):\n{list}\nFor each, add the short \
-         phrasings a USER would actually type to find it — synonyms, symptom wording, \
-         abbreviations, the everyday name. Then call graph_update once with an entry per node (its \
-         id or label + add_aliases:[…]). Do NOT create nodes or edges; only add aliases to the \
-         listed nodes."
-    )
+    let ctx = if context.trim().is_empty() {
+        "(no source text available)".to_string()
+    } else {
+        context.trim().to_string()
+    };
+    // Data only — the how (user-phrasings, graph_update, no new nodes) lives in `aliases.md`.
+    format!("Case source (context):\n---\n{ctx}\n---\n\nEnrich the search aliases of these nodes:\n{list}")
 }
 
 /// The alias-mode tool schema: `search`/`read`/`grep`/`reach` for exploring the case, and
@@ -205,31 +228,10 @@ fn build_alias_user_message(anchor: &str, poor: &[Node]) -> String {
 /// reason tool set by name — removing that affordance is what prevents the model from creating
 /// nodes/edges; that is the enforcement, not a prompt rule.
 fn alias_tools_schema() -> Value {
-    let mut tools: Vec<Value> = match extract_tools_schema(SEED_GRAPH_UPSERT_DESC) {
-        Value::Array(a) => a,
-        _ => Vec::new(),
-    };
-    tools.retain(|t| {
-        t.get("function")
-            .and_then(|f| f.get("name"))
-            .and_then(|n| n.as_str())
-            != Some("graph_upsert")
-    });
-    // `reach` (a graph tool, not in the reason set) helps the model land on the case source.
-    for d in glossa::tools::registry::registry() {
-        if d.name == "reach" {
-            tools.push(json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
-                }
-            }));
-        }
-    }
-    tools.push(graph_update_tool_value());
-    Value::Array(tools)
+    // ONLY graph_update. The harness pre-feeds the case's grounded source text in the prompt, so
+    // the model needs no read/reach/search exploration — it just adds aliases and calls
+    // graph_update. Dropping the agentic round-trips is what turns a ~day-long full pass into hours.
+    Value::Array(vec![graph_update_tool_value()])
 }
 
 /// The `graph_update` function-schema for alias mode — deliberately alias-only: each entry names an
@@ -320,6 +322,7 @@ fn enrich_one_chain(
     ep: &Endpoint,
     tools: &Value,
     spec: &ChainSpec,
+    alias_md: &str,
     unit: &AliasChain,
     writer: &GraphWriter,
     idx: &DocIndex,
@@ -328,8 +331,11 @@ fn enrich_one_chain(
     let g = writer.store();
     let trace = TraceLog::disabled();
 
-    let system = format!("{}\n\n{ALIAS_SYSTEM}", schema_graph_block(ont));
-    let user = build_alias_user_message(&unit.anchor, &unit.poor);
+    let system = format!("{}\n\n{alias_md}", schema_graph_block(ont));
+    // Harness reads the case's grounded source ONCE and feeds it as context — the model gets no
+    // read/reach tools, so it can't spend rounds exploring; it just generates aliases.
+    let context = alias_context(g, root, idx, &unit.anchor, &trace);
+    let user = build_alias_user_message(&context, &unit.poor);
     let messages = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": user }),
@@ -508,13 +514,14 @@ pub fn enrich_aliases_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
     let spec = ChainSpec::from_ontology(&ont);
     let tools = alias_tools_schema();
+    // File-first prompt: the editable `aliases.md` overrides the embedded default when present.
+    let alias_md = std::fs::read_to_string(&paths.aliases)
+        .unwrap_or_else(|_| DEFAULT_ALIASES_MD.to_string());
 
     let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_distil, DEFAULT_JOBS).max(1);
-    let max_rounds = crate::lab::resolve(
-        args.max_rounds,
-        lab.tuning.max_rounds,
-        crate::reason::seed::DEFAULT_MAX_ROUNDS,
-    );
+    // Small cap: with only graph_update (no exploration tools) the model adds aliases and stops in
+    // a round or two — this is just a ceiling so a misbehaving model can't spin.
+    let max_rounds = crate::lab::resolve(args.max_rounds, lab.tuning.max_rounds, ALIAS_MAX_ROUNDS);
 
     reset_tokens();
     reset_resamples();
@@ -531,7 +538,7 @@ pub fn enrich_aliases_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         |_unit| 1,
         |unit: &AliasChain| -> Result<(usize, usize)> {
             let (added, changed) = enrich_one_chain(
-                root, &ont, &ep, &tools, &spec, unit, &writer, &idx, max_rounds,
+                root, &ont, &ep, &tools, &spec, &alias_md, unit, &writer, &idx, max_rounds,
             )
             .with_context(|| format!("enriching aliases for chain {}", unit.key))?;
             pb.println(format!(
@@ -645,7 +652,7 @@ mod tests {
     /// The alias tool schema exposes read/search/grep/reach + graph_update, and must NOT expose
     /// graph_upsert — that removed affordance is the enforcement that no node/edge is created.
     #[test]
-    fn alias_tools_schema_excludes_graph_upsert_and_includes_graph_update() {
+    fn alias_tools_schema_is_graph_update_only() {
         let schema = alias_tools_schema();
         let names: Vec<String> = schema
             .as_array()
@@ -658,12 +665,12 @@ mod tests {
                     .map(String::from)
             })
             .collect();
-        assert!(names.contains(&"graph_update".to_string()));
-        assert!(names.contains(&"reach".to_string()));
-        assert!(names.contains(&"read".to_string()));
-        assert!(
-            !names.contains(&"graph_upsert".to_string()),
-            "graph_upsert must be filtered out so the model cannot create nodes/edges: {names:?}"
+        // ONLY graph_update — the harness pre-feeds the case source, so no read/reach/search
+        // exploration and no graph_upsert (the model can neither create nodes/edges nor wander).
+        assert_eq!(
+            names,
+            vec!["graph_update".to_string()],
+            "alias mode must expose only graph_update: {names:?}"
         );
     }
 }

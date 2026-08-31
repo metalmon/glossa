@@ -18,6 +18,7 @@ const JUDGE_MD: &str = include_str!("../templates/judge.md");
 const REFLECT_MD: &str = include_str!("../templates/reflect.md");
 const REASON_MD: &str = include_str!("../templates/reason.md");
 const DISTIL_MD: &str = include_str!("../templates/distil.md");
+const ALIASES_MD: &str = include_str!("../templates/aliases.md");
 const DISTIL_GOLDS_MD: &str = include_str!("../templates/distil_golds.md");
 const USER_SIM_MD: &str = include_str!("../templates/user_sim.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
@@ -35,7 +36,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
     std::fs::create_dir_all(&paths.runs)
         .with_context(|| format!("create {}", paths.runs.display()))?;
 
-    let files: [(&Path, &str); 11] = [
+    let files: [(&Path, &str); 12] = [
         (&paths.lab, LAB_TOML),
         (&paths.answer, ANSWER_MD),
         (&paths.builder, BUILDER_MD),
@@ -44,6 +45,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
         (&paths.reflect, REFLECT_MD),
         (&paths.reason, REASON_MD),
         (&paths.distil, DISTIL_MD),
+        (&paths.aliases, ALIASES_MD),
         (&paths.distil_golds, DISTIL_GOLDS_MD),
         (&paths.user_sim, USER_SIM_MD),
         (&paths.dataset, DATASET_TOML),
