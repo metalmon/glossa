@@ -175,9 +175,18 @@ fn gather_chain(
     Ok(chain)
 }
 
-/// The per-chain user message: read the case's source once (via `reach(anchor)`), then add the
-/// short user-phrasings to the harness-listed poor nodes and call `graph_update` once. First-pass
-/// wording — structured and simple, to be tuned later from episode dumps. Pure and model-free.
+/// The chunk a grounded node was harvested from: the `path#ord` target of its first `MENTIONS`
+/// edge (the grounding), parsed into `(path, ord)`. The node's own `source_path` is document-level
+/// provenance with NO chunk ordinal (`range` is unset on terminals), so the ordinal lives only on
+/// the grounding edge's `to` handle — that is what we resolve here. `None` for an ungrounded node
+/// (a singleton query-side entry with no `MENTIONS`).
+fn grounding_chunk(g: &GraphStore, anchor: &str) -> Option<(String, u64)> {
+    let edges = g.outgoing(anchor).ok()?;
+    let to = &edges.iter().find(|e| e.edge_type == "MENTIONS")?.to;
+    let (path, ord) = to.rsplit_once('#')?;
+    Some((path.to_string(), ord.parse::<u64>().ok()?))
+}
+
 /// The grounded source text of a chain's `anchor` terminal, truncated — fed to the model as the
 /// case's context so it needs no `read`/`reach` tools. Empty when the anchor is ungrounded (a
 /// singleton query-side node) or its chunk can't be read; the poor-node labels still carry meaning.
@@ -188,21 +197,28 @@ fn alias_context(
     anchor: &str,
     trace: &TraceLog,
 ) -> String {
-    let src = match g.get_node(anchor).ok().flatten() {
-        Some(n) => n.prov.source_path,
-        None => return String::new(),
-    };
-    let Some((path, ord)) = src.rsplit_once('#') else {
+    let Some((path, ord)) = grounding_chunk(g, anchor) else {
         return String::new();
     };
-    let Ok(n) = ord.parse::<u64>() else {
-        return String::new();
-    };
-    let (text, _imgs) = glossa_tools::run_read(root, idx, Some(g), path, n, false, trace);
+    let (text, _imgs) = glossa_tools::run_read(root, idx, Some(g), &path, ord, false, trace);
     text.chars().take(2000).collect()
 }
 
-fn build_alias_user_message(context: &str, poor: &[Node]) -> String {
+fn build_alias_user_message(ont: &Ontology, context: &str, poor: &[Node]) -> String {
+    // Legend of ONLY the node types present in this case, with their ontology descriptions, so the
+    // model aliases each node in the right register (a Symptom wants generous plain-user phrasings;
+    // a Resolution wants the procedure's short names). Deduped, first-seen order — not per node.
+    let mut legend = String::new();
+    let mut seen = HashSet::new();
+    for n in poor {
+        if seen.insert(n.node_type.clone()) {
+            match ont.description(&n.node_type) {
+                Some(d) => legend.push_str(&format!("- {} — {}\n", n.node_type, d)),
+                None => legend.push_str(&format!("- {}\n", n.node_type)),
+            }
+        }
+    }
+
     let mut list = String::new();
     for n in poor {
         let aliases = if n.aliases.is_empty() {
@@ -221,13 +237,15 @@ fn build_alias_user_message(context: &str, poor: &[Node]) -> String {
         context.trim().to_string()
     };
     // Data only — the how (user-phrasings, graph_update, no new nodes) lives in `aliases.md`.
-    format!("Case source (context):\n---\n{ctx}\n---\n\nEnrich the search aliases of these nodes:\n{list}")
+    format!(
+        "Case source (context):\n---\n{ctx}\n---\n\nNode types in this case:\n{legend}\nEnrich the search aliases of these nodes:\n{list}"
+    )
 }
 
-/// The alias-mode tool schema: `search`/`read`/`grep`/`reach` for exploring the case, and
-/// `graph_update` for the ONLY write (adding aliases). `graph_upsert` is filtered OUT of the
-/// reason tool set by name — removing that affordance is what prevents the model from creating
-/// nodes/edges; that is the enforcement, not a prompt rule.
+/// The alias-mode tool schema: `graph_update` is the ONLY tool (adding aliases). No `graph_upsert`
+/// (can't create nodes/edges) and no read/reach/search (the harness pre-feeds the case source), so
+/// a chain is one bounded write pass. That the tool set is graph_update-only IS the enforcement —
+/// not a prompt rule.
 fn alias_tools_schema() -> Value {
     // ONLY graph_update. The harness pre-feeds the case's grounded source text in the prompt, so
     // the model needs no read/reach/search exploration — it just adds aliases and calls
@@ -336,7 +354,7 @@ fn enrich_one_chain(
     // Harness reads the case's grounded source ONCE and feeds it as context — the model gets no
     // read/reach tools, so it can't spend rounds exploring; it just generates aliases.
     let context = alias_context(g, root, idx, &unit.anchor, &trace);
-    let user = build_alias_user_message(&context, &unit.poor);
+    let user = build_alias_user_message(ont, &context, &unit.poor);
     let messages = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": user }),
@@ -639,6 +657,36 @@ mod tests {
         // A lower threshold makes fewer nodes poor.
         let strict = poor_node_ids(&chain, 1, None);
         assert_eq!(strict, vec!["sym:a"], "only 0-alias nodes are below 1");
+    }
+
+    /// The case-source chunk is resolved from the node's `MENTIONS` grounding edge (`to = path#ord`),
+    /// NOT from its own `source_path`. Regression: the ordinal was parsed off `source_path`, but
+    /// terminals store a bare path there (the ordinal lives only on the grounding edge), so every
+    /// chain got an empty context and the model enriched blind.
+    #[test]
+    fn grounding_chunk_reads_ordinal_from_mentions_edge_not_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // Grounded terminal: bare-path `source_path` (no `#ord`), grounded via a MENTIONS edge
+        // whose target handle carries the chunk ordinal.
+        g.put_node(&node("res:x", "Resolution", &[])).unwrap();
+        g.put_edge(&glossa::graph::store::Edge {
+            from: "res:x".into(),
+            to: "docs/manual.pdf#7".into(),
+            edge_type: "MENTIONS".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        assert_eq!(
+            grounding_chunk(&g, "res:x"),
+            Some(("docs/manual.pdf".to_string(), 7))
+        );
+
+        // Ungrounded singleton (no MENTIONS): resolves to nothing — must NOT fall back to the
+        // node's own `source_path`.
+        g.put_node(&node("task:y", "Task", &[])).unwrap();
+        assert_eq!(grounding_chunk(&g, "task:y"), None);
     }
 
     /// `graph_update` args parse from both the canonical `nodes:[...]` and a flat single entry,
