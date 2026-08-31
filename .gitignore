@@ -60,3 +60,6 @@ eval/.data/
 # scratch graph HTML export (kb graph dump --format html) — regenerable, may embed corpus text
 grapth.html
 *.graph.html
+
+# Claude Code workspace-local files (never publish)
+.claude/
