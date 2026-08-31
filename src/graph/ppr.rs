@@ -20,13 +20,15 @@ use std::collections::HashMap;
 const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
 
 /// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
-/// Env-tunable so the killer sweep re-runs without recompiling. Default 0.1.
+/// Env-tunable (`GLOSSA_PPR_SIM_WEIGHT`) so a sweep re-runs without recompiling. Default 0.3 — it
+/// beat 0.1 on a kb-abac A/B (graded 0.655 vs 0.603, multihop 0.500 vs 0.429); with confidence
+/// already down-weighting weak SIMILAR the tier can be less aggressive than the original 0.1.
 pub(crate) fn sim_weight() -> f32 {
     std::env::var("GLOSSA_PPR_SIM_WEIGHT")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|w| *w >= 0.0 && w.is_finite())
-        .unwrap_or(0.1)
+        .unwrap_or(0.3)
 }
 
 /// Fold `w_sim` into the transition cache's content signature. The persisted transition matrix bakes
@@ -336,14 +338,14 @@ mod tests {
 
     #[test]
     fn similarity_edges_weigh_below_reasoning() {
-        // default w_sim = 0.1 (no env set in test)
+        // default w_sim = 0.3 (no env set in test)
         let w_sim = sim_weight();
         assert_eq!(edge_tier_weight("LEADS_TO", w_sim), 1.0);
         assert_eq!(edge_tier_weight("MENTIONS", w_sim), 1.0);
         assert_eq!(edge_tier_weight("CONTAINS", w_sim), 1.0); // structural still carries cross-doc mass
         assert_eq!(edge_tier_weight("NEXT", w_sim), 1.0);
         assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
-        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
+        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.3);
         assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
     }
 
@@ -396,7 +398,7 @@ mod tests {
             .map(|(j, w)| (t.ids()[*j].clone(), *w))
             .collect();
         assert_eq!(w["b"], 1.0);
-        assert_eq!(w["c"], 0.1); // SIMILAR down-weighted
+        assert_eq!(w["c"], 0.3); // SIMILAR down-weighted (default tier)
     }
 
     #[test]
