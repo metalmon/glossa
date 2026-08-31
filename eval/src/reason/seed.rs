@@ -180,6 +180,15 @@ pub fn chain_one_seed(
     let mut stats = ReasonStats::default();
 
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
+        // Opt-in observability (`KB_EVAL_DUMP_TOOLS=1`): reason is otherwise un-traced
+        // (`TraceLog::disabled`), so this is the only window into WHAT the model emits per seed —
+        // the tool call, and for graph_upsert the actual write outcome (which edges landed vs were
+        // dropped with a reason). Needed to diagnose e.g. query-side nodes that never get their
+        // Chaining edge to the given terminal. Mirrors `extract_doc`/`densify_doc`'s dump arm.
+        let dump = std::env::var("KB_EVAL_DUMP_TOOLS").is_ok();
+        if dump {
+            eprintln!("[TOOL] {name} {args}");
+        }
         if name == "graph_upsert" {
             let (nodes, edges, notes) = parse_and_filter_upsert(args, ont);
             let out = match writer.upsert(idx, ont, nodes, edges, now, "agent") {
@@ -188,6 +197,24 @@ pub fn chain_one_seed(
                 // error rather than panicking one worker's whole seed pass.
                 Err(e) => return (format!("graph_upsert failed: {e}"), Vec::new(), Vec::new()),
             };
+            if dump {
+                eprintln!(
+                    "[UPSERT] nodes={} edges={} rejected={} | drops: {}\n  landed:\n{}",
+                    out.nodes,
+                    out.edges,
+                    out.rejected,
+                    if notes.is_empty() {
+                        "-".to_string()
+                    } else {
+                        notes.join(" | ")
+                    },
+                    out.dump
+                        .iter()
+                        .map(|l| format!("    {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
             if !out.rejected {
                 stats.nodes += out.nodes;
                 stats.edges += out.edges;
