@@ -7,9 +7,11 @@
 //! rather than per node.
 //!
 //! The HARNESS — not the model — decides which nodes are poor (alias count `< min_aliases`,
-//! restricted to `--seed-type`/`--doc`); the model only chooses which aliases to add. The model is
-//! given `search`/`read`/`grep`/`reach` and `graph_update`, but NOT `graph_upsert`: removing that
-//! affordance from the tool schema is what prevents it from creating nodes or edges. Mirrors
+//! restricted to `--seed-type`/`--doc`) AND pre-reads the chain's grounded terminal source once as
+//! context; the model only chooses which aliases to add. Its ONLY tool is `graph_update`: with no
+//! `graph_upsert` and no read/reach/search affordances it can neither create nodes/edges nor spin
+//! on exploration, so a chain is one bounded pass (see `ALIAS_MAX_ROUNDS`). The strong model comes
+//! from the `[distil]` endpoint, like the other `kbx distil` modes. Mirrors
 //! `reason::run::run_reason_at` (worker pool + shared `GraphWriter`/`DocIndex` + progress bar) and
 //! `reason::seed::chain_one_seed` (agent loop + `exec` closure) in shape.
 
@@ -505,10 +507,10 @@ pub fn enrich_aliases_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // Ensure the corpus is indexed (chunks) so the model's read/reach resolve real sections.
     glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
 
-    let ep = lab.reason_endpoint().cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "kbx distil --aliases-only needs a [reason] (or [distil]) endpoint in lab.toml"
-        )
+    // Use the [distil] endpoint like the other `kbx distil` modes (densify, --emit-golds), so the
+    // subcommand honours one configured role. Point [distil] at a strong model for good aliases.
+    let ep = lab.distil.clone().ok_or_else(|| {
+        anyhow::anyhow!("kbx distil --aliases-only needs a [distil] endpoint in lab.toml")
     })?;
 
     let g = Arc::new(GraphStore::open(&paths.root)?);
