@@ -6,7 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.4.0] — 2026-08-30
+## [0.4.0] — 2026-08-31
 
 ### Added
 
@@ -19,6 +19,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Anti-loop retrieval signals.** Neutral plateau/repeat/streak markers surface per-session in the MCP server and in the eval/train reader, with novelty-gated result trimming to curb context bloat; plateaus are also paired into judge-labeled DPO examples during export.
 - **Native TensorZero transport** (`api = "tensorzero"`). A stage's reader calls group into one TensorZero episode via `/inference`, and the graded judge verdict is posted back as `/feedback` on that episode — TensorZero observability and optimization data for the kbx pipeline, without the OpenAI-compatibility shim.
 - **MCP-served operating prompts.** The `kb` MCP server advertises the Prompts capability and exposes two prompts a connecting client can pull directly: `reader` (how to answer over the corpus) and `editor` (how to build/maintain the reasoning graph).
+- **Richer GEPA reflector feedback.** Each failing case shown to the `kbx train` teacher now carries a retrieval note (whether the gold answer's material was surfaced by the tools at all) and the judge's own reason for the verdict, so the reflector separates prompt-fixable answering errors from unwinnable retrieval/coverage gaps instead of over-optimizing for the latter.
+- **Per-chunk build log.** `kbx build` streams a one-line-per-chunk record of what each section contributed (nodes / mention edges), printed above the live progress bar.
 
 ### Changed
 
@@ -30,6 +32,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`kbx build` no longer deletes graph nodes — it only constructs.** The incremental gate now decides only what to (re-)visit; it never drops nodes. Previously a changed-or-gone document's reasoning nodes were dropped up front — before re-extraction and outside any transaction — so an interrupted or mis-triggered build could wipe part of the reasoning layer and write nothing back in its place. Removing stale / dangling nodes is `kb graph doctor` / `prune`'s job alone (explicit, gated, opt-in), and `build`'s idempotent upsert tops up what is missing without duplicating.
 - **SQLite-dialect tolerance in the `sql` tool.** PostgreSQL habits no longer fail silently: `ILIKE` is accepted and rewritten to `LIKE`, a trailing `;` is stripped, and `LIKE` is Unicode-case-insensitive (including Cyrillic) via a custom function. On error the tool now surfaces the real SQLite reason (not a generic message) and declares the dialect in its description.
 
 ## [0.3.4] — 2026-08-21
