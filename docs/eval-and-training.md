@@ -120,7 +120,7 @@ per role). It needs no TensorZero gateway. Over an indexed corpus:
 | `kbx build` | Phase 1 — harvest grounded terminals from each document |
 | `kbx reason` | Phase 2 — synthesize the query-side reasoning layer |
 | `kbx train` | `(Q,A)` + GEPA optimization of the answer prompt (iteration-based progress bar) |
-| `kbx distil` | Densify the graph with a stronger model |
+| `kbx distil` | Densify the graph, emit `(Q,A)` golds, or enrich search aliases (stronger model) |
 | `kbx eval` | Score the reader (graph-on vs graph-off), optionally graded by an LLM judge |
 | `kbx export` | Build SFT / DPO fine-tuning datasets from captured trajectories |
 
@@ -140,6 +140,49 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
 
 For the operator-facing create / maintain workflows, see [graph-lifecycle.md](graph-lifecycle.md);
 for building fine-tuning datasets, [finetuning-datasets.md](finetuning-datasets.md).
+
+### Distil — densify, golds, and alias enrichment
+
+`kbx distil` runs a **stronger** model over the built graph in one of three modes:
+
+- **Densify** (default) — reads each grounded section and adds the query-side reasoning the weak
+  builder missed, writing through `graph_upsert`.
+- **Golds** (`--emit-golds <file.toml>`) — instead of editing the graph, walks grounded seeds and
+  emits synthetic `(question, answer)` cases (each proposed via `propose_gold`, self-gated, and
+  dropped if it is answerable without the reasoning chain). This is the question source for
+  training — see [finetuning-datasets.md](finetuning-datasets.md).
+- **Alias enrichment** (`--aliases-only`) — adds the short, real-user search phrasings ("aliases")
+  to alias-poor nodes so the reader's glossary / lexical lookup actually finds them. It seeds from
+  each grounded terminal, walks that terminal's Chaining component once, and for every
+  under-aliased node on the chain adds a handful of alternative wordings — synonyms, the symptom or
+  task in plain words, abbreviations, the short name, the same phrasing in the corpus's other
+  language — in a single `graph_update`. One shot per chain (capped rounds), so a full pass is
+  cheap. `--min-aliases N` sets the poverty threshold (default 3 — nodes with fewer aliases get
+  enriched); the prompt is the editable `aliases.md` in the workspace.
+
+  *Why it exists:* a multi-hop question stalls when a query-side node is reachable in the graph but
+  shares no words with how a user phrases the question, so the lexical rank can't float it. Alias
+  enrichment closes that gap without adding nodes or edges — the graph stays thin.
+
+### Prepare a training dataset (end to end)
+
+The reasoning graph is also the source of fine-tuning data. Over an indexed corpus:
+
+```bash
+kbx init                             # scaffold .glossa/kbx/ (once)
+kbx build                            # phase 1 — grounded terminals
+kbx reason                           # phase 2 — query-side reasoning layer
+kb graph doctor && kb graph prune    # clean orphans / stale (see graph-lifecycle.md)
+kbx distil                           # densify with a strong model (optional)
+kbx distil --aliases-only            # enrich search aliases → better retrieval → better capture
+kbx distil --emit-golds qa.toml      # synthesize (Q,A) golds from the graph
+kbx eval --dataset qa.toml --capture --tag teacher   # solve the golds, capture trajectories
+kbx export --from teacher --format sft --out teacher-sft.jsonl
+```
+
+The first steps prepare the graph and the question set; `eval --capture` + `export` turn the
+captured trajectories into Unsloth-ready SFT / DPO JSONL. Format details and the on-policy (DPO)
+variant live in [finetuning-datasets.md](finetuning-datasets.md).
 
 The remainder of this guide is the earlier **TensorZero-gateway apparatus** — the `kb-eval` /
 `kb-train` binaries, the `enrich` silver-graph path, and GEPA over the four retrieval micro-tasks.
