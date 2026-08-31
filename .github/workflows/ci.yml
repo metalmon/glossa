@@ -11,6 +11,27 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting gate: the whole tree must be `cargo fmt`-clean.
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      # Lint gate: no clippy warnings anywhere (lib, bins, tests). Warnings are denied so a new
+      # lint can't slip in unnoticed.
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
