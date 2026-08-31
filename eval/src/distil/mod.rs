@@ -28,6 +28,7 @@
 //! and docs/superpowers/specs/2026-08-24-kbx-synth-spec.md for the original gold-generator design
 //! (written before this module was renamed from `synth` to `distil`).
 
+pub(crate) mod aliases;
 mod densify;
 mod gen;
 mod run;

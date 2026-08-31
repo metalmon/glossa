@@ -376,6 +376,15 @@ enum Cmd {
         /// zero workers). Densify mode only.
         #[arg(long)]
         jobs: Option<usize>,
+        /// Run the CHAIN-driven alias enricher instead of densify: add search aliases to
+        /// alias-poor reasoning nodes so `glossary`/`resolve` match how users phrase questions.
+        /// Ignored when `--emit-golds` is also given (golds mode wins).
+        #[arg(long = "aliases-only")]
+        aliases_only: bool,
+        /// A reasoning node is "alias-poor" (enriched by `--aliases-only`) when it has fewer than
+        /// this many aliases (default 3). Alias mode only.
+        #[arg(long = "min-aliases", default_value_t = 3)]
+        min_aliases: usize,
     },
 }
 
@@ -551,6 +560,8 @@ fn main() -> Result<()> {
             seed_type,
             no_progress,
             jobs,
+            aliases_only,
+            min_aliases,
         } => distil::run(
             path,
             DistilArgs {
@@ -567,6 +578,8 @@ fn main() -> Result<()> {
                 max_rounds,
                 emit_golds,
                 jobs,
+                aliases_only,
+                min_aliases,
             },
         ),
     }
@@ -1416,6 +1429,36 @@ mod tests {
         match cli.cmd {
             Cmd::Train { jobs, .. } => assert!(jobs.is_none()),
             _ => panic!("expected Cmd::Train"),
+        }
+    }
+
+    #[test]
+    fn distil_cmd_parses_aliases_only_flag() {
+        // Flag present → aliases_only true; min_aliases defaults to 3 and is overridable.
+        let cli = Cli::try_parse_from(["kbx", "distil", "--aliases-only"]).unwrap();
+        match cli.cmd {
+            Cmd::Distil {
+                aliases_only,
+                min_aliases,
+                ..
+            } => {
+                assert!(aliases_only);
+                assert_eq!(min_aliases, 3, "min_aliases defaults to 3");
+            }
+            _ => panic!("expected Cmd::Distil"),
+        }
+
+        let cli = Cli::try_parse_from(["kbx", "distil", "--min-aliases", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Distil {
+                aliases_only,
+                min_aliases,
+                ..
+            } => {
+                assert!(!aliases_only, "flag absent → false");
+                assert_eq!(min_aliases, 5);
+            }
+            _ => panic!("expected Cmd::Distil"),
         }
     }
 

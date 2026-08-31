@@ -85,6 +85,13 @@ pub struct DistilArgs {
     /// it supplies the gold path `run_distil_at` writes to (see [`run`]). `None` selects densify,
     /// the new default.
     pub emit_golds: Option<PathBuf>,
+    /// When set, `distil::run` runs the CHAIN-driven alias enricher (`aliases::enrich_aliases_at`)
+    /// instead of densify — enriches alias-poor reasoning nodes so `glossary`/`resolve` match how
+    /// users phrase questions. Lower precedence than `emit_golds` (see [`distil_mode`]).
+    pub aliases_only: bool,
+    /// A reasoning node is "alias-poor" (eligible for `--aliases-only` enrichment) when its alias
+    /// count is strictly below this. Default 3 (wired in `kbx.rs`). Alias mode only.
+    pub min_aliases: usize,
 }
 
 /// Which pipeline `distil::run` dispatches to — decided purely from `DistilArgs.emit_golds`, kept
@@ -95,15 +102,20 @@ pub enum Mode {
     /// `--emit-golds <file>` was given: run the synthetic (question, answer) gold generator,
     /// writing kept golds to that file.
     Golds,
-    /// The default when `--emit-golds` is absent: densify the graph with the strong model.
+    /// `--aliases-only` was given (and not `--emit-golds`): run the CHAIN-driven alias enricher.
+    AliasesOnly,
+    /// The default when neither `--emit-golds` nor `--aliases-only` is given: densify the graph
+    /// with the strong model.
     Densify,
 }
 
-/// Pure selector behind `distil::run`: present `emit_golds` picks the gold generator, absent
-/// picks densify. See [`Mode`].
+/// Pure selector behind `distil::run`: `emit_golds` picks the gold generator; else `aliases_only`
+/// picks the alias enricher; else densify. See [`Mode`].
 pub fn distil_mode(args: &DistilArgs) -> Mode {
     if args.emit_golds.is_some() {
         Mode::Golds
+    } else if args.aliases_only {
+        Mode::AliasesOnly
     } else {
         Mode::Densify
     }
@@ -125,6 +137,10 @@ pub fn run(path: Option<PathBuf>, mut args: DistilArgs) -> Result<()> {
                 args.out = Some(emit);
             }
             run_distil(path, args)
+        }
+        Mode::AliasesOnly => {
+            let paths = workspace::resolve(path);
+            crate::distil::aliases::enrich_aliases_at(paths, &args)
         }
         Mode::Densify => run_densify(path, &args),
     }
@@ -880,6 +896,8 @@ to = ["Fact"]
             max_rounds: None,
             jobs: None,
             emit_golds: None,
+            aliases_only: false,
+            min_aliases: 3,
         };
         assert_eq!(args.doc.as_deref(), Some("a.md"));
         assert!(args.force);
@@ -949,6 +967,8 @@ to = ["Fact"]
             max_rounds: None,
             jobs: None,
             emit_golds,
+            aliases_only: false,
+            min_aliases: 3,
         }
     }
 
@@ -962,5 +982,17 @@ to = ["Fact"]
     fn distil_mode_selects_densify_when_emit_golds_is_absent() {
         let args = args_with_emit_golds(None);
         assert_eq!(distil_mode(&args), Mode::Densify);
+    }
+
+    #[test]
+    fn distil_mode_selects_aliases_only_when_flag_set_without_emit_golds() {
+        let mut args = args_with_emit_golds(None);
+        args.aliases_only = true;
+        assert_eq!(distil_mode(&args), Mode::AliasesOnly);
+
+        // emit_golds still WINS over aliases_only (higher precedence).
+        let mut both = args_with_emit_golds(Some(PathBuf::from("out.toml")));
+        both.aliases_only = true;
+        assert_eq!(distil_mode(&both), Mode::Golds);
     }
 }
