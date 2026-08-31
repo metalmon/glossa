@@ -967,7 +967,10 @@ strict = true
         )
         .unwrap();
         assert_eq!(total, 1, "one node's alias list changed");
-        assert!(notes.is_empty(), "no notes on a clean in-place edit: {notes:?}");
+        assert!(
+            notes.is_empty(),
+            "no notes on a clean in-place edit: {notes:?}"
+        );
         let n = g.get_node("sym:a").unwrap().unwrap();
         assert_eq!(n.aliases, vec!["pump broken".to_string()]);
     }

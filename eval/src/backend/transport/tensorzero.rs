@@ -347,13 +347,11 @@ mod tests {
         for req in &reqs {
             assert!(req.starts_with("POST /feedback"), "wrong path: {req}");
         }
-        let body0: Value =
-            serde_json::from_str(reqs[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        let body0: Value = serde_json::from_str(reqs[0].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body0["episode_id"], "ep-xyz");
         assert_eq!(body0["metric_name"], "judge");
         assert_eq!(body0["value"], 0.5);
-        let body1: Value =
-            serde_json::from_str(reqs[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        let body1: Value = serde_json::from_str(reqs[1].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body1["metric_name"], "correct");
         assert_eq!(body1["value"], false);
     }

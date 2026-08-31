@@ -2454,10 +2454,8 @@ mod tests {
 
         // add_aliases threads through BOTH shapes; the loose deser also accepts a single
         // comma-joined string (client sends primitives loosely).
-        let nested_al: GraphUpdateArgs = serde_json::from_str(
-            r#"{"nodes":[{"label":"old","add_aliases":["a","b"]}]}"#,
-        )
-        .unwrap();
+        let nested_al: GraphUpdateArgs =
+            serde_json::from_str(r#"{"nodes":[{"label":"old","add_aliases":["a","b"]}]}"#).unwrap();
         assert_eq!(
             nested_al.into_updates()[0].add_aliases,
             vec!["a".to_string(), "b".to_string()]

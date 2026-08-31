@@ -118,10 +118,9 @@ pub(crate) fn poor_node_ids(
 /// edge and is therefore skipped under `--doc`.
 fn grounded_to_doc(g: &GraphStore, id: &str, doc: &str) -> bool {
     let prefix = format!("{doc}#");
-    g.outgoing(id)
-        .unwrap_or_default()
-        .into_iter()
-        .any(|e| e.edge_type == glossa::graph::MENTIONS && (e.to == doc || e.to.starts_with(&prefix)))
+    g.outgoing(id).unwrap_or_default().into_iter().any(|e| {
+        e.edge_type == glossa::graph::MENTIONS && (e.to == doc || e.to.starts_with(&prefix))
+    })
 }
 
 /// BFS the connected set of NON-structural reasoning nodes reachable from `start` over
@@ -347,7 +346,14 @@ fn enrich_one_chain(
     let timeout = Duration::from_secs(ep.timeout_secs);
 
     let chat = |messages: &[Value]| {
-        agent_chat_full(&endpoint, &model, api_key.as_deref(), tools, messages, timeout)
+        agent_chat_full(
+            &endpoint,
+            &model,
+            api_key.as_deref(),
+            tools,
+            messages,
+            timeout,
+        )
     };
 
     let mut aliases_added = 0usize;
@@ -398,7 +404,9 @@ fn enrich_one_chain(
     };
 
     let on_repeat = |name: &str, _args: &Value| {
-        format!("(dup {name}) you already called this — try a different query, or call graph_update")
+        format!(
+            "(dup {name}) you already called this — try a different query, or call graph_update"
+        )
     };
 
     run_agent_loop(chat, messages, exec, on_repeat, max_rounds, None)?;
@@ -417,8 +425,10 @@ fn build_alias_chains(
     let seed_type = args.seed_type.as_deref();
     let doc = args.doc.as_deref();
     let all_nodes = g.all_nodes()?;
-    let by_id: HashMap<String, Node> =
-        all_nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
+    let by_id: HashMap<String, Node> = all_nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.clone()))
+        .collect();
     let structural: HashSet<String> = ont.structural().into_iter().collect();
 
     // Keep only poor nodes that also satisfy the `--doc` grounding restriction, preserving order.
@@ -496,7 +506,9 @@ pub fn enrich_aliases_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
 
     let ep = lab.reason_endpoint().cloned().ok_or_else(|| {
-        anyhow::anyhow!("kbx distil --aliases-only needs a [reason] (or [distil]) endpoint in lab.toml")
+        anyhow::anyhow!(
+            "kbx distil --aliases-only needs a [reason] (or [distil]) endpoint in lab.toml"
+        )
     })?;
 
     let g = Arc::new(GraphStore::open(&paths.root)?);
@@ -515,8 +527,8 @@ pub fn enrich_aliases_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     let spec = ChainSpec::from_ontology(&ont);
     let tools = alias_tools_schema();
     // File-first prompt: the editable `aliases.md` overrides the embedded default when present.
-    let alias_md = std::fs::read_to_string(&paths.aliases)
-        .unwrap_or_else(|_| DEFAULT_ALIASES_MD.to_string());
+    let alias_md =
+        std::fs::read_to_string(&paths.aliases).unwrap_or_else(|_| DEFAULT_ALIASES_MD.to_string());
 
     let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_distil, DEFAULT_JOBS).max(1);
     // Small cap: with only graph_update (no exploration tools) the model adds aliases and stops in
@@ -608,10 +620,10 @@ mod tests {
     #[test]
     fn poor_node_ids_filters_by_alias_count_and_seed_type() {
         let chain = vec![
-            node("sym:a", "Symptom", &[]),                 // 0 aliases -> poor
-            node("sym:b", "Symptom", &["x", "y", "z"]),    // 3 aliases -> rich (>= 3)
-            node("task:c", "Task", &["one"]),              // 1 alias   -> poor
-            node("res:d", "Resolution", &["a", "b"]),      // 2 aliases -> poor
+            node("sym:a", "Symptom", &[]),              // 0 aliases -> poor
+            node("sym:b", "Symptom", &["x", "y", "z"]), // 3 aliases -> rich (>= 3)
+            node("task:c", "Task", &["one"]),           // 1 alias   -> poor
+            node("res:d", "Resolution", &["a", "b"]),   // 2 aliases -> poor
         ];
 
         // No seed_type: every node with < 3 aliases is poor.

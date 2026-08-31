@@ -1767,7 +1767,8 @@ mod tests {
     #[test]
     fn vision_message_builds_canonical_data_uri_content_array() {
         let img = stub_image(1);
-        let msg = vision_user_message(std::slice::from_ref(&img)).expect("one image -> Some(message)");
+        let msg =
+            vision_user_message(std::slice::from_ref(&img)).expect("one image -> Some(message)");
         assert_eq!(msg["role"], "user");
         let content = msg["content"].as_array().expect("content must be an array");
         assert_eq!(

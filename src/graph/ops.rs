@@ -838,11 +838,7 @@ pub fn graph_upsert(
     // and the `id` handles the caller declared. Capped so a large batch does not produce a wall
     // of text. Built once, reused by both the `from` and `to` no-match branches below.
     let fmt_capped = |items: &[String], cap: usize| -> String {
-        let shown: Vec<String> = items
-            .iter()
-            .take(cap)
-            .map(|s| format!("\"{s}\""))
-            .collect();
+        let shown: Vec<String> = items.iter().take(cap).map(|s| format!("\"{s}\"")).collect();
         let mut s = shown.join(", ");
         if items.len() > cap {
             s.push_str(", …");
@@ -1286,7 +1282,10 @@ pub fn graph_upsert(
             let mut handles: Vec<(String, String)> = handle_to_id
                 .iter()
                 .map(|(handle, id)| {
-                    let target = canonical_of.get(id.as_str()).copied().unwrap_or(id.as_str());
+                    let target = canonical_of
+                        .get(id.as_str())
+                        .copied()
+                        .unwrap_or(id.as_str());
                     (handle.clone(), target.to_string())
                 })
                 .collect();
@@ -3663,7 +3662,11 @@ strict = true
 
         // the Symptom node still writes; only the bogus edge drops.
         assert!(!out.rejected, "{}", out.message);
-        assert_eq!(out.edges, 0, "bogus-endpoint edge dropped: {:?}", out.dropped);
+        assert_eq!(
+            out.edges, 0,
+            "bogus-endpoint edge dropped: {:?}",
+            out.dropped
+        );
         let msg = &out.message;
         assert!(
             msg.contains("is not a node in this call"),
@@ -3701,10 +3704,19 @@ strict = true
                 ..unode("Resolution", "Restart", "case1.docx")
             },
         ];
-        let edges = vec![uedge("Connection loss", "RESOLVED_BY", "Restart", "case1.docx")];
+        let edges = vec![uedge(
+            "Connection loss",
+            "RESOLVED_BY",
+            "Restart",
+            "case1.docx",
+        )];
         let out = graph_upsert(&idx, &g, &ont, nodes, edges, 1_000_000, "agent");
         assert!(!out.rejected, "{}", out.message);
-        assert_eq!(out.edges, 1, "label-wired edge still lands: {:?}", out.dropped);
+        assert_eq!(
+            out.edges, 1,
+            "label-wired edge still lands: {:?}",
+            out.dropped
+        );
     }
 
     #[test]
