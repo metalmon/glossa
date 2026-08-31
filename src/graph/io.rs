@@ -307,7 +307,10 @@ pub fn to_html(g: &GraphStore, e: &GraphExport, root: &std::path::Path) -> Strin
     let stamp_full = crate::graph::temporal::epoch_to_rfc3339(now_secs);
     let stamp = format!(
         "{} UTC",
-        stamp_full.get(..16).unwrap_or(&stamp_full).replace('T', " ")
+        stamp_full
+            .get(..16)
+            .unwrap_or(&stamp_full)
+            .replace('T', " ")
     );
 
     // Temporality: staleness (source file drifted since grounding), computed once
@@ -355,7 +358,8 @@ pub fn to_html(g: &GraphStore, e: &GraphExport, root: &std::path::Path) -> Strin
         })
         .collect();
     for (i, label) in stub_labels.iter().enumerate() {
-        nodes_json.push(serde_json::json!({"l": label, "t": SOURCE_TYPE, "d": stub_deg[i], "s": 1}));
+        nodes_json
+            .push(serde_json::json!({"l": label, "t": SOURCE_TYPE, "d": stub_deg[i], "s": 1}));
     }
     let edges_json: Vec<serde_json::Value> = render_edges
         .iter()
@@ -503,7 +507,10 @@ mod tests {
     fn html_is_self_contained_and_embeds_data() {
         let html = to_html(&empty_store(), &make_export(), std::path::Path::new("."));
         // Both template placeholders must be filled in.
-        assert!(!html.contains("__GRAPH_DATA__"), "data placeholder not substituted");
+        assert!(
+            !html.contains("__GRAPH_DATA__"),
+            "data placeholder not substituted"
+        );
         assert!(
             !html.contains("/*__CYTOSCAPE_LIB__*/"),
             "library placeholder not substituted"
@@ -516,7 +523,10 @@ mod tests {
         );
         // Graph data (labels + types) is baked in.
         assert!(html.contains("Label A"), "node label missing from payload");
-        assert!(html.contains("RESOLVED_BY"), "edge type missing from payload");
+        assert!(
+            html.contains("RESOLVED_BY"),
+            "edge type missing from payload"
+        );
         assert!(html.contains("Symptom"), "node type missing from payload");
     }
 
@@ -641,14 +651,14 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
         // Incoming export carries a DIFFERENT Symptom (+ a Resolution and an edge).
         let export = make_export(); // s1/Label A (Symptom), r1/Fix it (Resolution), s1->r1
-        let (pruned, n, ed) =
-            import_merge_layer(&g, &ont, export, 2, dir.path()).unwrap();
+        let (pruned, n, ed) = import_merge_layer(&g, &ont, export, 2, dir.path()).unwrap();
         assert_eq!(pruned, 0, "merge must never prune");
         assert_eq!(n, 2);
         assert_eq!(ed, 1);
@@ -690,7 +700,8 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
@@ -732,7 +743,11 @@ to = ["Resolution"]
             .filter(|n| !STRUCTURAL.contains(&n.node_type.as_str()))
             .count();
         assert_eq!(nonstructural, 2, "re-import must not duplicate nodes");
-        assert_eq!(g.edge_count().unwrap(), 1, "re-import must not duplicate edges");
+        assert_eq!(
+            g.edge_count().unwrap(),
+            1,
+            "re-import must not duplicate edges"
+        );
     }
 
     /// Sharp edge, pinned: identity is label+type, but the store key is the id. If an incoming file
@@ -762,7 +777,8 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
@@ -770,10 +786,16 @@ to = ["Resolution"]
         import_merge_layer(&g, &ont, make_export(), 2, dir.path()).unwrap();
 
         let s1 = g.get_node("s1").unwrap().unwrap();
-        assert_eq!(s1.label, "Label A", "same id + new label overwrites in place");
+        assert_eq!(
+            s1.label, "Label A",
+            "same id + new label overwrites in place"
+        );
         // The old label is gone — it was the same node id, now relabelled.
         assert!(
-            !g.all_nodes().unwrap().iter().any(|n| n.label == "Old label"),
+            !g.all_nodes()
+                .unwrap()
+                .iter()
+                .any(|n| n.label == "Old label"),
             "the clobbered label no longer exists"
         );
     }

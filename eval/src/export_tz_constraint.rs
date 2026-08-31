@@ -629,10 +629,7 @@ mod tests {
         assert_eq!(rows.research_reads[0].search_query, "doc.pdf#7");
 
         assert_eq!(rows.compile_fix.len(), 1);
-        assert_eq!(
-            rows.compile_fix[0].broken_csp,
-            "Material grade\n14A\n15A\n"
-        );
+        assert_eq!(rows.compile_fix[0].broken_csp, "Material grade\n14A\n15A\n");
         assert_eq!(
             rows.compile_fix[0].compiler_error,
             "graph_build FAILED: Material_grade.csp line 3"

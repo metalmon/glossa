@@ -139,7 +139,9 @@ mod tests {
 
     #[test]
     fn classify_deflects_on_substantive_user_reply() {
-        let d = classify_reply("I don't know, that's what I was hoping you'd tell me — take it step by step.");
+        let d = classify_reply(
+            "I don't know, that's what I was hoping you'd tell me — take it step by step.",
+        );
         assert_eq!(
             d.as_deref(),
             Some("I don't know, that's what I was hoping you'd tell me — take it step by step.")

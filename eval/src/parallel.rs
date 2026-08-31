@@ -38,7 +38,11 @@ pub struct GraphWriter {
 
 impl GraphWriter {
     pub fn new(g: Arc<GraphStore>, root: PathBuf) -> Self {
-        Self { g, lock: Arc::new(Mutex::new(())), root }
+        Self {
+            g,
+            lock: Arc::new(Mutex::new(())),
+            root,
+        }
     }
 
     /// Read-only access to the underlying store. Correctness needs no extra lock here (a read
@@ -72,7 +76,9 @@ impl GraphWriter {
             Err(poisoned) => poisoned.into_inner(),
         };
         with_graph_write_lock(&self.root, Duration::from_secs(120), || {
-            Ok(ops::graph_upsert(idx, &self.g, ont, nodes, edges, now, origin))
+            Ok(ops::graph_upsert(
+                idx, &self.g, ont, nodes, edges, now, origin,
+            ))
         })
     }
 }
@@ -164,7 +170,10 @@ mod tests {
         let mut got: Vec<u32> = out;
         got.sort_unstable();
         let want: Vec<u32> = (0..20).map(|u| u * 2).collect();
-        assert_eq!(got, want, "every unit's result must be present regardless of completion order");
+        assert_eq!(
+            got, want,
+            "every unit's result must be present regardless of completion order"
+        );
     }
 
     #[test]
@@ -175,16 +184,25 @@ mod tests {
         let pb = progress_bar_hidden();
         let in_flight = AtomicUsize::new(0);
         let max_seen = AtomicUsize::new(0);
-        let out = run_units_parallel(units, 2, &pb, |_| 1, |_u| {
-            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            max_seen.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(5));
-            in_flight.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
-        })
+        let out = run_units_parallel(
+            units,
+            2,
+            &pb,
+            |_| 1,
+            |_u| {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(out.len(), 20);
-        assert!(max_seen.load(Ordering::SeqCst) <= 2, "jobs=2 must never run >2 units concurrently");
+        assert!(
+            max_seen.load(Ordering::SeqCst) <= 2,
+            "jobs=2 must never run >2 units concurrently"
+        );
     }
 
     #[test]
@@ -194,9 +212,12 @@ mod tests {
         let caller_id = std::thread::current().id();
         let units: Vec<u32> = (0..5).collect();
         let pb = progress_bar_hidden();
-        let out = run_units_parallel(units, 1, &pb, |_| 1, |_u| Ok(std::thread::current().id()))
-            .unwrap();
-        assert!(out.iter().all(|id| *id == caller_id), "jobs=1 must run inline on the caller's thread");
+        let out =
+            run_units_parallel(units, 1, &pb, |_| 1, |_u| Ok(std::thread::current().id())).unwrap();
+        assert!(
+            out.iter().all(|id| *id == caller_id),
+            "jobs=1 must run inline on the caller's thread"
+        );
     }
 
     #[test]
@@ -204,9 +225,12 @@ mod tests {
         let caller_id = std::thread::current().id();
         let units: Vec<u32> = (0..3).collect();
         let pb = progress_bar_hidden();
-        let out = run_units_parallel(units, 0, &pb, |_| 1, |_u| Ok(std::thread::current().id()))
-            .unwrap();
-        assert!(out.iter().all(|id| *id == caller_id), "jobs=0 must clamp to 1 and run inline");
+        let out =
+            run_units_parallel(units, 0, &pb, |_| 1, |_u| Ok(std::thread::current().id())).unwrap();
+        assert!(
+            out.iter().all(|id| *id == caller_id),
+            "jobs=0 must clamp to 1 and run inline"
+        );
     }
 
     #[test]
@@ -214,14 +238,20 @@ mod tests {
         let units: Vec<u32> = (0..50).collect();
         let pb = progress_bar_hidden();
         let started = AtomicUsize::new(0);
-        let res: Result<Vec<()>> = run_units_parallel(units, 3, &pb, |_| 1, |u| {
-            started.fetch_add(1, Ordering::SeqCst);
-            if *u == 5 {
-                anyhow::bail!("boom at unit 5");
-            }
-            std::thread::sleep(Duration::from_millis(2));
-            Ok(())
-        });
+        let res: Result<Vec<()>> = run_units_parallel(
+            units,
+            3,
+            &pb,
+            |_| 1,
+            |u| {
+                started.fetch_add(1, Ordering::SeqCst);
+                if *u == 5 {
+                    anyhow::bail!("boom at unit 5");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+                Ok(())
+            },
+        );
         assert!(res.is_err(), "an error in one unit must be propagated");
         assert!(
             started.load(Ordering::SeqCst) < 50,
@@ -235,20 +265,36 @@ mod tests {
         let units: Vec<u32> = (0..10).collect();
         let pb = progress_bar_hidden();
         let ran: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-        let res: Result<Vec<()>> = run_units_parallel(units, 1, &pb, |_| 1, |u| {
-            ran.lock().unwrap().push(*u);
-            if *u == 2 {
-                anyhow::bail!("boom");
-            }
-            Ok(())
-        });
+        let res: Result<Vec<()>> = run_units_parallel(
+            units,
+            1,
+            &pb,
+            |_| 1,
+            |u| {
+                ran.lock().unwrap().push(*u);
+                if *u == 2 {
+                    anyhow::bail!("boom");
+                }
+                Ok(())
+            },
+        );
         assert!(res.is_err());
-        assert_eq!(*ran.lock().unwrap(), vec![0, 1, 2], "sequential path stops right after the failing unit");
+        assert_eq!(
+            *ran.lock().unwrap(),
+            vec![0, 1, 2],
+            "sequential path stops right after the failing unit"
+        );
     }
 
     fn prov() -> Provenance {
-        Provenance { source_path: "d.md".into(), range: None, file_sig: None,
-            origin: "test".into(), confidence: 0.9, created_at: 1 }
+        Provenance {
+            source_path: "d.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
     }
 
     /// Two threads hammer ONE `GraphWriter` with concurrent upserts that each (a) read the
@@ -266,8 +312,11 @@ mod tests {
 
         // Seed one node so read-then-write has something to read.
         g.put_node(&Node {
-            id: "seed".into(), node_type: "Resolution".into(), label: "seed".into(),
-            aliases: vec![], prov: prov(),
+            id: "seed".into(),
+            node_type: "Resolution".into(),
+            label: "seed".into(),
+            aliases: vec![],
+            prov: prov(),
         })
         .unwrap();
 
@@ -295,8 +344,14 @@ mod tests {
                             valid_from: None,
                             valid_to: None,
                         };
-                        let out = writer.upsert(idx, ont, vec![node], vec![], 1, "test").unwrap();
-                        assert!(!out.rejected, "upsert must not be rejected: {}", out.message);
+                        let out = writer
+                            .upsert(idx, ont, vec![node], vec![], 1, "test")
+                            .unwrap();
+                        assert!(
+                            !out.rejected,
+                            "upsert must not be rejected: {}",
+                            out.message
+                        );
                     }
                 });
             }
@@ -304,6 +359,10 @@ mod tests {
 
         let total = g.node_count().unwrap();
         // seed + 2 threads * PER_THREAD distinct ids, none lost to an interleaved RMW race.
-        assert_eq!(total, 1 + 2 * PER_THREAD as u64, "no upsert may be lost/clobbered under concurrency");
+        assert_eq!(
+            total,
+            1 + 2 * PER_THREAD as u64,
+            "no upsert may be lost/clobbered under concurrency"
+        );
     }
 }

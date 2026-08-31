@@ -132,7 +132,10 @@ pub(crate) fn parse_chart_xml(xml: &str) -> ChartData {
 fn cell(text: &str) -> TableCell {
     TableCell {
         content: vec![Element::Paragraph(Paragraph {
-            content: vec![InlineContent::Text(TextSpan { text: text.to_string(), ..Default::default() })],
+            content: vec![InlineContent::Text(TextSpan {
+                text: text.to_string(),
+                ..Default::default()
+            })],
             ..Default::default()
         })],
         ..Default::default()
@@ -149,20 +152,35 @@ fn chart_to_table(cd: &ChartData) -> Table {
 
     let mut header = vec![cell("")];
     for (i, s) in cd.series.iter().enumerate() {
-        let name = s.name.clone().unwrap_or_else(|| format!("Series {}", i + 1));
+        let name = s
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Series {}", i + 1));
         header.push(cell(&name));
     }
-    rows.push(TableRow { cells: header, ..Default::default() });
+    rows.push(TableRow {
+        cells: header,
+        ..Default::default()
+    });
 
     for r in 0..n_rows {
-        let label = cats.and_then(|c| c.get(r)).cloned().unwrap_or_else(|| (r + 1).to_string());
+        let label = cats
+            .and_then(|c| c.get(r))
+            .cloned()
+            .unwrap_or_else(|| (r + 1).to_string());
         let mut cells = vec![cell(&label)];
         for s in &cd.series {
             cells.push(cell(s.vals.get(r).map(String::as_str).unwrap_or("")));
         }
-        rows.push(TableRow { cells, ..Default::default() });
+        rows.push(TableRow {
+            cells,
+            ..Default::default()
+        });
     }
-    Table { rows, ..Default::default() }
+    Table {
+        rows,
+        ..Default::default()
+    }
 }
 
 fn chart_names_for(ext: &str) -> bool {
@@ -185,7 +203,10 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         .file_names()
         .filter(|n| {
             let n = n.to_ascii_lowercase();
-            n.contains("/charts/chart") && n.ends_with(".xml") && !n.contains("colors") && !n.contains("style")
+            n.contains("/charts/chart")
+                && n.ends_with(".xml")
+                && !n.contains("colors")
+                && !n.contains("style")
         })
         .map(|s| s.to_string())
         .collect();
@@ -211,7 +232,10 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         }
         let table = chart_to_table(&cd);
         let body = table_to_markdown(&table);
-        let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", i + 1));
+        let title = cd
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Chart {}", i + 1));
         let header = if cd.kind.is_empty() {
             format!("Chart: {}", title)
         } else {
@@ -322,14 +346,19 @@ mod tests {
  </c:barChart></c:plotArea>
 </c:chart></c:chartSpace>"#;
         let cd = parse_chart_xml(AXIS_ONLY);
-        assert_eq!(cd.title, None, "axis title must not become the chart title: {cd:?}");
+        assert_eq!(
+            cd.title, None,
+            "axis title must not become the chart title: {cd:?}"
+        );
     }
 
     use crate::model::Chunk;
     use std::path::Path;
 
     fn charts(fixture: &str) -> Vec<Chunk> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
         let bytes = std::fs::read(&path).unwrap();
         let ext = fixture.rsplit('.').next().unwrap();
         super::extract_charts(&path, &bytes, ext)
@@ -339,14 +368,33 @@ mod tests {
     fn docx_chart_yields_data_table_chunk() {
         let cs = charts("sample_chart.docx");
         assert!(!cs.is_empty(), "expected a chart chunk");
-        let t = cs.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(t.contains("Chart:") && t.contains("Sales by quarter"), "chart header/title missing:\n{t}");
-        assert!(t.contains('|') && t.contains("---"), "GFM table missing:\n{t}");
+        let t = cs
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            t.contains("Chart:") && t.contains("Sales by quarter"),
+            "chart header/title missing:\n{t}"
+        );
+        assert!(
+            t.contains('|') && t.contains("---"),
+            "GFM table missing:\n{t}"
+        );
         // English cached data from the synthetic fixture
-        assert!(t.contains("Series 1") && t.contains("Series 2"), "series names missing:\n{t}");
-        assert!(t.contains("Q1") && t.contains("4.3") && t.contains("2.4"), "categories/values missing:\n{t}");
+        assert!(
+            t.contains("Series 1") && t.contains("Series 2"),
+            "series names missing:\n{t}"
+        );
+        assert!(
+            t.contains("Q1") && t.contains("4.3") && t.contains("2.4"),
+            "categories/values missing:\n{t}"
+        );
         // the c:f formula ref (Sheet1!$B$2:$B$4) must NOT leak into the table
-        assert!(!t.contains("Sheet1!"), "formula ref leaked into chart table:\n{t}");
+        assert!(
+            !t.contains("Sheet1!"),
+            "formula ref leaked into chart table:\n{t}"
+        );
         assert!(cs.iter().all(|c| c.file_type == "docx"));
     }
 
@@ -361,11 +409,15 @@ mod tests {
             let mut zw = zip::ZipWriter::new(cursor);
             let opts = zip::write::SimpleFileOptions::default();
             zw.start_file("word/charts/chart1.xml", opts).unwrap();
-            zw.write_all(b"not xml at all <<< \x00\x01\x02 garbage").unwrap();
+            zw.write_all(b"not xml at all <<< \x00\x01\x02 garbage")
+                .unwrap();
             zw.finish().unwrap();
         }
         let cs = extract_charts(Path::new("garbage.docx"), &buf, "docx");
-        assert!(cs.is_empty(), "garbage chart part should yield no chunks, got: {cs:?}");
+        assert!(
+            cs.is_empty(),
+            "garbage chart part should yield no chunks, got: {cs:?}"
+        );
     }
 
     /// When no plot-type (…Chart) tag was captured, `cd.kind` is empty; the
@@ -393,7 +445,11 @@ mod tests {
         }
         let cs = extract_charts(Path::new("nokind.docx"), &buf, "docx");
         assert_eq!(cs.len(), 1, "expected one chart chunk: {cs:?}");
-        assert!(!cs[0].text.contains("()"), "empty kind parens leaked:\n{}", cs[0].text);
+        assert!(
+            !cs[0].text.contains("()"),
+            "empty kind parens leaked:\n{}",
+            cs[0].text
+        );
         assert!(
             cs[0].text.starts_with("Chart: Chart 1\n\n"),
             "expected kind-less header, got:\n{}",

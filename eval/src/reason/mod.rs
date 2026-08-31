@@ -58,9 +58,7 @@ pub fn schema_graph_block(ont: &Ontology) -> String {
                     continue;
                 }
                 for to_ty in &rel.to {
-                    out.push_str(&format!(
-                        "  - {from_ty} --{name}--> {to_ty} ({role})\n"
-                    ));
+                    out.push_str(&format!("  - {from_ty} --{name}--> {to_ty} ({role})\n"));
                 }
             }
         }
@@ -78,9 +76,12 @@ pub fn schema_graph_block(ont: &Ontology) -> String {
 /// descriptions — the node types the build harvest may create. No relations (harvest writes
 /// nodes, not the reasoning spine).
 pub fn grounding_schema_block(ont: &Ontology) -> String {
-    let mut out = String::from("Node types you create (each grounded to the section it is read from):\n");
+    let mut out =
+        String::from("Node types you create (each grounded to the section it is read from):\n");
     for t in ont.entity_types() {
-        if !ont.requires_grounding(t) { continue; }
+        if !ont.requires_grounding(t) {
+            continue;
+        }
         out.push_str(&format!("  - {t}\n"));
         if let Some(d) = ont.description(t) {
             out.push_str(&format!("      {d}\n"));
@@ -130,7 +131,8 @@ role = "chaining"
 
     #[test]
     fn schema_graph_block_prints_descriptions() {
-        let ont = Ontology::parse(r#"
+        let ont = Ontology::parse(
+            r#"
 [entities.A]
 requires_grounding = true
 description = "a thing that prescribes an action"
@@ -140,9 +142,14 @@ from = ["A"]
 to = ["B"]
 role = "chaining"
 description = "links A to B"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = schema_graph_block(&ont);
-        assert!(s.contains("a thing that prescribes an action"), "entity desc missing:\n{s}");
+        assert!(
+            s.contains("a thing that prescribes an action"),
+            "entity desc missing:\n{s}"
+        );
         assert!(s.contains("links A to B"), "relation desc missing:\n{s}");
     }
 
@@ -150,7 +157,8 @@ description = "links A to B"
     fn schema_graph_block_relation_description_printed_once_per_relation() {
         // REL has TWO `to` types, so it renders two edge lines (A --REL--> B, A --REL--> C).
         // The description must appear exactly once for the relation, not once per edge line.
-        let ont = Ontology::parse(r#"
+        let ont = Ontology::parse(
+            r#"
 [entities.A]
 [entities.B]
 [entities.C]
@@ -159,7 +167,9 @@ from = ["A"]
 to = ["B", "C"]
 role = "chaining"
 description = "links A to B"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = schema_graph_block(&ont);
         assert!(s.contains("A --REL--> B"), "missing edge A->B:\n{s}");
         assert!(s.contains("A --REL--> C"), "missing edge A->C:\n{s}");
@@ -172,7 +182,8 @@ description = "links A to B"
 
     #[test]
     fn grounding_schema_block_only_grounding_types() {
-        let ont = Ontology::parse(r#"
+        let ont = Ontology::parse(
+            r#"
 [entities.Res]
 requires_grounding = true
 description = "prescribed action"
@@ -182,11 +193,16 @@ description = "a reported problem"
 from=["Sym"]
 to=["Res"]
 role="chaining"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = grounding_schema_block(&ont);
         assert!(s.contains("Res"), "grounding type missing:\n{s}");
         assert!(s.contains("prescribed action"));
         assert!(!s.contains("Sym"), "non-grounding type leaked:\n{s}");
-        assert!(!s.contains("--R-->"), "relations leaked into grounding block:\n{s}");
+        assert!(
+            !s.contains("--R-->"),
+            "relations leaked into grounding block:\n{s}"
+        );
     }
 }

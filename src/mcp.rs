@@ -475,7 +475,9 @@ pub(crate) struct SearchArgs {
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -508,19 +510,25 @@ struct DoctorArgs {
         default,
         deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
     )]
-    #[schemars(description = "also delete incomplete (off-spine/degenerate) nodes; default false (report-only)")]
+    #[schemars(
+        description = "also delete incomplete (off-spine/degenerate) nodes; default false (report-only)"
+    )]
     prune_incomplete: Option<bool>,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
     )]
-    #[schemars(description = "also delete ungrounded nodes (last resort; prefer re-grounding); default false (report-only)")]
+    #[schemars(
+        description = "also delete ungrounded nodes (last resort; prefer re-grounding); default false (report-only)"
+    )]
     prune_ungrounded: Option<bool>,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
     )]
-    #[schemars(description = "also delete dangling nodes (last resort; prefer restoring the terminal); default false (report-only)")]
+    #[schemars(
+        description = "also delete dangling nodes (last resort; prefer restoring the terminal); default false (report-only)"
+    )]
     prune_dangling: Option<bool>,
 }
 
@@ -608,7 +616,9 @@ pub(crate) struct RelatedArgs {
     )]
     as_of: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -618,7 +628,9 @@ pub(crate) struct NeighborsArgs {
     #[schemars(description = "graph node id (from a `glossary` line, e.g. `sym:...`)")]
     node: Option<String>,
     #[serde(default)]
-    #[schemars(description = "document path from a search result (use with `n` instead of `node`)")]
+    #[schemars(
+        description = "document path from a search result (use with `n` instead of `node`)"
+    )]
     path: Option<String>,
     #[serde(
         default,
@@ -630,7 +642,9 @@ pub(crate) struct NeighborsArgs {
         default,
         deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
     )]
-    #[schemars(description = "keep only these edge/relation types (e.g. REFERENCES); omit for all")]
+    #[schemars(
+        description = "keep only these edge/relation types (e.g. REFERENCES); omit for all"
+    )]
     edge_types: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(description = "which edges: `out`, `in`, or `both` (default `both`)")]
@@ -644,7 +658,9 @@ pub(crate) struct NeighborsArgs {
     )]
     as_of: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -665,7 +681,9 @@ pub(crate) struct GlossaryArgs {
     )]
     as_of: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -720,7 +738,9 @@ pub(crate) struct ReachArgs {
     #[schemars(description = "max edges to search (default 6, capped at 12)")]
     max_depth: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -728,7 +748,9 @@ pub(crate) struct ReachArgs {
 struct NameArg {
     name: String,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
 }
 
@@ -881,7 +903,9 @@ pub(crate) struct GrepArgs {
     #[schemars(description = "restrict to a single file type (-t)")]
     file_type: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. ANDed with `path`/`glob` when set. Omit to search the whole corpus.")]
+    #[schemars(
+        description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. ANDed with `path`/`glob` when set. Omit to search the whole corpus."
+    )]
     scope: Option<String>,
     #[serde(
         default,
@@ -1365,11 +1389,16 @@ impl GlossaServer {
         let ids = g.resolve(&a.name).map_err(internal)?;
         // `GraphStore::resolve` returns bare ids with no path info, so scope is applied here in
         // the handler (after resolve returns) rather than in the store fn — see task brief.
-        let scope_glob =
-            crate::tools::compile_scope(a.scope.as_deref()).map_err(|e| internal(anyhow::anyhow!(e)))?;
+        let scope_glob = crate::tools::compile_scope(a.scope.as_deref())
+            .map_err(|e| internal(anyhow::anyhow!(e)))?;
         let filtered: Vec<String> = ids
             .into_iter()
-            .filter(|id| crate::tools::in_scope(scope_glob.as_ref(), crate::tools::owning_doc(&g, id).as_deref()))
+            .filter(|id| {
+                crate::tools::in_scope(
+                    scope_glob.as_ref(),
+                    crate::tools::owning_doc(&g, id).as_deref(),
+                )
+            })
             .collect();
         Ok(CallToolResult::success(vec![Content::text(
             filtered.join("\n"),
@@ -1496,7 +1525,11 @@ impl GlossaServer {
         let res = crate::graph::lock::with_graph_write_lock(
             &self.root,
             std::time::Duration::from_secs(5),
-            || Ok(crate::graph::ops::graph_upsert(&idx, &g, &ont, nodes, edges, now, "agent")),
+            || {
+                Ok(crate::graph::ops::graph_upsert(
+                    &idx, &g, &ont, nodes, edges, now, "agent",
+                ))
+            },
         );
         let message = match res {
             Ok(out) if parse_notes.is_empty() => out.message,
@@ -1921,7 +1954,12 @@ mod tests {
         // description is duplicated by hand between here and registry::DESC_SQL — this test is
         // the guard that keeps the two copies from silently drifting apart.
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Full, false, ServerFlags::default());
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Full,
+            false,
+            ServerFlags::default(),
+        );
         let specs = srv.tool_specs();
         let sql_tool = specs
             .iter()
@@ -1969,7 +2007,11 @@ mod tests {
         // Absent optionals stay None (report-only default).
         let da2: DoctorArgs = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(
-            (da2.prune_incomplete, da2.prune_ungrounded, da2.prune_dangling),
+            (
+                da2.prune_incomplete,
+                da2.prune_ungrounded,
+                da2.prune_dangling
+            ),
             (None, None, None)
         );
 
@@ -1993,8 +2035,7 @@ mod tests {
         assert_eq!(ne.scope, Some("somedoc.pdf".to_string()));
 
         // as_of also accepts a bare JSON number (a model writing a year unquoted).
-        let ne2: NeighborsArgs =
-            serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
+        let ne2: NeighborsArgs = serde_json::from_str(r#"{"node":"sym:x","as_of":2022}"#).unwrap();
         assert_eq!(ne2.as_of, Some("2022".to_string()));
 
         let gl: GlossaryArgs =
@@ -2089,7 +2130,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Editor, false, ServerFlags::default());
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
         // Another process holds the agent-graph write lock.
         std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
         let held = std::fs::OpenOptions::new()
@@ -2649,7 +2695,8 @@ mod tests {
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
         let reader =
-            GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default()).enabled_tools();
+            GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default())
+                .enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         #[cfg(feature = "notebook")]
         assert!(reader.contains(&"ls".to_string()));
@@ -2662,7 +2709,8 @@ mod tests {
         assert!(!reader.contains(&"write".to_string()));
 
         let editor =
-            GlossaServer::new(root.clone(), Profile::Editor, false, ServerFlags::default()).enabled_tools();
+            GlossaServer::new(root.clone(), Profile::Editor, false, ServerFlags::default())
+                .enabled_tools();
         #[cfg(feature = "notebook")]
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
@@ -2707,15 +2755,18 @@ mod tests {
             "reader cannot graph_doctor"
         );
 
-        let full =
-            GlossaServer::new(root.clone(), Profile::Full, false, ServerFlags::default()).enabled_tools();
+        let full = GlossaServer::new(root.clone(), Profile::Full, false, ServerFlags::default())
+            .enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         #[cfg(feature = "notebook")]
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
 
         // resolve is a low-level primitive: kept for editor/full, withheld from Reader (a tool the
         // reader never calls in practice — clutter that muddies tool choice).
-        assert!(!reader.contains(&"resolve".to_string()), "reader does not get resolve");
+        assert!(
+            !reader.contains(&"resolve".to_string()),
+            "reader does not get resolve"
+        );
         for prof in [&editor, &full] {
             assert!(
                 prof.contains(&"resolve".to_string()),
@@ -2723,7 +2774,16 @@ mod tests {
             );
         }
 
-        let ng = GlossaServer::new(root, Profile::Editor, false, ServerFlags { no_graph: true, ..Default::default() }).enabled_tools();
+        let ng = GlossaServer::new(
+            root,
+            Profile::Editor,
+            false,
+            ServerFlags {
+                no_graph: true,
+                ..Default::default()
+            },
+        )
+        .enabled_tools();
         assert!(ng.contains(&"search".to_string()) && ng.contains(&"read".to_string()));
         assert!(
             !ng.contains(&"related".to_string())
@@ -2747,7 +2807,10 @@ mod tests {
             root,
             Profile::Full,
             false,
-            ServerFlags { no_source_file: true, ..Default::default() },
+            ServerFlags {
+                no_source_file: true,
+                ..Default::default()
+            },
         )
         .enabled_tools();
         assert!(
@@ -2957,7 +3020,12 @@ mod tests {
         let mcp: std::collections::BTreeMap<String, String> = srv
             .tool_specs()
             .into_iter()
-            .map(|t| (t.name.to_string(), t.description.unwrap_or_default().to_string()))
+            .map(|t| {
+                (
+                    t.name.to_string(),
+                    t.description.unwrap_or_default().to_string(),
+                )
+            })
             .collect();
         let reg = crate::tools::registry::registry();
         for d in &reg {
@@ -3119,7 +3187,12 @@ mod tests {
     #[test]
     fn get_info_advertises_prompts_capability() {
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(dir.path().to_path_buf(), Profile::Full, false, ServerFlags::default());
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Full,
+            false,
+            ServerFlags::default(),
+        );
         let info = srv.get_info();
         assert!(
             info.capabilities.prompts.is_some(),

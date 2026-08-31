@@ -141,7 +141,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = TraceLog::to_dir(dir.path());
         let recorded = last_trace_path().expect("to_dir must record this thread's trace path");
-        assert_eq!(Some(recorded), log.path, "last_trace_path must match the log's own path");
+        assert_eq!(
+            Some(recorded),
+            log.path,
+            "last_trace_path must match the log's own path"
+        );
     }
 
     #[test]
@@ -149,7 +153,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = TraceLog::to_dir(dir.path());
         let b = TraceLog::to_dir(dir.path());
-        assert_ne!(a.path, b.path, "the process-global counter must keep filenames unique");
+        assert_ne!(
+            a.path, b.path,
+            "the process-global counter must keep filenames unique"
+        );
     }
 
     #[test]
@@ -160,7 +167,10 @@ mod tests {
         let child_saw_none = std::thread::spawn(|| last_trace_path().is_none())
             .join()
             .unwrap();
-        assert!(child_saw_none, "a thread that never called to_dir must see None");
+        assert!(
+            child_saw_none,
+            "a thread that never called to_dir must see None"
+        );
         // The outer thread's slot is untouched by the child.
         assert_eq!(last_trace_path(), outer.path);
     }

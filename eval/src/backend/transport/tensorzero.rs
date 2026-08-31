@@ -192,7 +192,13 @@ mod tests {
         let ep = test_endpoint("http://127.0.0.1:1", None);
         episode::reset();
         let err = transport
-            .call(&ep, None, &[json!({"role": "user", "content": "hi"})], None, None)
+            .call(
+                &ep,
+                None,
+                &[json!({"role": "user", "content": "hi"})],
+                None,
+                None,
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("function_name"),
@@ -278,7 +284,13 @@ mod tests {
         let ep = test_endpoint(&format!("http://127.0.0.1:{port}"), Some("f"));
         let transport = TzTransport::new(&ep);
         transport
-            .call(&ep, None, &[json!({"role": "user", "content": "hi"})], None, None)
+            .call(
+                &ep,
+                None,
+                &[json!({"role": "user", "content": "hi"})],
+                None,
+                None,
+            )
             .unwrap();
 
         let req = server.join().unwrap();
@@ -288,9 +300,16 @@ mod tests {
             .as_str()
             .expect("episode_id must be a string")
             .to_string();
-        assert!(!sent_id.is_empty(), "first turn must send a real (non-empty) episode id");
+        assert!(
+            !sent_id.is_empty(),
+            "first turn must send a real (non-empty) episode id"
+        );
         let uuid = uuid::Uuid::parse_str(&sent_id).expect("must be a valid UUID");
-        assert_eq!(uuid.get_version_num(), 7, "must be the same UUIDv7 backdated_episode_id mints");
+        assert_eq!(
+            uuid.get_version_num(),
+            7,
+            "must be the same UUIDv7 backdated_episode_id mints"
+        );
 
         // The mock response carried no episode_id -> the thread-local falls back to the id we
         // generated and sent, rather than being left unset.
@@ -355,7 +374,9 @@ mod tests {
         let ep = test_endpoint("http://x", Some("f"));
         let transport = TzTransport::new(&ep);
         let reply = crate::backend::tensorzero::turn_reply_from_content(
-            vec![json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": {"q": "x"} })],
+            vec![
+                json!({ "type": "tool_call", "id": "c1", "name": "search", "arguments": {"q": "x"} }),
+            ],
             None,
         );
         let mut messages: Vec<Value> = vec![];

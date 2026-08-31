@@ -38,7 +38,9 @@ impl Extractor for OfficeExtractor {
         let mut ir = doc.to_ir();
         expand_merged_tables(&mut ir);
         let mut chunks = chunk_ir(path, &ir, &ext);
-        chunks.extend(crate::extract::ooxml_chart::extract_charts(path, bytes, &ext));
+        chunks.extend(crate::extract::ooxml_chart::extract_charts(
+            path, bytes, &ext,
+        ));
         Ok(chunks)
     }
 }

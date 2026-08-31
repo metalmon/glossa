@@ -688,9 +688,7 @@ mod tests {
         assert!(msg.contains("no extension"), "{msg}");
         assert!(msg.contains("Slot depth.csp"), "{msg}");
         assert!(
-            !dir.path()
-                .join(".glossa/notes/doc.pdf/Slot depth")
-                .exists(),
+            !dir.path().join(".glossa/notes/doc.pdf/Slot depth").exists(),
             "must not save the extensionless file"
         );
         // The same content with `.csp` is accepted.

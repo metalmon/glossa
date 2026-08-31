@@ -468,8 +468,16 @@ mod tests {
     #[test]
     fn resolve_prefers_cli_over_lab_over_default() {
         assert_eq!(resolve(Some(9), Some(5), 3), 9, "CLI must win outright");
-        assert_eq!(resolve(None, Some(5), 3), 5, "lab must win when CLI is unset");
-        assert_eq!(resolve(None::<usize>, None, 3), 3, "default when both are unset");
+        assert_eq!(
+            resolve(None, Some(5), 3),
+            5,
+            "lab must win when CLI is unset"
+        );
+        assert_eq!(
+            resolve(None::<usize>, None, 3),
+            3,
+            "default when both are unset"
+        );
     }
 
     #[test]

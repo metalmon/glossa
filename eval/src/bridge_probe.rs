@@ -250,12 +250,20 @@ mod tests {
     fn load_probe_reads_the_real_fixture_with_at_least_three_per_trap_type() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_PATH);
         let cases = load_probe(&path).expect("load real bridge-probe fixture");
-        assert!(cases.len() >= 12, "expected >=12 cases, got {}", cases.len());
+        assert!(
+            cases.len() >= 12,
+            "expected >=12 cases, got {}",
+            cases.len()
+        );
 
         let mut counts: BTreeMap<TrapType, usize> = BTreeMap::new();
         for c in &cases {
             *counts.entry(c.trap_type).or_insert(0) += 1;
-            assert!(!c.question.is_empty(), "case {} has an empty question", c.id);
+            assert!(
+                !c.question.is_empty(),
+                "case {} has an empty question",
+                c.id
+            );
             assert!(!c.answer.is_empty(), "case {} has an empty answer", c.id);
             assert!(
                 !c.corpus_dir.is_empty(),

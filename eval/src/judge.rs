@@ -48,7 +48,13 @@ pub fn parse_verdict(reply: &str) -> Judgement {
         .lines()
         .position(|l| l.trim().to_lowercase().starts_with("verdict:"));
     let reason = match cut {
-        Some(i) => reply.lines().take(i).collect::<Vec<_>>().join("\n").trim().to_string(),
+        Some(i) => reply
+            .lines()
+            .take(i)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
         None => reply.trim().to_string(),
     };
     Judgement {
@@ -167,10 +173,22 @@ mod tests {
 
     #[test]
     fn verdict_parsing() {
-        assert!(matches!(parse_verdict("reason...\nVERDICT: correct").verdict, Verdict::Correct));
-        assert!(matches!(parse_verdict("VERDICT: Partial").verdict, Verdict::Partial));
-        assert!(matches!(parse_verdict("blah\nverdict: WRONG\n").verdict, Verdict::Wrong));
-        assert!(matches!(parse_verdict("no verdict here").verdict, Verdict::Unscored));
+        assert!(matches!(
+            parse_verdict("reason...\nVERDICT: correct").verdict,
+            Verdict::Correct
+        ));
+        assert!(matches!(
+            parse_verdict("VERDICT: Partial").verdict,
+            Verdict::Partial
+        ));
+        assert!(matches!(
+            parse_verdict("blah\nverdict: WRONG\n").verdict,
+            Verdict::Wrong
+        ));
+        assert!(matches!(
+            parse_verdict("no verdict here").verdict,
+            Verdict::Unscored
+        ));
         // last VERDICT wins
         assert!(matches!(
             parse_verdict("VERDICT: wrong\nVERDICT: correct").verdict,

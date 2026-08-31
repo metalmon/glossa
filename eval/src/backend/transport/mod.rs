@@ -76,7 +76,11 @@ pub trait ChatTransport {
     /// Append the results of one or more executed tool calls, in this provider's own message
     /// shape (OpenAI: one `{role:"tool"}` message per result; Anthropic: one `{role:"user"}`
     /// message batching all `tool_result` blocks). `results` is `(tool_call_id, body)` pairs.
-    fn push_tool_results(&self, messages: &mut Vec<serde_json::Value>, results: &[(String, String)]);
+    fn push_tool_results(
+        &self,
+        messages: &mut Vec<serde_json::Value>,
+        results: &[(String, String)],
+    );
 
     /// Post episode-level feedback (TensorZero's `/feedback`: one `(metric_name, value)` pair per
     /// call). Default no-op for every non-TZ transport — only [`tensorzero::TzTransport`]

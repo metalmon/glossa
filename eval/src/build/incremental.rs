@@ -89,7 +89,11 @@ pub fn compute_delta(root: &Path, idx: &DocIndex, g: &GraphStore) -> Result<Delt
     }
 
     // NEW: indexed docs that own no reasoning node at all.
-    let mut new: Vec<String> = indexed.iter().filter(|d| !owned.contains(*d)).cloned().collect();
+    let mut new: Vec<String> = indexed
+        .iter()
+        .filter(|d| !owned.contains(*d))
+        .cloned()
+        .collect();
     new.sort();
 
     // CHANGED: distinct docs of nodes whose stored file_sig drifted from disk — reuse glossa's

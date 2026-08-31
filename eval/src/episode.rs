@@ -69,13 +69,15 @@ mod tests {
     fn per_thread_independent() {
         reset();
         set("outer".to_string());
-        let child_saw_none = std::thread::spawn(|| current().is_none())
-            .join()
-            .unwrap();
+        let child_saw_none = std::thread::spawn(|| current().is_none()).join().unwrap();
         assert!(
             child_saw_none,
             "a thread that never called set() must see None"
         );
-        assert_eq!(current().as_deref(), Some("outer"), "outer thread's slot must be untouched");
+        assert_eq!(
+            current().as_deref(),
+            Some("outer"),
+            "outer thread's slot must be untouched"
+        );
     }
 }

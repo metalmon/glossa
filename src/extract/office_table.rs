@@ -445,7 +445,11 @@ mod tests {
             ..Default::default()
         };
         let expanded = expand_table(&table); // must not panic
-        assert_eq!(expanded.rows.len(), 1, "grid must stay 1 row (n_rows), not grow to row_span");
+        assert_eq!(
+            expanded.rows.len(),
+            1,
+            "grid must stay 1 row (n_rows), not grow to row_span"
+        );
         assert_eq!(expanded.rows[0].cells.len(), 1);
         assert_eq!(cell_plain(&expanded.rows[0].cells[0]), "only");
     }

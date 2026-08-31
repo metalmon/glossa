@@ -183,7 +183,9 @@ mod tests {
         assert_eq!(r.origin, RootOrigin::DiscoveredUp);
         assert_eq!(r.nested_ancestor, None);
         assert!(
-            r.advisories().iter().any(|a| a.contains("discovered above")),
+            r.advisories()
+                .iter()
+                .any(|a| a.contains("discovered above")),
             "DiscoveredUp must warn: {:?}",
             r.advisories()
         );

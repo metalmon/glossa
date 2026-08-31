@@ -178,8 +178,14 @@ pub fn reach(
 ) -> anyhow::Result<ReachResult> {
     // Trivial: from IS the target.
     if to == Some(from) {
-        let p = vec![Hop { node: from.to_string(), via: None }];
-        return Ok(ReachResult { paths: vec![p], targets: vec![from.to_string()] });
+        let p = vec![Hop {
+            node: from.to_string(),
+            via: None,
+        }];
+        return Ok(ReachResult {
+            paths: vec![p],
+            targets: vec![from.to_string()],
+        });
     }
 
     struct QItem {
@@ -190,7 +196,10 @@ pub fn reach(
     let mut visited: HashSet<String> = HashSet::from([from.to_string()]);
     let mut bridged_terms: HashSet<String> = HashSet::new();
     let mut q: VecDeque<QItem> = VecDeque::from([QItem {
-        path: vec![Hop { node: from.to_string(), via: None }],
+        path: vec![Hop {
+            node: from.to_string(),
+            via: None,
+        }],
         bridges: 0,
     }]);
     let mut paths: Vec<Vec<Hop>> = Vec::new();
@@ -218,26 +227,37 @@ pub fn reach(
             // Verify: return the first path that reaches `to` (checked before visited, like legacy).
             if to == Some(next.as_str()) {
                 let mut p = item.path.clone();
-                p.push(Hop { node: next.clone(), via: Some(HopVia::Edge { edge_type: et, forward: fwd }) });
-                return Ok(ReachResult { paths: vec![p], targets: vec![next] });
+                p.push(Hop {
+                    node: next.clone(),
+                    via: Some(HopVia::Edge {
+                        edge_type: et,
+                        forward: fwd,
+                    }),
+                });
+                return Ok(ReachResult {
+                    paths: vec![p],
+                    targets: vec![next],
+                });
             }
             if visited.insert(next.clone()) {
                 let mut p = item.path.clone();
                 p.push(Hop {
                     node: next.clone(),
-                    via: Some(HopVia::Edge { edge_type: et, forward: fwd }),
+                    via: Some(HopVia::Edge {
+                        edge_type: et,
+                        forward: fwd,
+                    }),
                 });
                 // Discovery: a node reached by FORWARD-following the requested relation is a valid
                 // target of that relation.
-                if to.is_none()
-                    && fwd
-                    && relation.is_some()
-                    && targets_seen.insert(next.clone())
-                {
+                if to.is_none() && fwd && relation.is_some() && targets_seen.insert(next.clone()) {
                     targets.push(next.clone());
                     paths.push(p.clone());
                 }
-                q.push_back(QItem { path: p, bridges: item.bridges });
+                q.push_back(QItem {
+                    path: p,
+                    bridges: item.bridges,
+                });
             }
         }
 
@@ -281,7 +301,9 @@ pub fn reach(
                         // disagrees with the source's. A strong (exact-match, few-candidates)
                         // bridge is never gated on community mismatch alone — legit cross-document
                         // bridges of the same entity can legitimately land in a different community.
-                        if bridge_gate_weak(exact, n_other) && community_disagrees(src_community, cand_community) {
+                        if bridge_gate_weak(exact, n_other)
+                            && community_disagrees(src_community, cand_community)
+                        {
                             continue;
                         }
                         let conf = (bridge_confidence(exact, n_other)
@@ -294,9 +316,15 @@ pub fn reach(
                             let mut p = item.path.clone();
                             p.push(Hop {
                                 node: cand.clone(),
-                                via: Some(HopVia::Bridge { term: term.clone(), confidence: conf }),
+                                via: Some(HopVia::Bridge {
+                                    term: term.clone(),
+                                    confidence: conf,
+                                }),
                             });
-                            return Ok(ReachResult { paths: vec![p], targets: vec![cand] });
+                            return Ok(ReachResult {
+                                paths: vec![p],
+                                targets: vec![cand],
+                            });
                         }
                         // Relation-coherence prune (§7.5 MUST): keep the bridged branch alive only
                         // if the landing document's chain continues along the requested relation.
@@ -307,9 +335,15 @@ pub fn reach(
                             let mut p = item.path.clone();
                             p.push(Hop {
                                 node: cand.clone(),
-                                via: Some(HopVia::Bridge { term: term.clone(), confidence: conf }),
+                                via: Some(HopVia::Bridge {
+                                    term: term.clone(),
+                                    confidence: conf,
+                                }),
                             });
-                            q.push_back(QItem { path: p, bridges: item.bridges + 1 });
+                            q.push_back(QItem {
+                                path: p,
+                                bridges: item.bridges + 1,
+                            });
                         }
                     }
                 }
@@ -425,18 +459,39 @@ mod tests {
         let nodes: Vec<&str> = fwd.iter().map(|h| h.node.as_str()).collect();
         assert_eq!(nodes, vec!["a", "b", "c"]);
         assert_eq!(fwd[0].via, None);
-        assert_eq!(fwd[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
-        assert_eq!(fwd[2].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
+        assert_eq!(
+            fwd[1].via,
+            Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: true
+            })
+        );
+        assert_eq!(
+            fwd[2].via,
+            Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: true
+            })
+        );
 
         // Reverse direction is found too (undirected), with forward=false.
         let rev = reach(&g, &ont, "c", None, Some("a"), 5, 0).unwrap().paths[0].clone();
         let rnodes: Vec<&str> = rev.iter().map(|h| h.node.as_str()).collect();
         assert_eq!(rnodes, vec!["c", "b", "a"]);
-        assert_eq!(rev[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: false }));
+        assert_eq!(
+            rev[1].via,
+            Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: false
+            })
+        );
 
         // Unreachable within depth.
         node(&g, "z");
-        assert!(reach(&g, &ont, "a", None, Some("z"), 5, 0).unwrap().paths.is_empty());
+        assert!(reach(&g, &ont, "a", None, Some("z"), 5, 0)
+            .unwrap()
+            .paths
+            .is_empty());
         // Same node.
         let same = reach(&g, &ont, "a", None, Some("a"), 5, 0).unwrap().paths[0].clone();
         assert_eq!(same.len(), 1);
@@ -484,7 +539,10 @@ mod tests {
             node_type: "Entity".into(),
             label: label.into(),
             aliases: vec![],
-            prov: Provenance { source_path: doc.into(), ..prov() },
+            prov: Provenance {
+                source_path: doc.into(),
+                ..prov()
+            },
         })
         .unwrap();
     }
@@ -493,7 +551,12 @@ mod tests {
     /// salience ratio gate (2/total < 0.1 needs total > 20).
     fn fillers(g: &GraphStore, n: usize) {
         for i in 0..n {
-            dnode(g, &format!("filler{i}"), &format!("Fillerword{i}"), "filler.md");
+            dnode(
+                g,
+                &format!("filler{i}"),
+                &format!("Fillerword{i}"),
+                "filler.md",
+            );
         }
     }
 
@@ -516,8 +579,20 @@ mod tests {
         let nodes: Vec<&str> = hops.iter().map(|h| h.node.as_str()).collect();
         assert_eq!(nodes, vec!["a", "b", "c"]);
         assert_eq!(hops[0].via, None);
-        assert_eq!(hops[1].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
-        assert_eq!(hops[2].via, Some(HopVia::Edge { edge_type: "REL".into(), forward: true }));
+        assert_eq!(
+            hops[1].via,
+            Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: true
+            })
+        );
+        assert_eq!(
+            hops[2].via,
+            Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: true
+            })
+        );
     }
 
     #[test]
@@ -552,7 +627,11 @@ mod tests {
 
         let res = reach(&g, &ont, "A_fact", Some("REL"), None, 6, 1).unwrap();
         assert!(res.targets.contains(&"Target".to_string()));
-        let p = res.paths.iter().find(|p| p.last().unwrap().node == "Target").unwrap();
+        let p = res
+            .paths
+            .iter()
+            .find(|p| p.last().unwrap().node == "Target")
+            .unwrap();
         assert!(p.iter().any(|h| matches!(
             &h.via,
             Some(HopVia::Bridge { term, confidence }) if term.eq_ignore_ascii_case("Xanthium") && *confidence > 0.0
@@ -666,7 +745,15 @@ mod tests {
     fn set_communities(g: &GraphStore, rows: &[(&str, i64)]) {
         let rows: Vec<(String, NodeMeta)> = rows
             .iter()
-            .map(|(id, c)| ((*id).to_string(), NodeMeta { community: Some(*c), ..Default::default() }))
+            .map(|(id, c)| {
+                (
+                    (*id).to_string(),
+                    NodeMeta {
+                        community: Some(*c),
+                        ..Default::default()
+                    },
+                )
+            })
             .collect();
         g.replace_node_meta(&rows).unwrap();
     }
@@ -696,7 +783,11 @@ mod tests {
         assert!(res.targets.contains(&"Target2".to_string()));
 
         let conf_of = |target: &str| -> f32 {
-            let p = res.paths.iter().find(|p| p.last().unwrap().node == target).unwrap();
+            let p = res
+                .paths
+                .iter()
+                .find(|p| p.last().unwrap().node == target)
+                .unwrap();
             match &p.iter().rev().nth(1).unwrap().via {
                 Some(HopVia::Bridge { confidence, .. }) => *confidence,
                 other => panic!("expected a Bridge hop before {target}, got {other:?}"),
@@ -762,13 +853,21 @@ mod tests {
 
         let res = reach(&g, &ont, "A_fact", Some("REL"), None, 6, 1).unwrap();
         assert!(res.targets.contains(&"Target".to_string()));
-        let p = res.paths.iter().find(|p| p.last().unwrap().node == "Target").unwrap();
+        let p = res
+            .paths
+            .iter()
+            .find(|p| p.last().unwrap().node == "Target")
+            .unwrap();
         let via = &p.iter().rev().nth(1).unwrap().via;
         let conf = match via {
             Some(HopVia::Bridge { confidence, .. }) => *confidence,
             other => panic!("expected a Bridge hop before Target, got {other:?}"),
         };
-        assert_eq!(conf, bridge_confidence(true, 1), "no community data must be a no-op on confidence");
+        assert_eq!(
+            conf,
+            bridge_confidence(true, 1),
+            "no community data must be a no-op on confidence"
+        );
     }
 
     #[test]
@@ -785,6 +884,9 @@ mod tests {
         assert_eq!(res.targets, vec!["B_leaf".to_string()]);
         let hops = &res.paths[0];
         assert_eq!(hops.last().unwrap().node, "B_leaf");
-        assert!(matches!(hops.last().unwrap().via, Some(HopVia::Bridge { .. })));
+        assert!(matches!(
+            hops.last().unwrap().via,
+            Some(HopVia::Bridge { .. })
+        ));
     }
 }

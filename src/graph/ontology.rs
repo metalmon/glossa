@@ -590,7 +590,11 @@ impl Ontology {
         {
             return role;
         }
-        if CORE_EDGES.iter().chain(SOFT_EDGES).any(|c| c.to_lowercase() == norm) {
+        if CORE_EDGES
+            .iter()
+            .chain(SOFT_EDGES)
+            .any(|c| c.to_lowercase() == norm)
+        {
             return RelationRole::Grounding;
         }
         RelationRole::default()
@@ -658,9 +662,18 @@ strict = true
         // Fact (base reasoning node) is accepted even though undeclared.
         assert!(o.validate_node(crate::graph::FACT).is_ok());
         // LEADS_TO (base chaining relation) is accepted Fact->Fact even though undeclared.
-        assert!(o.validate_edge(crate::graph::LEADS_TO, crate::graph::FACT, crate::graph::FACT).is_ok());
+        assert!(o
+            .validate_edge(
+                crate::graph::LEADS_TO,
+                crate::graph::FACT,
+                crate::graph::FACT
+            )
+            .is_ok());
         // ...and it is a reasoning hop, not grounding.
-        assert!(matches!(o.relation_role(crate::graph::LEADS_TO), RelationRole::Chaining));
+        assert!(matches!(
+            o.relation_role(crate::graph::LEADS_TO),
+            RelationRole::Chaining
+        ));
         // The typed layer still validates normally.
         assert!(o.validate_edge("CAUSED_BY", "Symptom", "Cause").is_ok());
         assert!(o.validate_node("Bogus").is_err()); // unrelated unknown type still rejected
@@ -702,7 +715,10 @@ props = []
         let m = o.meta();
         assert_eq!(m.family.as_deref(), Some("compliance"));
         assert_eq!(m.tier, 1);
-        assert_eq!(m.aliases, vec!["normocontrol".to_string(), "conformance".to_string()]);
+        assert_eq!(
+            m.aliases,
+            vec!["normocontrol".to_string(), "conformance".to_string()]
+        );
 
         // absent → tier defaults to 2, family None, aliases empty
         let o2 = Ontology::parse("[entities.X]\nprops=[]\n").unwrap();
@@ -923,9 +939,18 @@ from = ["A"]
 to = ["B"]
 "#;
         let o = Ontology::parse(toml).unwrap();
-        assert!(matches!(o.relation_role("LEADS_TO"), RelationRole::Chaining));
-        assert!(matches!(o.relation_role("MENTIONS"), RelationRole::Chaining)); // absent -> default
-        assert!(matches!(o.relation_role("UNKNOWN_REL"), RelationRole::Chaining)); // unknown -> default
+        assert!(matches!(
+            o.relation_role("LEADS_TO"),
+            RelationRole::Chaining
+        ));
+        assert!(matches!(
+            o.relation_role("MENTIONS"),
+            RelationRole::Chaining
+        )); // absent -> default
+        assert!(matches!(
+            o.relation_role("UNKNOWN_REL"),
+            RelationRole::Chaining
+        )); // unknown -> default
     }
 
     #[test]
@@ -943,8 +968,14 @@ to = ["B"]
 role = "attribute"
 "#;
         let o = Ontology::parse(toml).unwrap();
-        assert!(matches!(o.relation_role("MENTIONS"), RelationRole::Grounding));
-        assert!(matches!(o.relation_role("HAS_NAME"), RelationRole::Attribute));
+        assert!(matches!(
+            o.relation_role("MENTIONS"),
+            RelationRole::Grounding
+        ));
+        assert!(matches!(
+            o.relation_role("HAS_NAME"),
+            RelationRole::Attribute
+        ));
     }
 
     #[test]
@@ -961,8 +992,14 @@ to = ["B"]
 role = "chaining"
 "#;
         let o = Ontology::parse(toml).unwrap();
-        assert!(matches!(o.relation_role("leads_to"), RelationRole::Chaining));
-        assert!(matches!(o.relation_role(" LEADS_TO "), RelationRole::Chaining));
+        assert!(matches!(
+            o.relation_role("leads_to"),
+            RelationRole::Chaining
+        ));
+        assert!(matches!(
+            o.relation_role(" LEADS_TO "),
+            RelationRole::Chaining
+        ));
     }
 
     #[test]
@@ -986,9 +1023,15 @@ role = "chaining"
             );
         }
         // Normalized (case/whitespace) variant of a core edge also reads Grounding.
-        assert!(matches!(o.relation_role(" mentions "), RelationRole::Grounding));
+        assert!(matches!(
+            o.relation_role(" mentions "),
+            RelationRole::Grounding
+        ));
         // A real declared chaining relation is unaffected.
-        assert!(matches!(o.relation_role("LEADS_TO"), RelationRole::Chaining));
+        assert!(matches!(
+            o.relation_role("LEADS_TO"),
+            RelationRole::Chaining
+        ));
     }
 
     #[test]
@@ -998,8 +1041,14 @@ role = "chaining"
         // salience/coherence FP-control is undermined by similarity noise). The viewer already
         // excludes SIMILAR from traversal; the reasoning layer must too. Undeclared → Grounding.
         let o = Ontology::default();
-        assert!(matches!(o.relation_role("SIMILAR"), RelationRole::Grounding));
-        assert!(matches!(o.relation_role(" similar "), RelationRole::Grounding));
+        assert!(matches!(
+            o.relation_role("SIMILAR"),
+            RelationRole::Grounding
+        ));
+        assert!(matches!(
+            o.relation_role(" similar "),
+            RelationRole::Grounding
+        ));
     }
 
     #[test]

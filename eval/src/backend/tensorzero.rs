@@ -67,11 +67,11 @@ impl EpisodePolicy {
 enum ToolKind {
     Corpus,         // search/read/grep — static KB index; dedup once, never invalidate
     NotebookRead,   // ls/glob — reflect notebook state; invalidated by any notebook write
-    GraphRead,      // glossary/related/neighbors/path/resolve/graph_stats — invalidated by any graph mutation
+    GraphRead, // glossary/related/neighbors/path/resolve/graph_stats — invalidated by any graph mutation
     NotebookMutate, // note/del — invalidates notebook reads
-    GraphMutate,    // graph_upsert/delete/update/generalize — invalidates graph reads
-    CorpusMutate,   // index/reindex/purge — invalidates everything
-    Control,        // done/sop_advance/get_task — never deduped
+    GraphMutate, // graph_upsert/delete/update/generalize — invalidates graph reads
+    CorpusMutate, // index/reindex/purge — invalidates everything
+    Control,   // done/sop_advance/get_task — never deduped
 }
 
 fn tool_kind(name: &str) -> ToolKind {
@@ -918,7 +918,10 @@ mod tests {
         })];
         let reply = turn_reply_from_content(content, None);
         assert_eq!(reply.tool_calls[0].args, json!({"path": "a.md"}));
-        assert_eq!(reply.raw["content"][0]["arguments"], json!("{\"path\":\"a.md\"}"));
+        assert_eq!(
+            reply.raw["content"][0]["arguments"],
+            json!("{\"path\":\"a.md\"}")
+        );
     }
 
     #[test]

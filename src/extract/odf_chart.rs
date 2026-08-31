@@ -165,7 +165,10 @@ pub(crate) fn parse_odf_chart_xml(xml: &str) -> OdfChartData {
 fn cell(text: &str) -> TableCell {
     TableCell {
         content: vec![Element::Paragraph(Paragraph {
-            content: vec![InlineContent::Text(TextSpan { text: text.to_string(), ..Default::default() })],
+            content: vec![InlineContent::Text(TextSpan {
+                text: text.to_string(),
+                ..Default::default()
+            })],
             ..Default::default()
         })],
         ..Default::default()
@@ -177,9 +180,15 @@ fn cell(text: &str) -> TableCell {
 fn rows_to_table(rows: &[Vec<String>]) -> Table {
     let table_rows = rows
         .iter()
-        .map(|r| TableRow { cells: r.iter().map(|c| cell(c)).collect(), ..Default::default() })
+        .map(|r| TableRow {
+            cells: r.iter().map(|c| cell(c)).collect(),
+            ..Default::default()
+        })
         .collect();
-    Table { rows: table_rows, ..Default::default() }
+    Table {
+        rows: table_rows,
+        ..Default::default()
+    }
 }
 
 fn odf_ext(ext: &str) -> bool {
@@ -261,7 +270,11 @@ fn parse_cell_addr(part: &str, inherit_sheet: &str) -> Option<CellAddr> {
             None => (String::new(), part.to_string()),
         }
     };
-    let sheet = if sheet_part.is_empty() { inherit_sheet.to_string() } else { sheet_part };
+    let sheet = if sheet_part.is_empty() {
+        inherit_sheet.to_string()
+    } else {
+        sheet_part
+    };
     let stripped: String = cell_part.chars().filter(|&c| c != '$').collect();
     let split_at = stripped.find(|c: char| c.is_ascii_digit())?;
     let (col_s, row_s) = stripped.split_at(split_at);
@@ -305,7 +318,13 @@ fn parse_cell_range(addr: &str) -> Option<CellRange> {
                 r2: a1.row.max(a2.row),
             })
         }
-        None => Some(CellRange { sheet: a1.sheet, c1: a1.col, r1: a1.row, c2: a1.col, r2: a1.row }),
+        None => Some(CellRange {
+            sheet: a1.sheet,
+            c1: a1.col,
+            r1: a1.row,
+            c2: a1.col,
+            r2: a1.row,
+        }),
     }
 }
 
@@ -329,7 +348,12 @@ fn grid_cell(grid: &[Vec<String>], row: usize, col: usize) -> Option<String> {
 /// Over budget: truncate (best-effort, matching the file's other rows) and
 /// warn once, rather than refuse outright or allocate unbounded. `what` and
 /// `file_ctx` are only used to name the range in that warning.
-fn grid_range_values(grid: &[Vec<String>], range: &CellRange, what: &str, file_ctx: &str) -> Vec<String> {
+fn grid_range_values(
+    grid: &[Vec<String>],
+    range: &CellRange,
+    what: &str,
+    file_ctx: &str,
+) -> Vec<String> {
     let r2 = range.r1 + (range.r2 - range.r1).min(MAX_REPEAT - 1);
     let c2 = range.c1 + (range.c2 - range.c1).min(MAX_REPEAT - 1);
     let rows_n = r2 - range.r1 + 1;
@@ -340,7 +364,9 @@ fn grid_range_values(grid: &[Vec<String>], range: &CellRange, what: &str, file_c
         tracing::warn!(
             "odf {file_ctx}: {what} range on sheet {:?} (cols {}..{c2}, rows {}..{r2}) spans \
              {rows_n}x{cols_n}={total} cells, exceeds cap {MAX_GRID_CELLS}; truncating",
-            range.sheet, range.c1, range.r1
+            range.sheet,
+            range.c1,
+            range.r1
         );
     }
     let mut out = Vec::with_capacity(budget);
@@ -388,7 +414,12 @@ fn resolve_single_cell(addr: &str, grids: &SheetGrid) -> Option<String> {
 /// Best-effort/infallible: `None` means "give up on this chart" (bad sheet,
 /// bad range, or no series), never a panic. `path`/`chart_name` are only
 /// used to name the file/chart in an oversized-range warning, if one fires.
-fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid, path: &Path, chart_name: &str) -> Option<Vec<Vec<String>>> {
+fn resolve_ref_chart(
+    cd: &OdfChartData,
+    grids: &SheetGrid,
+    path: &Path,
+    chart_name: &str,
+) -> Option<Vec<Vec<String>>> {
     let file_ctx = format!("chart {chart_name} in {}", path.display());
     let cat_range = cd.categories_ref.as_deref().and_then(parse_cell_range)?;
     let cat_grid = grids.get(&cat_range.sheet)?;
@@ -400,10 +431,18 @@ fn resolve_ref_chart(cd: &OdfChartData, grids: &SheetGrid, path: &Path, chart_na
     let mut header = vec![String::new()];
     let mut series_values: Vec<Vec<String>> = Vec::new();
     for (i, s) in cd.series_refs.iter().enumerate() {
-        let Some(values_range) = s.values_ref.as_deref().and_then(parse_cell_range) else { continue };
-        let Some(values_grid) = grids.get(&values_range.sheet) else { continue };
-        let values =
-            grid_range_values(values_grid, &values_range, &format!("series {} values", i + 1), &file_ctx);
+        let Some(values_range) = s.values_ref.as_deref().and_then(parse_cell_range) else {
+            continue;
+        };
+        let Some(values_grid) = grids.get(&values_range.sheet) else {
+            continue;
+        };
+        let values = grid_range_values(
+            values_grid,
+            &values_range,
+            &format!("series {} values", i + 1),
+            &file_ctx,
+        );
         let label = s
             .label_ref
             .as_deref()
@@ -577,7 +616,11 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
                         // at table-row End. Repeated cells are never treated
                         // as spanned too (repeat + span together isn't a
                         // realistic file shape).
-                        span_owed = if col_repeat == 1 { col_span.saturating_sub(1) } else { 0 };
+                        span_owed = if col_repeat == 1 {
+                            col_span.saturating_sub(1)
+                        } else {
+                            0
+                        };
                     }
                     buf.clear();
                     value_attr = None;
@@ -741,7 +784,10 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         let body = table_to_markdown(&table);
         // number by emitted charts (out.len()), not scan index, so a chart
         // following a skipped non-chart Object doesn't get an inflated number.
-        let title = cd.title.clone().unwrap_or_else(|| format!("Chart {}", out.len() + 1));
+        let title = cd
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Chart {}", out.len() + 1));
         let header = if cd.kind.is_empty() {
             format!("Chart: {}", title)
         } else {
@@ -794,12 +840,30 @@ mod tests {
     #[test]
     fn parses_title_kind_rows_and_ignores_axis_title() {
         let cd = parse_odf_chart_xml(CHART_XML);
-        assert_eq!(cd.title.as_deref(), Some("Sales by quarter"), "chart title mismatch: {cd:?}");
-        assert_ne!(cd.title.as_deref(), Some("Quarter"), "axis title must not be adopted as chart title");
+        assert_eq!(
+            cd.title.as_deref(),
+            Some("Sales by quarter"),
+            "chart title mismatch: {cd:?}"
+        );
+        assert_ne!(
+            cd.title.as_deref(),
+            Some("Quarter"),
+            "axis title must not be adopted as chart title"
+        );
         assert_eq!(cd.kind, "bar");
         assert_eq!(cd.rows.len(), 2, "expected header + one data row: {cd:?}");
-        assert_eq!(cd.rows[0], vec!["".to_string(), "Series 1".to_string(), "Series 2".to_string()]);
-        assert_eq!(cd.rows[1], vec!["Q1".to_string(), "4.3".to_string(), "2.4".to_string()]);
+        assert_eq!(
+            cd.rows[0],
+            vec![
+                "".to_string(),
+                "Series 1".to_string(),
+                "Series 2".to_string()
+            ]
+        );
+        assert_eq!(
+            cd.rows[1],
+            vec!["Q1".to_string(), "4.3".to_string(), "2.4".to_string()]
+        );
     }
 
     #[test]
@@ -810,7 +874,9 @@ mod tests {
     }
 
     fn charts(fixture: &str) -> Vec<Chunk> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
         let bytes = std::fs::read(&path).unwrap();
         let ext = fixture.rsplit('.').next().unwrap();
         super::extract_odf_charts(&path, &bytes, ext)
@@ -820,11 +886,21 @@ mod tests {
     fn ods_chart_yields_data_table_chunk() {
         let cs = charts("sample_chart.ods");
         assert!(!cs.is_empty(), "expected a chart chunk");
-        let t = cs.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        let t = cs
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(t.starts_with("Chart:"), "chart header missing:\n{t}");
         assert!(t.contains("Sales by quarter"), "chart title missing:\n{t}");
-        assert!(t.contains("Series 1") && t.contains("4.3"), "series/value data missing:\n{t}");
-        assert!(t.contains('|') && t.contains("---"), "GFM table missing:\n{t}");
+        assert!(
+            t.contains("Series 1") && t.contains("4.3"),
+            "series/value data missing:\n{t}"
+        );
+        assert!(
+            t.contains('|') && t.contains("---"),
+            "GFM table missing:\n{t}"
+        );
         assert!(cs.iter().all(|c| c.file_type == "ods"));
     }
 
@@ -840,11 +916,18 @@ mod tests {
             chunks.iter().any(|c| c.text.starts_with("Chart:")),
             "expected a chart chunk, got: {chunks:?}"
         );
-        let chart = chunks.iter().find(|c| c.text.starts_with("Chart:")).unwrap();
+        let chart = chunks
+            .iter()
+            .find(|c| c.text.starts_with("Chart:"))
+            .unwrap();
         assert!(chart.text.contains("Sales by quarter"));
         assert!(chart.text.contains("Series 1"));
         assert!(chart.text.contains("4.3"));
-        assert!(chart.text.contains("---"), "expected a GFM table:\n{}", chart.text);
+        assert!(
+            chart.text.contains("---"),
+            "expected a GFM table:\n{}",
+            chart.text
+        );
     }
 
     /// FIX 4: ODF chart extraction is container-agnostic — the same
@@ -853,16 +936,24 @@ mod tests {
     #[test]
     fn odf_extractor_yields_chart_chunk_from_odt_and_odp() {
         for fixture in ["sample_chart.odt", "sample_chart.odp"] {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {fixture}: {e}"));
-            let chunks = OdfExtractor.extract(&path, &bytes).unwrap_or_else(|e| panic!("extract {fixture}: {e}"));
+            let chunks = OdfExtractor
+                .extract(&path, &bytes)
+                .unwrap_or_else(|e| panic!("extract {fixture}: {e}"));
             let chart = chunks
                 .iter()
                 .find(|c| c.text.starts_with("Chart: Sales by quarter"))
                 .unwrap_or_else(|| panic!("{fixture}: expected a chart chunk, got: {chunks:?}"));
             assert!(chart.text.contains("Series 1"), "{fixture}: {}", chart.text);
             assert!(chart.text.contains("4.3"), "{fixture}: {}", chart.text);
-            assert!(chart.text.contains('|') && chart.text.contains("---"), "{fixture}: expected a GFM table:\n{}", chart.text);
+            assert!(
+                chart.text.contains('|') && chart.text.contains("---"),
+                "{fixture}: expected a GFM table:\n{}",
+                chart.text
+            );
         }
     }
 
@@ -877,11 +968,15 @@ mod tests {
             let mut zw = zip::ZipWriter::new(cursor);
             let opts = zip::write::SimpleFileOptions::default();
             zw.start_file("Object 1/content.xml", opts).unwrap();
-            zw.write_all(b"<chart:chart not xml at all <<< \x00\x01\x02 garbage").unwrap();
+            zw.write_all(b"<chart:chart not xml at all <<< \x00\x01\x02 garbage")
+                .unwrap();
             zw.finish().unwrap();
         }
         let cs = extract_odf_charts(Path::new("garbage.ods"), &buf, "ods");
-        assert!(cs.is_empty(), "garbage chart part should yield no chunks, got: {cs:?}");
+        assert!(
+            cs.is_empty(),
+            "garbage chart part should yield no chunks, got: {cs:?}"
+        );
     }
 
     /// Fallback chart numbering must count EMITTED charts, not the scan-loop
@@ -931,7 +1026,10 @@ mod tests {
         }
         let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods");
         assert_eq!(cs.len(), 1, "expected exactly one chart chunk, got: {cs:?}");
-        assert_eq!(cs[0].location, "Chart 1", "untitled chart after a skipped object must be Chart 1: {cs:?}");
+        assert_eq!(
+            cs[0].location, "Chart 1",
+            "untitled chart after a skipped object must be Chart 1: {cs:?}"
+        );
     }
 
     /// A truncated/malformed zip entirely must not panic either.
@@ -962,7 +1060,11 @@ mod tests {
         // inherit the first half's sheet.
         let r = parse_cell_range("Sheet1.$B$2:.$B$4").expect("range should parse");
         assert_eq!(r.sheet, "Sheet1");
-        assert_eq!((r.c1, r.r1, r.c2, r.r2), (2, 2, 2, 4), "B col=2, rows 2..4: {r:?}");
+        assert_eq!(
+            (r.c1, r.r1, r.c2, r.r2),
+            (2, 2, 2, 4),
+            "B col=2, rows 2..4: {r:?}"
+        );
 
         // Single cell, no ':'.
         let single = parse_cell_range("Sheet1.$B$1").expect("single cell should parse");
@@ -985,17 +1087,26 @@ mod tests {
     fn parse_cell_range_handles_quoted_sheet_name_with_dots() {
         let r = parse_cell_range("'My.Sheet'.$B$2").expect("quoted-sheet range should parse");
         assert_eq!(r.sheet, "My.Sheet", "quoted sheet name mismatch: {r:?}");
-        assert_eq!((r.c1, r.r1, r.c2, r.r2), (2, 2, 2, 2), "col B, row 2: {r:?}");
+        assert_eq!(
+            (r.c1, r.r1, r.c2, r.r2),
+            (2, 2, 2, 2),
+            "col B, row 2: {r:?}"
+        );
 
         // A range: the second half omits the sheet and must inherit the
         // (quoted) first half's sheet name.
-        let range = parse_cell_range("'My.Sheet'.$B$2:.$B$4").expect("quoted-sheet range should parse");
+        let range =
+            parse_cell_range("'My.Sheet'.$B$2:.$B$4").expect("quoted-sheet range should parse");
         assert_eq!(range.sheet, "My.Sheet");
         assert_eq!((range.r1, range.r2), (2, 4));
 
         // `''` inside the quotes is an escaped literal `'`.
-        let escaped = parse_cell_range("'It''s Mine'.$A$1").expect("escaped-quote sheet name should parse");
-        assert_eq!(escaped.sheet, "It's Mine", "escaped quote not un-doubled: {escaped:?}");
+        let escaped =
+            parse_cell_range("'It''s Mine'.$A$1").expect("escaped-quote sheet name should parse");
+        assert_eq!(
+            escaped.sheet, "It's Mine",
+            "escaped quote not un-doubled: {escaped:?}"
+        );
 
         // Unquoted names must keep working.
         let plain = parse_cell_range("Sheet1.$B$2").expect("plain sheet name should still parse");
@@ -1025,9 +1136,17 @@ mod tests {
         let row = &sheet[0];
         // a, dup, dup, dup, z: the repeat=3 cell must expand to 3 positions
         // so the trailing "z" lands at column E (5), not column C (3).
-        assert_eq!(row, &vec!["a", "dup", "dup", "dup", "z"], "repeat expansion mismatch: {row:?}");
+        assert_eq!(
+            row,
+            &vec!["a", "dup", "dup", "dup", "z"],
+            "repeat expansion mismatch: {row:?}"
+        );
         assert_eq!(grid_cell(sheet, 1, 1).as_deref(), Some("a"));
-        assert_eq!(grid_cell(sheet, 1, 5).as_deref(), Some("z"), "z must be at col 5 after expansion");
+        assert_eq!(
+            grid_cell(sheet, 1, 5).as_deref(),
+            Some("z"),
+            "z must be at col 5 after expansion"
+        );
     }
 
     /// FIX 1: a `table:number-columns-spanned` cell must widen the grid
@@ -1128,10 +1247,16 @@ mod tests {
             "last row col A truncated by pad-exhausted budget: {:?}",
             sheet.last()
         );
-        assert_eq!(grid_cell(sheet, N_ROWS, 2).as_deref(), Some(format!("r{last}c2").as_str()));
+        assert_eq!(
+            grid_cell(sheet, N_ROWS, 2).as_deref(),
+            Some(format!("r{last}c2").as_str())
+        );
         // The huge trailing pad itself must not have consumed the grid budget.
         let total: usize = sheet.iter().map(|r| r.len()).sum();
-        assert!(total < MAX_GRID_CELLS, "trailing pad not clamped away, total cells materialized={total}");
+        assert!(
+            total < MAX_GRID_CELLS,
+            "trailing pad not clamped away, total cells materialized={total}"
+        );
     }
 
     /// The committed ref-only fixture: `Object 1/content.xml` has a
@@ -1142,18 +1267,32 @@ mod tests {
     /// then Q1/4.3, Q2/2.5, Q3/3.5.
     #[test]
     fn ref_only_chart_resolves_against_sheet_cells() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
         let bytes = std::fs::read(&path).unwrap();
         let cs = extract_odf_charts(&path, &bytes, "ods");
         assert!(!cs.is_empty(), "expected a resolved ref-only chart chunk");
-        let t = cs.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        let t = cs
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             t.starts_with("Chart: Sales by quarter (bar)"),
             "chart header mismatch:\n{t}"
         );
-        assert!(t.contains('|') && t.contains("---"), "GFM table missing:\n{t}");
-        assert!(t.contains("Series 1"), "resolved series label missing:\n{t}");
-        assert!(t.contains("Q1") && t.contains("Q2") && t.contains("Q3"), "category labels missing:\n{t}");
+        assert!(
+            t.contains('|') && t.contains("---"),
+            "GFM table missing:\n{t}"
+        );
+        assert!(
+            t.contains("Series 1"),
+            "resolved series label missing:\n{t}"
+        );
+        assert!(
+            t.contains("Q1") && t.contains("Q2") && t.contains("Q3"),
+            "category labels missing:\n{t}"
+        );
         assert!(
             t.contains("4.3") && t.contains("2.5") && t.contains("3.5"),
             "resolved values missing:\n{t}"
@@ -1164,18 +1303,31 @@ mod tests {
     /// chart-scan helper), matching how `sample_chart.ods` is covered above.
     #[test]
     fn odf_extractor_resolves_ref_only_chart_end_to_end() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
         let bytes = std::fs::read(&path).unwrap();
         let chunks = OdfExtractor.extract(&path, &bytes).unwrap();
         let chart = chunks
             .iter()
             .find(|c| c.text.starts_with("Chart:"))
             .unwrap_or_else(|| panic!("expected a chart chunk, got: {chunks:?}"));
-        assert!(chart.text.starts_with("Chart: Sales by quarter (bar)"), "{}", chart.text);
+        assert!(
+            chart.text.starts_with("Chart: Sales by quarter (bar)"),
+            "{}",
+            chart.text
+        );
         assert!(chart.text.contains("Series 1"));
-        assert!(chart.text.contains("Q1") && chart.text.contains("Q2") && chart.text.contains("Q3"));
-        assert!(chart.text.contains("4.3") && chart.text.contains("2.5") && chart.text.contains("3.5"));
-        assert!(chart.text.contains("---"), "expected a GFM table:\n{}", chart.text);
+        assert!(
+            chart.text.contains("Q1") && chart.text.contains("Q2") && chart.text.contains("Q3")
+        );
+        assert!(
+            chart.text.contains("4.3") && chart.text.contains("2.5") && chart.text.contains("3.5")
+        );
+        assert!(
+            chart.text.contains("---"),
+            "expected a GFM table:\n{}",
+            chart.text
+        );
     }
 
     /// A ref-only chart whose series/categories point at a sheet that does
@@ -1232,7 +1384,11 @@ mod tests {
             zw.finish().unwrap();
         }
         let cs = extract_odf_charts(Path::new("mixed_ref.ods"), &buf, "ods");
-        assert_eq!(cs.len(), 1, "unresolvable ref chart must be skipped, good chart kept: {cs:?}");
+        assert_eq!(
+            cs.len(),
+            1,
+            "unresolvable ref chart must be skipped, good chart kept: {cs:?}"
+        );
         assert!(
             cs[0].text.contains("Sales by quarter"),
             "expected the surviving local-table chart: {cs:?}"
@@ -1283,7 +1439,10 @@ mod tests {
             zw.finish().unwrap();
         }
         let cs = extract_odf_charts(Path::new("bad_range.ods"), &buf, "ods");
-        assert!(cs.is_empty(), "bad series range must skip the chart, not panic: {cs:?}");
+        assert!(
+            cs.is_empty(),
+            "bad series range must skip the chart, not panic: {cs:?}"
+        );
     }
 
     /// A crafted 2D range (`$A$1:$ZZ$4096` ≈ 4096 rows x 702 cols ≈ 2.9M
@@ -1306,7 +1465,11 @@ mod tests {
             "expected result capped at MAX_GRID_CELLS ({MAX_GRID_CELLS}), got {}",
             out.len()
         );
-        assert!(!out.is_empty(), "expected a truncated but non-empty result: {}", out.len());
+        assert!(
+            !out.is_empty(),
+            "expected a truncated but non-empty result: {}",
+            out.len()
+        );
     }
 
     /// Same adversarial range, but through the full `extract_odf_charts`

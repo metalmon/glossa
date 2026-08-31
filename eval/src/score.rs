@@ -77,8 +77,14 @@ fn is_token_subslice(needle: &[String], haystack: &[String]) -> bool {
 /// while still rejecting an over-hop to a broader entity (`Lakeshore Region` shares no
 /// run with `Riverton District`). Token-level, so `yes` never matches inside `yesterday`.
 pub fn contains_match(pred: &str, gold: &str) -> bool {
-    let p: Vec<String> = normalize(pred).split_whitespace().map(str::to_string).collect();
-    let g: Vec<String> = normalize(gold).split_whitespace().map(str::to_string).collect();
+    let p: Vec<String> = normalize(pred)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let g: Vec<String> = normalize(gold)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     if p.is_empty() || g.is_empty() {
         return false;
     }
@@ -279,10 +285,19 @@ mod alias_score_tests {
     #[test]
     fn exact_match_any_accepts_primary_or_alias() {
         let golds = vec!["Barack Obama".to_string(), "Obama".to_string()];
-        assert!(exact_match_any("obama", &golds), "matches an alias, normalized");
-        assert!(exact_match_any("Barack Obama", &golds), "matches the primary");
+        assert!(
+            exact_match_any("obama", &golds),
+            "matches an alias, normalized"
+        );
+        assert!(
+            exact_match_any("Barack Obama", &golds),
+            "matches the primary"
+        );
         assert!(!exact_match_any("Joe Biden", &golds), "matches neither");
-        assert!(!exact_match_any("anything", &[]), "empty gold set never matches");
+        assert!(
+            !exact_match_any("anything", &[]),
+            "empty gold set never matches"
+        );
     }
 
     #[test]
@@ -316,12 +331,18 @@ mod alias_score_tests {
             "obama",
             &["Barack Obama".to_string(), "Obama".to_string()]
         ));
-        assert!(!relaxed_match_any("anything", &[]), "empty gold set never matches");
+        assert!(
+            !relaxed_match_any("anything", &[]),
+            "empty gold set never matches"
+        );
     }
 
     #[test]
     fn token_f1_any_takes_the_best_gold() {
-        let golds = vec!["completely different".to_string(), "new york city".to_string()];
+        let golds = vec![
+            "completely different".to_string(),
+            "new york city".to_string(),
+        ];
         assert!(
             (token_f1_any("New York City", &golds) - 1.0).abs() < 1e-6,
             "F1 is the max over golds (perfect on the second)"

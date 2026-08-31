@@ -33,7 +33,10 @@ fn collects_ooxml_chart_chunks() {
         .filter(|c| c.file_type == "docx" && c.text.starts_with("Chart:"))
         .count();
     // sample_chart.docx has exactly one chart; sample.docx has none
-    assert_eq!(docx_chart_chunks, 1, "expected exactly one docx chart chunk");
+    assert_eq!(
+        docx_chart_chunks, 1,
+        "expected exactly one docx chart chunk"
+    );
 }
 
 #[test]
@@ -60,28 +63,44 @@ fn collects_odf_chart_chunks() {
         .iter()
         .filter(|c| c.file_type == "ods" && c.text.starts_with("Chart:"))
         .collect();
-    assert_eq!(ods_chart_chunks.len(), 2, "expected two ods chart chunks: {ods_chart_chunks:?}");
+    assert_eq!(
+        ods_chart_chunks.len(),
+        2,
+        "expected two ods chart chunks: {ods_chart_chunks:?}"
+    );
 
     // Both fixtures happen to share the title/kind ("Sales by quarter (bar)")
     // and the Series 1 values, so disambiguate the ref-only chart by the
     // absence of "Series 2" — only sample_chart.ods's local table has it.
     let ref_chart = ods_chart_chunks
         .iter()
-        .find(|c| c.text.starts_with("Chart: Sales by quarter (bar)") && !c.text.contains("Series 2"))
+        .find(|c| {
+            c.text.starts_with("Chart: Sales by quarter (bar)") && !c.text.contains("Series 2")
+        })
         .unwrap_or_else(|| panic!("no resolved ref-only chart chunk: {ods_chart_chunks:?}"));
     assert!(ref_chart.text.contains("Series 1"), "{}", ref_chart.text);
     assert!(
-        ref_chart.text.contains("Q1") && ref_chart.text.contains("Q2") && ref_chart.text.contains("Q3"),
+        ref_chart.text.contains("Q1")
+            && ref_chart.text.contains("Q2")
+            && ref_chart.text.contains("Q3"),
         "{}",
         ref_chart.text
     );
-    assert!(ref_chart.text.contains("4.3") && ref_chart.text.contains("2.5") && ref_chart.text.contains("3.5"));
+    assert!(
+        ref_chart.text.contains("4.3")
+            && ref_chart.text.contains("2.5")
+            && ref_chart.text.contains("3.5")
+    );
 
     let local_table_chart = ods_chart_chunks
         .iter()
         .find(|c| c.text.contains("Series 2"))
         .unwrap_or_else(|| panic!("no local-table chart chunk: {ods_chart_chunks:?}"));
-    assert!(local_table_chart.text.contains("4.4"), "{}", local_table_chart.text);
+    assert!(
+        local_table_chart.text.contains("4.4"),
+        "{}",
+        local_table_chart.text
+    );
 
     // FIX 4: chart extraction is container-agnostic — sample_chart.odt and
     // sample_chart.odp carry the same embedded local-table chart and must
@@ -91,12 +110,20 @@ fn collects_odf_chart_chunks() {
         .find(|c| c.file_type == "odt" && c.text.starts_with("Chart:"))
         .unwrap_or_else(|| panic!("expected an odt chart chunk (sample_chart.odt)"));
     assert!(odt_chart.text.contains("Series 1"), "{}", odt_chart.text);
-    assert!(odt_chart.text.contains('|') && odt_chart.text.contains("---"), "{}", odt_chart.text);
+    assert!(
+        odt_chart.text.contains('|') && odt_chart.text.contains("---"),
+        "{}",
+        odt_chart.text
+    );
 
     let odp_chart = chunks
         .iter()
         .find(|c| c.file_type == "odp" && c.text.starts_with("Chart:"))
         .unwrap_or_else(|| panic!("expected an odp chart chunk (sample_chart.odp)"));
     assert!(odp_chart.text.contains("Series 1"), "{}", odp_chart.text);
-    assert!(odp_chart.text.contains('|') && odp_chart.text.contains("---"), "{}", odp_chart.text);
+    assert!(
+        odp_chart.text.contains('|') && odp_chart.text.contains("---"),
+        "{}",
+        odp_chart.text
+    );
 }

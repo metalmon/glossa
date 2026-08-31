@@ -196,10 +196,7 @@ mod tests {
         // (word-order/inflection-tolerant term sets).
         let labels = vec![
             ("s1".to_string(), "Link loss Modbus".to_string()),
-            (
-                "s2".to_string(),
-                "Modbus link losses periodic".to_string(),
-            ),
+            ("s2".to_string(), "Modbus link losses periodic".to_string()),
             ("x".to_string(), "Fuse replacement".to_string()),
         ];
         let pairs = label_jaccard(&labels, 0.4);
@@ -228,10 +225,7 @@ mod tests {
         // English labels exercise the multilang (Latin) analyzer in the in-RAM BM25 index.
         let labels = vec![
             ("s1".to_string(), "Link loss Modbus".to_string()),
-            (
-                "s2".to_string(),
-                "Modbus periodic link losses".to_string(),
-            ),
+            ("s2".to_string(), "Modbus periodic link losses".to_string()),
             ("x".to_string(), "Power fuse replacement".to_string()),
         ];
         // relative threshold: paraphrase scores a high fraction of self-score; unrelated never matches

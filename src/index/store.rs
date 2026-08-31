@@ -180,10 +180,7 @@ impl RankedHit {
         } else {
             self.location.as_str()
         };
-        format!(
-            "{}#{} · {} · {}",
-            self.path, self.ord, label, self.snippet
-        )
+        format!("{}#{} · {} · {}", self.path, self.ord, label, self.snippet)
     }
 }
 
@@ -1868,12 +1865,26 @@ mod incremental_tests {
         // hard-error extractor like office exercises this path.)
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("ok.md"), b"# T\nhello world\n").unwrap();
-        std::fs::write(dir.path().join("bad.doc"), b"this is not a real CFB .doc file").unwrap();
+        std::fs::write(
+            dir.path().join("bad.doc"),
+            b"this is not a real CFB .doc file",
+        )
+        .unwrap();
         let stats = index_dir(dir.path(), false).expect("a corrupt .doc must not abort the index");
-        assert!(stats.added >= 1, "the good doc is indexed despite the corrupt one");
+        assert!(
+            stats.added >= 1,
+            "the good doc is indexed despite the corrupt one"
+        );
         // The failure is collected (not lost): reported to the CLI as an end-of-run error summary.
-        assert_eq!(stats.errors.len(), 1, "the corrupt .doc is recorded as an error");
-        assert!(stats.errors[0].0.contains("bad.doc"), "error names the offending file");
+        assert_eq!(
+            stats.errors.len(),
+            1,
+            "the corrupt .doc is recorded as an error"
+        );
+        assert!(
+            stats.errors[0].0.contains("bad.doc"),
+            "error names the offending file"
+        );
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx
             .search("hello", 10)
@@ -2171,11 +2182,7 @@ mod incremental_tests {
     fn index_dir_indexes_loose_images() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("Diagrams")).unwrap();
-        std::fs::write(
-            dir.path().join("Diagrams").join("bus.png"),
-            b"\x89PNG\r\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("Diagrams").join("bus.png"), b"\x89PNG\r\n").unwrap();
         index_dir(dir.path(), true).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
@@ -2762,7 +2769,8 @@ mod search_tests {
         );
         // Combined with a trailing section anchor (`@<path>#<ord>`), both are stripped.
         assert_eq!(
-            idx.canonical_document_path("@dir/manual.pdf#350").as_deref(),
+            idx.canonical_document_path("@dir/manual.pdf#350")
+                .as_deref(),
             Some("dir/manual.pdf")
         );
         // A real path starting with `@` resolves to itself — the strip is a fallback only.
@@ -2937,7 +2945,10 @@ mod search_tests {
         let anded_out = idx
             .search_filtered("swap", 10, Some("**/docB.md"), None, Some("docA.md"))
             .unwrap();
-        assert!(anded_out.is_empty(), "glob and scope must be ANDed: {anded_out:?}");
+        assert!(
+            anded_out.is_empty(),
+            "glob and scope must be ANDed: {anded_out:?}"
+        );
 
         // A non-matching scope glob returns nothing.
         let none = idx
@@ -3438,7 +3449,10 @@ mod tests {
             dir.path(),
             &[(format!("sub{}b.md", std::path::MAIN_SEPARATOR), sub_sig)],
         );
-        assert!(u2.contains("c:sub") && !u2.contains("c:"), "only sub flagged: {u2:?}");
+        assert!(
+            u2.contains("c:sub") && !u2.contains("c:"),
+            "only sub flagged: {u2:?}"
+        );
     }
 
     #[test]
@@ -3451,11 +3465,21 @@ mod tests {
         stored.insert("c:".to_string(), 50u128);
         stored.insert("c:sub".to_string(), 150u128);
         let unsettled: std::collections::HashSet<String> =
-            ["c:sub".to_string(), "c:new".to_string()].into_iter().collect();
+            ["c:sub".to_string(), "c:new".to_string()]
+                .into_iter()
+                .collect();
         let out = settled_dirsig(&cur, &stored, &unsettled);
         assert_eq!(out.get("c:"), Some(&100), "settled dir advances to current");
-        assert_eq!(out.get("c:sub"), Some(&150), "unsettled dir keeps its stored value");
-        assert_eq!(out.get("c:new"), None, "unsettled newly-added dir is dropped");
+        assert_eq!(
+            out.get("c:sub"),
+            Some(&150),
+            "unsettled dir keeps its stored value"
+        );
+        assert_eq!(
+            out.get("c:new"),
+            None,
+            "unsettled newly-added dir is dropped"
+        );
     }
 
     #[test]

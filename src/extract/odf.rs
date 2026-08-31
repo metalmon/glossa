@@ -31,11 +31,12 @@ const MAX_TABLE_CELLS: usize = 1_000_000;
 /// `MAX_REPEAT`. Clamping is logged (never silent) so a truncated expansion is
 /// discoverable rather than looking like a parser bug.
 fn bounded_repeat(raw: Option<String>, attr_name: &str, ext: &str) -> usize {
-    let n = raw.and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1);
+    let n = raw
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
     if n > MAX_REPEAT {
-        tracing::warn!(
-            "odf {attr_name}={n} exceeds cap {MAX_REPEAT} in .{ext} file; clamping"
-        );
+        tracing::warn!("odf {attr_name}={n} exceeds cap {MAX_REPEAT} in .{ext} file; clamping");
         MAX_REPEAT
     } else {
         n
@@ -78,12 +79,18 @@ fn heading_level_from_style(style: &str) -> Option<u8> {
     let rest = norm
         .strip_prefix("Heading ")
         .or_else(|| norm.strip_prefix("Heading"))?;
-    rest.trim().parse::<u8>().ok().filter(|n| (1..=6).contains(n))
+    rest.trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|n| (1..=6).contains(n))
 }
 
 fn para(text: String) -> Element {
     Element::Paragraph(Paragraph {
-        content: vec![InlineContent::Text(TextSpan { text, ..Default::default() })],
+        content: vec![InlineContent::Text(TextSpan {
+            text,
+            ..Default::default()
+        })],
         ..Default::default()
     })
 }
@@ -91,7 +98,10 @@ fn para(text: String) -> Element {
 fn heading(level: u8, text: String) -> Element {
     Element::Heading(Heading {
         level,
-        content: vec![InlineContent::Text(TextSpan { text, ..Default::default() })],
+        content: vec![InlineContent::Text(TextSpan {
+            text,
+            ..Default::default()
+        })],
         ..Default::default()
     })
 }
@@ -99,13 +109,22 @@ fn heading(level: u8, text: String) -> Element {
 /// Push `repeat` copies of `cell`. Empty single-column cells are deferred into
 /// `empty_run` (so trailing empties can be clamped by the caller); a non-empty
 /// cell first flushes any pending empties.
-fn push_cells(out: &mut Vec<TableCell>, empty_run: &mut usize, cell: TableCell, is_empty: bool, repeat: usize) {
+fn push_cells(
+    out: &mut Vec<TableCell>,
+    empty_run: &mut usize,
+    cell: TableCell,
+    is_empty: bool,
+    repeat: usize,
+) {
     if is_empty && cell.col_span <= 1 {
         *empty_run += repeat;
         return;
     }
     for _ in 0..*empty_run {
-        out.push(TableCell { content: vec![para(String::new())], ..Default::default() });
+        out.push(TableCell {
+            content: vec![para(String::new())],
+            ..Default::default()
+        });
     }
     *empty_run = 0;
     for _ in 0..repeat {
@@ -141,7 +160,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
 
     let mut sections: Vec<Section> = Vec::new(); // ODS: one per <table:table>; ODT: single, pushed at EOF
     let mut elements: Vec<Element> = Vec::new();
-    let mut buf = String::new();          // active paragraph/heading text
+    let mut buf = String::new(); // active paragraph/heading text
     let mut pending_heading: Option<u8> = None; // Some(level) while inside a heading-ish block
     let mut in_table = false; // derived: table_depth > 0
     let mut table_depth: usize = 0; // nesting depth of <table:table>; only 0<->1 starts/emits
@@ -157,17 +176,20 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut pending_empty_rows: usize = 0; // deferred trailing-empty rows (ODS only; clamped like empty_run)
     let mut table_cell_count: usize = 0; // running total of cells materialized in the current outer table
     let mut table_cell_budget_warned = false; // emit the MAX_TABLE_CELLS warning at most once per table
-    // Did this row contain a REAL <table:table-cell>? Deliberately excludes
-    // <table:covered-table-cell> — a covered-only row (the continuation of a
-    // vertical merge) must stay a genuine 0-cell TableRow, since expand_table
-    // (office_table.rs) fills those grid slots purely from the origin cell's
-    // row_span; padding a phantom blank cell here would widen the whole table.
+                                              // Did this row contain a REAL <table:table-cell>? Deliberately excludes
+                                              // <table:covered-table-cell> — a covered-only row (the continuation of a
+                                              // vertical merge) must stay a genuine 0-cell TableRow, since expand_table
+                                              // (office_table.rs) fills those grid slots purely from the origin cell's
+                                              // row_span; padding a phantom blank cell here would widen the whole table.
     let mut row_has_cell = false;
     let mut ev = Vec::new();
 
     loop {
         match reader.read_event_into(&mut ev) {
-            Err(e) => { tracing::warn!("odf xml error ({ext}): {e}"); break; }
+            Err(e) => {
+                tracing::warn!("odf xml error ({ext}): {e}");
+                break;
+            }
             Ok(Event::Eof) => break,
             Ok(Event::Text(t)) => {
                 if let Ok(decoded) = t.decode() {
@@ -189,7 +211,9 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         buf.clear();
                     }
                     pending_heading = Some(
-                        attr(&e, b"outline-level").and_then(|v| v.parse().ok()).unwrap_or(1),
+                        attr(&e, b"outline-level")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1),
                     );
                 }
                 b"p" => {
@@ -333,7 +357,10 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                             // so a covered-only vertical-merge continuation row stays a
                             // genuine 0-cell TableRow (expand_table in office_table.rs
                             // fills those grid slots purely from the origin's row_span).
-                            cells.push(TableCell { content: vec![para(String::new())], ..Default::default() });
+                            cells.push(TableCell {
+                                content: vec![para(String::new())],
+                                ..Default::default()
+                            });
                         }
                         // Budget guard: MAX_REPEAT already bounds a single row/column
                         // repeat attribute, but many rows each near that cap — or a
@@ -361,7 +388,10 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                                     break;
                                 }
                                 table_cell_count += row_cost;
-                                rows.push(TableRow { cells: cells.clone(), ..Default::default() });
+                                rows.push(TableRow {
+                                    cells: cells.clone(),
+                                    ..Default::default()
+                                });
                             }
                         }
                         if over_budget && !table_cell_budget_warned {
@@ -381,9 +411,16 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     in_table = table_depth > 0;
                     if table_depth == 0 {
                         pending_empty_rows = 0; // drop trailing empty rows (clamp)
-                        let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
+                        let table = Element::Table(Table {
+                            rows: std::mem::take(&mut rows),
+                            ..Default::default()
+                        });
                         if ext == "ods" {
-                            sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
+                            sections.push(Section {
+                                title: current_sheet.take(),
+                                elements: vec![table],
+                                ..Default::default()
+                            });
                         } else {
                             elements.push(table);
                         }
@@ -392,7 +429,11 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                 b"page" if ext == "odp" => {
                     // Slide close: emit everything accumulated for this slide
                     // (headings/paragraphs/tables) as one titled Section.
-                    sections.push(Section { title: current_slide.take(), elements: std::mem::take(&mut elements), ..Default::default() });
+                    sections.push(Section {
+                        title: current_slide.take(),
+                        elements: std::mem::take(&mut elements),
+                        ..Default::default()
+                    });
                 }
                 _ => {}
             },
@@ -405,15 +446,25 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     // error hit mid-table) instead of silently dropping accumulated rows.
     if in_table && (!rows.is_empty() || !cur_cells.is_empty()) {
         if !cur_cells.is_empty() {
-            rows.push(TableRow { cells: std::mem::take(&mut cur_cells), ..Default::default() });
+            rows.push(TableRow {
+                cells: std::mem::take(&mut cur_cells),
+                ..Default::default()
+            });
         }
         tracing::warn!(
             "odf .{ext}: unterminated <table:table>, flushing {} pending row(s)",
             rows.len()
         );
-        let table = Element::Table(Table { rows: std::mem::take(&mut rows), ..Default::default() });
+        let table = Element::Table(Table {
+            rows: std::mem::take(&mut rows),
+            ..Default::default()
+        });
         if ext == "ods" {
-            sections.push(Section { title: current_sheet.take(), elements: vec![table], ..Default::default() });
+            sections.push(Section {
+                title: current_sheet.take(),
+                elements: vec![table],
+                ..Default::default()
+            });
         } else {
             elements.push(table);
         }
@@ -436,14 +487,24 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
             // Truncated/malformed file: the last <draw:page> never closed (or
             // there's stray content outside any page) — flush what we have as
             // its own final section instead of silently dropping it.
-            sections.push(Section { title: current_slide.take(), elements: std::mem::take(&mut elements), ..Default::default() });
+            sections.push(Section {
+                title: current_slide.take(),
+                elements: std::mem::take(&mut elements),
+                ..Default::default()
+            });
         }
     } else {
         // ODT (and any other/unknown ext): single section, heading-scoped
         // chunking happens downstream in chunk_ir.
-        sections.push(Section { elements, ..Default::default() });
+        sections.push(Section {
+            elements,
+            ..Default::default()
+        });
     }
-    Ok(DocumentIR { sections, ..Default::default() })
+    Ok(DocumentIR {
+        sections,
+        ..Default::default()
+    })
 }
 
 impl Extractor for OdfExtractor {
@@ -452,12 +513,18 @@ impl Extractor for OdfExtractor {
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         let xml = read_content_xml(bytes, path)?;
         let mut ir = parse_to_ir(&xml, &ext)?;
         expand_merged_tables(&mut ir);
         let mut chunks = chunk_ir(path, &ir, &ext);
-        chunks.extend(crate::extract::odf_chart::extract_odf_charts(path, bytes, &ext));
+        chunks.extend(crate::extract::odf_chart::extract_odf_charts(
+            path, bytes, &ext,
+        ));
         if chunks.is_empty() {
             return Err(anyhow!("odf produced no chunks for {}", path.display()));
         }
@@ -525,25 +592,48 @@ mod tests {
     #[test]
     fn odt_marker_and_both_heading_conventions() {
         let chunks = extract(ODT, "sample.odt");
-        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(all_text.contains("glossa sample"), "marker missing: {all_text}");
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("glossa sample"),
+            "marker missing: {all_text}"
+        );
         assert!(chunks.iter().all(|c| c.file_type == "odt"));
         // structural <text:h>
-        assert!(chunks.iter().any(|c| c.location.contains("Alpha Section")),
-            "structural heading not a location: {:?}", chunks.iter().map(|c| &c.location).collect::<Vec<_>>());
+        assert!(
+            chunks.iter().any(|c| c.location.contains("Alpha Section")),
+            "structural heading not a location: {:?}",
+            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+        );
         // styled paragraph Heading_20_1 — the real-world quirk
-        assert!(chunks.iter().any(|c| c.location.contains("Beta Section")),
-            "styled-paragraph heading not recognised: {:?}", chunks.iter().map(|c| &c.location).collect::<Vec<_>>());
+        assert!(
+            chunks.iter().any(|c| c.location.contains("Beta Section")),
+            "styled-paragraph heading not recognised: {:?}",
+            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn odt_table_renders_gfm_with_spanned_cell() {
         let chunks = extract(ODT, "sample.odt");
-        let t: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(t.contains("| h1 | h2 |") && t.contains("---"), "GFM header row missing:\n{t}");
+        let t: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            t.contains("| h1 | h2 |") && t.contains("---"),
+            "GFM header row missing:\n{t}"
+        );
         // number-columns-spanned=2 → expand_merged_tables duplicates the origin value
         // into the covered cell (see office_table.rs densified_cell/expand_table).
-        assert!(t.contains("| wide | wide |"), "spanned cell not expanded to 2 columns:\n{t}");
+        assert!(
+            t.contains("| wide | wide |"),
+            "spanned cell not expanded to 2 columns:\n{t}"
+        );
     }
 
     #[test]
@@ -586,8 +676,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(cell_text.contains("foo"), "first paragraph lost, cell text: {cell_text:?}");
-        assert!(cell_text.contains("bar"), "second paragraph lost, cell text: {cell_text:?}");
+        assert!(
+            cell_text.contains("foo"),
+            "first paragraph lost, cell text: {cell_text:?}"
+        );
+        assert!(
+            cell_text.contains("bar"),
+            "second paragraph lost, cell text: {cell_text:?}"
+        );
     }
 
     const ODS: &[u8] = include_bytes!("../../tests/fixtures/sample.ods");
@@ -606,12 +702,28 @@ mod tests {
         let chunks = extract(ODS, "sample.ods");
         let data = chunks.iter().find(|c| c.location.contains("Data")).unwrap();
         // number-columns-repeated=3 on "dup" → three dup columns between x and y
-        assert!(data.text.contains("| x | dup | dup | dup | y |"),
-            "repeated non-empty cell not expanded:\n{}", data.text);
-        let sheet1 = chunks.iter().find(|c| c.location.contains("Sheet1")).unwrap();
+        assert!(
+            data.text.contains("| x | dup | dup | dup | y |"),
+            "repeated non-empty cell not expanded:\n{}",
+            data.text
+        );
+        let sheet1 = chunks
+            .iter()
+            .find(|c| c.location.contains("Sheet1"))
+            .unwrap();
         // trailing repeated empty cells (repeated=6) must be clamped, not 6+ empty columns
-        let widest = sheet1.text.lines().map(|l| l.matches('|').count()).max().unwrap_or(0);
-        assert!(widest <= 4, "trailing empties not clamped (cols≈{}):\n{}", widest, sheet1.text);
+        let widest = sheet1
+            .text
+            .lines()
+            .map(|l| l.matches('|').count())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest <= 4,
+            "trailing empties not clamped (cols≈{}):\n{}",
+            widest,
+            sheet1.text
+        );
     }
 
     #[test]
@@ -643,7 +755,12 @@ mod tests {
         // number-rows-repeated=3 on a non-empty row → 3 identical rows; the
         // trailing number-rows-repeated=1000 EMPTY row must be clamped away
         // entirely (not materialized as 1000 extra blank rows).
-        assert_eq!(table.rows.len(), 3, "expected 3 expanded rows (empty trailing row not clamped), got {}", table.rows.len());
+        assert_eq!(
+            table.rows.len(),
+            3,
+            "expected 3 expanded rows (empty trailing row not clamped), got {}",
+            table.rows.len()
+        );
         for row in &table.rows {
             let text: String = row.cells[0]
                 .content
@@ -703,7 +820,10 @@ mod tests {
             })
             .collect::<String>();
 
-        assert!(cell_text.contains("truncated"), "unterminated table row lost, cell text: {cell_text:?}");
+        assert!(
+            cell_text.contains("truncated"),
+            "unterminated table row lost, cell text: {cell_text:?}"
+        );
     }
 
     #[test]
@@ -746,8 +866,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(cell_text.contains("starttext"), "text before the in-cell heading was wiped: {cell_text:?}");
-        assert!(cell_text.contains("headtext"), "in-cell heading text lost: {cell_text:?}");
+        assert!(
+            cell_text.contains("starttext"),
+            "text before the in-cell heading was wiped: {cell_text:?}"
+        );
+        assert!(
+            cell_text.contains("headtext"),
+            "in-cell heading text lost: {cell_text:?}"
+        );
     }
 
     #[test]
@@ -781,7 +907,11 @@ mod tests {
             })
             .expect("expected a table element in the parsed IR");
 
-        assert_eq!(table.rows.len(), 2, "ODT trailing empty row must not be dropped/deferred (FIX 3)");
+        assert_eq!(
+            table.rows.len(),
+            2,
+            "ODT trailing empty row must not be dropped/deferred (FIX 3)"
+        );
         assert_eq!(
             table.rows[1].cells.len(),
             1,
@@ -843,7 +973,10 @@ mod tests {
             })
             .expect("expected a table element in the parsed IR");
 
-        assert_eq!(table.rows[0].cells[0].row_span, 3, "number-rows-spanned not carried onto TableCell.row_span");
+        assert_eq!(
+            table.rows[0].cells[0].row_span, 3,
+            "number-rows-spanned not carried onto TableCell.row_span"
+        );
     }
 
     #[test]
@@ -896,7 +1029,11 @@ mod tests {
             })
             .expect("expected a table element after expand_merged_tables");
 
-        assert_eq!(table_after.rows.len(), 2, "both rows should survive expand_merged_tables");
+        assert_eq!(
+            table_after.rows.len(),
+            2,
+            "both rows should survive expand_merged_tables"
+        );
         for (i, row) in table_after.rows.iter().enumerate() {
             assert_eq!(
                 row.cells.len(),
@@ -938,8 +1075,16 @@ mod tests {
             table.rows[0].cells.len()
         );
         assert_eq!(cell_text(&table.rows[0].cells[0]), "A");
-        assert_eq!(cell_text(&table.rows[0].cells[1]), "", "interior empty cell should stay a real (empty) cell");
-        assert_eq!(cell_text(&table.rows[0].cells[2]), "B", "B landed under the wrong column after the dropped cell");
+        assert_eq!(
+            cell_text(&table.rows[0].cells[1]),
+            "",
+            "interior empty cell should stay a real (empty) cell"
+        );
+        assert_eq!(
+            cell_text(&table.rows[0].cells[2]),
+            "B",
+            "B landed under the wrong column after the dropped cell"
+        );
     }
 
     #[test]
@@ -967,8 +1112,16 @@ mod tests {
             table.rows[0].cells.len()
         );
         assert_eq!(cell_text(&table.rows[0].cells[0]), "A");
-        assert_eq!(cell_text(&table.rows[0].cells[1]), "", "interior empty cell should stay a real (empty) cell");
-        assert_eq!(cell_text(&table.rows[0].cells[2]), "B", "B landed under the wrong column after the dropped cell");
+        assert_eq!(
+            cell_text(&table.rows[0].cells[1]),
+            "",
+            "interior empty cell should stay a real (empty) cell"
+        );
+        assert_eq!(
+            cell_text(&table.rows[0].cells[2]),
+            "B",
+            "B landed under the wrong column after the dropped cell"
+        );
     }
 
     #[test]
@@ -1010,10 +1163,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(all_text.contains("outertext"), "outer cell's own text lost after nested table: {all_text:?}");
+        assert!(
+            all_text.contains("outertext"),
+            "outer cell's own text lost after nested table: {all_text:?}"
+        );
         // No document-level leak: everything folded into the single table element.
         assert!(
-            ir.sections[0].elements.iter().all(|el| matches!(el, Element::Table(_))),
+            ir.sections[0]
+                .elements
+                .iter()
+                .all(|el| matches!(el, Element::Table(_))),
             "outer table cells leaked out to document level: {:?}",
             ir.sections[0].elements
         );
@@ -1048,8 +1207,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(text.contains("a b"), "line-break didn't insert a separating space: {text:?}");
-        assert!(!text.contains("ab"), "line-break text ran together: {text:?}");
+        assert!(
+            text.contains("a b"),
+            "line-break didn't insert a separating space: {text:?}"
+        );
+        assert!(
+            !text.contains("ab"),
+            "line-break text ran together: {text:?}"
+        );
     }
 
     #[test]
@@ -1057,9 +1222,21 @@ mod tests {
         // FIX E (MINOR): some producers write `Heading1`..`Heading6` with no
         // separator at all (vs. `Heading_20_N` or `Heading N`).
         assert_eq!(heading_level_from_style("Heading2"), Some(2));
-        assert_eq!(heading_level_from_style("Heading 2"), Some(2), "space-separated form regressed");
-        assert_eq!(heading_level_from_style("Heading_20_2"), Some(2), "encoded-space form regressed");
-        assert_eq!(heading_level_from_style("HeadingSomethingElse"), None, "non-numeric suffix must not false-positive");
+        assert_eq!(
+            heading_level_from_style("Heading 2"),
+            Some(2),
+            "space-separated form regressed"
+        );
+        assert_eq!(
+            heading_level_from_style("Heading_20_2"),
+            Some(2),
+            "encoded-space form regressed"
+        );
+        assert_eq!(
+            heading_level_from_style("HeadingSomethingElse"),
+            None,
+            "non-numeric suffix must not false-positive"
+        );
     }
 
     #[test]
@@ -1088,10 +1265,19 @@ mod tests {
 </office:document-content>"#;
 
         let bytes = make_odf_zip(content_xml);
-        let chunks = OdfExtractor.extract(Path::new("merge.ods"), &bytes).unwrap(); // must not panic
+        let chunks = OdfExtractor
+            .extract(Path::new("merge.ods"), &bytes)
+            .unwrap(); // must not panic
         assert!(!chunks.is_empty());
-        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(all_text.contains("tall"), "merge origin text lost: {all_text}");
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("tall"),
+            "merge origin text lost: {all_text}"
+        );
     }
 
     #[test]
@@ -1123,7 +1309,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(text.contains("a   b"), "text:s repeat count not expanded to 3 spaces: {text:?}");
+        assert!(
+            text.contains("a   b"),
+            "text:s repeat count not expanded to 3 spaces: {text:?}"
+        );
     }
 
     const ODP: &[u8] = include_bytes!("../../tests/fixtures/sample.odp");
@@ -1139,7 +1328,12 @@ mod tests {
         let xml = read_content_xml(ODP, Path::new("sample.odp")).unwrap();
         let ir = parse_to_ir(&xml, "odp").unwrap();
 
-        assert_eq!(ir.sections.len(), 2, "expected one section per slide, got {}", ir.sections.len());
+        assert_eq!(
+            ir.sections.len(),
+            2,
+            "expected one section per slide, got {}",
+            ir.sections.len()
+        );
         assert_eq!(ir.sections[0].title.as_deref(), Some("Slide1"));
         assert_eq!(ir.sections[1].title.as_deref(), Some("Slide2"));
     }
@@ -1148,13 +1342,25 @@ mod tests {
     fn odp_extract_yields_odp_chunks_with_both_slides_text() {
         let chunks = extract(ODP, "sample.odp");
         assert!(chunks.iter().all(|c| c.file_type == "odp"));
-        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(all_text.contains("glossa sample slide"), "marker missing: {all_text}");
-        assert!(all_text.contains("Second Heading"), "second slide heading missing: {all_text}");
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("glossa sample slide"),
+            "marker missing: {all_text}"
+        );
+        assert!(
+            all_text.contains("Second Heading"),
+            "second slide heading missing: {all_text}"
+        );
         // Section-per-slide boundary actually applies at chunk granularity too:
         // each slide's marker text must land in its OWN chunk, not be merged
         // into one big blob.
-        let slide1_chunk = chunks.iter().find(|c| c.text.contains("glossa sample slide"));
+        let slide1_chunk = chunks
+            .iter()
+            .find(|c| c.text.contains("glossa sample slide"));
         let slide2_chunk = chunks.iter().find(|c| c.text.contains("Second Heading"));
         assert!(slide1_chunk.is_some() && slide2_chunk.is_some());
         assert_ne!(
@@ -1175,7 +1381,11 @@ mod tests {
 <draw:page draw:name="OnlySlide"><draw:frame><draw:text-box><text:p>truncated slide text</text:p></draw:text-box></draw:frame>"#;
 
         let ir = parse_to_ir(xml, "odp").unwrap();
-        assert_eq!(ir.sections.len(), 1, "unterminated slide should still be flushed as one section");
+        assert_eq!(
+            ir.sections.len(),
+            1,
+            "unterminated slide should still be flushed as one section"
+        );
         assert_eq!(ir.sections[0].title.as_deref(), Some("OnlySlide"));
         let text: String = ir.sections[0]
             .elements
@@ -1193,6 +1403,9 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(text.contains("truncated slide text"), "unterminated slide text lost: {text:?}");
+        assert!(
+            text.contains("truncated slide text"),
+            "unterminated slide text lost: {text:?}"
+        );
     }
 }

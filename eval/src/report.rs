@@ -155,7 +155,11 @@ fn hop_summary_line(results: &[CaseResult]) -> String {
     let mut g: std::collections::BTreeMap<&str, (usize, usize, usize)> =
         std::collections::BTreeMap::new(); // value -> (correct, partial, n)
     for r in results {
-        let k = if r.hop_type.is_empty() { "(untyped)" } else { r.hop_type.as_str() };
+        let k = if r.hop_type.is_empty() {
+            "(untyped)"
+        } else {
+            r.hop_type.as_str()
+        };
         let e = g.entry(k).or_default();
         e.2 += 1;
         match r.verdict {
@@ -196,7 +200,11 @@ pub fn lexical_text(results: &[CaseResult]) -> String {
 /// section is deterministic regardless of the run's case order) via `BTreeMap`. Cases with an
 /// empty group value are folded into `"(untyped)"`. Each row is the group's graded `quality`
 /// (`quality_score`, matching the overall headline) plus its correct/partial/wrong tally.
-fn by_type_table(dimension: &str, results: &[CaseResult], key: impl Fn(&CaseResult) -> &str) -> String {
+fn by_type_table(
+    dimension: &str,
+    results: &[CaseResult],
+    key: impl Fn(&CaseResult) -> &str,
+) -> String {
     let mut groups: std::collections::BTreeMap<&str, Vec<&CaseResult>> =
         std::collections::BTreeMap::new();
     for r in results {
@@ -214,7 +222,9 @@ fn by_type_table(dimension: &str, results: &[CaseResult], key: impl Fn(&CaseResu
         let wrong = rs.iter().filter(|r| r.verdict == Verdict::Wrong).count();
         let n = rs.len();
         let q = quality_score(correct, partial, n);
-        out.push_str(&format!("| {name} | {n} | {q:.3} | {correct} | {partial} | {wrong} |\n"));
+        out.push_str(&format!(
+            "| {name} | {n} | {q:.3} | {correct} | {partial} | {wrong} |\n"
+        ));
     }
     out
 }
@@ -271,9 +281,7 @@ pub fn load_cases(cases_dir: &Path) -> anyhow::Result<Vec<CaseResult>> {
     let rd = match fs::read_dir(cases_dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => {
-            return Err(e).with_context(|| format!("read cases dir {}", cases_dir.display()))
-        }
+        Err(e) => return Err(e).with_context(|| format!("read cases dir {}", cases_dir.display())),
     };
     for ent in rd {
         let ent = ent.with_context(|| format!("read entry in {}", cases_dir.display()))?;
@@ -281,10 +289,9 @@ pub fn load_cases(cases_dir: &Path) -> anyhow::Result<Vec<CaseResult>> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let case: CaseResult = serde_json::from_str(&text)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let case: CaseResult =
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         out.push(case);
     }
     Ok(out)
@@ -343,8 +350,7 @@ pub fn write_run(
             r.id, r.transcript, r.answer, r.judge_raw
         );
         let trace_path = dir.join(format!("{}.trace.md", r.id));
-        fs::write(&trace_path, trace)
-            .with_context(|| format!("write {}", trace_path.display()))?;
+        fs::write(&trace_path, trace).with_context(|| format!("write {}", trace_path.display()))?;
     }
 
     Ok(report_path)
@@ -466,7 +472,11 @@ mod tests {
         let cases_dir = dir.path().join("cases");
         write_case(&cases_dir, &case("a-b", Verdict::Correct)).unwrap();
         write_case(&cases_dir, &case("a.b", Verdict::Wrong)).unwrap();
-        let mut ids: Vec<String> = load_cases(&cases_dir).unwrap().into_iter().map(|c| c.id).collect();
+        let mut ids: Vec<String> = load_cases(&cases_dir)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
         ids.sort();
         assert_eq!(ids, vec!["a-b".to_string(), "a.b".to_string()]);
     }

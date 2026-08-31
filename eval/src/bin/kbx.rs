@@ -712,8 +712,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let use_judge = !args.no_judge && lab.judge.is_some();
     let judge_md = if use_judge {
         Some(
-            std::fs::read_to_string(&paths.judge_prompt)
-                .with_context(|| format!("reading judge prompt {}", paths.judge_prompt.display()))?,
+            std::fs::read_to_string(&paths.judge_prompt).with_context(|| {
+                format!("reading judge prompt {}", paths.judge_prompt.display())
+            })?,
         )
     } else {
         None
@@ -734,17 +735,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
     // indicatif draws to stderr by default; also check stdout since some shells redirect one but
     // not the other and either being non-interactive is a good signal this run isn't at a console.
-    let show_progress = !args.no_progress
-        && std::io::stdout().is_terminal()
-        && std::io::stderr().is_terminal();
+    let show_progress =
+        !args.no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     let pb = if show_progress {
         let pb = ProgressBar::new(cases.len() as u64);
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
             )
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
         // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
         // calls — a no-op on a hidden bar.
@@ -775,176 +775,199 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // the per-case path is byte-identical to before (the reader runs exactly once, via `answer`).
     let n_samples = if args.capture { args.samples.max(1) } else { 1 };
     let trajectories: Mutex<Vec<TrajectoryRecord>> = Mutex::new(Vec::new());
-    let results = run_units_parallel(cases, jobs, &pb, |_q| 1, |q| {
-        let backend = OpenAiBackend {
-            endpoint: lab.model.endpoint.clone(),
-            model: lab.model.model.clone(),
-            api_key: api_key.clone(),
-            timeout,
-            use_graph: true,
-            system_prompt: Some(answer_md.clone()),
-            temperature: lab.model.temperature,
-            user_sim: lab.user_sim.clone(),
-            user_sim_prompt: user_sim_prompt.clone(),
-            rate_limit: lab.model.rate_limit.clone(),
-            fallback: lab.model.fallback.clone(),
-            api: lab.model.api,
-            function_name: lab.model.function_name.clone(),
-            feedback_score_metric: lab.model.feedback_score_metric.clone(),
-            feedback_bool_metric: lab.model.feedback_bool_metric.clone(),
-        };
+    let results = run_units_parallel(
+        cases,
+        jobs,
+        &pb,
+        |_q| 1,
+        |q| {
+            let backend = OpenAiBackend {
+                endpoint: lab.model.endpoint.clone(),
+                model: lab.model.model.clone(),
+                api_key: api_key.clone(),
+                timeout,
+                use_graph: true,
+                system_prompt: Some(answer_md.clone()),
+                temperature: lab.model.temperature,
+                user_sim: lab.user_sim.clone(),
+                user_sim_prompt: user_sim_prompt.clone(),
+                rate_limit: lab.model.rate_limit.clone(),
+                fallback: lab.model.fallback.clone(),
+                api: lab.model.api,
+                function_name: lab.model.function_name.clone(),
+                feedback_score_metric: lab.model.feedback_score_metric.clone(),
+                feedback_bool_metric: lab.model.feedback_bool_metric.clone(),
+            };
 
-        // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
-        // (`answer`); `capture=true` drives `answer_capturing`, recording the full trajectory into
-        // `episode`. Returns everything the CaseResult and a `TrajectoryRecord` both need.
-        type Sample = (
-            String,                                          // answer
-            Vec<String>,                                     // tools (deduped names)
-            String,                                          // transcript
-            f32,                                             // em
-            f32,                                             // f1
-            Verdict,                                         // verdict (reward)
-            String,                                          // reason
-            String,                                          // judge_raw
-            kb_eval::backend::agent_loop::CapturedEpisode,   // trajectory (empty unless captured)
-        );
-        let run_sample = |capture: bool| -> Sample {
-            // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
-            // episode id left over from a PRIOR case on the same thread (or the previous sample
-            // of THIS case) never leaks into this rollout — mirrors `TraceLog::to_dir`'s own
-            // per-call thread-local reset, just done explicitly here since episode-setting lives
-            // inside `TzTransport::call`, not the backend constructor. A no-op off TensorZero
-            // (nothing ever calls `kb_eval::episode::set`, so `current()` stays `None`).
-            kb_eval::episode::reset();
-            let mut episode = kb_eval::backend::agent_loop::CapturedEpisode::default();
-            let answer = if capture {
-                match backend.answer_capturing(&paths.root, q, Some(&mut episode)) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        pb.println(format!("case {}: agent error: {e}", q.id));
-                        format!("(error: {e})")
+            // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
+            // (`answer`); `capture=true` drives `answer_capturing`, recording the full trajectory into
+            // `episode`. Returns everything the CaseResult and a `TrajectoryRecord` both need.
+            type Sample = (
+                String,                                        // answer
+                Vec<String>,                                   // tools (deduped names)
+                String,                                        // transcript
+                f32,                                           // em
+                f32,                                           // f1
+                Verdict,                                       // verdict (reward)
+                String,                                        // reason
+                String,                                        // judge_raw
+                kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
+            );
+            let run_sample = |capture: bool| -> Sample {
+                // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
+                // episode id left over from a PRIOR case on the same thread (or the previous sample
+                // of THIS case) never leaks into this rollout — mirrors `TraceLog::to_dir`'s own
+                // per-call thread-local reset, just done explicitly here since episode-setting lives
+                // inside `TzTransport::call`, not the backend constructor. A no-op off TensorZero
+                // (nothing ever calls `kb_eval::episode::set`, so `current()` stays `None`).
+                kb_eval::episode::reset();
+                let mut episode = kb_eval::backend::agent_loop::CapturedEpisode::default();
+                let answer = if capture {
+                    match backend.answer_capturing(&paths.root, q, Some(&mut episode)) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            pb.println(format!("case {}: agent error: {e}", q.id));
+                            format!("(error: {e})")
+                        }
+                    }
+                } else {
+                    match backend.answer(&paths.root, q) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            pb.println(format!("case {}: agent error: {e}", q.id));
+                            format!("(error: {e})")
+                        }
+                    }
+                };
+
+                // This sample's exact trace file — the one `answer*()` created on THIS worker thread —
+                // read straight from the thread-local rather than diffing the trace dir (which races
+                // under concurrency). Best-effort: empty when tracing was disabled / no file recorded.
+                let (tools, transcript) = match glossa::trace::last_trace_path() {
+                    Some(p) => parse_trace_file(&p),
+                    None => (Vec::new(), String::new()),
+                };
+
+                let golds = gold_forms(q);
+                let em = if relaxed_match_any(&answer, &golds) {
+                    1.0
+                } else {
+                    0.0
+                };
+                let f1 = token_f1_any(&answer, &golds);
+
+                let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
+                    (Some(jmd), Some(jep)) => match judge(
+                        jep,
+                        jmd,
+                        &q.question,
+                        &q.answer,
+                        &answer,
+                        &q.source,
+                        judge_idx.as_ref(),
+                    ) {
+                        Ok(Judgement {
+                            verdict,
+                            reason,
+                            raw,
+                        }) => (verdict, reason, raw),
+                        Err(e) => (
+                            Verdict::Unscored,
+                            format!("judge error: {e}"),
+                            String::new(),
+                        ),
+                    },
+                    _ => (Verdict::Unscored, String::new(), String::new()),
+                };
+
+                // TensorZero episode feedback: post the judge verdict on the episode this rollout
+                // grouped into. `episode::current()` is `Some` ONLY when the reader's transport is
+                // `TzTransport` (every other transport never calls `episode::set`) AND a judge
+                // actually scored this rollout (`Unscored` — no judge configured, or the judge call
+                // itself errored — posts nothing rather than a misleading 0.0). Off-TZ this whole
+                // block is inert: `current()` is always `None`, so `post_feedback` is never reached.
+                if verdict != Verdict::Unscored {
+                    if let Some(eid) = kb_eval::episode::current() {
+                        let score_metric = lab.model.feedback_score_metric();
+                        let bool_metric = lab.model.feedback_bool_metric();
+                        backend.post_feedback(
+                            &eid,
+                            &[
+                                (
+                                    score_metric.as_str(),
+                                    serde_json::json!(verdict_score(verdict)),
+                                ),
+                                (
+                                    bool_metric.as_str(),
+                                    serde_json::json!(verdict == Verdict::Correct),
+                                ),
+                            ],
+                        );
                     }
                 }
+
+                (
+                    answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode,
+                )
+            };
+
+            // Sample 0 produces the reported CaseResult (and its trajectory when capturing).
+            let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode) =
+                run_sample(args.capture);
+
+            // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
+            if args.capture {
+                let push =
+                    |ans: &str, ep: &kb_eval::backend::agent_loop::CapturedEpisode, v: Verdict| {
+                        trajectories
+                            .lock()
+                            .expect("trajectories mutex poisoned")
+                            .push(TrajectoryRecord {
+                                id: q.id.clone(),
+                                question: q.question.clone(),
+                                model: lab.model.model.clone(),
+                                tools: ep.tools.clone().unwrap_or(serde_json::Value::Null),
+                                messages: ep.messages.clone(),
+                                answer: ans.to_string(),
+                                verdict: v,
+                                hop_type: q.hop_type.clone(),
+                            });
+                    };
+                push(&answer, &episode, verdict);
+                for _ in 1..n_samples {
+                    let s = run_sample(true);
+                    push(&s.0, &s.8, s.5);
+                }
+            }
+
+            // The graded JUDGE verdict is the real signal (EM is ~0 on paragraph answers); lead with
+            // the question's `hop_type` when present. `em`/`f1` still flow into `CaseResult` for the
+            // end-of-run report's secondary numbers.
+            let type_tag = if q.hop_type.is_empty() {
+                String::new()
             } else {
-                match backend.answer(&paths.root, q) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        pb.println(format!("case {}: agent error: {e}", q.id));
-                        format!("(error: {e})")
-                    }
-                }
+                format!(" [{}]", q.hop_type)
             };
+            pb.println(format!("case {}{type_tag}: {verdict:?}", q.id));
 
-            // This sample's exact trace file — the one `answer*()` created on THIS worker thread —
-            // read straight from the thread-local rather than diffing the trace dir (which races
-            // under concurrency). Best-effort: empty when tracing was disabled / no file recorded.
-            let (tools, transcript) = match glossa::trace::last_trace_path() {
-                Some(p) => parse_trace_file(&p),
-                None => (Vec::new(), String::new()),
+            let r = CaseResult {
+                id: q.id.clone(),
+                verdict,
+                reason,
+                f1,
+                em,
+                tools,
+                answer,
+                transcript,
+                judge_raw,
+                hop_type: q.hop_type.clone(),
+                needs_graph: q.needs_graph.clone(),
             };
-
-            let golds = gold_forms(q);
-            let em = if relaxed_match_any(&answer, &golds) { 1.0 } else { 0.0 };
-            let f1 = token_f1_any(&answer, &golds);
-
-            let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
-                (Some(jmd), Some(jep)) => match judge(
-                    jep,
-                    jmd,
-                    &q.question,
-                    &q.answer,
-                    &answer,
-                    &q.source,
-                    judge_idx.as_ref(),
-                ) {
-                    Ok(Judgement {
-                        verdict,
-                        reason,
-                        raw,
-                    }) => (verdict, reason, raw),
-                    Err(e) => (Verdict::Unscored, format!("judge error: {e}"), String::new()),
-                },
-                _ => (Verdict::Unscored, String::new(), String::new()),
-            };
-
-            // TensorZero episode feedback: post the judge verdict on the episode this rollout
-            // grouped into. `episode::current()` is `Some` ONLY when the reader's transport is
-            // `TzTransport` (every other transport never calls `episode::set`) AND a judge
-            // actually scored this rollout (`Unscored` — no judge configured, or the judge call
-            // itself errored — posts nothing rather than a misleading 0.0). Off-TZ this whole
-            // block is inert: `current()` is always `None`, so `post_feedback` is never reached.
-            if verdict != Verdict::Unscored {
-                if let Some(eid) = kb_eval::episode::current() {
-                    let score_metric = lab.model.feedback_score_metric();
-                    let bool_metric = lab.model.feedback_bool_metric();
-                    backend.post_feedback(
-                        &eid,
-                        &[
-                            (score_metric.as_str(), serde_json::json!(verdict_score(verdict))),
-                            (bool_metric.as_str(), serde_json::json!(verdict == Verdict::Correct)),
-                        ],
-                    );
-                }
-            }
-
-            (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode)
-        };
-
-        // Sample 0 produces the reported CaseResult (and its trajectory when capturing).
-        let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode) =
-            run_sample(args.capture);
-
-        // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
-        if args.capture {
-            let push = |ans: &str, ep: &kb_eval::backend::agent_loop::CapturedEpisode, v: Verdict| {
-                trajectories
-                    .lock()
-                    .expect("trajectories mutex poisoned")
-                    .push(TrajectoryRecord {
-                        id: q.id.clone(),
-                        question: q.question.clone(),
-                        model: lab.model.model.clone(),
-                        tools: ep.tools.clone().unwrap_or(serde_json::Value::Null),
-                        messages: ep.messages.clone(),
-                        answer: ans.to_string(),
-                        verdict: v,
-                        hop_type: q.hop_type.clone(),
-                    });
-            };
-            push(&answer, &episode, verdict);
-            for _ in 1..n_samples {
-                let s = run_sample(true);
-                push(&s.0, &s.8, s.5);
-            }
-        }
-
-        // The graded JUDGE verdict is the real signal (EM is ~0 on paragraph answers); lead with
-        // the question's `hop_type` when present. `em`/`f1` still flow into `CaseResult` for the
-        // end-of-run report's secondary numbers.
-        let type_tag = if q.hop_type.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", q.hop_type)
-        };
-        pb.println(format!("case {}{type_tag}: {verdict:?}", q.id));
-
-        let r = CaseResult {
-            id: q.id.clone(),
-            verdict,
-            reason,
-            f1,
-            em,
-            tools,
-            answer,
-            transcript,
-            judge_raw,
-            hop_type: q.hop_type.clone(),
-            needs_graph: q.needs_graph.clone(),
-        };
-        write_case(&cases_dir, &r)
-            .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
-        Ok(r)
-    })?;
+            write_case(&cases_dir, &r)
+                .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
+            Ok(r)
+        },
+    )?;
     drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
     pb.finish_and_clear();
 
@@ -955,7 +978,11 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .into_inner()
             .expect("trajectories mutex poisoned");
         let tpath = write_trajectories(&runs_dir.join(&tag), &recs)?;
-        println!("captured {} trajectories -> {}", recs.len(), tpath.display());
+        println!(
+            "captured {} trajectories -> {}",
+            recs.len(),
+            tpath.display()
+        );
     }
 
     // Merge prior (resumed) cases with the ones just run. Dedup by id — a case just re-run wins
@@ -1009,7 +1036,10 @@ fn run_export(args: ExportArgs) -> Result<()> {
     let mut records: Vec<TrajectoryRecord> = Vec::new();
     for tag in &tags {
         records.extend(load_trajectories_for_tag(&runs_dir, tag).with_context(|| {
-            format!("loading trajectories for tag '{tag}' under {}", runs_dir.display())
+            format!(
+                "loading trajectories for tag '{tag}' under {}",
+                runs_dir.display()
+            )
         })?);
     }
 
@@ -1019,7 +1049,12 @@ fn run_export(args: ExportArgs) -> Result<()> {
                 ExportShape::Messages => SftShape::Messages,
                 ExportShape::Sharegpt => SftShape::Sharegpt,
             };
-            let out = export_sft(&records, shape, args.include_partial, args.sft_prefer_signal);
+            let out = export_sft(
+                &records,
+                shape,
+                args.include_partial,
+                args.sft_prefer_signal,
+            );
             let summary = format!(
                 "SFT: {} lines from {} trajectories ({} tag(s)), {} signal-reaction",
                 out.rows.len(),
@@ -1153,7 +1188,10 @@ mod tests {
             answer_aliases: vec!["Robert".into()],
             ..Default::default()
         };
-        assert_eq!(gold_forms(&q), vec!["Bob".to_string(), "Robert".to_string()]);
+        assert_eq!(
+            gold_forms(&q),
+            vec!["Bob".to_string(), "Robert".to_string()]
+        );
     }
 
     /// `kbx eval`'s path resolver: given a scaffolded `.glossa/kbx/` workspace, the corpus is
@@ -1399,7 +1437,9 @@ mod tests {
     fn eval_capture_defaults_off_and_samples_one() {
         let cli = Cli::try_parse_from(["kbx", "eval"]).unwrap();
         match cli.cmd {
-            Cmd::Eval { capture, samples, .. } => {
+            Cmd::Eval {
+                capture, samples, ..
+            } => {
                 assert!(!capture, "--capture must default OFF (non-breaking)");
                 assert_eq!(samples, 1, "--samples must default to 1");
             }
@@ -1407,7 +1447,9 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["kbx", "eval", "--capture", "--samples", "4"]).unwrap();
         match cli.cmd {
-            Cmd::Eval { capture, samples, .. } => {
+            Cmd::Eval {
+                capture, samples, ..
+            } => {
                 assert!(capture);
                 assert_eq!(samples, 4);
             }
@@ -1422,11 +1464,23 @@ mod tests {
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Export { from, format, out, shape, include_partial, max_pairs, .. } => {
+            Cmd::Export {
+                from,
+                format,
+                out,
+                shape,
+                include_partial,
+                max_pairs,
+                ..
+            } => {
                 assert_eq!(from, "tagA");
                 assert_eq!(format, ExportFormat::Sft);
                 assert_eq!(out, PathBuf::from("d.jsonl"));
-                assert_eq!(shape, ExportShape::Messages, "shape must default to messages");
+                assert_eq!(
+                    shape,
+                    ExportShape::Messages,
+                    "shape must default to messages"
+                );
                 assert!(!include_partial);
                 assert_eq!(max_pairs, 1);
             }
@@ -1437,12 +1491,25 @@ mod tests {
     #[test]
     fn export_dataset_parses_dpo_and_sharegpt() {
         let cli = Cli::try_parse_from([
-            "kbx", "export", "--from", "a,b", "--format", "dpo", "--out", "o.jsonl",
-            "--max-pairs", "3",
+            "kbx",
+            "export",
+            "--from",
+            "a,b",
+            "--format",
+            "dpo",
+            "--out",
+            "o.jsonl",
+            "--max-pairs",
+            "3",
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Export { from, format, max_pairs, .. } => {
+            Cmd::Export {
+                from,
+                format,
+                max_pairs,
+                ..
+            } => {
                 assert_eq!(from, "a,b");
                 assert_eq!(format, ExportFormat::Dpo);
                 assert_eq!(max_pairs, 3);
@@ -1450,12 +1517,25 @@ mod tests {
             _ => panic!("expected Cmd::ExportDataset"),
         }
         let cli = Cli::try_parse_from([
-            "kbx", "export", "--from", "t", "--format", "sft", "--out", "o.jsonl",
-            "--shape", "sharegpt", "--include-partial",
+            "kbx",
+            "export",
+            "--from",
+            "t",
+            "--format",
+            "sft",
+            "--out",
+            "o.jsonl",
+            "--shape",
+            "sharegpt",
+            "--include-partial",
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Export { shape, include_partial, .. } => {
+            Cmd::Export {
+                shape,
+                include_partial,
+                ..
+            } => {
                 assert_eq!(shape, ExportShape::Sharegpt);
                 assert!(include_partial);
             }

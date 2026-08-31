@@ -23,9 +23,9 @@ pub mod markdown;
 pub mod odf;
 pub mod odf_chart;
 pub mod office;
-pub mod ooxml_chart;
 pub mod office_chunk;
 pub mod office_table;
+pub mod ooxml_chart;
 pub mod pdf;
 pub mod text;
 

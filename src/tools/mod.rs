@@ -281,7 +281,9 @@ fn read_node(
             crate::graph::temporal::Status::Expired => "expired",
             crate::graph::temporal::Status::Superseded => "superseded",
         };
-        text.push_str(&format!("\nvalid:  {from_disp} .. {to_disp}\nstatus: {status_str}"));
+        text.push_str(&format!(
+            "\nvalid:  {from_disp} .. {to_disp}\nstatus: {status_str}"
+        ));
     }
     if chunks.is_empty() {
         text.push_str("\n(no source chunk linked to this node)");
@@ -595,7 +597,9 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
 /// missing/unreadable source, is never stale.
 pub struct StaleChecker {
     root: std::path::PathBuf,
-    cache: std::cell::RefCell<std::collections::HashMap<String, Option<crate::index::manifest::FileSig>>>,
+    cache: std::cell::RefCell<
+        std::collections::HashMap<String, Option<crate::index::manifest::FileSig>>,
+    >,
 }
 
 impl StaleChecker {
@@ -852,7 +856,10 @@ pub fn glossary_with_query(
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
 ) -> String {
-    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+    let at = match as_of
+        .map(crate::graph::temporal::normalize_point)
+        .transpose()
+    {
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
     };
@@ -956,13 +963,16 @@ pub fn glossary_with_query(
                                 // made agents read the wrong one. Fall back to `@owner` only for an
                                 // ungrounded node, where it is the only pointer to a document.
                                 let anchor = read_anchor(idx, g, &node.id);
-                                let owner = if node.prov.source_path.is_empty() || !anchor.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("  @{}", node.prov.source_path)
-                                };
-                                let head =
-                                    format!("{base}{owner}{}{anchor}", meta_suffix(g, &node.id, stale));
+                                let owner =
+                                    if node.prov.source_path.is_empty() || !anchor.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("  @{}", node.prov.source_path)
+                                    };
+                                let head = format!(
+                                    "{base}{owner}{}{anchor}",
+                                    meta_suffix(g, &node.id, stale)
+                                );
                                 let mut seen = std::collections::HashSet::new();
                                 seen.insert(node.id.clone());
                                 let mut chain = Vec::new();
@@ -1020,12 +1030,18 @@ pub fn glossary_with_query(
                                 .flatten()
                                 .map(|n| n.node_type)
                                 .unwrap_or_default();
-                            format!("{}  [{ty}]  {}{}", c.id, c.label, read_anchor(idx, g, &c.id))
+                            format!(
+                                "{}  [{ty}]  {}{}",
+                                c.id,
+                                c.label,
+                                read_anchor(idx, g, &c.id)
+                            )
                         })
                         .collect();
                     if !extra.is_empty() {
                         lines.push(
-                            "— composed (reachable from here via the reasoning graph) —".to_string(),
+                            "— composed (reachable from here via the reasoning graph) —"
+                                .to_string(),
                         );
                         lines.extend(extra);
                     }
@@ -1092,7 +1108,8 @@ fn resolve_node_ref(
                     .flatten()
                     .map(|x| x.label)
                     .unwrap_or_default();
-                let note = format!("note: \"{nid}\" is not a node id — resolved it to {hit} ({label})");
+                let note =
+                    format!("note: \"{nid}\" is not a node id — resolved it to {hit} ({label})");
                 return Ok((hit, Some(note)));
             }
         }
@@ -1146,7 +1163,10 @@ pub fn related(
         Ok(x) => x,
         Err(m) => return m,
     };
-    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+    let at = match as_of
+        .map(crate::graph::temporal::normalize_point)
+        .transpose()
+    {
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
     };
@@ -1155,7 +1175,8 @@ pub fn related(
         Err(e) => return e,
     };
     let visible = |nid: &str| {
-        at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
+        at.as_deref()
+            .is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
             && in_scope(scope_glob.as_ref(), owning_doc(g, nid).as_deref())
     };
     let mut seen = std::collections::HashSet::new();
@@ -1261,7 +1282,10 @@ pub fn neighbors(
         Ok(x) => x,
         Err(m) => return m,
     };
-    let at = match as_of.map(crate::graph::temporal::normalize_point).transpose() {
+    let at = match as_of
+        .map(crate::graph::temporal::normalize_point)
+        .transpose()
+    {
         Ok(a) => a,
         Err(e) => return format!("as_of error: {e}"),
     };
@@ -1270,7 +1294,8 @@ pub fn neighbors(
         Err(e) => return e,
     };
     let visible = |nid: &str| {
-        at.as_deref().is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
+        at.as_deref()
+            .is_none_or(|a| g.visible_at(nid, a).unwrap_or(true))
             && in_scope(scope_glob.as_ref(), owning_doc(g, nid).as_deref())
     };
     let want = |et: &str| edge_types.is_none_or(|ts| ts.iter().any(|t| t == et));
@@ -1358,11 +1383,11 @@ pub fn reach(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let (from, note_from) = match resolve_node_ref(idx, g, from_node, from_path, from_n, scope_glob.as_ref())
-    {
-        Ok(x) => x,
-        Err(m) => return format!("from: {m}"),
-    };
+    let (from, note_from) =
+        match resolve_node_ref(idx, g, from_node, from_path, from_n, scope_glob.as_ref()) {
+            Ok(x) => x,
+            Err(m) => return format!("from: {m}"),
+        };
     // `to` is optional: this is discovery mode only when the caller supplied no `to_*` ref at all.
     // Only attempt to resolve `to` when one was actually given, so a discovery call never sees a
     // spurious "to: ..." resolution error.
@@ -1379,10 +1404,21 @@ pub fn reach(
     let notes: Vec<String> = [note_from, note_to].into_iter().flatten().collect();
     let note = (!notes.is_empty()).then(|| notes.join("\n"));
     let depth = max_depth.clamp(1, 12);
-    let budget = if bridge { DEFAULT_REACH_BRIDGE_BUDGET } else { 0 };
+    let budget = if bridge {
+        DEFAULT_REACH_BRIDGE_BUDGET
+    } else {
+        0
+    };
 
-    let body = match crate::graph::traverse::reach(g, ont, &from, relation, to.as_deref(), depth, budget)
-    {
+    let body = match crate::graph::traverse::reach(
+        g,
+        ont,
+        &from,
+        relation,
+        to.as_deref(),
+        depth,
+        budget,
+    ) {
         Ok(mut res) => {
             // Filter rendered terminal/bridge endpoints: drop any hop-chain whose last node isn't
             // in scope. Discovery mode drops out-of-scope targets; verify mode's single path (if
@@ -1425,8 +1461,14 @@ fn render_reach_chain(
             continue;
         }
         let arrow = match h.via.as_ref().expect("non-first reach hop has via") {
-            HopVia::Edge { edge_type, forward: true } => format!("--{edge_type}-->"),
-            HopVia::Edge { edge_type, forward: false } => format!("<--{edge_type}--"),
+            HopVia::Edge {
+                edge_type,
+                forward: true,
+            } => format!("--{edge_type}-->"),
+            HopVia::Edge {
+                edge_type,
+                forward: false,
+            } => format!("<--{edge_type}--"),
             HopVia::Bridge { term, confidence } => {
                 format!("↝ bridged on \"{term}\" (conf {confidence:.2})")
             }
@@ -1833,7 +1875,12 @@ fn slice_pdf_page(doc_path: &std::path::Path, page: u64) -> anyhow::Result<Vec<u
 /// Fuzzy read-only SQL query over the reasoning graph. Traces the call and delegates to
 /// `crate::graph::query::run`, which handles empty queries (returns schema), fuzzy literal
 /// resolution, and rendering.
-pub fn sql(idx: &DocIndex, g: &crate::graph::store::GraphStore, sql: &str, trace: &TraceLog) -> String {
+pub fn sql(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    sql: &str,
+    trace: &TraceLog,
+) -> String {
     let body = crate::graph::query::run(g, idx, sql);
     trace.log("sql", json!({"sql": sql}), json!({"result": body}));
     body
@@ -2297,13 +2344,40 @@ mod tests {
         .unwrap();
         let t = TraceLog::disabled();
         // No as_of: node is visible as usual.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None, None);
+        let out = glossary(
+            &i,
+            &g,
+            "Bus link dropout",
+            &spine_spec(),
+            &t,
+            None,
+            None,
+            None,
+        );
         assert!(out.contains("[Symptom]"), "{out}");
         // as_of after the validity window: the node is filtered out entirely.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2024-01-01"), None, None);
+        let out = glossary(
+            &i,
+            &g,
+            "Bus link dropout",
+            &spine_spec(),
+            &t,
+            Some("2024-01-01"),
+            None,
+            None,
+        );
         assert_eq!(out, "(no matches)", "{out}");
         // as_of inside the window: still visible.
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, Some("2022-06-01"), None, None);
+        let out = glossary(
+            &i,
+            &g,
+            "Bus link dropout",
+            &spine_spec(),
+            &t,
+            Some("2022-06-01"),
+            None,
+            None,
+        );
         assert!(out.contains("[Symptom]"), "{out}");
     }
 
@@ -2347,14 +2421,25 @@ mod tests {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
         let t = TraceLog::disabled();
-        let out = glossary(&i, &g, "Bus link dropout", &spine_spec(), &t, None, None, None);
+        let out = glossary(
+            &i,
+            &g,
+            "Bus link dropout",
+            &spine_spec(),
+            &t,
+            None,
+            None,
+            None,
+        );
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
             out.contains("[Symptom]") && out.contains("Bus link dropout"),
             "{out}"
         );
         assert!(
-            out.contains("→ CAUSED_BY") && out.contains("[Cause]") && out.contains("Low respTimeout"),
+            out.contains("→ CAUSED_BY")
+                && out.contains("[Cause]")
+                && out.contains("Low respTimeout"),
             "{out}"
         );
         assert!(
@@ -2433,15 +2518,45 @@ mod tests {
         let t = TraceLog::disabled();
         let stale = StaleChecker::new(root.path());
 
-        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, Some(&stale), None);
+        let out = glossary(
+            &i,
+            &g,
+            "Drifted symptom",
+            &ChainSpec::default(),
+            &t,
+            None,
+            Some(&stale),
+            None,
+        );
         assert!(out.contains("⚠ stale"), "expected stale marker: {out}");
 
-        let out = glossary(&i, &g, "Fresh symptom", &ChainSpec::default(), &t, None, Some(&stale), None);
+        let out = glossary(
+            &i,
+            &g,
+            "Fresh symptom",
+            &ChainSpec::default(),
+            &t,
+            None,
+            Some(&stale),
+            None,
+        );
         assert!(!out.contains("⚠ stale"), "unexpected stale marker: {out}");
 
         // No checker at all (as production callers that lack a root may pass) → no marker either.
-        let out = glossary(&i, &g, "Drifted symptom", &ChainSpec::default(), &t, None, None, None);
-        assert!(!out.contains("⚠ stale"), "stale check must be opt-in: {out}");
+        let out = glossary(
+            &i,
+            &g,
+            "Drifted symptom",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !out.contains("⚠ stale"),
+            "stale check must be opt-in: {out}"
+        );
     }
 
     #[test]
@@ -2718,7 +2833,11 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             None,
             None,
         );
-        assert_eq!(both.matches("LINKS").count(), 1, "self-loop rendered twice: {both}");
+        assert_eq!(
+            both.matches("LINKS").count(),
+            1,
+            "self-loop rendered twice: {both}"
+        );
 
         // Direction-scoped views still show it once, with the matching arrow.
         let out = neighbors(
@@ -2789,10 +2908,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
         assert!(out.contains("--REFERENCES-->"), "got: {out}");
         // first line is the `from` node, no arrow prefix
-        assert!(
-            out.lines().next().unwrap().contains("a"),
-            "got: {out}"
-        );
+        assert!(out.lines().next().unwrap().contains("a"), "got: {out}");
 
         let reverse = reach(
             &idx,
@@ -2874,7 +2990,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     }
     fn reach_fillers(g: &GraphStore, n: usize) {
         for i in 0..n {
-            reach_dnode(g, &format!("rfiller{i}"), &format!("Fillerword{i}"), "filler.md");
+            reach_dnode(
+                g,
+                &format!("rfiller{i}"),
+                &format!("Fillerword{i}"),
+                "filler.md",
+            );
         }
     }
 
@@ -2912,13 +3033,22 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &TraceLog::disabled(),
             None,
         );
-        assert!(out.contains("Target"), "expected the discovered target handle, got: {out}");
-        assert!(out.contains("[Entity]"), "expected a glossary-style handle, got: {out}");
+        assert!(
+            out.contains("Target"),
+            "expected the discovered target handle, got: {out}"
+        );
+        assert!(
+            out.contains("[Entity]"),
+            "expected a glossary-style handle, got: {out}"
+        );
         assert!(
             out.contains("↝ bridged on \"Xanthium\""),
             "expected an explicit bridge hop naming its term, got: {out}"
         );
-        assert!(out.contains("conf 0."), "expected a bridge confidence value, got: {out}");
+        assert!(
+            out.contains("conf 0."),
+            "expected a bridge confidence value, got: {out}"
+        );
 
         let no_bridge = reach(
             &idx,
@@ -3180,8 +3310,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert_eq!(all_hits.len(), 2);
 
         // scope=docA.md: only that document's hit remains.
-        let (scoped_body, scoped_hits) =
-            search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
+        let (scoped_body, scoped_hits) = search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
     }
@@ -3211,8 +3340,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert!(out.text.contains(&big), "full body, no cap"); // not truncated
         assert!(out.text.contains("next d.md#2") && !out.text.contains("end of document"));
         assert!(out.text.contains("‹ start of document · next d.md#2 ›")); // unified footer (MCP wording)
-                                                                       // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
-                                                                       // #2 = "second") instead of an error the model loops on.
+                                                                           // Out-of-range read CLAMPS to the valid range and returns that chunk (here the last,
+                                                                           // #2 = "second") instead of an error the model loops on.
         let oor = read(d.path(), &i, None, "d.md", 99, false, &t).text;
         assert!(oor.contains("second"), "clamped to last chunk: {oor}");
         // A wrong path reports that the document isn't indexed.
@@ -3246,8 +3375,15 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let via_token = read(d.path(), &i, None, "d.md#2", 0, false, &t);
         let via_split = read(d.path(), &i, None, "d.md", 2, false, &t);
-        assert_eq!(via_token.text, via_split.text, "token form must match split form");
-        assert!(via_token.text.contains("second chunk"), "{}", via_token.text);
+        assert_eq!(
+            via_token.text, via_split.text,
+            "token form must match split form"
+        );
+        assert!(
+            via_token.text.contains("second chunk"),
+            "{}",
+            via_token.text
+        );
         // the `n` arg is ignored when the anchor is present — the anchor wins.
         let anchor_wins = read(d.path(), &i, None, "d.md#1", 99, false, &t);
         assert!(
@@ -3458,9 +3594,21 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &t
         )
         .contains("MODULE.pdf#7:"));
-        let no = grep(d.path(), &i, "nomatchzzz", &crate::grep::GrepOpts::default(), &t);
-        assert!(no.starts_with("(no matches)"), "still reports the miss: {no}");
-        assert!(no.contains("fixed:true"), "coaches toward a simpler literal: {no}");
+        let no = grep(
+            d.path(),
+            &i,
+            "nomatchzzz",
+            &crate::grep::GrepOpts::default(),
+            &t,
+        );
+        assert!(
+            no.starts_with("(no matches)"),
+            "still reports the miss: {no}"
+        );
+        assert!(
+            no.contains("fixed:true"),
+            "coaches toward a simpler literal: {no}"
+        );
         assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (7 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
@@ -3562,13 +3710,31 @@ strict = true
         let idx = DocIndex::open_or_create(idir.path()).unwrap();
         let t = TraceLog::disabled();
         // "org:acme" is type Organization (unknown to node_ref) → falls back to raw id
-        let result = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None, None);
+        let result = glossary(
+            &idx,
+            &g,
+            "ACME",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+        );
         assert!(
             result.contains("org:acme"),
             "expected node id in result, got: {result}"
         );
         assert_eq!(
-            glossary(&idx, &g, "nonesuch", &ChainSpec::default(), &t, None, None, None),
+            glossary(
+                &idx,
+                &g,
+                "nonesuch",
+                &ChainSpec::default(),
+                &t,
+                None,
+                None,
+                None
+            ),
             "(no matches)"
         );
     }
@@ -3585,8 +3751,20 @@ strict = true
         let opts = crate::graph::generalize::apply::Opts::defaults(1);
         crate::graph::generalize::apply::generalize(&g, &opts).unwrap();
 
-        let after = glossary(&idx, &g, "ACME", &ChainSpec::default(), &t, None, None, None);
-        assert!(after.contains("org:acme"), "still shows the node id: {after}");
+        let after = glossary(
+            &idx,
+            &g,
+            "ACME",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            after.contains("org:acme"),
+            "still shows the node id: {after}"
+        );
         assert!(
             !after.contains("comm ") && !after.contains(" pr ") && !after.contains(" deg "),
             "glossary must not surface SIMILAR-derived community/pagerank/degree: {after}"
@@ -3630,7 +3808,16 @@ strict = true
 
         // glossary on the Symptom walks the spine and surfaces the connected Cause inline,
         // so the agent sees the causal chain without a separate call.
-        let out = glossary(&idx, &g, "Link dropout", &spine_spec(), &t, None, None, None);
+        let out = glossary(
+            &idx,
+            &g,
+            "Link dropout",
+            &spine_spec(),
+            &t,
+            None,
+            None,
+            None,
+        );
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
             out.contains("→ CAUSED_BY") && out.contains("[Cause]"),
@@ -3664,12 +3851,30 @@ strict = true
         let t = TraceLog::disabled();
 
         // "Intro" is a Section node; glossary should render it as "path#1 · Intro".
-        let result = glossary(&idx, &g, "Intro", &ChainSpec::default(), &t, None, None, None);
+        let result = glossary(
+            &idx,
+            &g,
+            "Intro",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+        );
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
 
         assert_eq!(
-            glossary(&idx, &g, "nonexistentzzz", &ChainSpec::default(), &t, None, None, None),
+            glossary(
+                &idx,
+                &g,
+                "nonexistentzzz",
+                &ChainSpec::default(),
+                &t,
+                None,
+                None,
+                None
+            ),
             "(no matches)"
         );
     }
@@ -3696,7 +3901,8 @@ strict = true
             "Heliocentrism was proposed as early as the 3rd century BC by Aristarchus",
         ))
         .unwrap();
-        g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id)).unwrap();
+        g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id))
+            .unwrap();
 
         let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None, None);
         assert!(
@@ -3729,7 +3935,8 @@ strict = true
             "The Sun is the star at the center of the Solar System",
         ))
         .unwrap();
-        g.put_edge(&edge("fact:sun-center", "MENTIONS", &sec_id)).unwrap();
+        g.put_edge(&edge("fact:sun-center", "MENTIONS", &sec_id))
+            .unwrap();
         // ... that LEADS_TO the answer fact (owned by another document).
         g.put_node(&node(
             "fact:origin",
@@ -3737,7 +3944,8 @@ strict = true
             "Heliocentrism was proposed as early as the 3rd century BC by Aristarchus",
         ))
         .unwrap();
-        g.put_edge(&edge("fact:sun-center", "LEADS_TO", "fact:origin")).unwrap();
+        g.put_edge(&edge("fact:sun-center", "LEADS_TO", "fact:origin"))
+            .unwrap();
 
         // Real readers drive glossary with the ontology's spine (LEADS_TO here), not the empty
         // default — that is the spec under which the chain must expand.
@@ -3774,10 +3982,7 @@ strict = true
         // Real query should return something
         let query = "SELECT id, label FROM nodes LIMIT 1";
         let result = sql(&idx, &g, query, &t);
-        assert!(
-            !result.is_empty(),
-            "query should return results: {result}"
-        );
+        assert!(!result.is_empty(), "query should return results: {result}");
     }
 
     // ── `scope` doc-filter tests ────────────────────────────────────────────
@@ -3809,24 +4014,42 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
 
-        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
-        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A"))
+            .unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B"))
+            .unwrap();
         g.put_node(&node("ent:root", "Entity", "Root")).unwrap();
         g.put_node(&node("ent:in_a", "Entity", "In docA")).unwrap();
         g.put_node(&node("ent:in_b", "Entity", "In docB")).unwrap();
-        g.put_node(&node("ent:none", "Entity", "Ungrounded")).unwrap();
-        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA")).unwrap();
-        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB")).unwrap();
+        g.put_node(&node("ent:none", "Entity", "Ungrounded"))
+            .unwrap();
+        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA"))
+            .unwrap();
+        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB"))
+            .unwrap();
         // ent:none has no MENTIONS edge at all — unattributable.
-        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_a")).unwrap();
-        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_b")).unwrap();
-        g.put_edge(&edge("ent:root", "REFERENCES", "ent:none")).unwrap();
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_a"))
+            .unwrap();
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:in_b"))
+            .unwrap();
+        g.put_edge(&edge("ent:root", "REFERENCES", "ent:none"))
+            .unwrap();
 
         let t = TraceLog::disabled();
 
         // No scope: unchanged baseline — every endpoint shows.
         let all = neighbors(
-            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None, None,
+            &idx,
+            &g,
+            Some("ent:root"),
+            None,
+            None,
+            None,
+            "both",
+            &t,
+            None,
+            None,
+            None,
         );
         assert!(
             all.contains("ent:in_a") && all.contains("ent:in_b") && all.contains("ent:none"),
@@ -3835,7 +4058,16 @@ strict = true
 
         // scope=docA.md: only the docA-owned endpoint remains.
         let scoped = neighbors(
-            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None,
+            &idx,
+            &g,
+            Some("ent:root"),
+            None,
+            None,
+            None,
+            "both",
+            &t,
+            None,
+            None,
             Some("docA.md"),
         );
         assert!(scoped.contains("ent:in_a"), "{scoped}");
@@ -3847,7 +4079,17 @@ strict = true
 
         // Glob: "doc*" matches both documents — the unattributable endpoint stays excluded.
         let glob_scoped = neighbors(
-            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None, Some("doc*"),
+            &idx,
+            &g,
+            Some("ent:root"),
+            None,
+            None,
+            None,
+            "both",
+            &t,
+            None,
+            None,
+            Some("doc*"),
         );
         assert!(
             glob_scoped.contains("ent:in_a") && glob_scoped.contains("ent:in_b"),
@@ -3857,7 +4099,16 @@ strict = true
 
         // Non-matching glob: nothing survives.
         let none_scoped = neighbors(
-            &idx, &g, Some("ent:root"), None, None, None, "both", &t, None, None,
+            &idx,
+            &g,
+            Some("ent:root"),
+            None,
+            None,
+            None,
+            "both",
+            &t,
+            None,
+            None,
             Some("nomatch*"),
         );
         assert_eq!(none_scoped, "(no structural edges)", "{none_scoped}");
@@ -3869,25 +4120,42 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
 
-        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
-        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A"))
+            .unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B"))
+            .unwrap();
         g.put_node(&node("ent:root", "Entity", "Root")).unwrap();
         g.put_node(&node("ent:in_a", "Entity", "In docA")).unwrap();
         g.put_node(&node("ent:in_b", "Entity", "In docB")).unwrap();
-        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA")).unwrap();
-        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB")).unwrap();
-        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_a")).unwrap();
-        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_b")).unwrap();
+        g.put_edge(&edge("ent:in_a", "MENTIONS", "sec:docA"))
+            .unwrap();
+        g.put_edge(&edge("ent:in_b", "MENTIONS", "sec:docB"))
+            .unwrap();
+        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_a"))
+            .unwrap();
+        g.put_edge(&edge("ent:root", "SIMILAR", "ent:in_b"))
+            .unwrap();
 
         let t = TraceLog::disabled();
 
         // No scope: unchanged baseline.
         let all = related(&idx, &g, Some("ent:root"), None, None, &t, None, None, None);
-        assert!(all.contains("ent:in_a") && all.contains("ent:in_b"), "{all}");
+        assert!(
+            all.contains("ent:in_a") && all.contains("ent:in_b"),
+            "{all}"
+        );
 
         // scope=docA.md: only the docA-owned SIMILAR case remains.
         let scoped = related(
-            &idx, &g, Some("ent:root"), None, None, &t, None, None, Some("docA.md"),
+            &idx,
+            &g,
+            Some("ent:root"),
+            None,
+            None,
+            &t,
+            None,
+            None,
+            Some("docA.md"),
         );
         assert!(scoped.contains("ent:in_a"), "{scoped}");
         assert!(!scoped.contains("ent:in_b"), "{scoped}");
@@ -3899,8 +4167,10 @@ strict = true
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
 
-        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
-        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A"))
+            .unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B"))
+            .unwrap();
         // Two facts sharing the exact same label — `resolve` returns both (label_norm match).
         g.put_node(&node("fact:a", "Fact", "Shared term")).unwrap();
         g.put_node(&node("fact:b", "Fact", "Shared term")).unwrap();
@@ -3910,7 +4180,16 @@ strict = true
         let t = TraceLog::disabled();
 
         // No scope: unchanged baseline — both facts surface.
-        let all = glossary(&idx, &g, "Shared term", &ChainSpec::default(), &t, None, None, None);
+        let all = glossary(
+            &idx,
+            &g,
+            "Shared term",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+        );
         assert!(all.contains("fact:a") && all.contains("fact:b"), "{all}");
 
         // scope=docA.md: only the docA-grounded fact surfaces.
@@ -3935,15 +4214,21 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::default();
 
-        g.put_node(&section_node("sec:docA", "docA.md", "Heading A")).unwrap();
-        g.put_node(&section_node("sec:docB", "docB.md", "Heading B")).unwrap();
+        g.put_node(&section_node("sec:docA", "docA.md", "Heading A"))
+            .unwrap();
+        g.put_node(&section_node("sec:docB", "docB.md", "Heading B"))
+            .unwrap();
         for id in ["reach_start", "reach_target_a", "reach_target_b"] {
             g.put_node(&node(id, "Entity", id)).unwrap();
         }
-        g.put_edge(&edge("reach_target_a", "MENTIONS", "sec:docA")).unwrap();
-        g.put_edge(&edge("reach_target_b", "MENTIONS", "sec:docB")).unwrap();
-        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_a")).unwrap();
-        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_b")).unwrap();
+        g.put_edge(&edge("reach_target_a", "MENTIONS", "sec:docA"))
+            .unwrap();
+        g.put_edge(&edge("reach_target_b", "MENTIONS", "sec:docB"))
+            .unwrap();
+        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_a"))
+            .unwrap();
+        g.put_edge(&edge("reach_start", "REFERENCES", "reach_target_b"))
+            .unwrap();
 
         let t = TraceLog::disabled();
 
@@ -3951,8 +4236,20 @@ strict = true
         // records a target when `relation` is explicit (`traverse::reach`'s undirected
         // `relation=None` connectivity mode records no targets at all), so pass one here.
         let all = reach(
-            &idx, &g, &ont, Some("reach_start"), None, None, Some("REFERENCES"), None, None,
-            None, 6, false, &t, None,
+            &idx,
+            &g,
+            &ont,
+            Some("reach_start"),
+            None,
+            None,
+            Some("REFERENCES"),
+            None,
+            None,
+            None,
+            6,
+            false,
+            &t,
+            None,
         );
         assert!(
             all.contains("reach_target_a") && all.contains("reach_target_b"),
@@ -3961,8 +4258,20 @@ strict = true
 
         // scope=docA.md: only the docA-owned target chain survives.
         let scoped = reach(
-            &idx, &g, &ont, Some("reach_start"), None, None, Some("REFERENCES"), None, None,
-            None, 6, false, &t, Some("docA.md"),
+            &idx,
+            &g,
+            &ont,
+            Some("reach_start"),
+            None,
+            None,
+            Some("REFERENCES"),
+            None,
+            None,
+            None,
+            6,
+            false,
+            &t,
+            Some("docA.md"),
         );
         assert!(scoped.contains("reach_target_a"), "{scoped}");
         assert!(!scoped.contains("reach_target_b"), "{scoped}");

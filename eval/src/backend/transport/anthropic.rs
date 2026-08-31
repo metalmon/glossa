@@ -150,7 +150,11 @@ fn parse_response(resp: Value) -> TurnReply {
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
         .map(|b| ToolCall {
-            id: b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+            id: b
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             name: b
                 .get("name")
                 .and_then(Value::as_str)
@@ -164,7 +168,11 @@ fn parse_response(resp: Value) -> TurnReply {
     // `"max_tokens"` (its length-cap signal) maps to `"length"` so a truncated turn resamples the
     // same way an OpenAI `finish_reason == "length"` one does; any other stop reason passes through.
     let finish_reason = resp.get("stop_reason").and_then(Value::as_str).map(|r| {
-        if r == "max_tokens" { "length".to_string() } else { r.to_string() }
+        if r == "max_tokens" {
+            "length".to_string()
+        } else {
+            r.to_string()
+        }
     });
 
     TurnReply {
@@ -305,7 +313,11 @@ mod tests {
                 ("id2".to_string(), "body2".to_string()),
             ],
         );
-        assert_eq!(messages.len(), 1, "must batch into exactly ONE user message");
+        assert_eq!(
+            messages.len(),
+            1,
+            "must batch into exactly ONE user message"
+        );
         assert_eq!(messages[0]["role"], "user");
         let blocks = messages[0]["content"].as_array().unwrap();
         assert_eq!(blocks.len(), 2);
@@ -409,7 +421,11 @@ mod tests {
                     let headers = &text[..header_end];
                     let content_length: usize = headers
                         .lines()
-                        .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0);
                     let body_so_far = buf.len() - (header_end + 4);
@@ -490,7 +506,11 @@ mod tests {
         assert_eq!(out, "ANSWER: final");
 
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2, "the tool must trigger exactly one extra turn");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the tool must trigger exactly one extra turn"
+        );
 
         let req0 = &requests[0];
         assert!(

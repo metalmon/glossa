@@ -17,9 +17,9 @@ pub mod distil;
 pub mod enrich;
 pub mod episode;
 pub mod export_tz;
-pub mod finetune;
 #[cfg(feature = "constraint")]
 pub mod export_tz_constraint;
+pub mod finetune;
 pub mod gepa;
 #[cfg(feature = "constraint")]
 pub mod gepa_constraint;

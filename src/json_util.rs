@@ -262,7 +262,10 @@ where
             OneOrMany::One(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
             OneOrMany::Many(m) => m.into_iter().map(|s| s.trim().to_string()).collect(),
         };
-        items.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()
+        items
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
     });
     Ok(cleaned.filter(|v: &Vec<String>| !v.is_empty()))
 }

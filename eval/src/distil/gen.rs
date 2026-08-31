@@ -13,8 +13,8 @@
 use crate::backend::glossa_tools;
 use crate::backend::openai::{chat_once, run_agent_loop};
 use crate::backend::transport::openai::agent_chat_full;
-use crate::reason::schema_graph_block;
 use crate::lab::LabConfig;
+use crate::reason::schema_graph_block;
 use crate::score::contains_match;
 use crate::workspace::KbxPaths;
 use anyhow::anyhow;
@@ -313,7 +313,10 @@ pub fn generate_one(
         distil_ep.timeout_secs,
         distil_ep.resolve_temperature(),
     )?;
-    let leak_text = leak_resp.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    let leak_text = leak_resp
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
     if contains_match(leak_text, &proposal.answer) {
         return Ok(GenOutcome::Dropped(DropReason::Leaked));
     }
@@ -347,7 +350,10 @@ mod tests {
         let args = json!({ "question": "q?", "answer": "a" });
         let p = parse_propose_gold(&args).expect("minimal payload parses");
         assert!(p.chain_node_ids.is_empty());
-        assert!(!p.gate_ok, "gate_ok must default to false, never an accidental pass");
+        assert!(
+            !p.gate_ok,
+            "gate_ok must default to false, never an accidental pass"
+        );
         assert!(p.gate_reason.is_empty());
     }
 
@@ -369,8 +375,20 @@ mod tests {
             .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
             .map(String::from)
             .collect();
-        for t in ["search", "read", "grep", "glob", "glossary", "reach", "sql", "propose_gold"] {
-            assert!(names.contains(&t.to_string()), "missing tool {t}: {names:?}");
+        for t in [
+            "search",
+            "read",
+            "grep",
+            "glob",
+            "glossary",
+            "reach",
+            "sql",
+            "propose_gold",
+        ] {
+            assert!(
+                names.contains(&t.to_string()),
+                "missing tool {t}: {names:?}"
+            );
         }
         assert!(
             !names.contains(&"graph_upsert".to_string()),

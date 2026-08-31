@@ -108,12 +108,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let candidate_selection = args
         .candidate_selection
         .parse::<CandidateSelection>()
-        .with_context(|| {
-            format!(
-                "parse candidate_selection {:?}",
-                args.candidate_selection
-            )
-        })?;
+        .with_context(|| format!("parse candidate_selection {:?}", args.candidate_selection))?;
 
     // Selection metric: "judge" (default, graded LLM judge) or "exact" (exact-match EM). Judge
     // needs both a [judge] endpoint in lab.toml and the workspace judge.md prompt; exact needs
@@ -196,9 +191,8 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     // Visible progress bar for the long GEPA run (mirrors `kbx run`/build/reason): one bar owned
     // here, driven per iteration by `gepa_graph::run` (length = budget, position = iterations done).
     // Hidden on a non-TTY or under `--no-progress`, exactly like `run_eval`.
-    let show_progress = !args.no_progress
-        && std::io::stdout().is_terminal()
-        && std::io::stderr().is_terminal();
+    let show_progress =
+        !args.no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     let pb = if show_progress {
         // Length 0 at creation: `gepa_graph::run` sets the real length (= budget) once it starts, so
         // the bar tracks GEPA iterations end-to-end (`[iter/budget]`). Seeding a count here would
@@ -259,11 +253,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             backup.push(".bak");
             let backup = PathBuf::from(backup);
             std::fs::copy(&paths.answer, &backup).with_context(|| {
-                format!(
-                    "backup {} -> {}",
-                    paths.answer.display(),
-                    backup.display()
-                )
+                format!("backup {} -> {}", paths.answer.display(), backup.display())
             })?;
         }
         std::fs::write(&paths.answer, &result.prompt)

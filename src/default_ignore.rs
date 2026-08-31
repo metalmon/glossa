@@ -114,7 +114,10 @@ mod tests {
         let content = std::fs::read_to_string(&p).unwrap();
         // The gitignore-whitelist idiom must be intact.
         assert!(content.contains("\n*\n"), "ignores everything first");
-        assert!(content.contains("!*/"), "keeps directories so the walk descends");
+        assert!(
+            content.contains("!*/"),
+            "keeps directories so the walk descends"
+        );
         assert!(content.contains("!*.pdf") && content.contains("!*.docx"));
         assert!(content.contains("!*.png"), "images stay whitelisted");
     }
@@ -138,7 +141,10 @@ mod tests {
     fn does_not_seed_when_a_gitignore_exists() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".gitignore"), "target/\n").unwrap();
-        assert!(seed_if_absent(d.path()).is_none(), "respects an existing .gitignore");
+        assert!(
+            seed_if_absent(d.path()).is_none(),
+            "respects an existing .gitignore"
+        );
         assert!(!d.path().join(".ignore").exists());
     }
 }

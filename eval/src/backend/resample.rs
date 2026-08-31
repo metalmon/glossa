@@ -170,7 +170,7 @@ pub fn call_with_resample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::openai::{reset_resamples, resamples};
+    use crate::backend::openai::{resamples, reset_resamples};
     use crate::backend::transport::ToolCall;
     use serde_json::json;
     use std::cell::RefCell;
@@ -262,7 +262,9 @@ mod tests {
 
     #[test]
     fn looks_looped_detects_and_passes() {
-        assert!(looks_looped(&("prefix ".to_string() + &"ABABAB".repeat(20))));
+        assert!(looks_looped(
+            &("prefix ".to_string() + &"ABABAB".repeat(20))
+        ));
         assert!(!looks_looped("too short"));
         assert!(!looks_looped(
             "The quick brown fox jumps over the lazy dog. It was a bright cold day in April, and \
@@ -284,10 +286,18 @@ mod tests {
     #[test]
     fn not_degenerate_on_good_answer_or_normal_tool_call_turn() {
         // A normal, complete answer.
-        assert!(!is_degenerate(&reply("ANSWER: a short normal answer", "stop", vec![])));
+        assert!(!is_degenerate(&reply(
+            "ANSWER: a short normal answer",
+            "stop",
+            vec![]
+        )));
         // A normal tool-call turn: empty content is NORMAL (the content IS the tool call) — and its
         // finish_reason is "tool_calls", not "length" — so it must NEVER be flagged degenerate.
-        let tc = vec![ToolCall { id: "c1".into(), name: "search".into(), args: json!({"q": "x"}) }];
+        let tc = vec![ToolCall {
+            id: "c1".into(),
+            name: "search".into(),
+            args: json!({"q": "x"}),
+        }];
         assert!(!is_degenerate(&reply("", "tool_calls", tc)));
     }
 
@@ -302,15 +312,25 @@ mod tests {
             ],
             ResamplePolicy::default(),
         );
-        assert_eq!(calls, 2, "must resample exactly once after a finish_reason=length turn");
-        assert_eq!(out.text.as_deref(), Some("ANSWER: ok"), "returns the good (second) reply");
+        assert_eq!(
+            calls, 2,
+            "must resample exactly once after a finish_reason=length turn"
+        );
+        assert_eq!(
+            out.text.as_deref(),
+            Some("ANSWER: ok"),
+            "returns the good (second) reply"
+        );
         assert_eq!(rs, 1, "the counter must tally the one resample");
     }
 
     #[test]
     fn resamples_on_empty_no_tool_turn_then_returns_answer() {
         let (out, calls, rs) = run(
-            vec![reply("   ", "stop", vec![]), reply("ANSWER: recovered", "stop", vec![])],
+            vec![
+                reply("   ", "stop", vec![]),
+                reply("ANSWER: recovered", "stop", vec![]),
+            ],
             ResamplePolicy::default(),
         );
         assert_eq!(calls, 2, "an empty no-tool turn must resample once");
@@ -321,17 +341,26 @@ mod tests {
     #[test]
     fn normal_tool_call_turn_is_never_resampled() {
         // Empty content + tool_calls: the normal case. Only ONE call, no resample, returned as-is.
-        let tc = vec![ToolCall { id: "c1".into(), name: "search".into(), args: json!({"q": "x"}) }];
+        let tc = vec![ToolCall {
+            id: "c1".into(),
+            name: "search".into(),
+            args: json!({"q": "x"}),
+        }];
         let (out, calls, rs) = run(vec![reply("", "tool_calls", tc)], ResamplePolicy::default());
         assert_eq!(calls, 1, "a normal tool-call turn must not be resampled");
         assert_eq!(rs, 0);
-        assert!(!out.tool_calls.is_empty(), "the tool-call reply is returned unchanged");
+        assert!(
+            !out.tool_calls.is_empty(),
+            "the tool-call reply is returned unchanged"
+        );
     }
 
     #[test]
     fn good_answer_returns_in_one_call() {
-        let (out, calls, rs) =
-            run(vec![reply("ANSWER: done", "stop", vec![])], ResamplePolicy::default());
+        let (out, calls, rs) = run(
+            vec![reply("ANSWER: done", "stop", vec![])],
+            ResamplePolicy::default(),
+        );
         assert_eq!(calls, 1, "a good completion returns in one call");
         assert_eq!(rs, 0);
         assert_eq!(out.text.as_deref(), Some("ANSWER: done"));
@@ -342,12 +371,22 @@ mod tests {
         // Chronically-verbose model: length on every turn. Default length-cap is 1, so exactly one
         // resample then it gives up and returns the second (still truncated) completion.
         let (out, calls, rs) = run(
-            vec![reply("...truncated A", "length", vec![]), reply("...truncated B", "length", vec![])],
+            vec![
+                reply("...truncated A", "length", vec![]),
+                reply("...truncated B", "length", vec![]),
+            ],
             ResamplePolicy::default(),
         );
-        assert_eq!(calls, 2, "must resample once, not twice, before giving up on length");
+        assert_eq!(
+            calls, 2,
+            "must resample once, not twice, before giving up on length"
+        );
         assert_eq!(rs, 1);
-        assert_eq!(out.text.as_deref(), Some("...truncated B"), "returns the last best-effort reply");
+        assert_eq!(
+            out.text.as_deref(),
+            Some("...truncated B"),
+            "returns the last best-effort reply"
+        );
     }
 
     #[test]
@@ -363,17 +402,29 @@ mod tests {
             ],
             ResamplePolicy::default(),
         );
-        assert_eq!(calls, 3, "1 initial + 2 resamples for a persistent loop, unbounded by length cap");
+        assert_eq!(
+            calls, 3,
+            "1 initial + 2 resamples for a persistent loop, unbounded by length cap"
+        );
         assert_eq!(rs, 2);
-        assert!(out.text.as_deref().unwrap().contains("ABABAB"), "returns last best-effort");
+        assert!(
+            out.text.as_deref().unwrap().contains("ABABAB"),
+            "returns last best-effort"
+        );
     }
 
     #[test]
     fn zero_length_cap_never_resamples_on_length() {
         // max_length_resamples == 0 disables length-resampling: a single length turn is accepted.
-        let policy = ResamplePolicy { max_resamples: 2, max_length_resamples: 0 };
+        let policy = ResamplePolicy {
+            max_resamples: 2,
+            max_length_resamples: 0,
+        };
         let (out, calls, rs) = run(vec![reply("...truncated", "length", vec![])], policy);
-        assert_eq!(calls, 1, "length cap 0 accepts the first completion outright");
+        assert_eq!(
+            calls, 1,
+            "length cap 0 accepts the first completion outright"
+        );
         assert_eq!(rs, 0);
         assert_eq!(out.text.as_deref(), Some("...truncated"));
     }

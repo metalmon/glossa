@@ -74,7 +74,11 @@ impl NodeIndex {
 
     /// The node-table content signature this index was last rebuilt from, if recorded.
     pub fn built_sig(&self) -> Option<u64> {
-        std::fs::read_to_string(&self.sig_path).ok()?.trim().parse().ok()
+        std::fs::read_to_string(&self.sig_path)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     /// Persist the content signature the index was just rebuilt from, beside the segment dir.
@@ -280,7 +284,10 @@ mod tests {
         let idx = NodeIndex::open_or_create(dir.path()).unwrap();
         let mut docs: Vec<(String, Vec<String>)> = vec![
             ("n:1".into(), vec!["Meridian Falls District office".into()]),
-            ("n:2".into(), vec!["Meridian Falls District courthouse".into()]),
+            (
+                "n:2".into(),
+                vec!["Meridian Falls District courthouse".into()],
+            ),
         ];
         for i in 3..=20 {
             docs.push((format!("n:{i}"), vec!["The District held a meeting".into()]));
@@ -325,7 +332,10 @@ mod tests {
             docs.push((format!("n:common:{i}"), vec!["Ubiquitine marker".into()]));
         }
         for i in 0..(total - common_df) {
-            docs.push((format!("n:other:{i}"), vec!["Unrelated filler content".into()]));
+            docs.push((
+                format!("n:other:{i}"),
+                vec!["Unrelated filler content".into()],
+            ));
         }
         idx.rebuild(&docs).unwrap();
 

@@ -50,7 +50,9 @@ impl<'c> QueryAuthzGuard<'c> {
 }
 impl Drop for QueryAuthzGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.0.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        let _ = self
+            .0
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     }
 }
 
@@ -119,7 +121,9 @@ fn like_match(pattern: &str, text: &str, escape: Option<char>) -> bool {
                 (0..=text.len()).any(|split| matches(rest, &text[split..]))
             }
             Some(Tok::AnyOne) => !text.is_empty() && matches(&toks[1..], &text[1..]),
-            Some(Tok::Lit(c)) => matches!(text.first(), Some(t) if t == c) && matches(&toks[1..], &text[1..]),
+            Some(Tok::Lit(c)) => {
+                matches!(text.first(), Some(t) if t == c) && matches(&toks[1..], &text[1..])
+            }
         }
     }
     matches(&toks, &text_lower)
@@ -710,7 +714,10 @@ impl GraphStore {
     /// that fuzzy relation matching resolves against.
     pub fn edge_type_vocab(&self) -> anyhow::Result<Vec<String>> {
         let rows = self.run_select("SELECT DISTINCT edge_type FROM edges", 200)?;
-        Ok(rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next())
+            .collect())
     }
 
     /// Whether at least one row of `edges_labeled` matches all of the given constraints
@@ -1539,9 +1546,10 @@ impl GraphStore {
     pub fn term_is_salient(&self, term: &str) -> anyhow::Result<bool> {
         let c = self.conn.lock().unwrap();
         self.ensure_node_index_fresh(&c)?;
-        Ok(self
-            .node_index
-            .is_salient(term, crate::graph::node_index::DEFAULT_SALIENCE_MAX_DF_RATIO))
+        Ok(self.node_index.is_salient(
+            term,
+            crate::graph::node_index::DEFAULT_SALIENCE_MAX_DF_RATIO,
+        ))
     }
 
     /// Rebuild the node index from the node table when it has drifted (count OR content signature
@@ -1675,9 +1683,13 @@ strict = true
         // First resolve builds the index; the not-yet-added alias must miss.
         assert!(g.resolve("Zephyrion").unwrap().is_empty());
         // Add the alias in place — count stays at one node.
-        g.upsert(&ont, &[mk(vec!["Zephyrion".into()])], &[]).unwrap();
+        g.upsert(&ont, &[mk(vec!["Zephyrion".into()])], &[])
+            .unwrap();
         // Signature drift must force a rebuild so the new alias resolves.
-        assert_eq!(g.resolve("Zephyrion").unwrap(), vec!["org:acme".to_string()]);
+        assert_eq!(
+            g.resolve("Zephyrion").unwrap(),
+            vec!["org:acme".to_string()]
+        );
     }
 
     #[test]
@@ -1907,7 +1919,8 @@ strict = true
         assert!(g.upsert(&ont, &[a, b], &[e]).is_ok());
         let out = g.outgoing("sym:a").unwrap();
         assert!(
-            out.iter().any(|e| e.edge_type == "CAUSED_BY" && e.to == "cau:a"),
+            out.iter()
+                .any(|e| e.edge_type == "CAUSED_BY" && e.to == "cau:a"),
             "chaining edge with empty provenance must be written: {:?}",
             out
         );
@@ -2011,8 +2024,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for (id, label) in [
-            ("fact:early", "Heliocentrism was proposed as early as the 3rd century BC"),
-            ("fact:late", "A mathematically predictive heliocentric system was developed later"),
+            (
+                "fact:early",
+                "Heliocentrism was proposed as early as the 3rd century BC",
+            ),
+            (
+                "fact:late",
+                "A mathematically predictive heliocentric system was developed later",
+            ),
         ] {
             g.put_node(&Node {
                 id: id.into(),
@@ -2136,7 +2155,10 @@ mod tests {
         })
         .unwrap();
         let rows = g
-            .run_select("SELECT label FROM nodes WHERE label LIKE '%калибровка%'", 10)
+            .run_select(
+                "SELECT label FROM nodes WHERE label LIKE '%калибровка%'",
+                10,
+            )
             .unwrap();
         assert_eq!(rows, vec![vec!["КаЛибРовка Аналоговых".to_string()]]);
     }
@@ -2159,9 +2181,13 @@ mod tests {
 
         // Whitelisted reads work — including an ORDER BY that needs a transient sort, and the
         // edges_labeled view (which internally reads nodes+edges) — no false denials.
-        assert!(g.run_select("SELECT id FROM nodes ORDER BY label", 5).is_ok());
+        assert!(g
+            .run_select("SELECT id FROM nodes ORDER BY label", 5)
+            .is_ok());
         assert!(g.select_columns("SELECT id FROM nodes").is_ok());
-        assert!(g.run_select("SELECT src_label FROM edges_labeled", 5).is_ok());
+        assert!(g
+            .run_select("SELECT src_label FROM edges_labeled", 5)
+            .is_ok());
 
         // A direct read of a non-whitelisted table is denied.
         assert!(g.run_select("SELECT name FROM sqlite_master", 5).is_err());
@@ -2312,7 +2338,9 @@ mod tests {
         assert!(g.visible_at("res:x", "2022-06-01T00:00:00Z").unwrap());
         assert!(!g.visible_at("res:x", "2024-06-01T00:00:00Z").unwrap());
         // a node with NO validity row is always visible
-        assert!(g.visible_at("some:timeless", "2024-06-01T00:00:00Z").unwrap());
+        assert!(g
+            .visible_at("some:timeless", "2024-06-01T00:00:00Z")
+            .unwrap());
 
         // deleting the node removes its validity row
         g.delete_nodes(&["res:x".into()]).unwrap();
@@ -2599,8 +2627,13 @@ mod tests {
     }
 
     fn link(g: &GraphStore, a: &str, b: &str) {
-        g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
-            .unwrap();
+        g.put_edge(&Edge {
+            from: a.into(),
+            to: b.into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
     }
 
     #[test]

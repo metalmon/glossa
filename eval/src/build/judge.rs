@@ -233,8 +233,10 @@ pub fn run_judge(
             );
         }
 
-        let doc_by_id: HashMap<&str, &str> =
-            facts.iter().map(|f| (f.id.as_str(), f.doc.as_str())).collect();
+        let doc_by_id: HashMap<&str, &str> = facts
+            .iter()
+            .map(|f| (f.id.as_str(), f.doc.as_str()))
+            .collect();
 
         let links = judge_group(
             lab.bridge.as_ref().unwrap_or(&lab.model),

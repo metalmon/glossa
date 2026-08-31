@@ -21,7 +21,13 @@ fn days_in_month(y: i64, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap(y) { 29 } else { 28 },
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
@@ -74,7 +80,11 @@ fn passthrough_datetime(s: &str) -> Option<String> {
     parse_date(date)?; // validates the date part
     let hms = &rest[1..rest.len() - 1]; // strip 'T' and 'Z'
     let t: Vec<&str> = hms.split(':').collect();
-    let (h, mi, se): (u32, u32, u32) = (t.first()?.parse().ok()?, t.get(1)?.parse().ok()?, t.get(2)?.parse().ok()?);
+    let (h, mi, se): (u32, u32, u32) = (
+        t.first()?.parse().ok()?,
+        t.get(1)?.parse().ok()?,
+        t.get(2)?.parse().ok()?,
+    );
     if h > 23 || mi > 59 || se > 59 {
         return None;
     }
@@ -94,9 +104,17 @@ fn normalize(s: &str, end: bool) -> Result<String> {
     }
     let (y, m, d) = parse_date(s).ok_or_else(|| anyhow::anyhow!("unparseable date: '{s}'"))?;
     let (mm, dd, time) = if m == 0 {
-        (if end { 12 } else { 1 }, if end { 31 } else { 1 }, if end { "23:59:59" } else { "00:00:00" })
+        (
+            if end { 12 } else { 1 },
+            if end { 31 } else { 1 },
+            if end { "23:59:59" } else { "00:00:00" },
+        )
     } else if d.is_none() {
-        (m, if end { days_in_month(y, m) } else { 1 }, if end { "23:59:59" } else { "00:00:00" })
+        (
+            m,
+            if end { days_in_month(y, m) } else { 1 },
+            if end { "23:59:59" } else { "00:00:00" },
+        )
     } else {
         (m, d.unwrap(), if end { "23:59:59" } else { "00:00:00" })
     };
@@ -163,9 +181,15 @@ mod tests {
         assert_eq!(normalize_from("2024-02").unwrap(), "2024-02-01T00:00:00Z");
         assert_eq!(normalize_to("2024-02").unwrap(), "2024-02-29T23:59:59Z"); // leap
         assert_eq!(normalize_to("2023-02").unwrap(), "2023-02-28T23:59:59Z");
-        assert_eq!(normalize_from("2024-03-01").unwrap(), "2024-03-01T00:00:00Z");
+        assert_eq!(
+            normalize_from("2024-03-01").unwrap(),
+            "2024-03-01T00:00:00Z"
+        );
         assert_eq!(normalize_to("2024-03-01").unwrap(), "2024-03-01T23:59:59Z");
-        assert_eq!(normalize_from("2024-03-01T09:30:00Z").unwrap(), "2024-03-01T09:30:00Z");
+        assert_eq!(
+            normalize_from("2024-03-01T09:30:00Z").unwrap(),
+            "2024-03-01T09:30:00Z"
+        );
         // ordering holds lexicographically
         assert!(normalize_from("2024-01-01").unwrap() < normalize_to("2024-12-31").unwrap());
     }
@@ -208,7 +232,7 @@ mod tests {
         // Malformed dates
         assert!(normalize_from("not-a-date").is_err());
         assert!(normalize_from("2024-13").is_err()); // bad month
-        // Trailing garbage (more than 3 dash-separated segments)
+                                                     // Trailing garbage (more than 3 dash-separated segments)
         assert!(normalize_from("2024-01-01-99").is_err());
         // 5-digit year (breaks fixed-width lexicographic ordering)
         assert!(normalize_from("12024").is_err());
@@ -227,9 +251,26 @@ mod tests {
     #[test]
     fn status_derives() {
         let at = "2024-06-01T00:00:00Z";
-        assert_eq!(status(Some("2025-01-01T00:00:00Z"), None, false, at), Status::Future);
-        assert_eq!(status(Some("2024-01-01T00:00:00Z"), Some("2024-03-01T23:59:59Z"), false, at), Status::Expired);
-        assert_eq!(status(Some("2024-01-01T00:00:00Z"), None, false, at), Status::Current);
-        assert_eq!(status(Some("2024-01-01T00:00:00Z"), None, true, at), Status::Superseded);
+        assert_eq!(
+            status(Some("2025-01-01T00:00:00Z"), None, false, at),
+            Status::Future
+        );
+        assert_eq!(
+            status(
+                Some("2024-01-01T00:00:00Z"),
+                Some("2024-03-01T23:59:59Z"),
+                false,
+                at
+            ),
+            Status::Expired
+        );
+        assert_eq!(
+            status(Some("2024-01-01T00:00:00Z"), None, false, at),
+            Status::Current
+        );
+        assert_eq!(
+            status(Some("2024-01-01T00:00:00Z"), None, true, at),
+            Status::Superseded
+        );
     }
 }

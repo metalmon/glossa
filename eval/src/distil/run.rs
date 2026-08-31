@@ -11,9 +11,9 @@ use crate::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
 };
 use crate::checkpoint::Checkpoint;
-use crate::lab::LabConfig;
 use crate::distil::densify::{densify_doc, DensifyStats};
 use crate::distil::gen::{generate_one, GenOutcome, Seed};
+use crate::lab::LabConfig;
 use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
@@ -142,8 +142,8 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
     // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
     // calls — a no-op on a hidden bar.
@@ -225,15 +225,17 @@ fn write_dataset_toml(out_path: &std::path::Path, kept: &[OutCase]) -> Result<()
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let file = OutFile {
-        case: kept.iter().map(|c| OutCase {
-            id: c.id.clone(),
-            question: c.question.clone(),
-            answer: c.answer.clone(),
-        }).collect(),
+        case: kept
+            .iter()
+            .map(|c| OutCase {
+                id: c.id.clone(),
+                question: c.question.clone(),
+                answer: c.answer.clone(),
+            })
+            .collect(),
     };
     let text = toml::to_string_pretty(&file).context("serializing synthetic dataset.toml")?;
-    std::fs::write(out_path, text)
-        .with_context(|| format!("writing {}", out_path.display()))?;
+    std::fs::write(out_path, text).with_context(|| format!("writing {}", out_path.display()))?;
     Ok(())
 }
 
@@ -515,7 +517,10 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // `DENSIFY_TEMP` for the whole run, so a single write covers them all. Setting it per-worker
     // (the old placement, inside `densify_doc`) would race N threads on a process-global env var,
     // which is UB even though every writer agrees on the value.
-    std::env::set_var("KB_EVAL_TEMP", crate::distil::densify::DENSIFY_TEMP.to_string());
+    std::env::set_var(
+        "KB_EVAL_TEMP",
+        crate::distil::densify::DENSIFY_TEMP.to_string(),
+    );
 
     // Each doc's progress is driven entirely by `densify_doc`'s own per-round callback plus the
     // gap top-up below, so `run_units_parallel`'s own post-work `pb.inc(weight)` must be a no-op
@@ -641,8 +646,14 @@ to = ["Fact"]
         let ont = Ontology::parse(GROUNDING_ONT).unwrap();
         let types = eligible_seed_types(&ont, None);
         assert!(types.contains("Fact"));
-        assert!(!types.contains("Document"), "structural type must never be eligible");
-        assert!(!types.contains("Section"), "structural type must never be eligible");
+        assert!(
+            !types.contains("Document"),
+            "structural type must never be eligible"
+        );
+        assert!(
+            !types.contains("Section"),
+            "structural type must never be eligible"
+        );
     }
 
     #[test]
@@ -713,7 +724,11 @@ to = ["Fact"]
 
         let seeds = seed_pool(&g, &ont, None).unwrap();
         let ids: Vec<&str> = seeds.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["fact-grounded"], "seed pool must be exactly the grounded Fact: {ids:?}");
+        assert_eq!(
+            ids,
+            vec!["fact-grounded"],
+            "seed pool must be exactly the grounded Fact: {ids:?}"
+        );
     }
 
     #[test]
@@ -879,11 +894,18 @@ to = ["Fact"]
         assert_eq!(DEFAULT_CHUNKS_PER_ROUND, 3);
         assert_eq!(resolve(Some(9), Some(6), DEFAULT_CHUNKS_PER_ROUND), 9);
         assert_eq!(resolve(None, Some(6), DEFAULT_CHUNKS_PER_ROUND), 6);
-        assert_eq!(resolve(None, None, DEFAULT_CHUNKS_PER_ROUND), DEFAULT_CHUNKS_PER_ROUND);
+        assert_eq!(
+            resolve(None, None, DEFAULT_CHUNKS_PER_ROUND),
+            DEFAULT_CHUNKS_PER_ROUND
+        );
 
         assert_eq!(crate::distil::densify::DEFAULT_MAX_ROUNDS, 30);
         assert_eq!(
-            resolve(Some(50), Some(40), crate::distil::densify::DEFAULT_MAX_ROUNDS),
+            resolve(
+                Some(50),
+                Some(40),
+                crate::distil::densify::DEFAULT_MAX_ROUNDS
+            ),
             50
         );
         assert_eq!(

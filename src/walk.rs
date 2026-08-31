@@ -124,8 +124,17 @@ mod cover_tests {
         })
         .unwrap();
 
-        assert!(seen.contains(&"real.txt".to_string()), "real file must index");
-        for junk in ["Thumbs.db", "desktop.ini", ".DS_Store", "~$report.docx", "._real.txt"] {
+        assert!(
+            seen.contains(&"real.txt".to_string()),
+            "real file must index"
+        );
+        for junk in [
+            "Thumbs.db",
+            "desktop.ini",
+            ".DS_Store",
+            "~$report.docx",
+            "._real.txt",
+        ] {
             assert!(!seen.contains(&junk.to_string()), "junk indexed: {junk}");
         }
     }

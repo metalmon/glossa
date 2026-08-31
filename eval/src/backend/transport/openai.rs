@@ -33,12 +33,18 @@ pub(crate) const DEFAULT_MAX_TOKENS: u64 = 16384;
 
 /// Resolve the agent-loop `min_p` floor (env `KB_EVAL_MIN_P` > [`DEFAULT_MIN_P`]).
 pub(crate) fn agent_min_p() -> f64 {
-    std::env::var("KB_EVAL_MIN_P").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MIN_P)
+    std::env::var("KB_EVAL_MIN_P")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MIN_P)
 }
 
 /// Resolve the per-call completion cap (env `KB_EVAL_MAX_TOKENS` > [`DEFAULT_MAX_TOKENS`]).
 pub(crate) fn agent_max_tokens() -> u64 {
-    std::env::var("KB_EVAL_MAX_TOKENS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_TOKENS)
+    std::env::var("KB_EVAL_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 pub struct OpenAiTransport;
@@ -225,14 +231,20 @@ pub(crate) fn chat_http_full(
                         // If that error is itself an upstream transient (same wording as the
                         // non-2xx path), retry it too.
                         let retryable = is_transient_upstream(&err.to_string());
-                        (retryable, Err(anyhow!("chat endpoint returned an error: {err}")))
+                        (
+                            retryable,
+                            Err(anyhow!("chat endpoint returned an error: {err}")),
+                        )
                     } else if v.pointer("/choices/0/message").is_some() {
                         // Tally usage into the process-global counters before handing the FULL
                         // response back (see `backend::openai::record_usage`).
                         record_usage(&v);
                         (false, Ok(v))
                     } else {
-                        (false, Err(anyhow!("chat response had no choices[0].message")))
+                        (
+                            false,
+                            Err(anyhow!("chat response had no choices[0].message")),
+                        )
                     }
                 }
                 Err(e) => (false, Err(anyhow!("parse chat response json: {e}"))),
@@ -316,7 +328,11 @@ pub(crate) fn reply_from_response(full: &Value) -> anyhow::Result<TurnReply> {
         .map(|arr| {
             arr.iter()
                 .map(|call| ToolCall {
-                    id: call.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                    id: call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                     name: call
                         .pointer("/function/name")
                         .and_then(Value::as_str)
@@ -443,7 +459,10 @@ mod tests {
     fn transport_tools_schema_graph_on_has_function_envelope_and_graph_tool() {
         let schema = OpenAiTransport.tools_schema(true);
         let s = serde_json::to_string(&schema).unwrap();
-        assert!(s.contains("\"type\":\"function\""), "expected function envelope, got: {s}");
+        assert!(
+            s.contains("\"type\":\"function\""),
+            "expected function envelope, got: {s}"
+        );
         let names: Vec<&str> = schema
             .as_array()
             .unwrap()
@@ -461,7 +480,8 @@ mod tests {
     #[test]
     fn transport_push_tool_results_appends_tool_message() {
         let mut messages: Vec<Value> = vec![];
-        OpenAiTransport.push_tool_results(&mut messages, &[("id1".to_string(), "body1".to_string())]);
+        OpenAiTransport
+            .push_tool_results(&mut messages, &[("id1".to_string(), "body1".to_string())]);
         assert_eq!(
             messages,
             vec![json!({ "role": "tool", "tool_call_id": "id1", "content": "body1" })]

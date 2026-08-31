@@ -143,9 +143,8 @@ pub fn extract_node_ids(body: &str) -> Vec<String> {
     // loop detector; requiring glued-only fixes that. The bare `(document)` anchor is untouched
     // and still requires the wider `\s{2,}` gap so a path token's own text doesn't
     // false-positive into a document match.
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(\S+?)(?:#(\d+)|\s{2,}\(document\))").expect("valid regex")
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r"(\S+?)(?:#(\d+)|\s{2,}\(document\))").expect("valid regex"));
     re.captures_iter(body)
         .map(|c| match c.get(2) {
             Some(ord) => format!("{}#{}", &c[1], ord.as_str()),
@@ -285,7 +284,9 @@ impl ReaderSignals {
             let marker = repeat_marker();
             return Outcome {
                 kind: Some(SignalKind::Repeat),
-                render: ResultRender::ReplaceWith { marker: marker.clone() },
+                render: ResultRender::ReplaceWith {
+                    marker: marker.clone(),
+                },
                 marker: Some(marker),
             };
         }
@@ -328,7 +329,9 @@ impl ReaderSignals {
             let marker = streak_marker();
             return Outcome {
                 kind: Some(SignalKind::Streak),
-                render: ResultRender::ReplaceWith { marker: marker.clone() },
+                render: ResultRender::ReplaceWith {
+                    marker: marker.clone(),
+                },
                 marker: Some(marker),
             };
         }
@@ -349,7 +352,9 @@ impl ReaderSignals {
                     omitted: ids.len() - new_count,
                 }
             } else {
-                ResultRender::ReplaceWith { marker: marker.clone() }
+                ResultRender::ReplaceWith {
+                    marker: marker.clone(),
+                }
             };
             return Outcome {
                 kind: Some(SignalKind::Plateau),
@@ -427,7 +432,10 @@ mod tests {
             .observe(&[])
             .expect("plateau must fire once M/E/window-sum thresholds are all met");
         assert!(marker.contains("plateaued"), "marker: {marker}");
-        assert!(marker.contains("3 unique results gathered"), "counts in marker: {marker}");
+        assert!(
+            marker.contains("3 unique results gathered"),
+            "counts in marker: {marker}"
+        );
     }
 
     /// Fires ONCE per plateau: after firing it stays quiet on further no-new calls, then a call
@@ -441,15 +449,26 @@ mod tests {
         }
         assert!(p.observe(&[]).is_some(), "first plateau fires at call M");
         // Still plateaued, but already fired -> silent.
-        assert_eq!(p.observe(&[]), None, "second no-new call must not re-fire the same plateau");
+        assert_eq!(
+            p.observe(&[]),
+            None,
+            "second no-new call must not re-fire the same plateau"
+        );
         assert_eq!(p.observe(&[]), None, "still silent while plateaued");
         // A genuinely new id re-arms the signal and refills the window with a non-zero count.
-        assert_eq!(p.observe(&ids(&["d"])), None, "new id: window sum > G, no fire, re-armed");
+        assert_eq!(
+            p.observe(&ids(&["d"])),
+            None,
+            "new id: window sum > G, no fire, re-armed"
+        );
         // Drain the window back to all-zero over W calls -> a fresh plateau fires again.
         for _ in 0..(RetrievalProgress::W - 1) {
             assert_eq!(p.observe(&[]), None, "window not yet fully drained");
         }
-        assert!(p.observe(&[]).is_some(), "a distinct later plateau must fire again");
+        assert!(
+            p.observe(&[]).is_some(),
+            "a distinct later plateau must fire again"
+        );
     }
 
     /// The marker is a NEUTRAL observation: it states the counts and that gain has plateaued, and
@@ -462,7 +481,15 @@ mod tests {
             p.observe(&[]);
         }
         let marker = p.observe(&[]).expect("plateau fires").to_lowercase();
-        for imperative in ["stop", "answer", "must", "commit", "should", "change approach", "give up"] {
+        for imperative in [
+            "stop",
+            "answer",
+            "must",
+            "commit",
+            "should",
+            "change approach",
+            "give up",
+        ] {
             assert!(
                 !marker.contains(imperative),
                 "neutral marker must not contain the directive word {imperative:?}: {marker}"
@@ -474,10 +501,25 @@ mod tests {
     /// write/non-id tools don't (so their zero-id results can't drain the plateau window).
     #[test]
     fn is_retrieval_tool_selects_id_surfacing_tools() {
-        for t in ["search", "glossary", "related", "neighbors", "reach", "sql", "read"] {
+        for t in [
+            "search",
+            "glossary",
+            "related",
+            "neighbors",
+            "reach",
+            "sql",
+            "read",
+        ] {
             assert!(is_retrieval_tool(t), "{t} surfaces ids");
         }
-        for t in ["glob", "grep", "get_source_file", "graph_stats", "resolve", "unknown"] {
+        for t in [
+            "glob",
+            "grep",
+            "get_source_file",
+            "graph_stats",
+            "resolve",
+            "unknown",
+        ] {
             assert!(!is_retrieval_tool(t), "{t} must not feed the tracker");
         }
     }
@@ -503,7 +545,9 @@ mod tests {
         assert_eq!(extract_node_ids(doc_line), vec!["doc.md".to_string()]);
 
         // A line with neither anchor form contributes nothing.
-        assert!(extract_node_ids("REFERENCES      ->  fact-9  [Entity]  no anchor here").is_empty());
+        assert!(
+            extract_node_ids("REFERENCES      ->  fact-9  [Entity]  no anchor here").is_empty()
+        );
 
         // A single space before `#n` inside a node's own label text (NOT a real glued anchor)
         // must NOT spuriously match — this is the false-novelty bug the tightened regex fixes.
@@ -516,7 +560,11 @@ mod tests {
         let multi = format!("{section_line}\n{entity_line}\n{doc_line}");
         let mut ids = extract_node_ids(&multi);
         ids.sort();
-        let mut want = vec!["doc.md".to_string(), "doc.md#2".to_string(), "doc.md#3".to_string()];
+        let mut want = vec![
+            "doc.md".to_string(),
+            "doc.md#2".to_string(),
+            "doc.md#3".to_string(),
+        ];
         want.sort();
         assert_eq!(ids, want);
     }
@@ -536,7 +584,9 @@ mod tests {
         assert_eq!(out2.kind, Some(SignalKind::Repeat));
         assert_eq!(
             out2.render,
-            ResultRender::ReplaceWith { marker: repeat_marker() }
+            ResultRender::ReplaceWith {
+                marker: repeat_marker()
+            }
         );
         assert_eq!(out2.marker, Some(repeat_marker()));
 
@@ -560,8 +610,17 @@ mod tests {
             let out = r.observe("search", &format!("k{}", i + 1), &[]);
             if out.kind == Some(SignalKind::Streak) {
                 fired += 1;
-                assert_eq!(i, ReaderSignals::STREAK_K - 1, "streak must fire on the Kth call");
-                assert_eq!(out.render, ResultRender::ReplaceWith { marker: streak_marker() });
+                assert_eq!(
+                    i,
+                    ReaderSignals::STREAK_K - 1,
+                    "streak must fire on the Kth call"
+                );
+                assert_eq!(
+                    out.render,
+                    ResultRender::ReplaceWith {
+                        marker: streak_marker()
+                    }
+                );
                 assert_eq!(out.marker, Some(streak_marker()));
             } else {
                 assert_eq!(out.kind, None, "no signal before the Kth zero-new call");
@@ -619,7 +678,11 @@ mod tests {
         // lingers in the window for a few calls before it's fully evicted (and a Streak may claim
         // one of the intervening zero-new calls first, same as k4 above) — so scan forward for the
         // next Plateau rather than asserting one exact index.
-        assert_eq!(r.observe("search", "k6", &ids(&["d"])).kind, None, "re-arming call itself must not immediately refire");
+        assert_eq!(
+            r.observe("search", "k6", &ids(&["d"])).kind,
+            None,
+            "re-arming call itself must not immediately refire"
+        );
         let mut saw_plateau_again = false;
         for i in 7..15 {
             let out = r.observe("search", &format!("k{i}"), &[]);
@@ -628,7 +691,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_plateau_again, "a distinct later plateau must fire again once the window redrains");
+        assert!(
+            saw_plateau_again,
+            "a distinct later plateau must fire again once the window redrains"
+        );
     }
 
     /// Plateau renders OnlyNew (keeping the omitted count) when the firing call itself still
@@ -641,7 +707,10 @@ mod tests {
         assert_eq!(r.observe("search", "k3", &[]).kind, None);
         // Call 4 is zero-new too, so the streak claims it first (see the ReplaceWith test above
         // for why); state still updates, leaving the window all-zero afterward.
-        assert_eq!(r.observe("search", "k4", &[]).kind, Some(SignalKind::Streak));
+        assert_eq!(
+            r.observe("search", "k4", &[]).kind,
+            Some(SignalKind::Streak)
+        );
         // Call 5: prior window all-zero -> Plateau gate holds; THIS call brings 1 new + 1
         // already-seen id -> OnlyNew{omitted: 1}.
         let out5 = r.observe("search", "k5", &ids(&["d", "a"]));
@@ -673,7 +742,10 @@ mod tests {
         // Repeat still fires when disarmed.
         let mut r2 = ReaderSignals::with_plateau(false);
         r2.observe("search", "same", &ids(&["a"]));
-        assert_eq!(r2.observe("search", "same", &ids(&["a"])).kind, Some(SignalKind::Repeat));
+        assert_eq!(
+            r2.observe("search", "same", &ids(&["a"])).kind,
+            Some(SignalKind::Repeat)
+        );
 
         // Streak still fires when disarmed.
         let mut r3 = ReaderSignals::with_plateau(false);
@@ -709,7 +781,10 @@ mod tests {
         for i in 0..12 {
             let id = format!("doc.md#{i}");
             let out = r.observe("search", &format!("k{i}"), &ids(&[&id]));
-            assert_eq!(out.kind, None, "a call that adds a new id ({id}) must not fire");
+            assert_eq!(
+                out.kind, None,
+                "a call that adds a new id ({id}) must not fire"
+            );
             assert_eq!(out.render, ResultRender::Full);
         }
     }

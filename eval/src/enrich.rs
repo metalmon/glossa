@@ -126,8 +126,9 @@ pub fn run_enrich(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let mut out =
-                        glossa::graph::ops::graph_upsert(&idx, &graph, &ont, nodes, edges, now, "agent");
+                    let mut out = glossa::graph::ops::graph_upsert(
+                        &idx, &graph, &ont, nodes, edges, now, "agent",
+                    );
                     if !parse_errs.is_empty() {
                         out.message.push_str(&format!(
                             "\n{} item(s) could not be parsed and were skipped:\n- {}",

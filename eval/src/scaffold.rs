@@ -99,7 +99,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = scaffold_init(dir.path(), false).unwrap();
         let lab_text = std::fs::read_to_string(&p.lab).unwrap();
-        assert!(lab_text.contains("[tuning]"), "scaffolded lab.toml must have a [tuning] section");
+        assert!(
+            lab_text.contains("[tuning]"),
+            "scaffolded lab.toml must have a [tuning] section"
+        );
 
         let lab = kb_eval_lab_config(&p.lab);
         assert_eq!(lab.tuning.fanout_max, Some(3));

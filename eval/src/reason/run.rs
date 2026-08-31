@@ -4,7 +4,9 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
-use crate::backend::openai::{cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker};
+use crate::backend::openai::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+};
 use crate::checkpoint::Checkpoint;
 use crate::distil::Seed;
 use crate::lab::LabConfig;
@@ -66,8 +68,8 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
     // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
     // calls — a no-op on a hidden bar.
@@ -107,7 +109,10 @@ pub fn chainless_seeds(seeds: Vec<Seed>, chained_ids: &HashSet<String>, force: b
     if force {
         return seeds;
     }
-    seeds.into_iter().filter(|s| !chained_ids.contains(&s.id)).collect()
+    seeds
+        .into_iter()
+        .filter(|s| !chained_ids.contains(&s.id))
+        .collect()
 }
 
 /// Orchestrate the `kbx reason` pipeline over the corpus at `path` (kb-style PATH resolution via
@@ -178,7 +183,8 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     let idx = DocIndex::open_or_create(&paths.root).context("opening doc index")?;
     let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
 
-    let fanout_max = crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
+    let fanout_max =
+        crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
     let max_rounds = crate::lab::resolve(
         args.max_rounds,
         lab.tuning.max_rounds,
@@ -219,19 +225,25 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         to_run.push(seed);
     }
 
-    let results = run_units_parallel(to_run, jobs, &pb, |_seed| 1, |seed| {
-        let stats = crate::reason::chain_one_seed(
-            &paths, &ontology, &lab, &reason_md, seed, fanout_max, max_rounds, &writer, &idx,
-        )
-        .with_context(|| format!("synthesizing query-side for seed {}", seed.id))?;
-        cp.mark(&unit_id(&seed.id), "done")
-            .with_context(|| format!("marking seed {} done", seed.id))?;
-        pb.println(format!(
-            "reason {}: {} node(s), {} edge(s), {} grounded",
-            seed.id, stats.nodes, stats.edges, stats.grounded
-        ));
-        Ok(stats)
-    })?;
+    let results = run_units_parallel(
+        to_run,
+        jobs,
+        &pb,
+        |_seed| 1,
+        |seed| {
+            let stats = crate::reason::chain_one_seed(
+                &paths, &ontology, &lab, &reason_md, seed, fanout_max, max_rounds, &writer, &idx,
+            )
+            .with_context(|| format!("synthesizing query-side for seed {}", seed.id))?;
+            cp.mark(&unit_id(&seed.id), "done")
+                .with_context(|| format!("marking seed {} done", seed.id))?;
+            pb.println(format!(
+                "reason {}: {} node(s), {} edge(s), {} grounded",
+                seed.id, stats.nodes, stats.edges, stats.grounded
+            ));
+            Ok(stats)
+        },
+    )?;
 
     let processed = results.len();
     let (mut total_nodes, mut total_edges, mut total_grounded) = (0usize, 0usize, 0usize);
@@ -265,7 +277,11 @@ mod tests {
     use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 
     fn seed(id: &str) -> Seed {
-        Seed { id: id.to_string(), node_type: "Fact".to_string(), label: id.to_string() }
+        Seed {
+            id: id.to_string(),
+            node_type: "Fact".to_string(),
+            label: id.to_string(),
+        }
     }
 
     #[test]
@@ -273,7 +289,10 @@ mod tests {
         let seeds = vec![seed("a"), seed("b")];
         let chained: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
         let out = chainless_seeds(seeds.clone(), &chained, true);
-        assert_eq!(out, seeds, "--force must reproduce today's full-rebuild: every seed kept");
+        assert_eq!(
+            out, seeds,
+            "--force must reproduce today's full-rebuild: every seed kept"
+        );
     }
 
     #[test]
@@ -282,7 +301,11 @@ mod tests {
         let chained: HashSet<String> = ["b".to_string()].into_iter().collect();
         let out = chainless_seeds(seeds, &chained, false);
         let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "c"], "chained seed 'b' must be skipped; order preserved");
+        assert_eq!(
+            ids,
+            vec!["a", "c"],
+            "chained seed 'b' must be skipped; order preserved"
+        );
     }
 
     #[test]
@@ -352,7 +375,11 @@ mod tests {
         let seeds = vec![seed("has-chain"), seed("lonely")];
         let out = chainless_seeds(seeds, &chained_ids, false);
         let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["lonely"], "only the chainless terminal must remain: {ids:?}");
+        assert_eq!(
+            ids,
+            vec!["lonely"],
+            "only the chainless terminal must remain: {ids:?}"
+        );
     }
 
     /// Step 1's TDD unit (per the brief): a seed id already recorded done in the checkpoint is
@@ -395,7 +422,10 @@ mod tests {
             no_progress: true,
             jobs: None,
         };
-        assert_eq!(args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
+        assert_eq!(
+            args.fanout_max.unwrap_or(DEFAULT_FANOUT_MAX),
+            DEFAULT_FANOUT_MAX
+        );
     }
 
     /// `max_rounds`' own default mirrors `fanout_max`'s: `reason::seed::DEFAULT_MAX_ROUNDS` (30)
@@ -414,7 +444,11 @@ mod tests {
             jobs: None,
         };
         assert_eq!(
-            crate::lab::resolve(args.max_rounds, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
+            crate::lab::resolve(
+                args.max_rounds,
+                None,
+                crate::reason::seed::DEFAULT_MAX_ROUNDS
+            ),
             30
         );
     }
@@ -429,8 +463,14 @@ mod tests {
         assert_eq!(resolve(None, Some(5), DEFAULT_FANOUT_MAX), 5);
         assert_eq!(resolve(None, None, DEFAULT_FANOUT_MAX), DEFAULT_FANOUT_MAX);
 
-        assert_eq!(resolve(Some(50), Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS), 50);
-        assert_eq!(resolve(None, Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS), 40);
+        assert_eq!(
+            resolve(Some(50), Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS),
+            50
+        );
+        assert_eq!(
+            resolve(None, Some(40), crate::reason::seed::DEFAULT_MAX_ROUNDS),
+            40
+        );
         assert_eq!(
             resolve(None, None, crate::reason::seed::DEFAULT_MAX_ROUNDS),
             crate::reason::seed::DEFAULT_MAX_ROUNDS

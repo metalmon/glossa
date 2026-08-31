@@ -47,8 +47,14 @@ mod tests {
     fn bearer_ok_requires_exact_scheme_and_token() {
         assert!(bearer_ok(Some("Bearer s3cr3t"), "s3cr3t"));
         assert!(!bearer_ok(Some("Bearer wrong"), "s3cr3t"));
-        assert!(!bearer_ok(Some("s3cr3t"), "s3cr3t"), "missing Bearer scheme");
-        assert!(!bearer_ok(Some("bearer s3cr3t"), "s3cr3t"), "scheme is case-sensitive");
+        assert!(
+            !bearer_ok(Some("s3cr3t"), "s3cr3t"),
+            "missing Bearer scheme"
+        );
+        assert!(
+            !bearer_ok(Some("bearer s3cr3t"), "s3cr3t"),
+            "scheme is case-sensitive"
+        );
         assert!(!bearer_ok(Some("Bearer "), "s3cr3t"), "empty token");
         assert!(!bearer_ok(None, "s3cr3t"), "no header");
         // No trailing-substring or prefix match.

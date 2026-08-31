@@ -465,5 +465,4 @@ strict = false
             .iter()
             .any(|e| e.edge_type == "RESOLVED_BY" && e.to == "res:r"));
     }
-
 }

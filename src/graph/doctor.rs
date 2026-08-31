@@ -95,13 +95,8 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
     let structural: HashSet<String> = ont.structural().into_iter().collect();
 
     let ungrounded_ids = hygiene::ungrounded_nodes(&id_types, &triples, &grounding_types);
-    let incomplete_ids = hygiene::incomplete_nodes(
-        &id_types,
-        &triples,
-        &spines,
-        &spine_types,
-        &structural,
-    );
+    let incomplete_ids =
+        hygiene::incomplete_nodes(&id_types, &triples, &spines, &spine_types, &structural);
 
     let stale_input: Vec<(String, String, Option<FileSig>)> = nodes
         .iter()
@@ -237,7 +232,11 @@ pub fn prune(
 ///   2. dangling nodes exceed ~50% of the non-structural (reasoning) layer.
 ///
 /// This only gates the DELETE — `doctor()` keeps reporting `dangling` regardless.
-pub fn dangling_prune_risk(report: &DoctorReport, g: &GraphStore, ont: &Ontology) -> Option<String> {
+pub fn dangling_prune_risk(
+    report: &DoctorReport,
+    g: &GraphStore,
+    ont: &Ontology,
+) -> Option<String> {
     if report.dangling.is_empty() {
         return None;
     }
@@ -372,7 +371,11 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         let rep = doctor(&g, &ont, root).unwrap();
         assert_eq!(rep.stale.len(), 1, "res:a's source drifted");
         assert_eq!(rep.ungrounded.len(), 1, "res:b has no live MENTIONS");
-        assert_eq!(rep.incomplete.len(), 1, "cau:orphan is on no complete spine");
+        assert_eq!(
+            rep.incomplete.len(),
+            1,
+            "cau:orphan is on no complete spine"
+        );
         assert_eq!(rep.stale[0].id, "res:a");
         assert_eq!(rep.ungrounded[0].id, "res:b");
         assert_eq!(rep.incomplete[0].id, "cau:orphan");
@@ -703,7 +706,11 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
 
         let rep = doctor(&g, &ont, root).unwrap();
         assert!(rep.live_terminal_count > 0, "res:a must be a live terminal");
-        assert_eq!(rep.dangling.len(), 4, "the four orphan Symptoms must dangle");
+        assert_eq!(
+            rep.dangling.len(),
+            4,
+            "the four orphan Symptoms must dangle"
+        );
         let risk = dangling_prune_risk(&rep, &g, &ont);
         assert!(risk.is_some(), "4-of-7 dangling must refuse the prune");
         assert!(risk.unwrap().contains("over half"));

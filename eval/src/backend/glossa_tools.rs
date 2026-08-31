@@ -65,7 +65,13 @@ mod reader_signal_render_tests {
     fn drained_plateau_replaces_body_with_marker_only() {
         let mut signals = ReaderSignals::new();
         assert_eq!(
-            apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a", "b", "c"]), "hit-list body".into()),
+            apply_plateau_render(
+                &mut signals,
+                "search",
+                "search:q1",
+                &ids(&["a", "b", "c"]),
+                "hit-list body".into()
+            ),
             "hit-list body",
             "no signal yet on the seeding call"
         );
@@ -86,9 +92,21 @@ mod reader_signal_render_tests {
         );
         // Call 5: the prior window has fully drained to all-zero and this call is zero-new too ->
         // Plateau fires with ReplaceWith. The fed-back body must be ONLY the marker.
-        let rendered = apply_plateau_render(&mut signals, "search", "search:q5", &[], "body 5 (should be dropped)".into());
-        assert!(rendered.starts_with("\n\n[retrieval:"), "rendered: {rendered}");
-        assert!(rendered.contains("gain has plateaued"), "rendered: {rendered}");
+        let rendered = apply_plateau_render(
+            &mut signals,
+            "search",
+            "search:q5",
+            &[],
+            "body 5 (should be dropped)".into(),
+        );
+        assert!(
+            rendered.starts_with("\n\n[retrieval:"),
+            "rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("gain has plateaued"),
+            "rendered: {rendered}"
+        );
         assert!(
             !rendered.contains("body 5"),
             "a drained plateau must NOT retain the redundant body: {rendered}"
@@ -101,7 +119,13 @@ mod reader_signal_render_tests {
     #[test]
     fn plateau_with_some_new_ids_appends_marker_to_body() {
         let mut signals = ReaderSignals::new();
-        apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a", "b", "c"]), String::new());
+        apply_plateau_render(
+            &mut signals,
+            "search",
+            "search:q1",
+            &ids(&["a", "b", "c"]),
+            String::new(),
+        );
         apply_plateau_render(&mut signals, "search", "search:q2", &[], String::new());
         apply_plateau_render(&mut signals, "search", "search:q3", &[], String::new());
         let _ = apply_plateau_render(&mut signals, "search", "search:q4", &[], String::new()); // streak claims this one
@@ -112,15 +136,27 @@ mod reader_signal_render_tests {
             &ids(&["d", "a"]), // one genuinely new + one already-seen
             "genuinely new hit".to_string(),
         );
-        assert!(rendered.starts_with("genuinely new hit"), "rendered: {rendered}");
-        assert!(rendered.contains("gain has plateaued"), "rendered: {rendered}");
+        assert!(
+            rendered.starts_with("genuinely new hit"),
+            "rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("gain has plateaued"),
+            "rendered: {rendered}"
+        );
     }
 
     /// No signal fired (a productive run) leaves the body byte-identical.
     #[test]
     fn no_signal_leaves_body_unchanged() {
         let mut signals = ReaderSignals::new();
-        let rendered = apply_plateau_render(&mut signals, "search", "search:q1", &ids(&["a"]), "unchanged".into());
+        let rendered = apply_plateau_render(
+            &mut signals,
+            "search",
+            "search:q1",
+            &ids(&["a"]),
+            "unchanged".into(),
+        );
         assert_eq!(rendered, "unchanged");
     }
 
@@ -130,18 +166,43 @@ mod reader_signal_render_tests {
     #[test]
     fn repeat_and_streak_kinds_are_ignored_body_untouched() {
         let mut signals = ReaderSignals::new();
-        apply_plateau_render(&mut signals, "search", "same-key", &ids(&["a"]), String::new());
+        apply_plateau_render(
+            &mut signals,
+            "search",
+            "same-key",
+            &ids(&["a"]),
+            String::new(),
+        );
         // Identical key -> Repeat internally, but body must be untouched by this helper.
-        let rendered = apply_plateau_render(&mut signals, "search", "same-key", &ids(&["a"]), "repeat body".into());
-        assert_eq!(rendered, "repeat body", "Repeat kind must not alter the body here");
+        let rendered = apply_plateau_render(
+            &mut signals,
+            "search",
+            "same-key",
+            &ids(&["a"]),
+            "repeat body".into(),
+        );
+        assert_eq!(
+            rendered, "repeat body",
+            "Repeat kind must not alter the body here"
+        );
 
         let mut signals2 = ReaderSignals::new();
         apply_plateau_render(&mut signals2, "search", "k0", &ids(&["a"]), String::new());
         let mut last = String::new();
         for i in 0..ReaderSignals::STREAK_K {
-            last = apply_plateau_render(&mut signals2, "search", &format!("k{}", i + 1), &[], format!("streak body {i}"));
+            last = apply_plateau_render(
+                &mut signals2,
+                "search",
+                &format!("k{}", i + 1),
+                &[],
+                format!("streak body {i}"),
+            );
         }
-        assert_eq!(last, format!("streak body {}", ReaderSignals::STREAK_K - 1), "Streak kind must not alter the body here");
+        assert_eq!(
+            last,
+            format!("streak body {}", ReaderSignals::STREAK_K - 1),
+            "Streak kind must not alter the body here"
+        );
     }
 }
 
@@ -298,10 +359,15 @@ pub fn exec(
         "glossary" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             // Optional: the full question, so the composed neighbourhood ranks by its terms.
-            let query = args.get("query").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
             // Loose like the MCP surface: a JSON string or a bare number both work.
             let as_of: Option<String> = args.get("as_of").and_then(|v| {
-                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+                glossa::json_util::deserialize_opt_string_loose(v)
+                    .ok()
+                    .flatten()
             });
             let body = match graph {
                 Some(g) => glossa::tools::glossary_with_query(
@@ -331,7 +397,9 @@ pub fn exec(
                 .filter(|s| !s.is_empty());
             let n = args.get("n").and_then(parse_n);
             let as_of: Option<String> = args.get("as_of").and_then(|v| {
-                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+                glossa::json_util::deserialize_opt_string_loose(v)
+                    .ok()
+                    .flatten()
             });
             let body = match graph {
                 Some(g) => glossa::tools::related(
@@ -363,11 +431,18 @@ pub fn exec(
             // Loose like the MCP surface: a JSON array, a single string, or a comma-separated
             // string all resolve to the same Vec<String> (some models send `edge_types:"REFERENCES"`).
             let edge_types: Option<Vec<String>> = args.get("edge_types").and_then(|v| {
-                glossa::json_util::deserialize_opt_vec_string_loose(v).ok().flatten()
+                glossa::json_util::deserialize_opt_vec_string_loose(v)
+                    .ok()
+                    .flatten()
             });
-            let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+            let direction = args
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("both");
             let as_of: Option<String> = args.get("as_of").and_then(|v| {
-                glossa::json_util::deserialize_opt_string_loose(v).ok().flatten()
+                glossa::json_util::deserialize_opt_string_loose(v)
+                    .ok()
+                    .flatten()
             });
             let body = match graph {
                 Some(g) => glossa::tools::neighbors(
@@ -818,8 +893,17 @@ mod tests {
         let path = "p.md".to_string(); // canonical key: corpus-root-relative
 
         // MCP path: call shared fn directly (same call as src/mcp.rs handler).
-        let mcp_out =
-            glossa::tools::related(&idx, &g, None, Some(&path), Some(1), &trace, None, None, None);
+        let mcp_out = glossa::tools::related(
+            &idx,
+            &g,
+            None,
+            Some(&path),
+            Some(1),
+            &trace,
+            None,
+            None,
+            None,
+        );
         // Eval path: dispatch through exec().
         let eval_out = exec(
             "related",
@@ -870,10 +954,7 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(
-            out.contains("delivered whole file: note.txt"),
-            "got: {out}"
-        );
+        assert!(out.contains("delivered whole file: note.txt"), "got: {out}");
 
         // Unknown path -> the same not-found provenance text `get_source_file` returns directly
         // (not "unknown tool: get_source_file", which is what the missing arm used to produce).
@@ -961,7 +1042,10 @@ mod tests {
             &trace,
         )
         .0;
-        assert_eq!(single_string, array_form, "single string must filter identically to array");
+        assert_eq!(
+            single_string, array_form,
+            "single string must filter identically to array"
+        );
 
         let csv_string = exec(
             "neighbors",
@@ -973,7 +1057,10 @@ mod tests {
             &trace,
         )
         .0;
-        assert_eq!(csv_string, array_form, "comma-separated string must filter identically");
+        assert_eq!(
+            csv_string, array_form,
+            "comma-separated string must filter identically"
+        );
     }
 
     /// `sql` dispatch: empty `sql` returns the schema (mirrors the real MCP tool's
@@ -996,7 +1083,10 @@ mod tests {
             &trace,
         )
         .0;
-        assert!(!with_graph.is_empty(), "empty sql should return the schema help text");
+        assert!(
+            !with_graph.is_empty(),
+            "empty sql should return the schema help text"
+        );
         assert!(with_graph.contains("sql"), "got: {with_graph}");
 
         let no_graph = exec(

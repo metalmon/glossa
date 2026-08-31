@@ -89,8 +89,14 @@ mod tests {
         let res = with_graph_write_lock(dir.path(), Duration::from_millis(150), || Ok(()));
         assert!(res.is_err(), "must bail when the lock is held, not run f");
         assert!(res.unwrap_err().to_string().contains(LOCK_BUSY_MSG));
-        assert!(start.elapsed() >= Duration::from_millis(150), "waited to the deadline");
-        assert!(start.elapsed() < Duration::from_secs(2), "did not hang past the deadline");
+        assert!(
+            start.elapsed() >= Duration::from_millis(150),
+            "waited to the deadline"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "did not hang past the deadline"
+        );
         FileExt::unlock(&held).unwrap();
     }
 }

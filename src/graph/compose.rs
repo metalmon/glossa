@@ -71,14 +71,27 @@ pub fn build_alias_index(g: &GraphStore) -> anyhow::Result<AliasIndex> {
         for a in &node.aliases {
             let na = normalize(a);
             if na.len() >= 3 && seen.insert(na.clone()) {
-                alias_facts.entry(na.clone()).or_default().push(node.id.clone());
+                alias_facts
+                    .entry(na.clone())
+                    .or_default()
+                    .push(node.id.clone());
                 als.push(na);
             }
         }
         fact_aliases.insert(node.id.clone(), als);
     }
-    let alias_df = alias_facts.iter().map(|(a, v)| (a.clone(), v.len())).collect();
-    Ok(AliasIndex { fact_aliases, alias_facts, alias_df, fact_label, tok_df, n_facts })
+    let alias_df = alias_facts
+        .iter()
+        .map(|(a, v)| (a.clone(), v.len()))
+        .collect();
+    Ok(AliasIndex {
+        fact_aliases,
+        alias_facts,
+        alias_df,
+        fact_label,
+        tok_df,
+        n_facts,
+    })
 }
 
 /// Facts reachable from `seeds` by joining on SPECIFIC aliases only (df ≤ `df_cap` — generic hub
@@ -147,8 +160,11 @@ pub fn compose(
         // symptom lookup, it handles a rich phrase by weighting the DISCRIMINATIVE tokens, so a
         // topic like "<entity> <what you want>" still lands on the entity's facts, not on generic
         // high-frequency words. Fall back to a tolerant alias-substring match only if resolve is dry.
-        let mut seeds: HashSet<String> =
-            g.resolve(anc)?.into_iter().filter(|id| idx.fact_label.contains_key(id)).collect();
+        let mut seeds: HashSet<String> = g
+            .resolve(anc)?
+            .into_iter()
+            .filter(|id| idx.fact_label.contains_key(id))
+            .collect();
         if seeds.is_empty() {
             let na = normalize(anc);
             for (alias, fs) in &idx.alias_facts {
@@ -180,9 +196,12 @@ pub fn compose(
     if cand.is_empty() {
         return Ok(vec![]);
     }
-    let qtoks: HashSet<String> =
-        tokens(query).into_iter().filter(|t| !anchor_toks.contains(t)).collect();
-    let idf = |t: &str| (1.0 + idx.n_facts as f32 / (1.0 + *idx.tok_df.get(t).unwrap_or(&0) as f32)).ln();
+    let qtoks: HashSet<String> = tokens(query)
+        .into_iter()
+        .filter(|t| !anchor_toks.contains(t))
+        .collect();
+    let idf =
+        |t: &str| (1.0 + idx.n_facts as f32 / (1.0 + *idx.tok_df.get(t).unwrap_or(&0) as f32)).ln();
     let mut scored: Vec<Candidate> = cand
         .into_iter()
         .map(|id| {
@@ -196,7 +215,11 @@ pub fn compose(
             Candidate { id, label, score }
         })
         .collect();
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(k);
     Ok(scored)
 }
@@ -232,8 +255,11 @@ pub fn compose_ppr(
         return Ok(vec![]);
     }
     // id -> (node_type, label), one pass; avoids a DB hit per ranked node.
-    let meta: HashMap<String, (String, String)> =
-        g.all_nodes()?.into_iter().map(|n| (n.id, (n.node_type, n.label))).collect();
+    let meta: HashMap<String, (String, String)> = g
+        .all_nodes()?
+        .into_iter()
+        .map(|n| (n.id, (n.node_type, n.label)))
+        .collect();
     let structural: HashSet<&str> = crate::graph::STRUCTURAL_NODES.iter().copied().collect();
     let seed_ids: HashSet<&String> = seeds.keys().collect();
     let mut out = Vec::new();
@@ -248,7 +274,11 @@ pub fn compose_ppr(
             if structural.contains(nt.as_str()) {
                 continue;
             }
-            out.push(Candidate { id, label: label.clone(), score });
+            out.push(Candidate {
+                id,
+                label: label.clone(),
+                score,
+            });
         }
     }
     Ok(out)
@@ -272,12 +302,16 @@ pub fn fuse(
     // id -> (fused score, label, in_compose, in_ppr)
     let mut acc: HashMap<String, (f32, String, bool, bool)> = HashMap::new();
     for (r, c) in compose.iter().enumerate() {
-        let e = acc.entry(c.id.clone()).or_insert((0.0, c.label.clone(), false, false));
+        let e = acc
+            .entry(c.id.clone())
+            .or_insert((0.0, c.label.clone(), false, false));
         e.0 += wc / (k + r as f32);
         e.2 = true;
     }
     for (r, c) in ppr.iter().enumerate() {
-        let e = acc.entry(c.id.clone()).or_insert((0.0, c.label.clone(), false, false));
+        let e = acc
+            .entry(c.id.clone())
+            .or_insert((0.0, c.label.clone(), false, false));
         e.0 += wp / (k + r as f32);
         e.3 = true;
     }
@@ -287,10 +321,18 @@ pub fn fuse(
             if in_c && in_p {
                 s *= cons;
             }
-            Candidate { id, label, score: s }
+            Candidate {
+                id,
+                label,
+                score: s,
+            }
         })
         .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(out_k);
     out
 }
@@ -322,7 +364,11 @@ mod tests {
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
 
     fn cand(id: &str) -> Candidate {
-        Candidate { id: id.into(), label: id.into(), score: 0.0 }
+        Candidate {
+            id: id.into(),
+            label: id.into(),
+            score: 0.0,
+        }
     }
 
     #[test]
@@ -332,8 +378,16 @@ mod tests {
         let compose = [cand("X"), cand("A")];
         let ppr = [cand("X"), cand("B")];
         let out = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 1.0, 5);
-        assert_eq!(out[0].id, "X", "consensus node ranks first: {:?}", out.iter().map(|c| &c.id).collect::<Vec<_>>());
-        assert!(out.iter().any(|c| c.id == "A") && out.iter().any(|c| c.id == "B"), "both singles kept");
+        assert_eq!(
+            out[0].id,
+            "X",
+            "consensus node ranks first: {:?}",
+            out.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        assert!(
+            out.iter().any(|c| c.id == "A") && out.iter().any(|c| c.id == "B"),
+            "both singles kept"
+        );
     }
 
     #[test]
@@ -343,7 +397,10 @@ mod tests {
         let plain = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 1.0, 5);
         let boosted = fuse(&compose, &ppr, 10.0, 1.0, 1.0, 2.0, 5);
         let sx = |o: &[Candidate]| o.iter().find(|c| c.id == "X").unwrap().score;
-        assert!(sx(&boosted) > sx(&plain), "cons>1 strictly raises the both-node score");
+        assert!(
+            sx(&boosted) > sx(&plain),
+            "cons>1 strictly raises the both-node score"
+        );
     }
 
     #[test]
@@ -352,11 +409,23 @@ mod tests {
         let compose = [cand("A")];
         let ppr = [cand("B")];
         let out = fuse(&compose, &ppr, 10.0, 1.0, 3.0, 1.0, 5);
-        assert_eq!(out[0].id, "B", "heavier ppr weight wins: {:?}", out.iter().map(|c| (&c.id, c.score)).collect::<Vec<_>>());
+        assert_eq!(
+            out[0].id,
+            "B",
+            "heavier ppr weight wins: {:?}",
+            out.iter().map(|c| (&c.id, c.score)).collect::<Vec<_>>()
+        );
     }
 
     fn prov() -> Provenance {
-        Provenance { source_path: "s.md".into(), range: None, file_sig: None, origin: "agent".into(), confidence: 1.0, created_at: 0 }
+        Provenance {
+            source_path: "s.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 1.0,
+            created_at: 0,
+        }
     }
     fn fact(g: &GraphStore, id: &str, label: &str, aliases: &[&str]) {
         g.put_node(&Node {
@@ -388,9 +457,19 @@ mod tests {
         let g = GraphStore::open(d.path()).unwrap();
         // Ann -Uni(hub)- everyone; the specific bridge Ann->Prize is what we want, not the hub.
         fact(&g, "ann", "Ann studied", &["Ann", "Uni", "Prize2020"]);
-        fact(&g, "prize", "Prize2020 went to the winner", &["Prize2020", "winner"]);
+        fact(
+            &g,
+            "prize",
+            "Prize2020 went to the winner",
+            &["Prize2020", "winner"],
+        );
         for i in 0..20 {
-            fact(&g, &format!("hub{i}"), "someone at Uni", &["Uni", &format!("p{i}")]);
+            fact(
+                &g,
+                &format!("hub{i}"),
+                "someone at Uni",
+                &["Uni", &format!("p{i}")],
+            );
         }
         let idx = build_alias_index(&g).unwrap();
         let seeds: HashSet<String> = ["ann".to_string()].into_iter().collect();
@@ -401,8 +480,13 @@ mod tests {
     }
 
     fn link(g: &GraphStore, a: &str, b: &str) {
-        g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
-            .unwrap();
+        g.put_edge(&Edge {
+            from: a.into(),
+            to: b.into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
     }
 
     #[test]
@@ -421,7 +505,11 @@ mod tests {
         );
         // A fresh handle (new process, conceptually) loads it from disk — counts match, no rebuild.
         let g2 = GraphStore::open(d.path()).unwrap();
-        assert_eq!(g2.ppr_transition().unwrap().len(), 2, "loads across a reopen");
+        assert_eq!(
+            g2.ppr_transition().unwrap().len(),
+            2,
+            "loads across a reopen"
+        );
     }
 
     #[test]
@@ -433,7 +521,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         fact(&g, "ann", "Ann", &["Ann"]);
-        fact(&g, "bridge", "Ann studied at Redbrick University", &["Redbrick"]);
+        fact(
+            &g,
+            "bridge",
+            "Ann studied at Redbrick University",
+            &["Redbrick"],
+        );
         fact(&g, "terminal", "ranked seventh in the world", &[]);
         fact(&g, "distractor", "ranked first in the world", &[]);
         link(&g, "ann", "bridge");
@@ -462,15 +555,33 @@ mod tests {
         // Redbrick's other facts are noise on the same bridge; IDF on the query's rare tokens
         // ("worldwide", "ranking") must float the answer fact to the top.
         fact(&g, "a", "Ann studied at Redbrick", &["Ann", "Redbrick"]);
-        fact(&g, "b", "Redbrick worldwide ranking is seventh", &["Redbrick"]);
+        fact(
+            &g,
+            "b",
+            "Redbrick worldwide ranking is seventh",
+            &["Redbrick"],
+        );
         fact(&g, "c", "Redbrick was founded long ago", &["Redbrick"]);
         fact(&g, "e", "Redbrick has many students", &["Redbrick"]);
         // generic-hub noise elsewhere in the corpus (df high) — must not pull in via the gate.
         for i in 0..15 {
-            fact(&g, &format!("d{i}"), "some city fact", &[&format!("City{i}"), "Common"]);
+            fact(
+                &g,
+                &format!("d{i}"),
+                "some city fact",
+                &[&format!("City{i}"), "Common"],
+            );
         }
         let idx = build_alias_index(&g).unwrap();
-        let out = compose(&g, &idx, &["Ann"], "worldwide ranking of Ann university", 5, 10).unwrap();
+        let out = compose(
+            &g,
+            &idx,
+            &["Ann"],
+            "worldwide ranking of Ann university",
+            5,
+            10,
+        )
+        .unwrap();
         assert!(!out.is_empty());
         assert!(
             out[0].label.contains("worldwide ranking"),

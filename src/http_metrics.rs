@@ -4,13 +4,14 @@
 //! `GlossaServer::metrics_text`, which renders these next to the existing index/graph gauges. Kept
 //! dependency-free and in the same exposition style as the rest of `/metrics`.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Upper bounds (seconds) of the cumulative latency histogram buckets. A `+Inf` bucket (= total
 /// count) is appended at render time.
-const DURATION_BUCKETS_SECS: [f64; 11] =
-    [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+const DURATION_BUCKETS_SECS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 #[derive(Debug)]
 pub struct HttpMetrics {

@@ -20,10 +20,16 @@ pub struct NodeSpec {
     /// Start of this node's authored validity interval, any ISO-8601 granularity
     /// (`"2020"`, `"2020-06"`, `"2020-06-15"`, or a full RFC3339 UTC instant).
     /// `None` when the caller doesn't touch validity (mirrors `ops::UpsertNode`).
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
     pub valid_from: Option<String>,
     /// End of the authored validity interval, same granularity rules as `valid_from`.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_string_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_string_loose"
+    )]
     pub valid_to: Option<String>,
 }
 
@@ -155,7 +161,10 @@ pub fn apply_upsert(
         if valid_from.is_none() && valid_to.is_none() {
             continue;
         }
-        let canon_id = canonical.get(&n.id).cloned().unwrap_or_else(|| n.id.clone());
+        let canon_id = canonical
+            .get(&n.id)
+            .cloned()
+            .unwrap_or_else(|| n.id.clone());
         validity_writes.push((
             canon_id,
             NodeValidity {
@@ -182,7 +191,10 @@ pub fn apply_upsert(
         if !ont.requires_validity(&n.node_type) {
             continue;
         }
-        let canon_id = canonical.get(&n.id).cloned().unwrap_or_else(|| n.id.clone());
+        let canon_id = canonical
+            .get(&n.id)
+            .cloned()
+            .unwrap_or_else(|| n.id.clone());
         if supplied_valid_from.contains(canon_id.as_str()) {
             continue;
         }
@@ -656,7 +668,8 @@ strict = true
             vec![node("sym:test", "Symptom", "Test symptom", "test.docx")],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
@@ -684,20 +697,15 @@ strict = true
         apply_upsert(
             &g,
             &ont,
-            vec![node(
-                "sym:t",
-                "Symptom",
-                "Test pump symptom",
-                "t.docx",
-            )],
+            vec![node("sym:t", "Symptom", "Test pump symptom", "t.docx")],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
-        let (removed, notes) =
-            apply_delete(&g, vec!["Test pump symptoms".into()], vec![]).unwrap();
+        let (removed, notes) = apply_delete(&g, vec!["Test pump symptoms".into()], vec![]).unwrap();
         assert_eq!(removed, 0, "an inflected variant must not match exactly");
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("matched nothing"), "note: {}", notes[0]);
@@ -743,7 +751,12 @@ strict = true
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        let nodes = vec![node("sym:unbounded", "Symptom", "Unbounded symptom", "test.docx")];
+        let nodes = vec![node(
+            "sym:unbounded",
+            "Symptom",
+            "Unbounded symptom",
+            "test.docx",
+        )];
         apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").unwrap();
 
         assert!(
@@ -764,10 +777,16 @@ strict = true
         apply_upsert(
             &g,
             &ont,
-            vec![node("sym:first", "Symptom", "Recurring symptom", "case1.docx")],
+            vec![node(
+                "sym:first",
+                "Symptom",
+                "Recurring symptom",
+                "case1.docx",
+            )],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 
@@ -781,7 +800,10 @@ strict = true
             None,
         )];
         let r = apply_upsert(&g, &ont, nodes2, vec![], 2, dir.path(), "agent").unwrap();
-        assert_eq!(r.merged, vec![("sym:second".to_string(), "sym:first".to_string())]);
+        assert_eq!(
+            r.merged,
+            vec![("sym:second".to_string(), "sym:first".to_string())]
+        );
 
         assert!(
             g.validity_for("sym:second").unwrap().is_none(),
@@ -809,7 +831,11 @@ strict = true
             None,
         )];
         assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").is_err());
-        assert_eq!(g.node_count().unwrap(), 0, "the whole batch is dropped, nothing written");
+        assert_eq!(
+            g.node_count().unwrap(),
+            0,
+            "the whole batch is dropped, nothing written"
+        );
     }
 
     /// (4c) mirror of `ops::apply_upsert`'s MCP-path validity guarantee: a `requires_validity`
@@ -831,7 +857,11 @@ strict = true
             err.to_string().contains("requires a validity interval"),
             "{err}"
         );
-        assert_eq!(g.node_count().unwrap(), 0, "whole batch dropped, nothing written");
+        assert_eq!(
+            g.node_count().unwrap(),
+            0,
+            "whole batch dropped, nothing written"
+        );
     }
 
     /// A `requires_validity` node that supplies its OWN `valid_from` in this batch is accepted.
@@ -851,7 +881,12 @@ strict = true
         );
         let r = apply_upsert(&g, &ont, vec![timed], vec![], 1, dir.path(), "agent").unwrap();
         assert_eq!(r.nodes_written, 1);
-        assert!(g.validity_for("rec:y").unwrap().unwrap().valid_from.is_some());
+        assert!(g
+            .validity_for("rec:y")
+            .unwrap()
+            .unwrap()
+            .valid_from
+            .is_some());
     }
 
     /// A `requires_validity` node with no bound in THIS batch, but whose canonical id already
@@ -877,7 +912,8 @@ strict = true
             )],
             vec![],
             1,
-            dir.path(), "agent"
+            dir.path(),
+            "agent",
         )
         .unwrap();
 

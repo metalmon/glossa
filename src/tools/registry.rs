@@ -6,7 +6,9 @@
 //! structs `src/mcp.rs` already deserializes into (`schemars::schema_for!`), normalized
 //! to the OpenAI-function core `{ "type": "object", "properties": {…}, "required": […] }`.
 
-use crate::mcp::{GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs};
+use crate::mcp::{
+    GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs,
+};
 
 pub const DESC_SEARCH: &str = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.";
 
@@ -119,7 +121,11 @@ mod tests {
         for t in ["related", "neighbors"] {
             assert!(!names.contains(&t), "registry must NOT contain {t}");
         }
-        assert_eq!(names.len(), 7, "registry must contain exactly the Reader profile's 7 tools");
+        assert_eq!(
+            names.len(),
+            7,
+            "registry must contain exactly the Reader profile's 7 tools"
+        );
         // graph tools gated; retrieval tools not
         let g = |n| r.iter().find(|d| d.name == n).unwrap();
         assert!(g("glossary").graph_gated && g("reach").graph_gated && g("sql").graph_gated);
@@ -132,6 +138,9 @@ mod tests {
         // schema is a valid object with properties for a known arg
         let s = &g("search").params_schema;
         assert_eq!(s["type"], "object");
-        assert!(s["properties"]["query"].is_object(), "search.query schema present");
+        assert!(
+            s["properties"]["query"].is_object(),
+            "search.query schema present"
+        );
     }
 }

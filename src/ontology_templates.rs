@@ -149,7 +149,9 @@ pub fn write_template(
 ) -> anyhow::Result<Written> {
     let name = resolve(name_or_alias).ok_or_else(|| {
         let near = nearest(name_or_alias, 3).join(", ");
-        anyhow::anyhow!("unknown ontology preset '{name_or_alias}' — did you mean: {near}? (kb ontology list)")
+        anyhow::anyhow!(
+            "unknown ontology preset '{name_or_alias}' — did you mean: {near}? (kb ontology list)"
+        )
     })?;
     let toml = raw(&name).expect("resolved name is embedded");
 
@@ -161,7 +163,11 @@ pub fn write_template(
     }
     std::fs::create_dir_all(&glossa_dir)?;
     std::fs::write(&target, toml)?;
-    Ok(if existed { Written::Overwritten } else { Written::Created })
+    Ok(if existed {
+        Written::Overwritten
+    } else {
+        Written::Created
+    })
 }
 
 #[cfg(test)]
@@ -199,7 +205,10 @@ mod tests {
         assert_eq!(near.first().map(String::as_str), Some("compliance"));
 
         // free text about privacy ranks data-privacy above support
-        let s = suggest("we keep a register of personal data and its retention period", 3);
+        let s = suggest(
+            "we keep a register of personal data and its retention period",
+            3,
+        );
         assert_eq!(s.first().map(|(n, _)| n.as_str()), Some("data-privacy"));
         assert!(s.iter().all(|(_, score)| *score > 0));
     }
@@ -211,23 +220,44 @@ mod tests {
         let target = root.join(".glossa").join("ontology.toml");
 
         // create
-        assert!(matches!(write_template(root, "support", false).unwrap(), Written::Created));
+        assert!(matches!(
+            write_template(root, "support", false).unwrap(),
+            Written::Created
+        ));
         assert!(target.exists());
         let written = std::fs::read_to_string(&target).unwrap();
         Ontology::parse(&written).unwrap(); // valid ontology on disk
 
         // keep (no force)
-        assert!(matches!(write_template(root, "compliance", false).unwrap(), Written::Kept));
-        assert!(std::fs::read_to_string(&target).unwrap().contains("Symptom")); // still support
+        assert!(matches!(
+            write_template(root, "compliance", false).unwrap(),
+            Written::Kept
+        ));
+        assert!(std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("Symptom")); // still support
 
         // force overwrite (via alias)
-        assert!(matches!(write_template(root, "normocontrol", true).unwrap(), Written::Overwritten));
-        assert!(std::fs::read_to_string(&target).unwrap().contains("NormativeRequirement"));
+        assert!(matches!(
+            write_template(root, "normocontrol", true).unwrap(),
+            Written::Overwritten
+        ));
+        assert!(std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("NormativeRequirement"));
 
         // unknown → error whose message suggests the closest preset(s)
-        let err = write_template(root, "compliancee", false).unwrap_err().to_string();
-        assert!(err.contains("compliance"), "error should suggest a candidate: {err}");
-        assert!(err.contains("kb ontology list"), "error should point at the list: {err}");
+        let err = write_template(root, "compliancee", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("compliance"),
+            "error should suggest a candidate: {err}"
+        );
+        assert!(
+            err.contains("kb ontology list"),
+            "error should point at the list: {err}"
+        );
     }
 
     #[test]
@@ -237,7 +267,11 @@ mod tests {
         // when they `expect`/`unwrap` after `resolve`.
         for t in catalog() {
             assert_eq!(resolve(&t.name).as_deref(), Some(t.name.as_str()));
-            assert!(raw(&t.name).is_some(), "{}: raw() missing for a catalog name", t.name);
+            assert!(
+                raw(&t.name).is_some(),
+                "{}: raw() missing for a catalog name",
+                t.name
+            );
             for a in &t.aliases {
                 assert_eq!(
                     resolve(a).as_deref(),
@@ -246,7 +280,10 @@ mod tests {
                     t.name
                 );
                 let canon = resolve(a).unwrap();
-                assert!(raw(&canon).is_some(), "alias {a} resolves to a non-embedded name");
+                assert!(
+                    raw(&canon).is_some(),
+                    "alias {a} resolves to a non-embedded name"
+                );
             }
         }
     }
@@ -262,16 +299,27 @@ mod tests {
         let mut seen_names = std::collections::HashSet::new();
         let mut seen_aliases = std::collections::HashSet::new();
         for (name, toml) in TEMPLATES {
-            let o = Ontology::parse(toml)
-                .unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+            let o = Ontology::parse(toml).unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
             let m = o.meta();
-            assert!(m.description.is_some(), "{name}: [meta].description required");
+            assert!(
+                m.description.is_some(),
+                "{name}: [meta].description required"
+            );
             assert!(m.family.is_some(), "{name}: [meta].family required");
             assert!(m.tier == 1 || m.tier == 2, "{name}: tier must be 1 or 2");
-            assert!(seen_names.insert(name.to_string()), "duplicate preset name {name}");
+            assert!(
+                seen_names.insert(name.to_string()),
+                "duplicate preset name {name}"
+            );
             for a in &m.aliases {
-                assert!(seen_aliases.insert(a.clone()), "{name}: duplicate alias {a}");
-                assert!(raw(a).is_none(), "{name}: alias {a} collides with a preset name");
+                assert!(
+                    seen_aliases.insert(a.clone()),
+                    "{name}: duplicate alias {a}"
+                );
+                assert!(
+                    raw(a).is_none(),
+                    "{name}: alias {a} collides with a preset name"
+                );
             }
             assert!(o.strict(), "{name}: presets must set strict = true");
 
@@ -338,7 +386,10 @@ mod tests {
                             "{name}: relations.{rel} has no explicit `role = \"...\"` line"
                         );
                     }
-                    if let Some(rel) = rest.strip_prefix("relations.").and_then(|s| s.strip_suffix(']')) {
+                    if let Some(rel) = rest
+                        .strip_prefix("relations.")
+                        .and_then(|s| s.strip_suffix(']'))
+                    {
                         in_relation = Some(rel);
                         saw_role = false;
                     } else {
@@ -370,7 +421,9 @@ mod tests {
     fn grounding_coverage_marks_extracted_exempts_synthesized() {
         use crate::graph::ontology::Ontology;
         let g = |preset: &str, ty: &str| {
-            Ontology::parse(raw(preset).unwrap()).unwrap().requires_grounding(ty)
+            Ontology::parse(raw(preset).unwrap())
+                .unwrap()
+                .requires_grounding(ty)
         };
         // concrete extracted nouns are grounded
         assert!(g("qa-inspection", "Parameter"));
@@ -387,8 +440,12 @@ mod tests {
         assert!(!g("vendor", "Service"));
         assert!(!g("data-privacy", "Processor"));
         // reg-change: the validity window lives on Requirement, not Standard
-        assert!(!Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Standard"));
-        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_validity("Requirement"));
+        assert!(!Ontology::parse(raw("reg-change").unwrap())
+            .unwrap()
+            .requires_validity("Standard"));
+        assert!(Ontology::parse(raw("reg-change").unwrap())
+            .unwrap()
+            .requires_validity("Requirement"));
     }
 
     #[test]
@@ -396,19 +453,38 @@ mod tests {
         use crate::graph::ontology::Ontology;
         let ground_count = |p: &str| {
             let o = Ontology::parse(raw(p).unwrap()).unwrap();
-            o.entity_types().iter().filter(|t| o.requires_grounding(t)).count()
+            o.entity_types()
+                .iter()
+                .filter(|t| o.requires_grounding(t))
+                .count()
         };
         let has_entity = |p: &str, t: &str| {
-            Ontology::parse(raw(p).unwrap()).unwrap().entity_types().contains(t)
+            Ontology::parse(raw(p).unwrap())
+                .unwrap()
+                .entity_types()
+                .contains(t)
         };
         // exactly one grounded node per preset (spot a representative set)
-        for p in ["support","compliance","tender","certification","audit","fmea",
-                  "risk-register","traceability","sop","policy","customer-journey",
-                  "decision-log","faq","contract"] {
+        for p in [
+            "support",
+            "compliance",
+            "tender",
+            "certification",
+            "audit",
+            "fmea",
+            "risk-register",
+            "traceability",
+            "sop",
+            "policy",
+            "customer-journey",
+            "decision-log",
+            "faq",
+            "contract",
+        ] {
             assert_eq!(ground_count(p), 1, "{p}: exactly one requires_grounding");
         }
         // Evidence node is gone everywhere
-        for p in ["compliance","tender","certification","audit"] {
+        for p in ["compliance", "tender", "certification", "audit"] {
             assert!(!has_entity(p, "Evidence"), "{p}: Evidence must be cut");
         }
         // context nouns cut
@@ -417,19 +493,40 @@ mod tests {
         assert!(!has_entity("sop", "Tool"));
         assert!(!has_entity("risk-register", "Owner"));
         // the grounded node is the right one
-        assert!(Ontology::parse(raw("support").unwrap()).unwrap().requires_grounding("Resolution"));
-        assert!(Ontology::parse(raw("audit").unwrap()).unwrap().requires_grounding("Control"));
+        assert!(Ontology::parse(raw("support").unwrap())
+            .unwrap()
+            .requires_grounding("Resolution"));
+        assert!(Ontology::parse(raw("audit").unwrap())
+            .unwrap()
+            .requires_grounding("Control"));
 
         // constraint/flat presets: grounding consolidated to exactly one node each
-        for p in ["qa-inspection","data-privacy","hr-compliance","access-governance",
-                  "vendor","product-catalog","competency","org-roles","okr",
-                  "project-schedule","timeline","reg-change"] {
+        for p in [
+            "qa-inspection",
+            "data-privacy",
+            "hr-compliance",
+            "access-governance",
+            "vendor",
+            "product-catalog",
+            "competency",
+            "org-roles",
+            "okr",
+            "project-schedule",
+            "timeline",
+            "reg-change",
+        ] {
             assert_eq!(ground_count(p), 1, "{p}: exactly one requires_grounding");
         }
         // the grounded node is the right one (spot check)
-        assert!(Ontology::parse(raw("qa-inspection").unwrap()).unwrap().requires_grounding("Parameter"));
-        assert!(Ontology::parse(raw("data-privacy").unwrap()).unwrap().requires_grounding("DataAsset"));
-        assert!(Ontology::parse(raw("reg-change").unwrap()).unwrap().requires_grounding("Requirement"));
+        assert!(Ontology::parse(raw("qa-inspection").unwrap())
+            .unwrap()
+            .requires_grounding("Parameter"));
+        assert!(Ontology::parse(raw("data-privacy").unwrap())
+            .unwrap()
+            .requires_grounding("DataAsset"));
+        assert!(Ontology::parse(raw("reg-change").unwrap())
+            .unwrap()
+            .requires_grounding("Requirement"));
         // data-privacy is not over-cut: ROPA reasoning nodes remain (ungrounded)
         assert!(has_entity("data-privacy", "Purpose"));
         assert!(has_entity("data-privacy", "LegalBasis"));

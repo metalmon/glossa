@@ -119,10 +119,7 @@ pub fn export_json(ont: &Ontology) -> Value {
         })
         .collect();
 
-    let any_validity = ont
-        .entity_types()
-        .iter()
-        .any(|n| ont.requires_validity(n));
+    let any_validity = ont.entity_types().iter().any(|n| ont.requires_validity(n));
 
     let mut out = json!({
         "meta": meta_export,

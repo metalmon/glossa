@@ -51,9 +51,9 @@ pub const TRANSITION_CACHE_VERSION: u32 = 2;
 /// no longer "equal weight" (confidence-weighting is a separate future knob, deliberately not wired
 /// here).
 pub struct Transition {
-    ids: Vec<String>,                 // idx -> node id
-    idx: HashMap<String, usize>,      // node id -> idx
-    adj: Vec<Vec<(usize, f32)>>,      // undirected weighted adjacency (neighbor idx, tier weight)
+    ids: Vec<String>,            // idx -> node id
+    idx: HashMap<String, usize>, // node id -> idx
+    adj: Vec<Vec<(usize, f32)>>, // undirected weighted adjacency (neighbor idx, tier weight)
 }
 
 impl Transition {
@@ -76,7 +76,12 @@ impl Transition {
     }
     /// Reassemble from persisted `(ids, adj)`; the id->index map is derived, not stored.
     pub fn from_parts(ids: Vec<String>, adj: Vec<Vec<(usize, f32)>>) -> Transition {
-        let idx = ids.iter().cloned().enumerate().map(|(i, s)| (s, i)).collect();
+        let idx = ids
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, s)| (s, i))
+            .collect();
         Transition { ids, idx, adj }
     }
 }
@@ -100,7 +105,11 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
             if a != b {
                 // Guard confidence: treat 0 or negative as 1.0 (default) so legacy graphs are unchanged.
                 // Clamp to [0,1] — guards a future >1.0 edge from over-weighting past the reasoning tier.
-                let confidence = if e.prov.confidence > 0.0 { e.prov.confidence.min(1.0) } else { 1.0 };
+                let confidence = if e.prov.confidence > 0.0 {
+                    e.prov.confidence.min(1.0)
+                } else {
+                    1.0
+                };
                 let w = edge_tier_weight(&e.edge_type, w_sim) * confidence;
                 adj[a].push((b, w));
                 adj[b].push((a, w)); // symmetric — a multi-hop answer may need to walk "backward"
@@ -207,8 +216,13 @@ mod tests {
         .unwrap();
     }
     fn link(g: &GraphStore, a: &str, b: &str) {
-        g.put_edge(&Edge { from: a.into(), to: b.into(), edge_type: "LEADS_TO".into(), prov: prov() })
-            .unwrap();
+        g.put_edge(&Edge {
+            from: a.into(),
+            to: b.into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
     }
     fn seed(ids: &[(&str, f32)]) -> HashMap<String, f32> {
         ids.iter().map(|(k, v)| (k.to_string(), *v)).collect()
@@ -230,8 +244,14 @@ mod tests {
         link(&g, "bridge", "terminal");
         let t = build_transition(&g).unwrap();
         let out = ppr(&t, &seed(&[("seed", 1.0)]), 0.15, 50, 1e-6);
-        assert!(rank_of(&out, "terminal").is_some(), "terminal reached: {out:?}");
-        assert!(rank_of(&out, "far").is_none(), "disconnected node gets no mass: {out:?}");
+        assert!(
+            rank_of(&out, "terminal").is_some(),
+            "terminal reached: {out:?}"
+        );
+        assert!(
+            rank_of(&out, "far").is_none(),
+            "disconnected node gets no mass: {out:?}"
+        );
     }
 
     #[test]
@@ -289,7 +309,10 @@ mod tests {
         let t = build_transition(&g).unwrap();
         let out = ppr(&t, &seed(&[("a", 1.0)]), 0.15, 100, 1e-9);
         let total: f32 = out.iter().map(|(_, v)| v).sum();
-        assert!((total - 1.0).abs() < 1e-3, "mass conserved to ~1.0, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-3,
+            "mass conserved to ~1.0, got {total}"
+        );
     }
 
     #[test]
@@ -331,14 +354,26 @@ mod tests {
             node(&g, x);
         }
         // a -LEADS_TO- b  (weight 1.0),  a -SIMILAR- c  (weight w_sim)
-        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "LEADS_TO".into(), prov: prov() })
-            .unwrap();
-        g.put_edge(&Edge { from: "a".into(), to: "c".into(), edge_type: "SIMILAR".into(), prov: prov() })
-            .unwrap();
+        g.put_edge(&Edge {
+            from: "a".into(),
+            to: "b".into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "a".into(),
+            to: "c".into(),
+            edge_type: "SIMILAR".into(),
+            prov: prov(),
+        })
+        .unwrap();
         let t = build_transition(&g).unwrap();
         let ai = t.ids().iter().position(|s| s == "a").unwrap();
-        let w: std::collections::HashMap<_, _> =
-            t.adj()[ai].iter().map(|(j, w)| (t.ids()[*j].clone(), *w)).collect();
+        let w: std::collections::HashMap<_, _> = t.adj()[ai]
+            .iter()
+            .map(|(j, w)| (t.ids()[*j].clone(), *w))
+            .collect();
         assert_eq!(w["b"], 1.0);
         assert_eq!(w["c"], 0.1); // SIMILAR down-weighted
     }
@@ -389,9 +424,18 @@ mod tests {
     fn low_confidence_edge_carries_less_mass() {
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
-        for x in ["a", "b"] { node(&g, x); }
-        let mut p = prov(); p.confidence = 0.5;
-        g.put_edge(&Edge { from: "a".into(), to: "b".into(), edge_type: "LEADS_TO".into(), prov: p }).unwrap();
+        for x in ["a", "b"] {
+            node(&g, x);
+        }
+        let mut p = prov();
+        p.confidence = 0.5;
+        g.put_edge(&Edge {
+            from: "a".into(),
+            to: "b".into(),
+            edge_type: "LEADS_TO".into(),
+            prov: p,
+        })
+        .unwrap();
         let t = build_transition(&g).unwrap();
         let ai = t.ids().iter().position(|s| s == "a").unwrap();
         assert_eq!(t.adj()[ai][0].1, 0.5); // 1.0 (tier) * 0.5 (confidence)

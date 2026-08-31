@@ -195,7 +195,8 @@ pub fn run_agent_loop_capturing(
     let mut unproductive: usize = 0;
 
     for _ in 0..max_rounds {
-        let reply: TurnReply = resilient_call(transport, ep, system, &messages, tools, temperature)?;
+        let reply: TurnReply =
+            resilient_call(transport, ep, system, &messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
             let text = reply.text.clone().unwrap_or_default();
             match user_sim {
@@ -397,7 +398,8 @@ mod tests {
         let ep = test_endpoint();
         let transport = MockTransport::new(vec![reply_text("ANSWER: Bob")]);
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
+        let out =
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
 
@@ -462,9 +464,14 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), vec!["hit-id".to_string()])
         };
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None).unwrap();
+        let out =
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None).unwrap();
         assert_eq!(out, "looping");
-        assert_eq!(*execs.borrow(), 1, "identical consecutive calls must execute only once");
+        assert_eq!(
+            *execs.borrow(),
+            1,
+            "identical consecutive calls must execute only once"
+        );
         // From the 3rd call onward, the most recent tool result in the transcript must be a dedup
         // nudge (round 1 executes live; round 2's identical call is deduped and its nudge lands in
         // the transcript for round 3's call onward).
@@ -516,7 +523,8 @@ mod tests {
             .collect();
         let transport = MockTransport::new(replies);
         let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
-        let out = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None).unwrap();
+        let out =
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None).unwrap();
         // The trailing "give up" call's reply.text is what's returned regardless of it also
         // carrying tool_calls (the loop reads `text` unconditionally on the final call).
         assert_eq!(out, "giving up");
@@ -530,7 +538,13 @@ mod tests {
         // nothing new). By the (K+1)th call, the fed-back tool content must be the steer.
         let ep = test_endpoint();
         let mut replies: Vec<TurnReply> = (0..UNPRODUCTIVE_STREAK_K + 1)
-            .map(|i| reply_tool_call(&format!("c{i}"), "search", json!({"query": format!("query-{i}")})))
+            .map(|i| {
+                reply_tool_call(
+                    &format!("c{i}"),
+                    "search",
+                    json!({"query": format!("query-{i}")}),
+                )
+            })
             .collect();
         replies.push(reply_text("ANSWER: done"));
         let transport = MockTransport::new(replies);
@@ -538,7 +552,10 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             *execs.borrow_mut() += 1;
             // Always the same id, regardless of the (varied) query -> never novel after the first.
-            ("same old snippet".to_string(), vec!["doc.md:p.1".to_string()])
+            (
+                "same old snippet".to_string(),
+                vec!["doc.md:p.1".to_string()],
+            )
         };
         let out = run_agent_loop(
             &transport,
@@ -657,10 +674,7 @@ mod tests {
             _proposed: &str,
         ) -> anyhow::Result<Option<String>> {
             *self.calls.borrow_mut() += 1;
-            self.verdicts
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or(Ok(None)) // exhausted -> accept, so a test can't hang the loop
+            self.verdicts.borrow_mut().pop_front().unwrap_or(Ok(None)) // exhausted -> accept, so a test can't hang the loop
         }
     }
 
@@ -674,7 +688,9 @@ mod tests {
             reply_text("ANSWER: Bob Page"),      // real answer -> accepted
         ]);
         let gate = MockGate::new(vec![
-            Ok(Some("I don't know, that's what I was hoping you'd tell me.".to_string())),
+            Ok(Some(
+                "I don't know, that's what I was hoping you'd tell me.".to_string(),
+            )),
             Ok(None),
         ]);
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
@@ -692,7 +708,11 @@ mod tests {
         .unwrap();
         assert_eq!(out, "ANSWER: Bob Page");
         // The loop must have made a SECOND call (didn't return the first text-only turn early)...
-        assert_eq!(transport.calls.borrow().len(), 2, "gate deflection must re-enter the loop");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            2,
+            "gate deflection must re-enter the loop"
+        );
         // ...and the deflection must be the last message the 2nd call saw, as a `role:"user"` turn.
         let second = &transport.calls.borrow()[1];
         let last_user = second.iter().rev().find(|m| m["role"] == "user");
@@ -724,7 +744,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
-        assert_eq!(transport.calls.borrow().len(), 1, "a DONE verdict must not re-enter the loop");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            1,
+            "a DONE verdict must not re-enter the loop"
+        );
         assert_eq!(*gate.calls.borrow(), 1);
     }
 
@@ -771,7 +795,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "QUESTION: still thinking");
-        assert_eq!(transport.calls.borrow().len(), 1, "fail-open must not re-enter the loop");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            1,
+            "fail-open must not re-enter the loop"
+        );
         assert_eq!(*gate.calls.borrow(), 1);
     }
 }

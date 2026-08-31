@@ -29,7 +29,9 @@
 use crate::backend::glossa_tools;
 use crate::backend::openai::run_agent_loop;
 use crate::backend::transport::openai::agent_chat_full;
-use crate::build::extract::{doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
+use crate::build::extract::{
+    doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids,
+};
 use crate::lab::LabConfig;
 use crate::parallel::GraphWriter;
 use crate::reason::schema_graph_block;
@@ -393,7 +395,10 @@ strict = true
         assert_eq!(a, vec![("Fact".to_string(), "docA fact one".to_string())]);
 
         let b = existing_for_chunk(&g, &idx, "docB.md", 1);
-        assert!(b.is_empty(), "bare chunk with no MENTIONS must return empty: {b:?}");
+        assert!(
+            b.is_empty(),
+            "bare chunk with no MENTIONS must return empty: {b:?}"
+        );
     }
 
     /// A doc_path that isn't indexed at all (no canonical resolution) must not panic — it just
@@ -441,7 +446,10 @@ strict = true
         let (out, ids, notes) = densify_write(&idx, &writer, &ont, &args, 1_000).unwrap();
         assert!(!out.rejected, "batch must not be rejected: {}", out.message);
         assert!(notes.is_empty(), "no node should be filtered: {notes:?}");
-        assert_eq!(out.nodes, 2, "both the grounded terminal AND the query-side node must write");
+        assert_eq!(
+            out.nodes, 2,
+            "both the grounded terminal AND the query-side node must write"
+        );
         assert_eq!(
             ids.len(),
             2,
@@ -466,7 +474,9 @@ strict = true
         // The LEADS_TO edge from the query-side node to the terminal must also have landed.
         let out_edges = g.outgoing(&task_id).unwrap();
         assert!(
-            out_edges.iter().any(|e| e.edge_type == "LEADS_TO" && e.to == fact_id),
+            out_edges
+                .iter()
+                .any(|e| e.edge_type == "LEADS_TO" && e.to == fact_id),
             "query-side -> terminal edge must write: {out_edges:?}"
         );
     }
@@ -489,7 +499,11 @@ strict = true
         });
         let (out, _ids, _notes) = densify_write(&idx, &writer, &ont, &args, 1_000).unwrap();
         assert!(!out.rejected, "{}", out.message);
-        assert_eq!(out.edges, 1, "auto-derived MENTIONS edge must be written: {}", out.message);
+        assert_eq!(
+            out.edges, 1,
+            "auto-derived MENTIONS edge must be written: {}",
+            out.message
+        );
 
         let id = ops::id_for(&ont, "Fact", "auto grounded");
         let mentions: Vec<_> = g

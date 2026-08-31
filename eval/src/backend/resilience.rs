@@ -237,7 +237,10 @@ where
     for link in std::iter::once(chain).chain(chain.fallback.iter()) {
         // Throttle only a link that opted in; the guard (if any) is held across the call and drops
         // right after, releasing the in-flight slot.
-        let _guard = link.rate_limit.as_ref().map(|rl| throttle(&link.endpoint, rl));
+        let _guard = link
+            .rate_limit
+            .as_ref()
+            .map(|rl| throttle(&link.endpoint, rl));
         match make_call(link) {
             Ok(reply) => return Ok(reply),
             Err(e) => last_err = Some(e),
@@ -350,7 +353,11 @@ mod tests {
         let w2 = mi.acquire(&clock);
         assert_eq!(w1, 0, "first request should not wait");
         assert_eq!(w2, 1000, "second request should wait one 1000ms interval");
-        assert_eq!(*clock.slept.borrow(), vec![1000], "only the second call sleeps");
+        assert_eq!(
+            *clock.slept.borrow(),
+            vec![1000],
+            "only the second call sleeps"
+        );
     }
 
     #[test]
@@ -373,7 +380,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out.text.as_deref(), Some("ok"));
-        assert_eq!(*calls.borrow(), vec!["primary".to_string()], "fallback must not be called");
+        assert_eq!(
+            *calls.borrow(),
+            vec!["primary".to_string()],
+            "fallback must not be called"
+        );
     }
 
     #[test]
@@ -392,7 +403,10 @@ mod tests {
         .unwrap();
         assert_eq!(out.text.as_deref(), Some("from-fb1"));
         // Tried primary then fb1, stopped before fb2.
-        assert_eq!(*calls.borrow(), vec!["primary".to_string(), "fb1".to_string()]);
+        assert_eq!(
+            *calls.borrow(),
+            vec!["primary".to_string(), "fb1".to_string()]
+        );
     }
 
     #[test]
@@ -403,7 +417,10 @@ mod tests {
             Err::<TurnReply, _>(anyhow::anyhow!("fail-{}", link.endpoint))
         })
         .unwrap_err();
-        assert!(err.to_string().contains("fb2"), "should surface the LAST link's error: {err}");
+        assert!(
+            err.to_string().contains("fb2"),
+            "should surface the LAST link's error: {err}"
+        );
     }
 
     #[test]
@@ -436,12 +453,15 @@ mod tests {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done2 = std::sync::Arc::clone(&done);
         let t = std::thread::spawn(move || {
-            let _g2 = throttle("test://inflight-cap", &RateLimit {
-                rpm: None,
-                max_inflight: Some(1),
-                retry: None,
-                backoff_ms: None,
-            });
+            let _g2 = throttle(
+                "test://inflight-cap",
+                &RateLimit {
+                    rpm: None,
+                    max_inflight: Some(1),
+                    retry: None,
+                    backoff_ms: None,
+                },
+            );
             done2.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         // The spawned acquire must be blocked while g1 is held.

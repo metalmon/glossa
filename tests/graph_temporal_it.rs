@@ -129,7 +129,11 @@ fn graph_node_respects_as_of_and_shows_status() {
         ])
         .assert()
         .success()
-        .stdout(contains("expired").and(contains("2020")).and(contains("2023")));
+        .stdout(
+            contains("expired")
+                .and(contains("2020"))
+                .and(contains("2023")),
+        );
 
     // ...and "current" when the reference instant falls inside the interval.
     Command::cargo_bin("kb")

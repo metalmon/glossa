@@ -285,7 +285,10 @@ mod fullwiki_tests {
         .unwrap();
 
         assert_eq!(report.rows.len(), 1);
-        assert!(report.rows[0].em, "alias 'NYC' must count as an exact match");
+        assert!(
+            report.rows[0].em,
+            "alias 'NYC' must count as an exact match"
+        );
         assert_eq!(report.em_mean, 1.0);
         assert_eq!(report.f1_mean, 1.0);
     }

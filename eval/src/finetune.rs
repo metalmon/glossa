@@ -75,7 +75,8 @@ pub fn load_trajectories_for_tag(runs_dir: &Path, tag: &str) -> Result<Vec<Traje
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     parse_trajectories(&text)
 }
 
@@ -110,7 +111,8 @@ const PLATEAU_MARKER_SUBSTR: &str = "gain has plateaued";
 /// Whether a captured chat message is a plateau-signal TOOL result — a `role:"tool"` message whose
 /// rendered text contains [`PLATEAU_MARKER_SUBSTR`].
 fn is_plateau_tool_message(m: &Value) -> bool {
-    m.get("role").and_then(Value::as_str) == Some("tool") && message_text(m).contains(PLATEAU_MARKER_SUBSTR)
+    m.get("role").and_then(Value::as_str) == Some("tool")
+        && message_text(m).contains(PLATEAU_MARKER_SUBSTR)
 }
 
 /// Index (into `messages`) of the LAST plateau-signal tool message, if the trajectory has one. A
@@ -179,10 +181,14 @@ pub fn export_sft(
         .iter()
         .filter(|r| keep_for_sft(r.verdict, include_partial))
         .collect();
-    let signal_reaction = kept.iter().filter(|r| has_plateau_turn(&r.messages)).count();
+    let signal_reaction = kept
+        .iter()
+        .filter(|r| has_plateau_turn(&r.messages))
+        .count();
     let ordered: Vec<&TrajectoryRecord> = if prefer_signal {
-        let (with_signal, without_signal): (Vec<_>, Vec<_>) =
-            kept.into_iter().partition(|r| has_plateau_turn(&r.messages));
+        let (with_signal, without_signal): (Vec<_>, Vec<_>) = kept
+            .into_iter()
+            .partition(|r| has_plateau_turn(&r.messages));
         with_signal.into_iter().chain(without_signal).collect()
     } else {
         kept
@@ -194,7 +200,10 @@ pub fn export_sft(
             SftShape::Sharegpt => json!({ "conversations": to_conversations(&r.messages) }),
         })
         .collect();
-    SftExport { rows, signal_reaction }
+    SftExport {
+        rows,
+        signal_reaction,
+    }
 }
 
 /// Map an OpenAI/ChatML `messages` array to ShareGPT `conversations`: system→system, user→human,
@@ -284,7 +293,11 @@ pub struct DpoExport {
 ///   — a question whose Wrong trajectories never spiraled is skipped (and counted). When unset, the
 ///   full Wrong pool is used (spiraled ones biased to the front), so the feature degrades to today's
 ///   any-Correct-vs-any-Wrong behavior when no trajectory plateaued at all.
-pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize, focus_plateau: bool) -> DpoExport {
+pub fn export_dpo(
+    records: &[TrajectoryRecord],
+    max_pairs: usize,
+    focus_plateau: bool,
+) -> DpoExport {
     // Preserve first-seen id order for deterministic output.
     let mut order: Vec<String> = Vec::new();
     let mut groups: std::collections::HashMap<String, Vec<&TrajectoryRecord>> =
@@ -317,15 +330,17 @@ pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize, focus_plateau:
 
         // Chosen pool: Correct trajectories, plateau-turn ones biased to the front. Stable
         // partition — every Correct trajectory stays eligible regardless of how it reacted.
-        let (chosen_signal, chosen_rest): (Vec<_>, Vec<_>) =
-            correct.into_iter().partition(|r| has_plateau_turn(&r.messages));
+        let (chosen_signal, chosen_rest): (Vec<_>, Vec<_>) = correct
+            .into_iter()
+            .partition(|r| has_plateau_turn(&r.messages));
         let chosen_pool: Vec<&&TrajectoryRecord> =
             chosen_signal.into_iter().chain(chosen_rest).collect();
 
         // Rejected pool: Wrong trajectories that spiraled past a plateau, biased to the front (or
         // exclusively, under `focus_plateau`).
-        let (rejected_spiraled, rejected_rest): (Vec<_>, Vec<_>) =
-            wrong.into_iter().partition(|r| spiraled_past_plateau(&r.messages));
+        let (rejected_spiraled, rejected_rest): (Vec<_>, Vec<_>) = wrong
+            .into_iter()
+            .partition(|r| spiraled_past_plateau(&r.messages));
         if focus_plateau && rejected_spiraled.is_empty() {
             questions_skipped += 1;
             continue;
@@ -353,7 +368,11 @@ pub fn export_dpo(records: &[TrajectoryRecord], max_pairs: usize, focus_plateau:
             }));
         }
     }
-    DpoExport { pairs, questions_skipped, plateau_contrastive }
+    DpoExport {
+        pairs,
+        questions_skipped,
+        plateau_contrastive,
+    }
 }
 
 /// Serialize export rows to JSONL text (one compact object per line, trailing newline per row).
@@ -401,10 +420,20 @@ mod tests {
             rec("q3", Verdict::Partial, "What is 5+5?", "ANSWER: about 10"),
         ];
         let out = export_sft(&recs, SftShape::Messages, false, false);
-        assert_eq!(out.rows.len(), 1, "only the Correct trajectory is a demonstration");
-        assert_eq!(out.signal_reaction, 0, "no trajectory here has a plateau turn");
+        assert_eq!(
+            out.rows.len(),
+            1,
+            "only the Correct trajectory is a demonstration"
+        );
+        assert_eq!(
+            out.signal_reaction, 0,
+            "no trajectory here has a plateau turn"
+        );
         // Line is `{"messages":[...]}` passed through verbatim, ending in the final answer turn.
-        let msgs = out.rows[0].get("messages").and_then(Value::as_array).unwrap();
+        let msgs = out.rows[0]
+            .get("messages")
+            .and_then(Value::as_array)
+            .unwrap();
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs.last().unwrap()["content"], "ANSWER: 4");
@@ -416,15 +445,28 @@ mod tests {
             rec("q1", Verdict::Correct, "What is 2+2?", "ANSWER: 4"),
             rec("q3", Verdict::Partial, "What is 5+5?", "ANSWER: about 10"),
         ];
-        assert_eq!(export_sft(&recs, SftShape::Messages, false, false).rows.len(), 1);
-        assert_eq!(export_sft(&recs, SftShape::Messages, true, false).rows.len(), 2);
+        assert_eq!(
+            export_sft(&recs, SftShape::Messages, false, false)
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            export_sft(&recs, SftShape::Messages, true, false)
+                .rows
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn sft_sharegpt_maps_roles() {
         let recs = vec![rec("q1", Verdict::Correct, "What is 2+2?", "ANSWER: 4")];
         let out = export_sft(&recs, SftShape::Sharegpt, false, false);
-        let conv = out.rows[0].get("conversations").and_then(Value::as_array).unwrap();
+        let conv = out.rows[0]
+            .get("conversations")
+            .and_then(Value::as_array)
+            .unwrap();
         assert_eq!(conv[0]["from"], "system");
         assert_eq!(conv[1]["from"], "human"); // user -> human
         assert_eq!(conv[1]["value"], "What is 2+2?");
@@ -468,8 +510,16 @@ mod tests {
             rec("q1", Verdict::Wrong, "What is 2+2?", "ANSWER: 5"),
             rec("q1", Verdict::Wrong, "What is 2+2?", "ANSWER: 3"),
         ];
-        assert_eq!(export_dpo(&recs, 1, false).pairs.len(), 1, "default caps at 1 pair/question");
-        assert_eq!(export_dpo(&recs, 2, false).pairs.len(), 2, "max_pairs=2 yields two pairs");
+        assert_eq!(
+            export_dpo(&recs, 1, false).pairs.len(),
+            1,
+            "default caps at 1 pair/question"
+        );
+        assert_eq!(
+            export_dpo(&recs, 2, false).pairs.len(),
+            2,
+            "max_pairs=2 yields two pairs"
+        );
         // Can't exceed the smaller class size.
         assert_eq!(export_dpo(&recs, 9, false).pairs.len(), 2);
     }
@@ -477,7 +527,9 @@ mod tests {
     #[test]
     fn empty_input_yields_empty_output_no_panic() {
         let recs: Vec<TrajectoryRecord> = Vec::new();
-        assert!(export_sft(&recs, SftShape::Messages, true, false).rows.is_empty());
+        assert!(export_sft(&recs, SftShape::Messages, true, false)
+            .rows
+            .is_empty());
         let out = export_dpo(&recs, 1, false);
         assert!(out.pairs.is_empty());
         assert_eq!(out.questions_skipped, 0);
@@ -502,7 +554,9 @@ mod tests {
         assert_eq!(loaded[0].id, "q1");
         assert!(matches!(loaded[1].verdict, Verdict::Wrong));
         // A tag that was never captured contributes nothing (no panic).
-        assert!(load_trajectories_for_tag(&runs, "missing").unwrap().is_empty());
+        assert!(load_trajectories_for_tag(&runs, "missing")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -542,7 +596,13 @@ mod tests {
 
     /// Build a synthetic trajectory record from an explicit `messages` sequence (a variant of
     /// `rec` for tests that need to control plateau/spiral shape precisely).
-    fn rec_msgs(id: &str, verdict: Verdict, user: &str, answer: &str, messages: Vec<Value>) -> TrajectoryRecord {
+    fn rec_msgs(
+        id: &str,
+        verdict: Verdict,
+        user: &str,
+        answer: &str,
+        messages: Vec<Value>,
+    ) -> TrajectoryRecord {
         TrajectoryRecord {
             id: id.to_string(),
             question: user.to_string(),
@@ -579,7 +639,10 @@ mod tests {
         m.push(plateau_tool_msg("c1"));
         m.push(answer_msg("a"));
         assert!(has_plateau_turn(&m));
-        assert!(!spiraled_past_plateau(&m), "answering right after the signal is not a spiral");
+        assert!(
+            !spiraled_past_plateau(&m),
+            "answering right after the signal is not a spiral"
+        );
 
         // Plateau turn, THEN another tool call -> spiraled true (kept searching past the signal).
         let mut m = seed("q");
@@ -599,7 +662,13 @@ mod tests {
         i_msgs.push(tool_call_msg("c1"));
         i_msgs.push(plateau_tool_msg("c1"));
         i_msgs.push(answer_msg("ANSWER: correct-plain"));
-        let i = rec_msgs("q1", Verdict::Correct, "Q1", "ANSWER: correct-plain", i_msgs);
+        let i = rec_msgs(
+            "q1",
+            Verdict::Correct,
+            "Q1",
+            "ANSWER: correct-plain",
+            i_msgs,
+        );
 
         // (ii) Wrong that spiraled past a plateau.
         let mut ii_msgs = seed("Q1");
@@ -608,14 +677,26 @@ mod tests {
         ii_msgs.push(tool_call_msg("c2"));
         ii_msgs.push(tool_result_msg("c2"));
         ii_msgs.push(answer_msg("ANSWER: wrong-spiraled"));
-        let ii = rec_msgs("q1", Verdict::Wrong, "Q1", "ANSWER: wrong-spiraled", ii_msgs);
+        let ii = rec_msgs(
+            "q1",
+            Verdict::Wrong,
+            "Q1",
+            "ANSWER: wrong-spiraled",
+            ii_msgs,
+        );
 
         // (iii) Wrong with no plateau turn at all.
         let mut iii_msgs = seed("Q1");
         iii_msgs.push(tool_call_msg("c1"));
         iii_msgs.push(tool_result_msg("c1"));
         iii_msgs.push(answer_msg("ANSWER: wrong-no-plateau"));
-        let iii = rec_msgs("q1", Verdict::Wrong, "Q1", "ANSWER: wrong-no-plateau", iii_msgs);
+        let iii = rec_msgs(
+            "q1",
+            Verdict::Wrong,
+            "Q1",
+            "ANSWER: wrong-no-plateau",
+            iii_msgs,
+        );
 
         // (iv) Correct that ALSO searched past a plateau turn — CRITICAL: must remain eligible as
         // chosen and must NEVER be used as rejected, because the judge verdict is Correct.
@@ -625,7 +706,13 @@ mod tests {
         iv_msgs.push(tool_call_msg("c2"));
         iv_msgs.push(tool_result_msg("c2"));
         iv_msgs.push(answer_msg("ANSWER: correct-spiraled"));
-        let iv = rec_msgs("q1", Verdict::Correct, "Q1", "ANSWER: correct-spiraled", iv_msgs);
+        let iv = rec_msgs(
+            "q1",
+            Verdict::Correct,
+            "Q1",
+            "ANSWER: correct-spiraled",
+            iv_msgs,
+        );
 
         // A second question with only a non-spiraled Wrong -> under --dpo-focus plateau it must be
         // skipped for lacking a spiraled rejected (even though it has a plain Correct+Wrong pair).
@@ -636,7 +723,14 @@ mod tests {
         q2_wrong_msgs.push(answer_msg("ANSWER: 2-wrong"));
         let q2_wrong = rec_msgs("q2", Verdict::Wrong, "Q2", "ANSWER: 2-wrong", q2_wrong_msgs);
 
-        let recs = vec![i.clone(), ii.clone(), iii.clone(), iv.clone(), q2_correct, q2_wrong];
+        let recs = vec![
+            i.clone(),
+            ii.clone(),
+            iii.clone(),
+            iv.clone(),
+            q2_correct,
+            q2_wrong,
+        ];
 
         // Default (no focus): rejected pool biases the spiraled Wrong (ii) to the front over the
         // non-spiraled Wrong (iii); q2 still pairs (falls back to its only Wrong).
@@ -646,25 +740,43 @@ mod tests {
         let q1_pair = out
             .pairs
             .iter()
-            .find(|p| p["chosen"][0]["content"] == "ANSWER: correct-plain" || p["chosen"][0]["content"] == "ANSWER: correct-spiraled")
+            .find(|p| {
+                p["chosen"][0]["content"] == "ANSWER: correct-plain"
+                    || p["chosen"][0]["content"] == "ANSWER: correct-spiraled"
+            })
             .expect("q1 pair present");
         assert_eq!(
             q1_pair["rejected"][0]["content"], "ANSWER: wrong-spiraled",
             "the spiraled Wrong is biased to the front even without --dpo-focus"
         );
         assert!(
-            out.pairs.iter().all(|p| p["rejected"][0]["content"] != "ANSWER: correct-plain"
-                && p["rejected"][0]["content"] != "ANSWER: correct-spiraled"),
+            out.pairs
+                .iter()
+                .all(|p| p["rejected"][0]["content"] != "ANSWER: correct-plain"
+                    && p["rejected"][0]["content"] != "ANSWER: correct-spiraled"),
             "a Correct trajectory (i/iv) must never appear as rejected, spiraled or not"
         );
-        assert_eq!(out.plateau_contrastive, 1, "only q1's pair is plateau-contrastive");
+        assert_eq!(
+            out.plateau_contrastive, 1,
+            "only q1's pair is plateau-contrastive"
+        );
 
         // --dpo-focus plateau: q1 pairs using the spiraled Wrong; q2 (no spiraled Wrong) is skipped.
         let focused = export_dpo(&recs, 1, true);
-        assert_eq!(focused.pairs.len(), 1, "only q1 has a spiraled-Wrong rejected candidate");
-        assert_eq!(focused.questions_skipped, 1, "q2 is skipped for lacking a spiraled rejected");
+        assert_eq!(
+            focused.pairs.len(),
+            1,
+            "only q1 has a spiraled-Wrong rejected candidate"
+        );
+        assert_eq!(
+            focused.questions_skipped, 1,
+            "q2 is skipped for lacking a spiraled rejected"
+        );
         assert_eq!(focused.plateau_contrastive, 1);
-        assert_eq!(focused.pairs[0]["rejected"][0]["content"], "ANSWER: wrong-spiraled");
+        assert_eq!(
+            focused.pairs[0]["rejected"][0]["content"],
+            "ANSWER: wrong-spiraled"
+        );
         assert!(
             focused.pairs[0]["chosen"][0]["content"] == "ANSWER: correct-plain"
                 || focused.pairs[0]["chosen"][0]["content"] == "ANSWER: correct-spiraled",
@@ -688,13 +800,25 @@ mod tests {
         // Default: today's input order (plain first).
         let out = export_sft(&recs, SftShape::Messages, false, false);
         assert_eq!(out.signal_reaction, 1);
-        assert_eq!(out.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: plain");
-        assert_eq!(out.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: signal");
+        assert_eq!(
+            out.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"],
+            "ANSWER: plain"
+        );
+        assert_eq!(
+            out.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"],
+            "ANSWER: signal"
+        );
 
         // --sft-prefer-signal: the plateau-turn trajectory is partitioned to the front.
         let out2 = export_sft(&recs, SftShape::Messages, false, true);
         assert_eq!(out2.signal_reaction, 1);
-        assert_eq!(out2.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: signal");
-        assert_eq!(out2.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"], "ANSWER: plain");
+        assert_eq!(
+            out2.rows[0]["messages"].as_array().unwrap().last().unwrap()["content"],
+            "ANSWER: signal"
+        );
+        assert_eq!(
+            out2.rows[1]["messages"].as_array().unwrap().last().unwrap()["content"],
+            "ANSWER: plain"
+        );
     }
 }

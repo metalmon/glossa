@@ -8,10 +8,10 @@ use crate::backend::transport::openai::agent_chat_full;
 use crate::build::extract::{extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::distil::Seed;
 use crate::lab::LabConfig;
+use crate::parallel::GraphWriter;
 use crate::reason::schema_graph_block;
 use crate::workspace::KbxPaths;
 use anyhow::anyhow;
-use crate::parallel::GraphWriter;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
@@ -162,7 +162,14 @@ pub fn chain_one_seed(
     // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
     // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {
-        agent_chat_full(&endpoint, &model, api_key.as_deref(), &tools, messages, timeout)
+        agent_chat_full(
+            &endpoint,
+            &model,
+            api_key.as_deref(),
+            &tools,
+            messages,
+            timeout,
+        )
     };
 
     let now = std::time::SystemTime::now()
@@ -224,26 +231,45 @@ mod tests {
     #[test]
     fn build_seed_user_message_names_seed_source_and_fanout() {
         let seed = crate::distil::Seed {
-            id: "res-1".into(), node_type: "Resolution".into(), label: "do the thing".into() };
+            id: "res-1".into(),
+            node_type: "Resolution".into(),
+            label: "do the thing".into(),
+        };
         let msg = build_seed_user_message(&seed, "grounded body text", 3);
-        assert!(msg.contains("res-1") && msg.contains("Resolution") && msg.contains("do the thing"),
-            "seed identity must appear: {msg}");
-        assert!(msg.contains("grounded body text"), "source text must appear: {msg}");
+        assert!(
+            msg.contains("res-1") && msg.contains("Resolution") && msg.contains("do the thing"),
+            "seed identity must appear: {msg}"
+        );
+        assert!(
+            msg.contains("grounded body text"),
+            "source text must appear: {msg}"
+        );
         assert!(msg.contains('3'), "fan-out cap must appear: {msg}");
     }
 
     #[test]
     fn build_seed_user_message_handles_empty_source() {
         let seed = crate::distil::Seed {
-            id: "res-2".into(), node_type: "Resolution".into(), label: "x".into() };
+            id: "res-2".into(),
+            node_type: "Resolution".into(),
+            label: "x".into(),
+        };
         let msg = build_seed_user_message(&seed, "", 2);
-        assert!(msg.to_lowercase().contains("no grounded source"),
-            "empty source must be flagged, not left blank: {msg}");
+        assert!(
+            msg.to_lowercase().contains("no grounded source"),
+            "empty source must be flagged, not left blank: {msg}"
+        );
     }
 
     fn prov() -> Provenance {
-        Provenance { source_path: "d.md".into(), range: None, file_sig: None,
-            origin: "test".into(), confidence: 0.9, created_at: 1 }
+        Provenance {
+            source_path: "d.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
     }
 
     #[test]
@@ -252,22 +278,45 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            glossa::model::Chunk { doc_path: "d.md".into(), location: "S1".into(),
-                file_type: "md".into(), text: "FIRST chunk body".into() },
-            glossa::model::Chunk { doc_path: "d.md".into(), location: "S2".into(),
-                file_type: "md".into(), text: "SECOND chunk body".into() },
-        ]).unwrap();
+            glossa::model::Chunk {
+                doc_path: "d.md".into(),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "FIRST chunk body".into(),
+            },
+            glossa::model::Chunk {
+                doc_path: "d.md".into(),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "SECOND chunk body".into(),
+            },
+        ])
+        .unwrap();
 
-        g.put_node(&Node { id: "res-1".into(), node_type: "Resolution".into(),
-            label: "r".into(), aliases: vec![], prov: prov() }).unwrap();
+        g.put_node(&Node {
+            id: "res-1".into(),
+            node_type: "Resolution".into(),
+            label: "r".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
         for n in [1u64, 2] {
-            g.put_edge(&Edge { from: "res-1".into(), to: format!("d.md#{n}"),
-                edge_type: glossa::graph::MENTIONS.to_string(), prov: prov() }).unwrap();
+            g.put_edge(&Edge {
+                from: "res-1".into(),
+                to: format!("d.md#{n}"),
+                edge_type: glossa::graph::MENTIONS.to_string(),
+                prov: prov(),
+            })
+            .unwrap();
         }
 
         let text = seed_source_text_all(dir.path(), &idx, &g, "res-1");
         assert!(text.contains("FIRST chunk body"), "missing chunk 1: {text}");
-        assert!(text.contains("SECOND chunk body"), "missing chunk 2: {text}");
+        assert!(
+            text.contains("SECOND chunk body"),
+            "missing chunk 2: {text}"
+        );
     }
 
     /// Guards the fix for the numeric-sort bug: groundings at chunk `#2` and `#10` (both real,
@@ -296,17 +345,31 @@ mod tests {
             .collect();
         idx.write_chunks(&chunks).unwrap();
 
-        g.put_node(&Node { id: "res-1".into(), node_type: "Resolution".into(),
-            label: "r".into(), aliases: vec![], prov: prov() }).unwrap();
+        g.put_node(&Node {
+            id: "res-1".into(),
+            node_type: "Resolution".into(),
+            label: "r".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
         for n in [10u64, 2] {
-            g.put_edge(&Edge { from: "res-1".into(), to: format!("d.md#{n}"),
-                edge_type: glossa::graph::MENTIONS.to_string(), prov: prov() }).unwrap();
+            g.put_edge(&Edge {
+                from: "res-1".into(),
+                to: format!("d.md#{n}"),
+                edge_type: glossa::graph::MENTIONS.to_string(),
+                prov: prov(),
+            })
+            .unwrap();
         }
 
         let text = seed_source_text_all(dir.path(), &idx, &g, "res-1");
         let pos2 = text.find("CHUNK TWO body").expect("chunk 2 must appear");
         let pos10 = text.find("CHUNK TEN body").expect("chunk 10 must appear");
-        assert!(pos2 < pos10, "chunk #2 must come before chunk #10 in true section order: {text}");
+        assert!(
+            pos2 < pos10,
+            "chunk #2 must come before chunk #10 in true section order: {text}"
+        );
     }
 
     #[test]
@@ -314,8 +377,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        g.put_node(&Node { id: "res-x".into(), node_type: "Resolution".into(),
-            label: "r".into(), aliases: vec![], prov: prov() }).unwrap();
+        g.put_node(&Node {
+            id: "res-x".into(),
+            node_type: "Resolution".into(),
+            label: "r".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
         assert_eq!(seed_source_text_all(dir.path(), &idx, &g, "res-x"), "");
     }
 }

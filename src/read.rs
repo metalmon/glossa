@@ -197,14 +197,22 @@ pub fn extract_images(path: &Path, page: u64, max: usize) -> anyhow::Result<Vec<
                 return Ok(Vec::new());
             }
             let bytes = std::fs::read(path)?;
-            Ok(legacy_ole_images_guarded(bytes, office_oxide::doc::images::extract_images, max))
+            Ok(legacy_ole_images_guarded(
+                bytes,
+                office_oxide::doc::images::extract_images,
+                max,
+            ))
         }
         "xls" => {
             if max == 0 {
                 return Ok(Vec::new());
             }
             let bytes = std::fs::read(path)?;
-            Ok(legacy_ole_images_guarded(bytes, office_oxide::xls::images::extract_images, max))
+            Ok(legacy_ole_images_guarded(
+                bytes,
+                office_oxide::xls::images::extract_images,
+                max,
+            ))
         }
         _ => extract_zip_media(path, max),
     }
@@ -556,8 +564,15 @@ mod image_tests {
             .join("fixtures")
             .join("sample.odp");
         let imgs = extract_zip_media(&p, 10).unwrap();
-        assert!(!imgs.is_empty(), "expected at least one image from Pictures/ in sample.odp");
-        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+        assert!(
+            !imgs.is_empty(),
+            "expected at least one image from Pictures/ in sample.odp"
+        );
+        assert!(
+            imgs.iter().any(|i| i.mime == "image/png"),
+            "expected a PNG image, got mimes: {:?}",
+            imgs.iter().map(|i| &i.mime).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -569,8 +584,15 @@ mod image_tests {
             .join("fixtures")
             .join("sample_legacy.doc");
         let imgs = extract_images(&p, 1, 10).unwrap();
-        assert!(!imgs.is_empty(), "expected at least one embedded image in sample_legacy.doc");
-        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+        assert!(
+            !imgs.is_empty(),
+            "expected at least one embedded image in sample_legacy.doc"
+        );
+        assert!(
+            imgs.iter().any(|i| i.mime == "image/png"),
+            "expected a PNG image, got mimes: {:?}",
+            imgs.iter().map(|i| &i.mime).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -582,8 +604,15 @@ mod image_tests {
             .join("fixtures")
             .join("sample_legacy.xls");
         let imgs = extract_images(&p, 1, 10).unwrap();
-        assert!(!imgs.is_empty(), "expected at least one embedded image in sample_legacy.xls");
-        assert!(imgs.iter().any(|i| i.mime == "image/png"), "expected a PNG image, got mimes: {:?}", imgs.iter().map(|i| &i.mime).collect::<Vec<_>>());
+        assert!(
+            !imgs.is_empty(),
+            "expected at least one embedded image in sample_legacy.xls"
+        );
+        assert!(
+            imgs.iter().any(|i| i.mime == "image/png"),
+            "expected a PNG image, got mimes: {:?}",
+            imgs.iter().map(|i| &i.mime).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -597,7 +626,11 @@ mod image_tests {
         let p = dir.path().join("garbage.doc");
         std::fs::write(&p, b"not a real ole doc at all, just garbage bytes").unwrap();
         let imgs = extract_images(&p, 1, 10).unwrap(); // must not panic
-        assert!(imgs.is_empty(), "garbage bytes should yield no images, got {}", imgs.len());
+        assert!(
+            imgs.is_empty(),
+            "garbage bytes should yield no images, got {}",
+            imgs.len()
+        );
     }
 
     #[test]
@@ -606,7 +639,11 @@ mod image_tests {
         let p = dir.path().join("garbage.xls");
         std::fs::write(&p, b"not a real ole doc at all, just garbage bytes").unwrap();
         let imgs = extract_images(&p, 1, 10).unwrap(); // must not panic
-        assert!(imgs.is_empty(), "garbage bytes should yield no images, got {}", imgs.len());
+        assert!(
+            imgs.is_empty(),
+            "garbage bytes should yield no images, got {}",
+            imgs.len()
+        );
     }
 
     #[test]

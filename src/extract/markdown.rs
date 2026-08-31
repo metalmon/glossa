@@ -81,7 +81,9 @@ mod tests {
         // Now with a body line.
         let mut b2 = bytes.clone();
         b2.extend_from_slice("body\n".as_bytes());
-        let c2 = MarkdownExtractor.extract(Path::new("latin.md"), &b2).unwrap();
+        let c2 = MarkdownExtractor
+            .extract(Path::new("latin.md"), &b2)
+            .unwrap();
         assert_eq!(c2.len(), 1);
         assert_eq!(c2[0].location, "café");
     }

@@ -167,9 +167,9 @@ pub fn stale_nodes(
     let mut seen: HashMap<&str, Option<FileSig>> = HashMap::new();
     for (id, source_path, stored) in nodes {
         let Some(stored) = stored else { continue };
-        let cur = *seen.entry(source_path.as_str()).or_insert_with(|| {
-            crate::index::store::file_sig(&root.join(source_path)).ok()
-        });
+        let cur = *seen
+            .entry(source_path.as_str())
+            .or_insert_with(|| crate::index::store::file_sig(&root.join(source_path)).ok());
         match cur {
             Some(cur) if cur != *stored => out.push(id.clone()),
             _ => {} // equal, or file missing/unreadable → not stale
@@ -400,8 +400,16 @@ mod tests {
             ("sec:1".to_string(), "Section".to_string()),    // a live section
         ];
         let edges = vec![
-            ("res:a".to_string(), "MENTIONS".to_string(), "sec:1".to_string()),   // live
-            ("res:b".to_string(), "MENTIONS".to_string(), "sec:gone".to_string()),// dangling
+            (
+                "res:a".to_string(),
+                "MENTIONS".to_string(),
+                "sec:1".to_string(),
+            ), // live
+            (
+                "res:b".to_string(),
+                "MENTIONS".to_string(),
+                "sec:gone".to_string(),
+            ), // dangling
         ];
         let mut gt = std::collections::HashSet::new();
         gt.insert("Resolution".to_string());
@@ -419,7 +427,7 @@ mod tests {
             ("res:a", "Resolution"), // live terminal
             ("sym:b", "Symptom"),
             ("cau:b", "Cause"),
-            ("res:b", "Resolution"), // NOT live (e.g. ungrounded/stale)
+            ("res:b", "Resolution"),   // NOT live (e.g. ungrounded/stale)
             ("sym:orphan", "Symptom"), // no outgoing chaining edge at all
             ("doc:x", "Document"),     // structural substrate — must NOT be flagged
             ("sec:x", "Section"),      // structural substrate — must NOT be flagged

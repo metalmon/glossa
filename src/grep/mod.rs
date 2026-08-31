@@ -689,7 +689,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(anded_out.is_empty(), "glob and scope must be ANDed: {anded_out:?}");
+        assert!(
+            anded_out.is_empty(),
+            "glob and scope must be ANDed: {anded_out:?}"
+        );
     }
 
     #[test]
@@ -711,7 +714,12 @@ mod tests {
 
     #[test]
     fn grep_substring_inside_token_is_found() {
-        let (_d, idx) = idx_with(&[("d.pdf", "p.5", "pdf", "Parameter respTimeout is configured.")]);
+        let (_d, idx) = idx_with(&[(
+            "d.pdf",
+            "p.5",
+            "pdf",
+            "Parameter respTimeout is configured.",
+        )]);
         assert_same_hits("Timeout", &GrepOpts::default(), &idx);
     }
 
@@ -845,11 +853,7 @@ mod tests {
         assert_eq!(h.len(), 7);
         // context lines render with '-' separators
         let ctx = h.iter().find(|x| x.kind == HitKind::Context).unwrap();
-        assert!(
-            ctx.display_line().contains("#1-"),
-            "{}",
-            ctx.display_line()
-        );
+        assert!(ctx.display_line().contains("#1-"), "{}", ctx.display_line());
     }
 
     #[test]
@@ -1061,19 +1065,17 @@ mod tests {
             };
             let h = grep(&idx, "Speed", &opts).unwrap();
             assert_eq!(h.len(), 1, "path={p:?} must scope to exactly one document");
-            assert_eq!(h[0].path, "dir\\a.pdf", "path={p:?} scoped to the wrong doc");
+            assert_eq!(
+                h[0].path, "dir\\a.pdf",
+                "path={p:?} scoped to the wrong doc"
+            );
         }
     }
 
     #[test]
     fn grep_single_spaces_match_irregular_whitespace() {
         // Extracted PDF text often carries double spaces; a single-spaced query must match.
-        let (_d, idx) = idx_with(&[(
-            "d.pdf",
-            "p.3",
-            "pdf",
-            "Sample  device   marking label",
-        )]);
+        let (_d, idx) = idx_with(&[("d.pdf", "p.3", "pdf", "Sample  device   marking label")]);
         let h = grep(&idx, "Sample device marking", &GrepOpts::default()).unwrap();
         assert_eq!(h.len(), 1, "single-spaced pattern must match double spaces");
         assert_same_hits("Sample device marking", &GrepOpts::default(), &idx);

@@ -115,7 +115,10 @@ mod tests {
         drop(g);
 
         let summary = finalize(root).unwrap();
-        assert!(summary.contains("Fact"), "summary should list the Fact node type: {summary}");
+        assert!(
+            summary.contains("Fact"),
+            "summary should list the Fact node type: {summary}"
+        );
         assert!(
             summary.contains("ungrounded"),
             "summary should include the doctor ungrounded count: {summary}"

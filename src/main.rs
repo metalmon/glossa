@@ -264,7 +264,11 @@ enum Cmd {
         /// request for this long is refused with 404 on its next request, so the client
         /// re-initializes (a cheap handshake; the KB holds no per-session state). OPT-IN — `0`
         /// (default) disables it. Set e.g. `900` (15 min) for a corporate policy.
-        #[arg(long = "session-idle-secs", env = "GLOSSA_MCP_SESSION_IDLE_SECS", default_value_t = 0)]
+        #[arg(
+            long = "session-idle-secs",
+            env = "GLOSSA_MCP_SESSION_IDLE_SECS",
+            default_value_t = 0
+        )]
         session_idle_secs: u64,
         /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
@@ -836,7 +840,9 @@ async fn bearer_auth_layer(
 /// status class, in-flight gauge, latency histogram). Applied to /health, /ready and /mcp — not to
 /// /metrics itself.
 async fn http_metrics_layer(
-    axum::extract::State(m): axum::extract::State<std::sync::Arc<glossa::http_metrics::HttpMetrics>>,
+    axum::extract::State(m): axum::extract::State<
+        std::sync::Arc<glossa::http_metrics::HttpMetrics>,
+    >,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -899,7 +905,9 @@ fn main() -> anyhow::Result<()> {
     // parsing so parse errors are still logged.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         // Our logs at info; silence noisy deps. RUST_LOG overrides.
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error"));
+        .unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
+        });
     let json_logs = std::env::var("GLOSSA_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
@@ -1316,7 +1324,12 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
-            GraphAction::Glossary { query, path, as_of, scope } => {
+            GraphAction::Glossary {
+                query,
+                path,
+                as_of,
+                scope,
+            } => {
                 let path = resolve_root_logged(path);
                 glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
                 let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
@@ -1415,7 +1428,11 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "generalize: inferred_edges={} similar_edges={} communities={} \
                      merge_candidates={} merged_nodes={}",
-                    r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates, r.merged_nodes,
+                    r.inferred_edges,
+                    r.similar_edges,
+                    r.communities,
+                    r.merge_candidates,
+                    r.merged_nodes,
                 );
                 Ok(())
             }
@@ -1432,7 +1449,8 @@ fn main() -> anyhow::Result<()> {
                 let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
                 if prune_dangling && !force {
-                    if let Some(reason) = glossa::graph::doctor::dangling_prune_risk(&report, &g, &ont)
+                    if let Some(reason) =
+                        glossa::graph::doctor::dangling_prune_risk(&report, &g, &ont)
                     {
                         prune_dangling = false;
                         println!(
@@ -1503,7 +1521,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Node { node_id, path, as_of, now } => {
+            GraphAction::Node {
+                node_id,
+                path,
+                as_of,
+                now,
+            } => {
                 let path = resolve_root_logged(path);
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
@@ -1537,7 +1560,9 @@ fn main() -> anyhow::Result<()> {
                             let reference = match (&at, &now) {
                                 (Some(a), _) => a.clone(),
                                 (None, Some(nw)) => glossa::graph::temporal::normalize_point(nw)?,
-                                (None, None) => epoch_to_rfc3339((glossa::trace::now_ms() / 1000) as i64),
+                                (None, None) => {
+                                    epoch_to_rfc3339((glossa::trace::now_ms() / 1000) as i64)
+                                }
                             };
                             let superseded = g
                                 .incoming(&node_id)?
@@ -1656,8 +1681,8 @@ fn main() -> anyhow::Result<()> {
                                 // An endpoint outside the exported node set (e.g. a structural
                                 // node) is checked directly — absent-from-export doesn't mean
                                 // hidden-by-as-of.
-                                let from_ok = visible_ids.contains(&e.from)
-                                    || g.visible_at(&e.from, a)?;
+                                let from_ok =
+                                    visible_ids.contains(&e.from) || g.visible_at(&e.from, a)?;
                                 let to_ok =
                                     visible_ids.contains(&e.to) || g.visible_at(&e.to, a)?;
                                 if from_ok && to_ok {
@@ -1681,7 +1706,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
-            GraphAction::Import { file, path, format, mode } => {
+            GraphAction::Import {
+                file,
+                path,
+                format,
+                mode,
+            } => {
                 let fmt = format.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
                     file.extension()
                         .and_then(|e| e.to_str())
@@ -1745,15 +1775,22 @@ fn main() -> anyhow::Result<()> {
             match action {
                 OntologyAction::List { family, tier } => {
                     let mut cat = ot::catalog();
-                    cat.sort_by(|a, b| a.tier.cmp(&b.tier)
-                        .then(a.family.cmp(&b.family))
-                        .then(a.name.cmp(&b.name)));
+                    cat.sort_by(|a, b| {
+                        a.tier
+                            .cmp(&b.tier)
+                            .then(a.family.cmp(&b.family))
+                            .then(a.name.cmp(&b.name))
+                    });
                     for t in cat {
                         if let Some(f) = &family {
-                            if t.family.as_deref() != Some(f.as_str()) { continue; }
+                            if t.family.as_deref() != Some(f.as_str()) {
+                                continue;
+                            }
                         }
                         if let Some(n) = tier {
-                            if t.tier != n { continue; }
+                            if t.tier != n {
+                                continue;
+                            }
                         }
                         let desc = t.description.as_deref().unwrap_or("");
                         let fam = t.family.as_deref().unwrap_or("-");
@@ -1763,19 +1800,30 @@ fn main() -> anyhow::Result<()> {
                 }
                 OntologyAction::Show { name } => {
                     let canon = ot::resolve(&name).ok_or_else(|| {
-                        anyhow::anyhow!("unknown preset '{name}' — did you mean: {}? (kb ontology list)",
-                            ot::nearest(&name, 3).join(", "))
+                        anyhow::anyhow!(
+                            "unknown preset '{name}' — did you mean: {}? (kb ontology list)",
+                            ot::nearest(&name, 3).join(", ")
+                        )
                     })?;
                     print!("{}", ot::raw(&canon).unwrap());
                     Ok(())
                 }
-                OntologyAction::Init { path, template, force } => {
+                OntologyAction::Init {
+                    path,
+                    template,
+                    force,
+                } => {
                     let root = resolve_root_logged(path);
                     match ot::write_template(&root, &template, force)? {
-                        ot::Written::Created => println!("wrote '{template}' to .glossa/ontology.toml"),
-                        ot::Written::Overwritten => println!("overwrote .glossa/ontology.toml with '{template}'"),
+                        ot::Written::Created => {
+                            println!("wrote '{template}' to .glossa/ontology.toml")
+                        }
+                        ot::Written::Overwritten => {
+                            println!("overwrote .glossa/ontology.toml with '{template}'")
+                        }
                         ot::Written::Kept => anyhow::bail!(
-                            ".glossa/ontology.toml already exists — pass --force to replace it"),
+                            ".glossa/ontology.toml already exists — pass --force to replace it"
+                        ),
                     }
                     Ok(())
                 }

@@ -3,15 +3,15 @@ use crate::backend::transport::{ChatTransport, ToolCall, TurnReply};
 use crate::dataset::Question;
 use glossa::read::DocImage;
 use glossa::trace::TraceLog;
+use indicatif::ProgressBar;
 use serde_json::{json, Value};
-use std::path::Path;
 use std::cell::Cell;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use indicatif::ProgressBar;
 
 /// Process-global running total of NEWLY-processed tokens (freshly-processed prompt + all
 /// completion) consumed across every chat call routed through `chat_http` — every one of
@@ -115,7 +115,9 @@ pub fn reset_resamples() {
 /// both by `usage_split_with_prefix` and by `chat_http` to update `PREV_PROMPT_TOKENS` after a
 /// call, so both read the exact same field the exact same way.
 fn prompt_tokens(resp: &Value) -> u64 {
-    resp.pointer("/usage/prompt_tokens").and_then(Value::as_u64).unwrap_or(0)
+    resp.pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 
 /// Split a parsed chat-completions response `resp`'s token usage into `(new, cached, estimated)`,
@@ -143,8 +145,14 @@ pub fn usage_split_with_prefix(resp: &Value, prev_prompt: u64) -> (u64, u64, boo
     let Some(usage) = resp.get("usage") else {
         return (0, 0, false);
     };
-    let prompt = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let completion = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     match usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
@@ -298,7 +306,10 @@ impl StatusTicker {
                 std::thread::sleep(Duration::from_millis(90));
             }
         });
-        StatusTicker { stop, handle: Some(handle) }
+        StatusTicker {
+            stop,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -428,18 +439,28 @@ impl OpenAiBackend {
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
         let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
         let exec = |name: &str, args: &Value| {
-            let (mut body, ids) = execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
+            let (mut body, ids) =
+                execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
                 let snippet: String = body.chars().take(500).collect();
-                eprintln!("\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]", body.len());
+                eprintln!(
+                    "\n[TOOL] {name} {args}\n[BODY] {snippet}\n[--- {} chars ---]",
+                    body.len()
+                );
             }
             // Only id-surfacing RETRIEVAL calls feed the tracker; only its PLATEAU kind is acted on
             // here — Repeat/Streak are the loop's job (see the comment above).
             if crate::backend::glossa_tools::is_retrieval_tool(name) {
                 let key = format!("{name}:{args}");
-                body = crate::backend::glossa_tools::apply_plateau_render(&mut signals, name, &key, &ids, body);
+                body = crate::backend::glossa_tools::apply_plateau_render(
+                    &mut signals,
+                    name,
+                    &key,
+                    &ids,
+                    body,
+                );
             }
             // The reader path never feeds vision input — `execute_tool` already discards whatever
             // images `glossa_tools::exec` surfaced (e.g. from `read`); only `build::extract::
@@ -457,7 +478,13 @@ impl OpenAiBackend {
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
             crate::backend::glossa_tools::next_best_action(
-                name, args, work, &idx, graph.as_ref(), &spec, &trace,
+                name,
+                args,
+                work,
+                &idx,
+                graph.as_ref(),
+                &spec,
+                &trace,
             )
         };
         // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the
@@ -593,7 +620,11 @@ pub(crate) fn chat_once(
         Duration::from_secs(timeout_secs),
         crate::backend::resilience::RetryPolicy::default(),
     )
-    .map(|v| v.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({})))
+    .map(|v| {
+        v.pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    })
 }
 
 /// True when an error body reflects a transient UPSTREAM failure of the gateway's own backend (its
@@ -841,7 +872,11 @@ where
             .map(|arr| {
                 arr.iter()
                     .map(|call| ToolCall {
-                        id: call.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                        id: call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                         name: call
                             .pointer("/function/name")
                             .and_then(Value::as_str)
@@ -941,7 +976,10 @@ mod tests {
             "502 Bad Gateway",
             "read timed out",
         ] {
-            assert!(is_transient_upstream(transient), "should retry: {transient}");
+            assert!(
+                is_transient_upstream(transient),
+                "should retry: {transient}"
+            );
         }
         // Genuine client faults — must fail fast, never retry.
         for fatal in [
@@ -976,7 +1014,10 @@ mod tests {
     #[test]
     fn usage_split_no_usage_object_is_all_zero_not_estimated() {
         // No usage object at all -> (0, 0, false), never a panic.
-        assert_eq!(usage_split_with_prefix(&json!({"choices": []}), 500), (0, 0, false));
+        assert_eq!(
+            usage_split_with_prefix(&json!({"choices": []}), 500),
+            (0, 0, false)
+        );
     }
 
     #[test]
@@ -1075,7 +1116,10 @@ mod tests {
         // Round 1: prev_prompt was 0 -> no prefix to credit -> new = 1000+50, cached = 0.
         assert_eq!(new_tokens(), 1050);
         assert_eq!(cached_tokens(), 0);
-        assert!(cache_is_estimated(), "server omits prompt_tokens_details -> estimate path");
+        assert!(
+            cache_is_estimated(),
+            "server omits prompt_tokens_details -> estimate path"
+        );
 
         chat_http(&endpoint, None, &body, Duration::from_secs(5)).unwrap();
         // Round 2: prev_prompt is now round 1's 1000 (the re-sent prefix) -> cached_est=1000,
@@ -1220,8 +1264,10 @@ mod tests {
         assert_eq!(new_tokens(), 0);
         assert_eq!(cached_tokens(), 0);
         assert!(!cache_is_estimated());
-        let (n1, c1, e1) =
-            usage_split_with_prefix(&json!({"usage": {"prompt_tokens": 5, "completion_tokens": 2}}), 0);
+        let (n1, c1, e1) = usage_split_with_prefix(
+            &json!({"usage": {"prompt_tokens": 5, "completion_tokens": 2}}),
+            0,
+        );
         NEW_TOKENS.fetch_add(n1, Ordering::Relaxed);
         CACHED_TOKENS.fetch_add(c1, Ordering::Relaxed);
         if e1 {
@@ -1270,7 +1316,10 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(msgs[0]["role"], "system");
-        assert!(msgs[0]["content"].as_str().unwrap().contains("SYS-MARKER-123"));
+        assert!(msgs[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("SYS-MARKER-123"));
         assert_eq!(msgs[1]["role"], "user");
         assert!(msgs[1]["content"].as_str().unwrap().contains("hi"));
     }
@@ -1320,7 +1369,11 @@ mod tests {
         let exec = |_: &str, _: &Value| {
             let mut c = counter.borrow_mut();
             *c += 1;
-            (format!("hit {}", *c), vec![format!("doc-{}.md", *c)], Vec::new()) // new id every call
+            (
+                format!("hit {}", *c),
+                vec![format!("doc-{}.md", *c)],
+                Vec::new(),
+            ) // new id every call
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, rounds_to_run + 2, None).unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -1516,7 +1569,8 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
+        let out =
+            run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1676,7 +1730,8 @@ mod tests {
                 }]
             }))
         };
-        let out = run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
+        let out =
+            run_agent_loop(chat, vec![], exec, nudge, UNPRODUCTIVE_STREAK_K + 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
     }
 
@@ -1710,10 +1765,16 @@ mod tests {
         let msg = vision_user_message(&[img.clone()]).expect("one image -> Some(message)");
         assert_eq!(msg["role"], "user");
         let content = msg["content"].as_array().expect("content must be an array");
-        assert_eq!(content.len(), 2, "one text part + one image_url part: {content:?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "one text part + one image_url part: {content:?}"
+        );
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image_url");
-        let url = content[1]["image_url"]["url"].as_str().expect("image_url.url string");
+        let url = content[1]["image_url"]["url"]
+            .as_str()
+            .expect("image_url.url string");
         assert!(
             url.starts_with("data:image/jpeg;base64,"),
             "must be a JPEG data URI, got: {url}"
@@ -1727,13 +1788,21 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(payload)
             .expect("payload must be valid standard base64");
-        assert_eq!(decoded, img.bytes, "decoded payload must round-trip the original JPEG bytes");
+        assert_eq!(
+            decoded, img.bytes,
+            "decoded payload must round-trip the original JPEG bytes"
+        );
     }
 
     #[test]
     fn vision_message_caps_at_max_images_per_turn() {
-        let images: Vec<DocImage> = (0..(MAX_IMAGES_PER_TURN as u8 + 2)).map(stub_image).collect();
-        assert!(images.len() > MAX_IMAGES_PER_TURN, "test must exceed the cap");
+        let images: Vec<DocImage> = (0..(MAX_IMAGES_PER_TURN as u8 + 2))
+            .map(stub_image)
+            .collect();
+        assert!(
+            images.len() > MAX_IMAGES_PER_TURN,
+            "test must exceed the cap"
+        );
         let msg = vision_user_message(&images).expect("non-empty -> Some(message)");
         let content = msg["content"].as_array().unwrap();
         let image_parts = content.iter().filter(|p| p["type"] == "image_url").count();
@@ -1783,7 +1852,11 @@ mod tests {
             Ok(json!({ "role": "assistant", "content": "ANSWER: done" }))
         };
         let exec = |_: &str, _: &Value| {
-            ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], vec![stub_image(9)])
+            (
+                "(scanned page text)".to_string(),
+                vec!["scan.pdf".to_string()],
+                vec![stub_image(9)],
+            )
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -1813,11 +1886,18 @@ mod tests {
                         .as_array()
                         .is_some_and(|c| c.iter().any(|p| p["type"] == "image_url"))
             });
-            assert!(!has_image_msg, "vision-off must never append an image message: {msgs:?}");
+            assert!(
+                !has_image_msg,
+                "vision-off must never append an image message: {msgs:?}"
+            );
             Ok(json!({ "role": "assistant", "content": "ANSWER: done" }))
         };
         let exec = |_: &str, _: &Value| {
-            ("(scanned page text)".to_string(), vec!["scan.pdf".to_string()], Vec::new())
+            (
+                "(scanned page text)".to_string(),
+                vec!["scan.pdf".to_string()],
+                Vec::new(),
+            )
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -1843,8 +1923,14 @@ mod schema_tests {
     #[test]
     fn grep_is_advertised_in_both_arms() {
         // grep is ungated in the registry, so it must appear in both graph-OFF and graph-ON.
-        assert!(tool_names(&tools_schema(false)).contains(&"grep".into()), "graph-OFF must advertise grep");
-        assert!(tool_names(&tools_schema(true)).contains(&"grep".into()), "graph-ON must advertise grep");
+        assert!(
+            tool_names(&tools_schema(false)).contains(&"grep".into()),
+            "graph-OFF must advertise grep"
+        );
+        assert!(
+            tool_names(&tools_schema(true)).contains(&"grep".into()),
+            "graph-ON must advertise grep"
+        );
     }
 
     #[test]

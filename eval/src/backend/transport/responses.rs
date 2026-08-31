@@ -184,7 +184,9 @@ fn parse_response(resp: Value) -> TurnReply {
     // (its length-cap signal) maps to `"length"`, so a truncated turn resamples like an OpenAI
     // `finish_reason == "length"` one. Other/absent statuses leave `finish_reason` as `None`.
     let finish_reason = if resp.get("status").and_then(Value::as_str) == Some("incomplete")
-        && resp.pointer("/incomplete_details/reason").and_then(Value::as_str)
+        && resp
+            .pointer("/incomplete_details/reason")
+            .and_then(Value::as_str)
             == Some("max_output_tokens")
     {
         Some("length".to_string())
@@ -205,7 +207,9 @@ fn parse_response(resp: Value) -> TurnReply {
 /// already-parsed object too. Reuses `openai::parse_tool_args`'s string-or-object logic by
 /// wrapping the item in the `{"function":{"arguments":...}}` shape that helper expects.
 fn parse_tool_args_responses(item: &Value) -> Value {
-    parse_tool_args(&json!({ "function": { "arguments": item.get("arguments").cloned().unwrap_or(Value::Null) } }))
+    parse_tool_args(
+        &json!({ "function": { "arguments": item.get("arguments").cloned().unwrap_or(Value::Null) } }),
+    )
 }
 
 /// Sync HTTP bridge: POST our `{model, input, instructions?, tools?, max_output_tokens,
@@ -301,11 +305,11 @@ mod tests {
         );
         let tools = schema.as_array().unwrap();
         assert!(
-            tools
-                .iter()
-                .any(|t| t.get("name").and_then(Value::as_str) == Some("glossary")
+            tools.iter().any(
+                |t| t.get("name").and_then(Value::as_str) == Some("glossary")
                     && t.get("parameters").is_some_and(Value::is_object)
-                    && t.get("description").is_some()),
+                    && t.get("description").is_some()
+            ),
             "expected flat name/description/parameters at top level, got {tools:?}"
         );
     }
@@ -351,7 +355,11 @@ mod tests {
                 ("id2".to_string(), "body2".to_string()),
             ],
         );
-        assert_eq!(messages.len(), 2, "one item per result, appended directly to input");
+        assert_eq!(
+            messages.len(),
+            2,
+            "one item per result, appended directly to input"
+        );
         assert_eq!(messages[0]["type"], "function_call_output");
         assert_eq!(messages[0]["call_id"], "id1");
         assert_eq!(messages[0]["output"], "body1");
@@ -380,7 +388,11 @@ mod tests {
             }),
         };
         ResponsesTransport.push_assistant_turn(&mut messages, &reply);
-        assert_eq!(messages.len(), 3, "reasoning item must be preserved verbatim");
+        assert_eq!(
+            messages.len(),
+            3,
+            "reasoning item must be preserved verbatim"
+        );
         assert_eq!(messages[0]["type"], "reasoning");
         assert_eq!(messages[2]["call_id"], "c1");
     }
@@ -521,7 +533,11 @@ mod tests {
         assert_eq!(out, "ANSWER: final");
 
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2, "the tool must trigger exactly one extra turn");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the tool must trigger exactly one extra turn"
+        );
 
         let req0 = &requests[0];
         assert!(

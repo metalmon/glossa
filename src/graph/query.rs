@@ -21,7 +21,8 @@ const WHITELIST: &[&str] = &["nodes", "edges", "node_validity", "edges_labeled"]
 /// statements, and any referenced table not in [`WHITELIST`] (including in subqueries and
 /// set operations).
 pub(crate) fn parse_readonly_select(sql: &str) -> Result<Query, String> {
-    let stmts = Parser::parse_sql(&SQLiteDialect {}, sql).map_err(|e| format!("SQL parse error: {e}"))?;
+    let stmts =
+        Parser::parse_sql(&SQLiteDialect {}, sql).map_err(|e| format!("SQL parse error: {e}"))?;
     let [Statement::Query(q)] = stmts.as_slice() else {
         return Err("only a single read-only SELECT is allowed".into());
     };
@@ -185,7 +186,9 @@ fn collect_from_expr(expr: &Expr, out: &mut Vec<String>) {
             }
         }
         Expr::InUnnest {
-            expr: e, array_expr, ..
+            expr: e,
+            array_expr,
+            ..
         } => {
             collect_from_expr(e, out);
             collect_from_expr(array_expr, out);
@@ -203,10 +206,18 @@ fn collect_from_expr(expr: &Expr, out: &mut Vec<String>) {
             collect_from_expr(left, out);
             collect_from_expr(right, out);
         }
-        Expr::Like { expr: e, pattern, .. }
-        | Expr::ILike { expr: e, pattern, .. }
-        | Expr::SimilarTo { expr: e, pattern, .. }
-        | Expr::RLike { expr: e, pattern, .. } => {
+        Expr::Like {
+            expr: e, pattern, ..
+        }
+        | Expr::ILike {
+            expr: e, pattern, ..
+        }
+        | Expr::SimilarTo {
+            expr: e, pattern, ..
+        }
+        | Expr::RLike {
+            expr: e, pattern, ..
+        } => {
             collect_from_expr(e, out);
             collect_from_expr(pattern, out);
         }
@@ -217,7 +228,9 @@ fn collect_from_expr(expr: &Expr, out: &mut Vec<String>) {
             collect_from_expr(timestamp, out);
             collect_from_expr(time_zone, out);
         }
-        Expr::Convert { expr: e, styles, .. } => {
+        Expr::Convert {
+            expr: e, styles, ..
+        } => {
             collect_from_expr(e, out);
             for s in styles {
                 collect_from_expr(s, out);
@@ -537,7 +550,9 @@ fn ilike_to_like_table_factor(tf: &mut TableFactor) {
     match tf {
         TableFactor::Table { .. } => {}
         TableFactor::Derived { subquery, .. } => ilike_to_like_query(subquery),
-        TableFactor::NestedJoin { table_with_joins, .. } => {
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
             ilike_to_like_table_factor(&mut table_with_joins.relation);
             for join in &mut table_with_joins.joins {
                 ilike_to_like_table_factor(&mut join.relation);
@@ -659,7 +674,9 @@ fn ilike_to_like_expr(expr: &mut Expr) {
             }
         }
         Expr::InUnnest {
-            expr: e, array_expr, ..
+            expr: e,
+            array_expr,
+            ..
         } => {
             ilike_to_like_expr(e);
             ilike_to_like_expr(array_expr);
@@ -677,10 +694,18 @@ fn ilike_to_like_expr(expr: &mut Expr) {
             ilike_to_like_expr(left);
             ilike_to_like_expr(right);
         }
-        Expr::Like { expr: e, pattern, .. }
-        | Expr::ILike { expr: e, pattern, .. }
-        | Expr::SimilarTo { expr: e, pattern, .. }
-        | Expr::RLike { expr: e, pattern, .. } => {
+        Expr::Like {
+            expr: e, pattern, ..
+        }
+        | Expr::ILike {
+            expr: e, pattern, ..
+        }
+        | Expr::SimilarTo {
+            expr: e, pattern, ..
+        }
+        | Expr::RLike {
+            expr: e, pattern, ..
+        } => {
             ilike_to_like_expr(e);
             ilike_to_like_expr(pattern);
         }
@@ -691,7 +716,9 @@ fn ilike_to_like_expr(expr: &mut Expr) {
             ilike_to_like_expr(timestamp);
             ilike_to_like_expr(time_zone);
         }
-        Expr::Convert { expr: e, styles, .. } => {
+        Expr::Convert {
+            expr: e, styles, ..
+        } => {
             ilike_to_like_expr(e);
             for s in styles {
                 ilike_to_like_expr(s);
@@ -946,7 +973,10 @@ pub(crate) fn locate_literals(q: &Query) -> Vec<Literal> {
             if let Some(on_expr) = join_on_expr(&join.join_operator) {
                 walk_bool_tree(
                     on_expr,
-                    ExprRoot::JoinOn { table_idx, join_idx },
+                    ExprRoot::JoinOn {
+                        table_idx,
+                        join_idx,
+                    },
                     &mut Vec::new(),
                     &mut out,
                 );
@@ -986,7 +1016,10 @@ fn root_expr(q: &Query, root: ExprRoot) -> Option<&Expr> {
     };
     match root {
         ExprRoot::Where => select.selection.as_ref(),
-        ExprRoot::JoinOn { table_idx, join_idx } => {
+        ExprRoot::JoinOn {
+            table_idx,
+            join_idx,
+        } => {
             let twj = select.from.get(table_idx)?;
             let join = twj.joins.get(join_idx)?;
             join_on_expr(&join.join_operator)
@@ -1027,7 +1060,10 @@ fn root_expr_mut(q: &mut Query, root: ExprRoot) -> Option<&mut Expr> {
     };
     match root {
         ExprRoot::Where => select.selection.as_mut(),
-        ExprRoot::JoinOn { table_idx, join_idx } => {
+        ExprRoot::JoinOn {
+            table_idx,
+            join_idx,
+        } => {
             let twj = select.from.get_mut(table_idx)?;
             let join = twj.joins.get_mut(join_idx)?;
             join_on_expr_mut(&mut join.join_operator)
@@ -1190,12 +1226,18 @@ pub(crate) fn resolve_assignment(
                 // consulted for its rank-based score (how confidently the graph resolves this
                 // text to a real node), but its node-id values are not used as the assignment.
                 LitKind::Entity => {
-                    let score =
-                        entity_candidates(g, &lit.value, 5).first().map(|(_, s)| *s).unwrap_or(1.0);
+                    let score = entity_candidates(g, &lit.value, 5)
+                        .first()
+                        .map(|(_, s)| *s)
+                        .unwrap_or(1.0);
                     vec![(lit.value.clone(), score)]
                 }
             };
-            LitInfo { lit, column, candidates }
+            LitInfo {
+                lit,
+                column,
+                candidates,
+            }
         })
         .collect();
 
@@ -1206,18 +1248,25 @@ pub(crate) fn resolve_assignment(
         if handled[i] {
             continue;
         }
-        let group_idx: Vec<usize> =
-            (0..infos.len()).filter(|&j| infos[j].lit.loc.root == infos[i].lit.loc.root).collect();
+        let group_idx: Vec<usize> = (0..infos.len())
+            .filter(|&j| infos[j].lit.loc.root == infos[i].lit.loc.root)
+            .collect();
         for &j in &group_idx {
             handled[j] = true;
         }
 
         let is_col = |j: usize, name: &str| {
             matches!(infos[j].lit.kind, LitKind::Entity)
-                && infos[j].column.as_deref().map(|c| c.eq_ignore_ascii_case(name)).unwrap_or(false)
+                && infos[j]
+                    .column
+                    .as_deref()
+                    .map(|c| c.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
         };
-        let rel_idx =
-            group_idx.iter().copied().find(|&j| matches!(infos[j].lit.kind, LitKind::Relation));
+        let rel_idx = group_idx
+            .iter()
+            .copied()
+            .find(|&j| matches!(infos[j].lit.kind, LitKind::Relation));
         let src_idx = group_idx.iter().copied().find(|&j| is_col(j, "src_label"));
         let dst_idx = group_idx.iter().copied().find(|&j| is_col(j, "dst_label"));
 
@@ -1297,7 +1346,11 @@ fn walk_bool_tree(expr: &Expr, root: ExprRoot, path: &mut Vec<Side>, out: &mut V
                     out.push(Literal {
                         value,
                         kind,
-                        loc: LitLoc { root, path: path.clone(), side },
+                        loc: LitLoc {
+                            root,
+                            path: path.clone(),
+                            side,
+                        },
                     });
                 }
             }
@@ -1398,7 +1451,11 @@ fn relation_similarity(query: &str, candidate: &str) -> f32 {
         let c_set: std::collections::HashSet<&String> = c_tokens.iter().collect();
         let inter = q_set.intersection(&c_set).count();
         let union = q_set.union(&c_set).count();
-        if union == 0 { 0.0 } else { inter as f32 / union as f32 }
+        if union == 0 {
+            0.0
+        } else {
+            inter as f32 / union as f32
+        }
     };
 
     let max_len = q_norm.chars().count().max(c_norm.chars().count()).max(1);
@@ -1438,11 +1495,19 @@ fn entity_candidates(g: &GraphStore, name: &str, k: usize) -> Vec<(String, f32)>
 pub(crate) fn schema_help(g: &GraphStore) -> String {
     let edge_types = g
         .run_select("SELECT DISTINCT edge_type FROM edges", 50)
-        .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect::<Vec<_>>())
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|r| r.into_iter().next())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let node_types = g
         .run_select("SELECT DISTINCT node_type FROM nodes", 50)
-        .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect::<Vec<_>>())
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|r| r.into_iter().next())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     let mut out = String::new();
@@ -1450,9 +1515,7 @@ pub(crate) fn schema_help(g: &GraphStore) -> String {
     out.push_str("Queryable tables/views:\n");
     out.push_str("  nodes(id, node_type, label)\n");
     out.push_str("  edges(efrom, edge_type, eto)\n");
-    out.push_str(
-        "  node_validity(node_id, valid_from, valid_to, valid_from_raw, valid_to_raw)\n",
-    );
+    out.push_str("  node_validity(node_id, valid_from, valid_to, valid_from_raw, valid_to_raw)\n");
     out.push_str("  edges_labeled(src_label, edge_type, dst_label, efrom, eto)\n\n");
 
     out.push_str(
@@ -1521,15 +1584,31 @@ pub fn run(g: &GraphStore, idx: &DocIndex, sql: &str) -> String {
 
     let rows = match g.run_select(&real_sql, 50) {
         Ok(rows) => rows,
-        Err(e) => return format!("query error: {}\n\n{}", query_error_text(&e), schema_help(g)),
+        Err(e) => {
+            return format!(
+                "query error: {}\n\n{}",
+                query_error_text(&e),
+                schema_help(g)
+            )
+        }
     };
     let cols = match g.select_columns(&real_sql) {
         Ok(cols) => cols,
-        Err(e) => return format!("query error: {}\n\n{}", query_error_text(&e), schema_help(g)),
+        Err(e) => {
+            return format!(
+                "query error: {}\n\n{}",
+                query_error_text(&e),
+                schema_help(g)
+            )
+        }
     };
 
     let body = render_rows(idx, g, &cols, &rows);
-    if notes.is_empty() { body } else { format!("{}\n{body}", notes.join("\n")) }
+    if notes.is_empty() {
+        body
+    } else {
+        format!("{}\n{body}", notes.join("\n"))
+    }
 }
 
 /// Render a `run_select`/`select_columns` failure with full anyhow context (`{e:#}`, not `{e}` —
@@ -1602,8 +1681,11 @@ fn render_rows(idx: &DocIndex, g: &GraphStore, cols: &[String], rows: &[Vec<Stri
                 .collect();
             // Drop a standalone label-column cell that a sibling handle on this row already spells
             // out, so `SELECT id, label` doesn't print the label twice.
-            let handles: Vec<&str> =
-                cells.iter().filter(|(h, _)| *h).map(|(_, t)| t.as_str()).collect();
+            let handles: Vec<&str> = cells
+                .iter()
+                .filter(|(h, _)| *h)
+                .map(|(_, t)| t.as_str())
+                .collect();
             cells
                 .iter()
                 .enumerate()
@@ -1689,7 +1771,10 @@ mod tests {
         g.put_edge(&edge("f:a", "LEADS_TO", "f:b")).unwrap();
         let out = schema_help(&g);
         assert!(out.contains("nodes(") && out.contains("edges_labeled"));
-        assert!(out.contains("LEADS_TO"), "shows real edge_type vocab: {out}");
+        assert!(
+            out.contains("LEADS_TO"),
+            "shows real edge_type vocab: {out}"
+        );
         assert!(out.contains("Fact"), "shows real node_type vocab: {out}");
     }
 
@@ -1736,10 +1821,10 @@ mod tests {
             assert!(parse_readonly_select(bad).is_err(), "must reject: {bad}");
         }
         // Positive control: a subquery over a WHITELISTED table must still be allowed.
-        assert!(
-            parse_readonly_select("SELECT id FROM nodes WHERE id IN (SELECT efrom FROM edges)")
-                .is_ok()
-        );
+        assert!(parse_readonly_select(
+            "SELECT id FROM nodes WHERE id IN (SELECT efrom FROM edges)"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1758,12 +1843,19 @@ mod tests {
             "SELECT dst_label FROM edges_labeled WHERE src_label = 'Riverton' AND edge_type = 'located in'"
         ).unwrap();
         let lits = locate_literals(&q);
-        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
-        let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap();
+        let rel = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Relation))
+            .unwrap();
+        let ent = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Entity))
+            .unwrap();
         assert_eq!(rel.value, "located in");
         assert_eq!(ent.value, "Riverton");
         // LIKE stays fuzzy already -> not collected
-        let q2 = parse_readonly_select("SELECT label FROM nodes WHERE label LIKE '%Kepler%'").unwrap();
+        let q2 =
+            parse_readonly_select("SELECT label FROM nodes WHERE label LIKE '%Kepler%'").unwrap();
         assert!(locate_literals(&q2).is_empty());
     }
 
@@ -1774,7 +1866,10 @@ mod tests {
         )
         .unwrap();
         let lits = locate_literals(&q);
-        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        let rel = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Relation))
+            .unwrap();
         assert_eq!(rel.value, "located in");
     }
 
@@ -1787,12 +1882,18 @@ mod tests {
         )
         .unwrap();
         let lits = locate_literals(&q);
-        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        let rel = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Relation))
+            .unwrap();
         assert_eq!(rel.value, "located in");
         assert_eq!(
             rel.loc,
             LitLoc {
-                root: ExprRoot::JoinOn { table_idx: 0, join_idx: 0 },
+                root: ExprRoot::JoinOn {
+                    table_idx: 0,
+                    join_idx: 0
+                },
                 path: vec![],
                 side: Side::Right,
             },
@@ -1801,9 +1902,16 @@ mod tests {
 
     #[test]
     fn relation_candidates_map_fuzzy_to_real_vocab() {
-        let vocab = vec!["LEADS_TO".to_string(), "LOCATED_IN".to_string(), "CREATED_BY".to_string()];
+        let vocab = vec![
+            "LEADS_TO".to_string(),
+            "LOCATED_IN".to_string(),
+            "CREATED_BY".to_string(),
+        ];
         let top = relation_candidates("located in", &vocab, 2);
-        assert_eq!(top[0].0, "LOCATED_IN", "best match is the real relation: {top:?}");
+        assert_eq!(
+            top[0].0, "LOCATED_IN",
+            "best match is the real relation: {top:?}"
+        );
         // an invented name still lands on the closest real one, with a lower score
         let top2 = relation_candidates("PROPOSED_BY", &vocab, 1);
         assert_eq!(top2.len(), 1);
@@ -1815,8 +1923,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         g.put_node(&node_fact("f:riverton", "Riverton")).unwrap();
-        g.put_node(&node_fact("f:distr", "Riverton District")).unwrap();
-        g.put_edge(&edge("f:riverton", "LOCATED_IN", "f:distr")).unwrap();
+        g.put_node(&node_fact("f:distr", "Riverton District"))
+            .unwrap();
+        g.put_edge(&edge("f:riverton", "LOCATED_IN", "f:distr"))
+            .unwrap();
         // vocab also has a lexically-closer-but-edgeless relation
         g.put_node(&node_fact("f:x", "x")).unwrap();
         g.put_edge(&edge("f:x", "LOCATION_OF", "f:x")).unwrap();
@@ -1826,7 +1936,10 @@ mod tests {
         .unwrap();
         let lits = locate_literals(&q);
         let chosen = resolve_assignment(&g, &q, &lits);
-        let rel = chosen.iter().find(|(l, _, _)| matches!(l.kind, LitKind::Relation)).unwrap();
+        let rel = chosen
+            .iter()
+            .find(|(l, _, _)| matches!(l.kind, LitKind::Relation))
+            .unwrap();
         assert_eq!(
             rel.1, "LOCATED_IN",
             "picks the relation that actually connects Riverton, not the lexically-nearest edgeless one"
@@ -1840,8 +1953,10 @@ mod tests {
         // Real edge for Riverton -> Riverton District uses a relation name that is lexically FAR
         // from the query word 'located'.
         g.put_node(&node_fact("f:riverton", "Riverton")).unwrap();
-        g.put_node(&node_fact("f:distr", "Riverton District")).unwrap();
-        g.put_edge(&edge("f:riverton", "SITED_IN", "f:distr")).unwrap();
+        g.put_node(&node_fact("f:distr", "Riverton District"))
+            .unwrap();
+        g.put_edge(&edge("f:riverton", "SITED_IN", "f:distr"))
+            .unwrap();
         // LOCATED_NEAR is in the vocab (so it's a relation_candidates hit) and is the lexical
         // top match for 'located' (substring), but it only connects unrelated nodes -- it is
         // edgeless between Riverton and its district.
@@ -1860,12 +1975,21 @@ mod tests {
         let vocab = g.edge_type_vocab().unwrap();
         let ranked = relation_candidates("located", &vocab, vocab.len());
         let top = &ranked[0];
-        assert_eq!(top.0, "LOCATED_NEAR", "fixture invalid: LOCATED_NEAR must be the lexical top match: {ranked:?}");
+        assert_eq!(
+            top.0, "LOCATED_NEAR",
+            "fixture invalid: LOCATED_NEAR must be the lexical top match: {ranked:?}"
+        );
         let sited_score = ranked.iter().find(|(r, _)| r == "SITED_IN").unwrap().1;
-        assert!(sited_score < top.1, "fixture invalid: SITED_IN must rank lower than LOCATED_NEAR: {ranked:?}");
+        assert!(
+            sited_score < top.1,
+            "fixture invalid: SITED_IN must rank lower than LOCATED_NEAR: {ranked:?}"
+        );
 
         let chosen = resolve_assignment(&g, &q, &lits);
-        let rel = chosen.iter().find(|(l, _, _)| matches!(l.kind, LitKind::Relation)).unwrap();
+        let rel = chosen
+            .iter()
+            .find(|(l, _, _)| matches!(l.kind, LitKind::Relation))
+            .unwrap();
         assert_eq!(
             rel.1, "SITED_IN",
             "edge-backed SITED_IN must win over lexically-top but edgeless LOCATED_NEAR: {chosen:?}"
@@ -1881,13 +2005,27 @@ mod tests {
         // Drive the test through the real addressing produced by `locate_literals`, rather than
         // hand-building `LitLoc`, so the test proves the locate -> rewrite round-trip.
         let lits = locate_literals(&q);
-        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap().clone();
-        let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap().clone();
-        let chosen = vec![(rel, "LOCATED_IN".to_string(), 0.8f32), (ent, "Riverton".to_string(), 0.9f32)];
+        let rel = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Relation))
+            .unwrap()
+            .clone();
+        let ent = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Entity))
+            .unwrap()
+            .clone();
+        let chosen = vec![
+            (rel, "LOCATED_IN".to_string(), 0.8f32),
+            (ent, "Riverton".to_string(), 0.9f32),
+        ];
 
         let sql = rewrite(&q, &chosen);
         assert!(sql.contains("edge_type = 'LOCATED_IN'"), "sql: {sql}");
-        assert!(sql.to_lowercase().contains("src_label like '%riverton%'"), "sql: {sql}");
+        assert!(
+            sql.to_lowercase().contains("src_label like '%riverton%'"),
+            "sql: {sql}"
+        );
     }
 
     #[test]
@@ -1897,8 +2035,14 @@ mod tests {
         )
         .unwrap();
         let lits = locate_literals(&q);
-        let ent = lits.iter().find(|l| matches!(l.kind, LitKind::Entity)).unwrap();
-        let rel = lits.iter().find(|l| matches!(l.kind, LitKind::Relation)).unwrap();
+        let ent = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Entity))
+            .unwrap();
+        let rel = lits
+            .iter()
+            .find(|l| matches!(l.kind, LitKind::Relation))
+            .unwrap();
         assert_eq!(ent.value, "Riverton");
         assert_eq!(rel.value, "x");
     }
@@ -1911,8 +2055,16 @@ mod tests {
         let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         for (id, label, vf) in [
-            ("f:early", "Heliocentrism was proposed as early as the 3rd century BC", "0001"),
-            ("f:late", "A predictive heliocentric system was developed later", "1543"),
+            (
+                "f:early",
+                "Heliocentrism was proposed as early as the 3rd century BC",
+                "0001",
+            ),
+            (
+                "f:late",
+                "A predictive heliocentric system was developed later",
+                "1543",
+            ),
         ] {
             g.put_node(&node_fact(id, label)).unwrap();
             g.upsert_validity(
@@ -1932,7 +2084,10 @@ mod tests {
             "SELECT n.id, n.label FROM nodes n JOIN node_validity v ON v.node_id=n.id \
              WHERE n.node_type='Fact' ORDER BY v.valid_from ASC LIMIT 1",
         );
-        assert!(out.contains("3rd century BC"), "deterministic earliest, not the model's guess: {out}");
+        assert!(
+            out.contains("3rd century BC"),
+            "deterministic earliest, not the model's guess: {out}"
+        );
         assert!(
             crate::graph::query::run(&g, &idx, "   ").contains("nodes("),
             "empty -> schema"
@@ -1973,7 +2128,10 @@ mod tests {
             &idx,
             "SELECT dst_label FROM edges WHERE src_label LIKE '%x%'",
         );
-        assert!(out.contains("query error"), "surfaces the real error: {out}");
+        assert!(
+            out.contains("query error"),
+            "surfaces the real error: {out}"
+        );
         assert!(out.contains("edges_labeled"), "appends the schema: {out}");
     }
 
@@ -1984,7 +2142,8 @@ mod tests {
         crate::index::store::index_dir(dir.path(), true).unwrap();
         let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
-        g.put_node(&node_fact("f:calib", "КаЛибРовка Аналоговых")).unwrap();
+        g.put_node(&node_fact("f:calib", "КаЛибРовка Аналоговых"))
+            .unwrap();
 
         let via_like = crate::graph::query::run(
             &g,
@@ -2000,7 +2159,10 @@ mod tests {
             via_like.contains("КаЛибРовка Аналоговых"),
             "LIKE (Unicode-CI) finds the row: {via_like}"
         );
-        assert_eq!(via_like, via_ilike, "ILIKE must return exactly the same rows as LIKE");
+        assert_eq!(
+            via_like, via_ilike,
+            "ILIKE must return exactly the same rows as LIKE"
+        );
     }
 
     #[test]
@@ -2013,20 +2175,32 @@ mod tests {
         g.put_node(&node_fact("f:a", "alpha")).unwrap();
 
         let out = crate::graph::query::run(&g, &idx, "SELECT label FROM nodes LIMIT 5;");
-        assert!(!out.contains("query error"), "trailing ';' must not error: {out}");
+        assert!(
+            !out.contains("query error"),
+            "trailing ';' must not error: {out}"
+        );
         assert!(out.contains("alpha"), "still returns the row: {out}");
     }
 
     #[test]
     fn ilike_to_like_query_rewrites_ilike_in_where_and_join_on() {
         // WHERE clause.
-        let stmts = Parser::parse_sql(&SQLiteDialect {}, "SELECT id FROM nodes WHERE label ILIKE '%x%'").unwrap();
-        let [Statement::Query(q)] = stmts.as_slice() else { panic!("expected one query") };
+        let stmts = Parser::parse_sql(
+            &SQLiteDialect {},
+            "SELECT id FROM nodes WHERE label ILIKE '%x%'",
+        )
+        .unwrap();
+        let [Statement::Query(q)] = stmts.as_slice() else {
+            panic!("expected one query")
+        };
         let mut q = (**q).clone();
         ilike_to_like_query(&mut q);
         let sql = q.to_string();
         assert!(sql.contains("LIKE"), "ILIKE rewritten to LIKE: {sql}");
-        assert!(!sql.to_uppercase().contains("ILIKE"), "no ILIKE left: {sql}");
+        assert!(
+            !sql.to_uppercase().contains("ILIKE"),
+            "no ILIKE left: {sql}"
+        );
 
         // JOIN ... ON with an alias.
         let stmts = Parser::parse_sql(
@@ -2034,12 +2208,17 @@ mod tests {
             "SELECT n.label FROM nodes n JOIN edges e ON e.efrom ILIKE n.id",
         )
         .unwrap();
-        let [Statement::Query(q)] = stmts.as_slice() else { panic!("expected one query") };
+        let [Statement::Query(q)] = stmts.as_slice() else {
+            panic!("expected one query")
+        };
         let mut q = (**q).clone();
         ilike_to_like_query(&mut q);
         let sql = q.to_string();
         assert!(sql.contains("LIKE"), "ILIKE in JOIN ON rewritten: {sql}");
-        assert!(!sql.to_uppercase().contains("ILIKE"), "no ILIKE left in JOIN ON: {sql}");
+        assert!(
+            !sql.to_uppercase().contains("ILIKE"),
+            "no ILIKE left in JOIN ON: {sql}"
+        );
         assert!(sql.contains("JOIN"), "join structure preserved: {sql}");
     }
 }
