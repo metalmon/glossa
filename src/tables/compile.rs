@@ -252,28 +252,24 @@ fn compile_field(
                     from: field_label.into(),
                     edge_type: wiring.constrained_by.clone(),
                     to: cond_label.clone(),
-                    id: None,
                     source_path: doc.into(),
                 });
                 edges.push(UpsertEdge {
                     from: cond_label.clone(),
                     edge_type: wiring.if_field.clone(),
                     to: trigger.clone(),
-                    id: None,
                     source_path: doc.into(),
                 });
                 edges.push(UpsertEdge {
                     from: cond_label.clone(),
                     edge_type: wiring.if_value.clone(),
                     to: t_val.clone(),
-                    id: None,
                     source_path: doc.into(),
                 });
                 edges.push(UpsertEdge {
                     from: cond_label,
                     edge_type: wiring.has_constraint.clone(),
                     to: enum_label,
-                    id: None,
                     source_path: doc.into(),
                 });
                 branches += 1;
