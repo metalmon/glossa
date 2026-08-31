@@ -380,15 +380,19 @@ pub fn apply_delete(
     Ok((total, notes))
 }
 
-/// Spec for an in-place node edit: change label and/or type while keeping the id and all edges.
+/// Spec for an in-place node edit: change label and/or type while keeping the id and all edges,
+/// and/or ADD search aliases to it. `add_aliases` is additive — it only appends new alias phrasings
+/// (deduped, label-skipping; see `GraphStore::add_aliases`), never creating a node or edge.
 pub struct NodeUpdate {
     pub label: String,
     pub new_label: Option<String>,
     pub new_type: Option<String>,
+    pub add_aliases: Vec<String>,
 }
 
-/// Rename and/or retype nodes in place, identified by id (as used in `graph_upsert`) or current
-/// label. Skips references that resolve to nothing. Returns the total number of rows updated.
+/// Rename and/or retype nodes in place, and/or ADD aliases to them, identified by id (as used in
+/// `graph_upsert`) or current label. Skips references that resolve to nothing. Returns the total
+/// number of rows updated (a rename/retype and an alias-append each count as one row changed).
 pub fn apply_update(
     g: &GraphStore,
     nodes: Vec<NodeUpdate>,
@@ -397,12 +401,17 @@ pub fn apply_update(
     let mut notes: Vec<String> = Vec::new();
     for u in nodes {
         let ids = resolve_node_ref(g, &u.label)?;
-        // Only rename when the reference is UNAMBIGUOUS. Renaming several distinct nodes that merely
+        // Only edit when the reference is UNAMBIGUOUS. Renaming several distinct nodes that merely
         // share a label (e.g. same label, different node_type) would give them all the new label and
         // corrupt label identity — skip those (and SAY SO) rather than mangle the graph.
         match ids.len() {
             0 => notes.push(format!("node \"{}\" matched nothing — nothing renamed{}", u.label, did_you_mean(g, &u.label))),
-            1 => total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?,
+            1 => {
+                total += g.update_node(&ids[0], u.new_label.as_deref(), u.new_type.as_deref())?;
+                if !u.add_aliases.is_empty() {
+                    total += g.add_aliases(&ids[0], &u.add_aliases)?;
+                }
+            }
             n => notes.push(format!(
                 "node \"{}\" is ambiguous ({n} nodes share that label) — rename skipped to avoid corrupting identity",
                 u.label
@@ -922,6 +931,45 @@ strict = true
         let retouch = node("rec:z", "Record", "Already-timed record", "a.md");
         let r = apply_upsert(&g, &ont, vec![retouch], vec![], 2, dir.path(), "agent").unwrap();
         assert_eq!(r.nodes_written, 1);
+    }
+
+    /// `apply_update` can ADD aliases to an existing node in place (no node/edge created), deduping
+    /// and skipping the label — exercises the `1 =>` unambiguous arm's new `add_aliases` call.
+    #[test]
+    fn apply_update_appends_aliases_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        apply_upsert(
+            &g,
+            &ont,
+            vec![node("sym:a", "Symptom", "Pump fails", "t.docx")],
+            vec![],
+            1,
+            dir.path(),
+            "agent",
+        )
+        .unwrap();
+
+        let (total, notes) = apply_update(
+            &g,
+            vec![NodeUpdate {
+                label: "sym:a".into(),
+                new_label: None,
+                new_type: None,
+                // "Pump fails" == label (skip), "pump broken" new, duplicate "pump broken" skipped.
+                add_aliases: vec![
+                    "Pump fails".into(),
+                    "pump broken".into(),
+                    "pump broken".into(),
+                ],
+            }],
+        )
+        .unwrap();
+        assert_eq!(total, 1, "one node's alias list changed");
+        assert!(notes.is_empty(), "no notes on a clean in-place edit: {notes:?}");
+        let n = g.get_node("sym:a").unwrap().unwrap();
+        assert_eq!(n.aliases, vec!["pump broken".to_string()]);
     }
 
     /// `requires_validity` doesn't affect OTHER types — a plain `Note` with no bound writes fine.

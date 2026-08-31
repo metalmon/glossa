@@ -208,6 +208,8 @@ pub fn run_enrich(
                         label: String,
                         new_label: Option<String>,
                         new_type: Option<String>,
+                        #[serde(default)]
+                        add_aliases: Vec<String>,
                     }
                     let mut parse_errs: Vec<String> = Vec::new();
                     let mut ups: Vec<NodeUpdate> = Vec::new();
@@ -218,6 +220,7 @@ pub fn run_enrich(
                                     label: u.label,
                                     new_label: u.new_label,
                                     new_type: u.new_type,
+                                    add_aliases: u.add_aliases,
                                 }),
                                 Err(e) => parse_errs.push(format!("nodes[{i}]: {e}")),
                             }
@@ -230,6 +233,7 @@ pub fn run_enrich(
                                 label: u.label,
                                 new_label: u.new_label,
                                 new_type: u.new_type,
+                                add_aliases: u.add_aliases,
                             }),
                             Err(e) => parse_errs.push(format!("flat update: {e}")),
                         }

@@ -1021,6 +1021,14 @@ struct GraphUpdateNode {
     #[serde(default)]
     #[schemars(description = "new node type, if changing it")]
     new_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
+    )]
+    #[schemars(
+        description = "search aliases to ADD to this node (extra phrasings users might type) — appended in place, never creating a node/edge"
+    )]
+    add_aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1038,6 +1046,14 @@ struct GraphUpdateArgs {
     new_label: Option<String>,
     #[serde(default)]
     new_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
+    )]
+    #[schemars(
+        description = "single-update shortcut: search aliases to ADD to the node named by `label`"
+    )]
+    add_aliases: Option<Vec<String>>,
 }
 
 impl GraphUpdateArgs {
@@ -1052,6 +1068,7 @@ impl GraphUpdateArgs {
                     label: n.label,
                     new_label: n.new_label,
                     new_type: n.new_type,
+                    add_aliases: n.add_aliases.unwrap_or_default(),
                 })
                 .collect()
         } else if let Some(label) = self.label {
@@ -1059,6 +1076,7 @@ impl GraphUpdateArgs {
                 label,
                 new_label: self.new_label,
                 new_type: self.new_type,
+                add_aliases: self.add_aliases.unwrap_or_default(),
             }]
         } else {
             vec![]
@@ -1572,7 +1590,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
+        description = "Edit an existing graph node in place — change its label or type, and/or ADD search aliases to it (`add_aliases`: extra phrasings users might type), while keeping its id and all its edges (delete-and-recreate would drop the edges). `add_aliases` only appends to an existing node; it never creates a node or edge. Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
     )]
     async fn graph_update(
         &self,
@@ -2399,6 +2417,7 @@ mod tests {
         assert_eq!(u.len(), 1);
         assert_eq!(u[0].label, "old");
         assert_eq!(u[0].new_label.as_deref(), Some("new"));
+        assert!(u[0].add_aliases.is_empty(), "no add_aliases given → empty");
 
         // FLAT shape the model commonly sends — must be accepted, not silently dropped
         let flat: GraphUpdateArgs =
@@ -2408,6 +2427,24 @@ mod tests {
         assert_eq!(u.len(), 1, "a flat single update must yield one NodeUpdate");
         assert_eq!(u[0].label, "old");
         assert_eq!(u[0].new_type.as_deref(), Some("Resolution"));
+
+        // add_aliases threads through BOTH shapes; the loose deser also accepts a single
+        // comma-joined string (client sends primitives loosely).
+        let nested_al: GraphUpdateArgs = serde_json::from_str(
+            r#"{"nodes":[{"label":"old","add_aliases":["a","b"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_al.into_updates()[0].add_aliases,
+            vec!["a".to_string(), "b".to_string()]
+        );
+        let flat_al: GraphUpdateArgs =
+            serde_json::from_str(r#"{"label":"old","add_aliases":"a, b"}"#).unwrap();
+        assert_eq!(
+            flat_al.into_updates()[0].add_aliases,
+            vec!["a".to_string(), "b".to_string()],
+            "a single comma-joined string must split into aliases"
+        );
 
         // genuinely empty → no updates (ops layer reports the clear message)
         let empty: GraphUpdateArgs = serde_json::from_str(r#"{}"#).unwrap();

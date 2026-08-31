@@ -2002,6 +2002,7 @@ strict = false
             label: "Connection loss".into(),
             new_label: Some("Unstable connection".into()),
             new_type: None,
+            add_aliases: vec![],
         }];
         let result = graph_update(&g, ups);
         assert_eq!(result, "updated 1 nodes", "unexpected result: {result}");
@@ -2306,6 +2307,7 @@ strict = false
                 label: "Nonexistent".into(),
                 new_label: Some("X".into()),
                 new_type: None,
+                add_aliases: vec![],
             }],
         );
         assert!(

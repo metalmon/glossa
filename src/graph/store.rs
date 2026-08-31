@@ -1392,6 +1392,38 @@ impl GraphStore {
         Ok(c.changes() as usize)
     }
 
+    /// Append search `new` aliases to node `id` in place, without creating anything. Each candidate
+    /// is kept only if it is non-empty (after trimming), not equal (case-insensitively) to the
+    /// node's own label, and not already present in its alias list (case-insensitive dedup,
+    /// order-preserving). Persists via the same `put_node` serialization `get_node`/`put_node`
+    /// already use. Returns 1 if the alias list changed, else 0 (unknown id, or nothing new to add).
+    pub fn add_aliases(&self, id: &str, new: &[String]) -> anyhow::Result<usize> {
+        let Some(mut node) = self.get_node(id)? else {
+            return Ok(0);
+        };
+        let label_lc = node.label.to_lowercase();
+        let before = node.aliases.len();
+        for a in new {
+            let a = a.trim();
+            if a.is_empty() {
+                continue;
+            }
+            let a_lc = a.to_lowercase();
+            if a_lc == label_lc {
+                continue;
+            }
+            if node.aliases.iter().any(|x| x.to_lowercase() == a_lc) {
+                continue;
+            }
+            node.aliases.push(a.to_string());
+        }
+        if node.aliases.len() == before {
+            return Ok(0);
+        }
+        self.put_node(&node)?;
+        Ok(1)
+    }
+
     /// Return the id of the first node with matching node_type and normalized label.
     pub fn find_by_label_type(
         &self,
@@ -1719,6 +1751,55 @@ strict = true
         );
         assert_eq!(g.find_by_label("Old Name").unwrap(), None);
         assert_eq!(g.resolve("new name").unwrap(), vec!["org:x".to_string()]);
+    }
+
+    #[test]
+    fn add_aliases_appends_deduped_and_skips_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        g.upsert(
+            &ont,
+            &[Node {
+                id: "org:x".into(),
+                node_type: "Organization".into(),
+                label: "Acme Corp".into(),
+                aliases: vec!["ACME".into()],
+                prov: agent_prov(),
+            }],
+            &[],
+        )
+        .unwrap();
+
+        // "acme corp" == label (skip), "ACME" already present case-insensitively (skip),
+        // "" empty (skip), "Acme Inc" is genuinely new (append). Net: one row changed.
+        let changed = g
+            .add_aliases(
+                "org:x",
+                &[
+                    "acme corp".into(),
+                    "ACME".into(),
+                    "  ".into(),
+                    "Acme Inc".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "the alias list changed once");
+        let n = g.get_node("org:x").unwrap().unwrap();
+        assert_eq!(
+            n.aliases,
+            vec!["ACME".to_string(), "Acme Inc".to_string()],
+            "existing alias kept, only the genuinely new one appended, order preserved"
+        );
+
+        // A second call with nothing new (label + existing, case-varied) is a no-op → 0.
+        let again = g
+            .add_aliases("org:x", &["ACME CORP".into(), "acme inc".into()])
+            .unwrap();
+        assert_eq!(again, 0, "no genuinely new alias → no change");
+
+        // Unknown id → 0, nothing created.
+        assert_eq!(g.add_aliases("nope", &["x".into()]).unwrap(), 0);
     }
 
     #[test]

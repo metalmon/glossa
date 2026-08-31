@@ -1200,6 +1200,7 @@ fn exec_graph_update(g: &GraphStore, args: &Value) -> String {
             label: label.to_string(),
             new_label: Some(new_label.to_string()),
             new_type: new_type.map(String::from),
+            add_aliases: vec![],
         }];
         glossa::graph::ops::graph_update(g, nodes)
     } else {
