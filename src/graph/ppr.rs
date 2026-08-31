@@ -21,12 +21,21 @@ const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
 
 /// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
 /// Env-tunable so the killer sweep re-runs without recompiling. Default 0.1.
-fn sim_weight() -> f32 {
+pub(crate) fn sim_weight() -> f32 {
     std::env::var("GLOSSA_PPR_SIM_WEIGHT")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|w| *w >= 0.0 && w.is_finite())
         .unwrap_or(0.1)
+}
+
+/// Fold `w_sim` into the transition cache's content signature. The persisted transition matrix bakes
+/// in `w_sim` (edge weights = tier * confidence, tier scaled by `w_sim`), so a cache built at one
+/// `w_sim` MUST NOT be reused at another — otherwise changing `GLOSSA_PPR_SIM_WEIGHT` silently has no
+/// effect while the graph is unchanged. Mixing the weight's bits into the content signature makes a
+/// different `w_sim` a cache miss (rebuild), exactly like a graph edit does.
+pub(crate) fn cache_sig(content_sig: u64, w_sim: f32) -> u64 {
+    content_sig ^ (w_sim.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// System-level tier weight for an edge in the PPR walk. Reads only `edge_type` membership in a
@@ -336,6 +345,17 @@ mod tests {
         assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
         assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
         assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
+    }
+
+    #[test]
+    fn cache_sig_differs_by_w_sim() {
+        // Same content signature, different w_sim → different cache signature, so a cache built at
+        // one w_sim is a miss at another (the whole point — GLOSSA_PPR_SIM_WEIGHT must take effect
+        // even when the graph is unchanged). Same w_sim → same sig (a hit).
+        let content = 0xDEAD_BEEF_u64;
+        assert_ne!(cache_sig(content, 0.1), cache_sig(content, 0.3));
+        assert_ne!(cache_sig(content, 0.1), cache_sig(content, 0.2));
+        assert_eq!(cache_sig(content, 0.3), cache_sig(content, 0.3));
     }
 
     #[test]

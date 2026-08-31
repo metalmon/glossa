@@ -242,12 +242,18 @@ pub struct GraphStore {
     /// The `.glossa` directory, kept for the on-disk PPR transition cache.
     gdir: std::path::PathBuf,
     /// Cached PPR transition (nodes+edges as a generic digraph). The in-memory copy is keyed by a
-    /// CHEAP file signature — the (mtime, len) of `graph.sqlite` and its `-wal` — so a hot call is an
-    /// O(1) stat, not an O(nodes+edges) scan; the expensive content-signature scan runs only when the
-    /// DB files changed on disk. The on-disk cache (`.glossa/ppr_transition.json`) is keyed by that
-    /// content signature so it survives the process and self-heals on a delete / in-place edit /
-    /// re-index that a count would miss.
-    ppr_transition: Mutex<Option<(DbFileSig, std::sync::Arc<crate::graph::ppr::Transition>)>>,
+    /// CHEAP file signature — the (mtime, len) of `graph.sqlite` and its `-wal` — plus the `w_sim`
+    /// bits (the matrix bakes in that weight), so a hot call is an O(1) stat + env read, not an
+    /// O(nodes+edges) scan; the expensive content-signature scan runs only when the DB files or
+    /// `w_sim` changed. The on-disk cache (`.glossa/ppr_transition.json`) is keyed by that content
+    /// signature with `w_sim` folded in, so it survives the process and self-heals on a delete /
+    /// in-place edit / re-index / `w_sim` change that a count would miss.
+    ppr_transition: Mutex<
+        Option<(
+            (DbFileSig, u32),
+            std::sync::Arc<crate::graph::ppr::Transition>,
+        )>,
+    >,
 }
 
 /// Cheap freshness signature of the graph DB: (mtime_nanos, len) of `graph.sqlite` and its `-wal`
@@ -315,19 +321,22 @@ impl GraphStore {
     /// signature covers node ids + edge endpoints, so a delete / in-place edit / re-index — anything
     /// that changes the graph topology — forces a rebuild, unlike a count-only key.
     pub fn ppr_transition(&self) -> anyhow::Result<std::sync::Arc<crate::graph::ppr::Transition>> {
-        // Hot path: a cheap file stat. If the DB files haven't changed, the in-memory transition is
-        // still valid — return it without touching a row.
-        let fsig = self.db_filesig();
+        // Hot path: a cheap file stat + env read. The persisted matrix bakes in `w_sim` (edge
+        // weights are tier-scaled by it), so the key is (DB file signature, w_sim) — if neither the
+        // DB files nor `GLOSSA_PPR_SIM_WEIGHT` changed, the in-memory transition is still valid.
+        let w_sim = crate::graph::ppr::sim_weight();
+        let key = (self.db_filesig(), w_sim.to_bits());
         if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
-            if *k == fsig {
+            if *k == key {
                 return Ok(t.clone());
             }
         }
-        // Cold or the DB changed: now the O(nodes+edges) content signature is worth it, to validate
-        // the on-disk cache (which survives across processes, where mtime isn't comparable).
+        // Cold, or the DB / w_sim changed: now the O(nodes+edges) content signature is worth it, to
+        // validate the on-disk cache (which survives across processes, where mtime isn't comparable).
+        // Fold `w_sim` into it so a cache built at one weight is a miss at another.
         let csig = {
             let c = self.conn.lock().unwrap();
-            Self::transition_sig(&c)?
+            crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim)
         };
         let arc = if let Some(t) = self.load_ppr_transition(csig) {
             std::sync::Arc::new(t)
@@ -336,7 +345,7 @@ impl GraphStore {
             let _ = self.save_ppr_transition(csig, &built); // best-effort; a failed write just re-builds
             built
         };
-        *self.ppr_transition.lock().unwrap() = Some((fsig, arc.clone()));
+        *self.ppr_transition.lock().unwrap() = Some((key, arc.clone()));
         Ok(arc)
     }
 
