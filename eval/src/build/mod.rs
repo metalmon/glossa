@@ -131,8 +131,7 @@ impl Default for BuildOpts {
 /// replacing any static stage label — and `{msg}` — the ETA + token/resample "service" counters —
 /// for the loop's scope, redrawn on its own timer so `{msg}` renders after the elapsed/ETA time.
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
-    let show =
-        !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
+    let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     if !show {
         return ProgressBar::hidden();
     }
@@ -141,8 +140,8 @@ fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
         )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
     // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
     // calls — a no-op on a hidden bar.
@@ -177,8 +176,13 @@ pub(crate) fn extract_doc_weight(doc: &str, chunk_counts: &HashMap<String, usize
 /// over `docs` — a 20-chunk doc advances the bar by 20, not 1, so `[pos/len]`/elapsed/ETA track
 /// actual extraction work instead of a per-document tick. Empty `docs` sums to `0`; the caller
 /// guards the bar length with `.max(1)` so a length-0 bar can't stall indicator progress.
-pub(crate) fn extract_total_chunks(docs: &[String], chunk_counts: &HashMap<String, usize>) -> usize {
-    docs.iter().map(|d| extract_doc_weight(d, chunk_counts)).sum()
+pub(crate) fn extract_total_chunks(
+    docs: &[String],
+    chunk_counts: &HashMap<String, usize>,
+) -> usize {
+    docs.iter()
+        .map(|d| extract_doc_weight(d, chunk_counts))
+        .sum()
 }
 
 /// How much of a `run_build` pass actually did — the outcome of the incremental gate plus the
@@ -205,66 +209,11 @@ pub fn plan_extract(delta: &Delta, force: bool, all_docs: &[String]) -> Vec<Stri
         return all_docs.to_vec();
     }
     let wanted: HashSet<&String> = delta.new.iter().chain(delta.changed.iter()).collect();
-    all_docs.iter().filter(|d| wanted.contains(d)).cloned().collect()
-}
-
-/// Which of `delta.changed`'s docs should have their stale reasoning nodes dropped this run:
-/// only those actually present in `final_extract` (the fully-narrowed, post `--doc`/`--limit`
-/// extract list). A changed doc NOT in `final_extract` keeps its nodes — dropping them without a
-/// same-run re-extraction to replace them would silently orphan facts until some later,
-/// unrestricted run picks the doc back up (it stays `changed` until then, never lost). Model-free
-/// and pure, like `plan_extract`, so the drop-scoping decision is unit-testable on its own.
-pub fn changed_docs_to_drop(delta: &Delta, final_extract: &[String]) -> Vec<String> {
-    let extract_set: HashSet<&String> = final_extract.iter().collect();
-    delta
-        .changed
+    all_docs
         .iter()
-        .filter(|d| extract_set.contains(d))
+        .filter(|d| wanted.contains(d))
         .cloned()
         .collect()
-}
-
-/// Fold every non-alphanumeric char to `_` — mirrors `sanitize_id`'s own cleaning step (minus its
-/// trailing hash), so a raw node/doc id can be matched against an already-sanitized checkpoint
-/// filename without needing to un-sanitize the filename (impossible in general: sanitizing is
-/// lossy, several distinct raw ids can fold to the same cleaned string before the hash tells them
-/// apart).
-fn fold_for_match(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
-}
-
-/// Invalidate the checkpoint marks that a `doc`'s dropped reasoning nodes made stale: `doc`'s own
-/// `extract:{doc}` mark (so a `--resume` run re-extracts it instead of silently skipping it and
-/// leaving it with ZERO reasoning nodes), plus every stale `judge:*` mark. Group-judge checkpoint
-/// marks are keyed by ENTITY (`judge:group:<entity>`, sanitized to `judge_group_...`), not by
-/// member node id, so — unlike the retired pairwise marks (`judge:{a}#{b}`, whose filename embeds
-/// both ids) — a dropped node id can't be matched back to the group mark that covered it. Rather
-/// than track which entities a dropped node belonged to, every `judge_group_*` mark is invalidated
-/// whenever ANY node was dropped for this doc: coarser than strictly necessary (some unaffected
-/// groups get re-judged too), but safe — it never UNDER-invalidates, only over-invalidates, and a
-/// re-judged group with no real change still ends up with the same "no links"/linked outcome.
-/// (The `judge_` id-substring match below is kept for defense in depth in case any legacy pairwise
-/// marks are still on disk from a build checkpoint that predates this redesign.) File-system-only,
-/// no model/network — safe to call unconditionally, whether or not any mark actually existed.
-fn invalidate_marks_for(cp: &Checkpoint, doc: &str, dropped_ids: &[String]) -> Result<()> {
-    cp.remove(&format!("extract:{doc}"))
-        .with_context(|| format!("removing extract:{doc} checkpoint mark"))?;
-    if dropped_ids.is_empty() {
-        return Ok(());
-    }
-    let folded: Vec<String> = dropped_ids.iter().map(|id| fold_for_match(id)).collect();
-    for name in cp.done_ids() {
-        let legacy_pair_match =
-            name.starts_with("judge_") && folded.iter().any(|f| name.contains(f.as_str()));
-        let group_match = name.starts_with("judge_group_");
-        if legacy_pair_match || group_match {
-            cp.remove_raw(&name)
-                .with_context(|| format!("removing stale judge checkpoint mark {name}"))?;
-        }
-    }
-    Ok(())
 }
 
 /// Clear a build run's persistent checkpoint (`run_dir/done/`) — `--force`'s "true full rebuild"
@@ -343,14 +292,25 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             enumerate_docs(&g)?
         };
 
-        // Incremental gate: compute the new/changed/gone delta against the reasoning graph
-        // already built, narrow `docs` to the FINAL extract list (NEW ∪ CHANGED, or every
-        // enumerated doc under `--force`) via `plan_extract`, THEN apply `--doc`/`--limit` — in
-        // that order, so the drop step below (which must match what's actually about to be
-        // re-extracted) sees the fully-narrowed list, not the pre-`--doc`/`--limit` one.
+        // Incremental gate: compute the new/changed delta against the reasoning graph already
+        // built, narrow `docs` to the FINAL extract list (NEW ∪ CHANGED, or every enumerated doc
+        // under `--force`) via `plan_extract`, THEN apply `--doc`/`--limit`. This gate is a pure
+        // SPEED optimization — it decides only what to re-visit, NEVER what to remove.
+        //
+        // `build` ONLY CONSTRUCTS. It never deletes graph nodes — not for GONE docs, not for
+        // CHANGED docs, not under `--force`. An earlier design dropped a doc's reasoning nodes
+        // up front (before extraction, non-atomically) so a re-extract would replace them; a run
+        // killed/crashed between the drop and the re-extract then lost those nodes for good, and a
+        // delta that mis-flagged unchanged docs turned an accidental `kbx build` into a silent
+        // wipe of the whole reasoning layer. Removing stale/dangling/orphaned nodes is the job of
+        // `kb graph doctor`/`prune` alone — explicit, gated, opt-in (see `graph::doctor`). Build
+        // is idempotent-additive: `ops::graph_upsert` writes by node key, so a re-visit tops up
+        // what's missing without duplicating, and an edited doc's now-stale nodes surface in
+        // doctor's `stale`/`dangling` buckets for a deliberate cleanup — never here.
         let idx = DocIndex::open_or_create(&paths.root).context("open doc index for delta")?;
-        let g = GraphStore::open(&paths.root).context("open graph store for delta/drop")?;
+        let g = GraphStore::open(&paths.root).context("open graph store for delta")?;
         let delta = compute_delta(&paths.root, &idx, &g)?;
+        drop(g);
 
         docs = plan_extract(&delta, opts.force, &docs);
         if let Some(d) = &opts.doc {
@@ -359,37 +319,6 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         if let Some(n) = opts.limit {
             docs.truncate(n);
         }
-
-        // GONE docs' nodes are dropped ALWAYS — unconditionally, regardless of `--force` and
-        // regardless of `--doc`/`--limit` narrowing. A gone doc never comes back, so there is no
-        // "wait for a same-run re-extraction" concern the way there is for CHANGED; leaving its
-        // orphaned nodes in place would make `--force` a lie ("full rebuild" with stragglers).
-        //
-        // CHANGED docs' nodes are dropped ONLY for docs still in the final, narrowed `docs` list:
-        // dropping a changed doc's nodes without re-extracting it in this SAME run would silently
-        // orphan its facts (e.g. `--doc a.md` while b.md also changed must leave b.md's nodes
-        // alone — b.md just stays CHANGED for the next, unrestricted run to pick up). Under
-        // `--force`, `docs` is every enumerated doc, so every changed doc qualifies and gets
-        // dropped+re-extracted, which is the correct full-rebuild behavior.
-        //
-        // Either way, dropping a doc's nodes invalidates any checkpoint mark that recorded work
-        // now undone: the doc's own `extract:{doc}` mark (so `--resume` doesn't skip re-extracting
-        // it and leave it with ZERO reasoning nodes) and every `judge:{a}#{b}` mark referencing a
-        // dropped node id (its bridge edge was cascade-deleted with the node, so the checkpoint
-        // mark is the only stale trace left — leaving it would suppress a needed re-judge).
-        for doc in &delta.gone {
-            let dropped_ids = drop_doc_nodes(&g, doc)
-                .with_context(|| format!("dropping gone-doc reasoning nodes for {doc}"))?;
-            invalidate_marks_for(&cp, doc, &dropped_ids)
-                .with_context(|| format!("invalidating checkpoint marks for {doc}"))?;
-        }
-        for doc in changed_docs_to_drop(&delta, &docs) {
-            let dropped_ids = drop_doc_nodes(&g, &doc)
-                .with_context(|| format!("dropping stale reasoning nodes for {doc}"))?;
-            invalidate_marks_for(&cp, &doc, &dropped_ids)
-                .with_context(|| format!("invalidating checkpoint marks for {doc}"))?;
-        }
-        drop(g);
 
         // Extraction shares ONE `GraphStore` (wrapped in a `GraphWriter`) across every worker in
         // the pool, instead of each document opening its own connection against `graph.sqlite` —
@@ -474,6 +403,7 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
                         covered += n;
                         pb.inc(n);
                     },
+                    |line| pb.println(line),
                 )
                 .with_context(|| format!("extracting {doc}"))?;
                 cp.mark(&format!("extract:{doc}"), "done")
@@ -551,7 +481,10 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             .context("judging candidate groups")?;
             drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
             pb.finish_and_clear();
-            println!("judge: {} group(s) judged, {} link(s)", stats.judged, stats.linked);
+            println!(
+                "judge: {} group(s) judged, {} link(s)",
+                stats.judged, stats.linked
+            );
             let footnote = if cache_is_estimated() {
                 " (cache estimated from prompt re-send)"
             } else {
@@ -623,9 +556,18 @@ mod tests {
     #[test]
     fn build_opts_defaults() {
         let o = BuildOpts::default();
-        assert_eq!(o.chunks_per_round, None, "unset — resolved against lab/default in run_build");
-        assert_eq!(o.max_rounds, None, "unset — resolved against lab/default in run_build");
-        assert_eq!(o.jobs, None, "unset — resolved against lab/default in run_build");
+        assert_eq!(
+            o.chunks_per_round, None,
+            "unset — resolved against lab/default in run_build"
+        );
+        assert_eq!(
+            o.max_rounds, None,
+            "unset — resolved against lab/default in run_build"
+        );
+        assert_eq!(
+            o.jobs, None,
+            "unset — resolved against lab/default in run_build"
+        );
         assert!((o.build_temp - 0.8).abs() < 1e-9);
     }
 
@@ -638,12 +580,18 @@ mod tests {
         assert_eq!(DEFAULT_CHUNKS_PER_ROUND, 3);
         assert_eq!(resolve(Some(9), Some(6), DEFAULT_CHUNKS_PER_ROUND), 9);
         assert_eq!(resolve(None, Some(6), DEFAULT_CHUNKS_PER_ROUND), 6);
-        assert_eq!(resolve(None, None, DEFAULT_CHUNKS_PER_ROUND), DEFAULT_CHUNKS_PER_ROUND);
+        assert_eq!(
+            resolve(None, None, DEFAULT_CHUNKS_PER_ROUND),
+            DEFAULT_CHUNKS_PER_ROUND
+        );
 
         assert_eq!(extract::DEFAULT_MAX_ROUNDS, 30);
         assert_eq!(resolve(Some(50), Some(40), extract::DEFAULT_MAX_ROUNDS), 50);
         assert_eq!(resolve(None, Some(40), extract::DEFAULT_MAX_ROUNDS), 40);
-        assert_eq!(resolve(None, None, extract::DEFAULT_MAX_ROUNDS), extract::DEFAULT_MAX_ROUNDS);
+        assert_eq!(
+            resolve(None, None, extract::DEFAULT_MAX_ROUNDS),
+            extract::DEFAULT_MAX_ROUNDS
+        );
     }
 
     /// `jobs`' own precedence mirrors `chunks_per_round`/`max_rounds`': CLI > lab.toml `[tuning]
@@ -769,7 +717,10 @@ mod tests {
             gone: vec![],
         };
         let all_docs = vec!["a.md".to_string(), "b.md".to_string()];
-        assert_eq!(plan_extract(&delta, false, &all_docs), vec!["b.md".to_string()]);
+        assert_eq!(
+            plan_extract(&delta, false, &all_docs),
+            vec!["b.md".to_string()]
+        );
     }
 
     /// NEW docs (not just CHANGED) are included in the non-force selection.
@@ -824,40 +775,6 @@ mod tests {
     }
 
     // ---- Fix round 1 (drop-scoping bugs found in review) ----
-
-    /// Pure unit test for `changed_docs_to_drop`: a doc excluded from `final_extract` (e.g. by
-    /// `--doc`/`--limit`) must NOT be selected for dropping, even though it's in `delta.changed`
-    /// — this is the CRITICAL bug's fix (dropping without a same-run re-extraction silently
-    /// orphans facts).
-    #[test]
-    fn changed_docs_to_drop_excludes_doc_not_in_final_extract() {
-        let delta = Delta {
-            new: vec![],
-            changed: vec!["a.md".to_string(), "b.md".to_string()],
-            gone: vec![],
-        };
-        let final_extract = vec!["b.md".to_string()]; // a.md was excluded by --doc/--limit
-        assert_eq!(
-            changed_docs_to_drop(&delta, &final_extract),
-            vec!["b.md".to_string()]
-        );
-    }
-
-    /// Under `--force`, `final_extract` is every enumerated doc, so every changed doc qualifies
-    /// for dropping (it's about to be re-extracted this same run).
-    #[test]
-    fn changed_docs_to_drop_includes_all_changed_when_final_extract_is_everything() {
-        let delta = Delta {
-            new: vec![],
-            changed: vec!["a.md".to_string(), "b.md".to_string()],
-            gone: vec![],
-        };
-        let final_extract = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
-        assert_eq!(
-            changed_docs_to_drop(&delta, &final_extract),
-            vec!["a.md".to_string(), "b.md".to_string()]
-        );
-    }
 
     /// A minimal `.glossa/kbx/lab.toml` + `builder.md` scaffold: just enough for `run_build`'s
     /// Extract stage to load its lab config/prompt. No model call happens unless `extract_doc` is
@@ -956,183 +873,47 @@ mod tests {
         (dir, paths)
     }
 
-    /// CRITICAL bug regression: `--doc` (or `--limit`) narrowing the extract list to exclude a
-    /// CHANGED doc must NOT drop that doc's reasoning nodes this run.
+    /// SAFETY INVARIANT: `build` ONLY constructs — it must NEVER delete graph nodes. A GONE doc
+    /// (referenced by the graph but absent from the corpus) and a CHANGED doc both keep every one
+    /// of their reasoning nodes across an ordinary build AND a `--force` build. Removing stale /
+    /// dangling / orphaned nodes is `kb graph doctor`/`prune`'s job alone; an accidental (or
+    /// force) `kbx build` must be structurally incapable of wiping the reasoning layer — the exact
+    /// data-loss bug this guards against. `--doc nonexistent.md` empties the extract list so no
+    /// live model is called; the delta/plan wiring still executes for real inside `run_build`.
     #[test]
-    fn run_build_extract_keeps_changed_doc_nodes_when_doc_flag_excludes_it() {
-        let (_dir, paths) = delta_regression_corpus();
-        let root = paths.root.clone();
+    fn run_build_never_deletes_nodes() {
+        for force in [false, true] {
+            let (_dir, paths) = delta_regression_corpus();
+            let root = paths.root.clone();
 
-        let opts = BuildOpts {
-            stage: BuildStage::Extract,
-            doc: Some("nonexistent.md".to_string()),
-            limit: None,
-            force: false,
-            resume: false,
-            no_progress: true,
-            bridge_max_facts: 40,
-            vision: false,
-            build_temp: 0.8,
-            chunks_per_round: Some(3),
-            max_rounds: None,
-            jobs: None,
-        };
-        let report = run_build(paths, opts).unwrap();
-        assert!(report.docs_extracted.is_empty());
+            let opts = BuildOpts {
+                stage: BuildStage::Extract,
+                doc: Some("nonexistent.md".to_string()),
+                limit: None,
+                force,
+                resume: false,
+                no_progress: true,
+                bridge_max_facts: 40,
+                vision: false,
+                build_temp: 0.8,
+                chunks_per_round: Some(3),
+                max_rounds: None,
+                jobs: None,
+            };
+            let report = run_build(paths, opts).unwrap();
+            assert!(report.docs_extracted.is_empty());
 
-        let g = GraphStore::open(&root).unwrap();
-        assert!(
-            g.get_node("f_b").unwrap().is_some(),
-            "changed doc's node must survive when --doc excludes it from this run's extract list"
-        );
-        assert!(g.get_node("f_a").unwrap().is_some());
-    }
-
-    /// IMPORTANT bug regression: GONE docs' nodes are dropped unconditionally — even under
-    /// `--force` (which used to skip the whole delta/drop step) and even when `--doc` narrows the
-    /// extract list to nothing.
-    #[test]
-    fn run_build_force_still_drops_gone_doc_nodes_even_when_doc_flag_narrows_to_nothing() {
-        let (_dir, paths) = delta_regression_corpus();
-        let root = paths.root.clone();
-
-        let opts = BuildOpts {
-            stage: BuildStage::Extract,
-            doc: Some("nonexistent.md".to_string()),
-            limit: None,
-            force: true,
-            resume: false,
-            no_progress: true,
-            bridge_max_facts: 40,
-            vision: false,
-            build_temp: 0.8,
-            chunks_per_round: Some(3),
-            max_rounds: None,
-            jobs: None,
-        };
-        let report = run_build(paths, opts).unwrap();
-        assert!(report.docs_extracted.is_empty());
-
-        let g = GraphStore::open(&root).unwrap();
-        assert!(
-            g.get_node("f_gone").unwrap().is_none(),
-            "gone doc's node must be dropped even under --force + --doc narrowing to nothing"
-        );
-    }
-
-    /// Same GONE-always guarantee without `--force`, confirming it isn't force-specific.
-    #[test]
-    fn run_build_drops_gone_doc_nodes_by_default_regardless_of_doc_flag() {
-        let (_dir, paths) = delta_regression_corpus();
-        let root = paths.root.clone();
-
-        let opts = BuildOpts {
-            stage: BuildStage::Extract,
-            doc: Some("nonexistent.md".to_string()),
-            limit: None,
-            force: false,
-            resume: false,
-            no_progress: true,
-            bridge_max_facts: 40,
-            vision: false,
-            build_temp: 0.8,
-            chunks_per_round: Some(3),
-            max_rounds: None,
-            jobs: None,
-        };
-        run_build(paths, opts).unwrap();
-
-        let g = GraphStore::open(&root).unwrap();
-        assert!(g.get_node("f_gone").unwrap().is_none());
-    }
-
-    // ---- Fix round 2 (checkpoint marks left stale after a node drop) ----
-
-    /// The exact scenario from review: `extract:a.md` and `judge:fA#fB` are marked done from a
-    /// prior run; a.md's nodes are dropped this run (it owns `fA`). Both marks must be
-    /// invalidated — `extract:a.md` so `--resume` re-extracts a.md instead of leaving it with
-    /// zero reasoning nodes, `judge:fA#fB` so the pair (whose node `fA` no longer exists) gets
-    /// re-judged rather than silently losing its bridge. An unrelated `judge:fX#fY` mark, which
-    /// references neither dropped id, must survive untouched.
-    #[test]
-    fn invalidate_marks_for_removes_extract_and_referencing_judge_marks() {
-        let dir = tempfile::tempdir().unwrap();
-        let cp = Checkpoint::open(&dir.path().join("runs").join("build")).unwrap();
-        cp.mark("extract:a.md", "done").unwrap();
-        cp.mark("judge:fA#fB", "yes").unwrap();
-        cp.mark("judge:fX#fY", "no").unwrap();
-
-        invalidate_marks_for(&cp, "a.md", &["fA".to_string()]).unwrap();
-
-        assert!(!cp.is_done("extract:a.md"));
-        assert!(!cp.is_done("judge:fA#fB"));
-        assert!(cp.is_done("judge:fX#fY"));
-    }
-
-    /// `invalidate_marks_for` must still remove the doc's own `extract:{doc}` mark even when no
-    /// nodes were actually dropped for it (an empty `dropped_ids`) — e.g. a doc classified CHANGED
-    /// whose reasoning nodes had already been removed by an earlier step in the same run.
-    #[test]
-    fn invalidate_marks_for_removes_extract_mark_even_with_no_dropped_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let cp = Checkpoint::open(&dir.path().join("runs").join("build")).unwrap();
-        cp.mark("extract:a.md", "done").unwrap();
-
-        invalidate_marks_for(&cp, "a.md", &[]).unwrap();
-
-        assert!(!cp.is_done("extract:a.md"));
-    }
-
-    /// End-to-end through the real `run_build` wiring (not just the pure helper): a GONE doc's
-    /// prior `extract:{doc}` mark and a `judge:*` mark referencing its dropped node must both be
-    /// invalidated by an ordinary (non-`--force`) run. GONE docs are never in the final extract
-    /// list, so this needs no live model — the extract loop body never runs for them.
-    #[test]
-    fn run_build_invalidates_checkpoint_marks_for_dropped_gone_doc_nodes() {
-        let (_dir, paths) = delta_regression_corpus();
-        let root = paths.root.clone();
-        let run_dir = paths.runs.join("build");
-
-        // Simulate marks left over from the run that originally extracted/judged doc_gone.md's
-        // fact, before that file was deleted from the corpus.
-        let cp = Checkpoint::open(&run_dir).unwrap();
-        cp.mark("extract:doc_gone.md", "done").unwrap();
-        cp.mark("judge:f_gone#f_a", "yes").unwrap();
-        cp.mark("judge:unrelated_a#unrelated_b", "no").unwrap();
-        drop(cp);
-
-        let opts = BuildOpts {
-            stage: BuildStage::Extract,
-            doc: Some("nonexistent.md".to_string()),
-            limit: None,
-            force: false,
-            resume: false,
-            no_progress: true,
-            bridge_max_facts: 40,
-            vision: false,
-            build_temp: 0.8,
-            chunks_per_round: Some(3),
-            max_rounds: None,
-            jobs: None,
-        };
-        run_build(paths, opts).unwrap();
-
-        let cp = Checkpoint::open(&run_dir).unwrap();
-        assert!(
-            !cp.is_done("extract:doc_gone.md"),
-            "gone doc's stale extract mark must be invalidated"
-        );
-        assert!(
-            !cp.is_done("judge:f_gone#f_a"),
-            "judge mark referencing the dropped node must be invalidated"
-        );
-        assert!(
-            cp.is_done("judge:unrelated_a#unrelated_b"),
-            "an unrelated judge mark must survive"
-        );
-
-        let g = GraphStore::open(&root).unwrap();
-        assert!(g.get_node("f_gone").unwrap().is_none());
+            let g = GraphStore::open(&root).unwrap();
+            assert!(
+                g.get_node("f_gone").unwrap().is_some(),
+                "GONE doc's node must SURVIVE build (force={force}) — deletion is doctor's job, not build's"
+            );
+            assert!(
+                g.get_node("f_b").unwrap().is_some(),
+                "CHANGED doc's node must survive build (force={force})"
+            );
+            assert!(g.get_node("f_a").unwrap().is_some());
+        }
     }
 
     #[test]

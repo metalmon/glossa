@@ -83,7 +83,10 @@ pub(crate) fn filter_grounding_only(
         if ont.requires_grounding(&n.node_type) {
             kept.push(n);
         } else {
-            notes.push(format!("dropped node type `{}` — harvest creates only grounding-required types", n.node_type));
+            notes.push(format!(
+                "dropped node type `{}` — harvest creates only grounding-required types",
+                n.node_type
+            ));
         }
     }
     (kept, notes)
@@ -325,6 +328,10 @@ pub fn extract_doc(
     // so a caller's progress bar can advance WITHIN a document instead of only when the whole doc
     // finishes (a big doc is otherwise many minutes at a standstill on a slow local model).
     mut on_progress: impl FnMut(u64),
+    // Called once per PRODUCTIVE coverage round (one that wrote at least one node) with a short,
+    // single-line log message naming the chunk and what it created — the caller prints it above
+    // the live bar (`pb.println`). Per-chunk, not per-doc, so a big document streams its progress.
+    mut on_log: impl FnMut(String),
 ) -> anyhow::Result<ExtractStats> {
     // lmstudio_chat reads the sampling temperature from KB_EVAL_TEMP — the caller (`run_build`)
     // sets it ONCE, before the worker pool is spawned, so this fn only ever reads it (concurrent
@@ -434,8 +441,16 @@ pub fn extract_doc(
                         reads.borrow_mut().push(n);
                         (c.body, vec![], gate_images(vision, vec![]))
                     }
-                    Ok(None) => ("(no more sections)".into(), vec![], gate_images(vision, vec![])),
-                    Err(e) => (format!("(read error: {e})"), vec![], gate_images(vision, vec![])),
+                    Ok(None) => (
+                        "(no more sections)".into(),
+                        vec![],
+                        gate_images(vision, vec![]),
+                    ),
+                    Err(e) => (
+                        format!("(read error: {e})"),
+                        vec![],
+                        gate_images(vision, vec![]),
+                    ),
                 }
             }
         };
@@ -447,7 +462,28 @@ pub fn extract_doc(
             )
         };
 
+        // Snapshot this doc's running totals so we can report what THIS round added.
+        let (nodes_before, mentions_before) = {
+            let s = stats.borrow();
+            (s.nodes, s.mentions)
+        };
+
         run_agent_loop(chat, messages, exec, on_repeat, max_rounds, None)?;
+
+        // Per-round creation log: one short line naming the chunk and what it wrote, emitted only
+        // when the round was PRODUCTIVE (so empty chunks — e.g. certificate boilerplate — stay
+        // quiet instead of flooding the terminal with `+0`). Basename, not the full path, so the
+        // line never wraps.
+        let (round_nodes, round_mentions) = {
+            let s = stats.borrow();
+            (s.nodes - nodes_before, s.mentions - mentions_before)
+        };
+        if round_nodes > 0 {
+            let base = doc_path.rsplit(['/', '\\']).next().unwrap_or(doc_path);
+            on_log(format!(
+                "build {base}#{start}: +{round_nodes} node(s), +{round_mentions} mention(s)"
+            ));
+        }
 
         // Advance coverage monotonically: `start` is unconditionally marked covered after its
         // round (regardless of what the round actually read), plus whatever ordinals the round
@@ -558,7 +594,11 @@ strict = true
             "edges": []
         });
         let (nodes, edges, notes) = parse_and_filter_upsert(&call, &ont);
-        assert_eq!(nodes.len(), 1, "only the Fact node survives the type filter");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "only the Fact node survives the type filter"
+        );
         assert_eq!(nodes[0].label, "good fact");
         assert!(
             notes.iter().any(|n| n.contains("Bogus")),
@@ -668,7 +708,11 @@ strict = true
             "nodes":[{"node_type":"Fact","label":"x","source_path":"d.md"}],"edges":[]
         });
         let (nodes, _edges, notes) = parse_and_filter_upsert(&call, &ont);
-        assert_eq!(nodes.len(), 1, "Fact must survive the type filter: {notes:?}");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "Fact must survive the type filter: {notes:?}"
+        );
         assert!(notes.is_empty(), "{notes:?}");
     }
 
@@ -690,21 +734,24 @@ strict = true
     /// are dropped with a reason naming the type.
     #[test]
     fn harvest_keeps_only_grounding_types() {
-        let ont = Ontology::parse(r#"
+        let ont = Ontology::parse(
+            r#"
 [entities.Res]
 requires_grounding = true
 [entities.Sym]
 [validation]
 strict = true
-"#).unwrap();
-        let nodes = vec![
-            mk_node("Res", "r1", "doc#0"),
-            mk_node("Sym", "s1", "doc#1"),
-        ];
+"#,
+        )
+        .unwrap();
+        let nodes = vec![mk_node("Res", "r1", "doc#0"), mk_node("Sym", "s1", "doc#1")];
         let (kept, notes) = filter_grounding_only(nodes, &ont);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].node_type, "Res");
-        assert!(notes.iter().any(|n| n.contains("Sym")), "dropped-type note missing");
+        assert!(
+            notes.iter().any(|n| n.contains("Sym")),
+            "dropped-type note missing"
+        );
     }
 
     // --- vision: `--vision` gates images out of (or into) `extract_doc`'s exec closure ---------
@@ -730,7 +777,11 @@ strict = true
     fn gate_images_vision_on_passes_through() {
         let img = stub_image();
         let out = gate_images(true, vec![img.clone()]);
-        assert_eq!(out, vec![img], "vision on must pass images through unchanged");
+        assert_eq!(
+            out,
+            vec![img],
+            "vision on must pass images through unchanged"
+        );
     }
 
     // --- doc_chunk_ords: ordered enumeration of a document's existing (sparse) chunk ordinals ---
@@ -774,11 +825,21 @@ strict = true
     #[test]
     fn build_tools_schema_has_no_search_or_grep() {
         let v = build_tools_schema("desc");
-        let names: Vec<String> = v.as_array().unwrap().iter()
-            .map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        let names: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
         assert!(names.contains(&"read".to_string()));
         assert!(names.contains(&"graph_upsert".to_string()));
-        assert!(!names.contains(&"search".to_string()), "search must be off on build path");
-        assert!(!names.contains(&"grep".to_string()), "grep must be off on build path");
+        assert!(
+            !names.contains(&"search".to_string()),
+            "search must be off on build path"
+        );
+        assert!(
+            !names.contains(&"grep".to_string()),
+            "grep must be off on build path"
+        );
     }
 }
