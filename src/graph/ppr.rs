@@ -46,10 +46,11 @@ pub(crate) fn edge_tier_weight(edge_type: &str, w_sim: f32) -> f32 {
 pub const TRANSITION_CACHE_VERSION: u32 = 2;
 
 /// A symmetric transition structure built once from the graph's nodes + edges. Ontology-blind:
-/// every stored edge becomes a bidirectional transition weighted by its system-level tier (see
-/// `edge_tier_weight`) — mechanical-similarity edges carry less mass than authored/structural ones,
-/// no longer "equal weight" (confidence-weighting is a separate future knob, deliberately not wired
-/// here).
+/// every stored edge becomes a bidirectional transition whose weight is its system-level tier (see
+/// `edge_tier_weight`) MULTIPLIED by its stored `prov.confidence`. So mechanical-similarity edges
+/// carry less mass than authored/structural ones (the tier), AND within a tier a low-confidence
+/// edge carries less mass than a high-confidence one (the confidence factor). Legacy edges with
+/// `confidence <= 0` default to 1.0, so pre-confidence graphs are unchanged.
 pub struct Transition {
     ids: Vec<String>,            // idx -> node id
     idx: HashMap<String, usize>, // node id -> idx
