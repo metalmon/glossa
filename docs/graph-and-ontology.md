@@ -149,6 +149,8 @@ Use the doctor to audit and heal:
 kb graph doctor ./my-corpus                      # report all doubts
 kb graph doctor ./my-corpus --prune-ungrounded   # delete ungrounded nodes (destructive)
 kb graph doctor ./my-corpus --prune-incomplete   # remove off-spine nodes (destructive)
+kb graph doctor ./my-corpus --prune-dangling     # delete query-side nodes with a dead terminal
+kb graph doctor ./my-corpus --prune-stale        # delete stale nodes (last resort; prefer re-sync)
 ```
 
 The **healing loop** for stale nodes:
@@ -158,9 +160,9 @@ The **healing loop** for stale nodes:
 3. **Re-ground** by calling `graph_upsert` with the updated node or a refreshed `MENTIONS` edge. On upsert, glossa re-stat the source file, recompute `file_sig`, and clear the stale flag. Alternatively, retract the node if the reasoning no longer holds.
 4. Repeat until `graph doctor` reports no stale nodes.
 
-**No `--prune-stale`.** Stale nodes are never deleted by the doctor — they are re-grounded instead. A stale flag is a signal to re-read the source, not a reason to discard reasoning.
+**Prefer re-grounding over `--prune-stale`.** A stale flag is first of all a signal to re-read the source: re-ground (or rebuild the document) and the flag clears, keeping the reasoning. Stale nodes are therefore *not* deleted by default. `--prune-stale` exists as an opt-in last resort — for content that has genuinely gone for good (e.g. a cleanup pass after rebuilding a changed document), not for transient drift a re-sync would heal.
 
-**Dangling nodes** are remediated by fixing the *terminal* they can no longer reach: re-ground or restore it and the chain becomes live again. If the terminal is genuinely gone, prune the orphaned branch — today via the agent's `graph_delete` after `--prune-ungrounded` clears the terminals; a single `--prune-dangling` flag is *planned* to clear the whole orphaned sub-tree in one pass.
+**Dangling nodes** are remediated by fixing the *terminal* they can no longer reach: re-ground or restore it and the chain becomes live again. If the terminal is genuinely gone, `--prune-ungrounded` clears the dead terminals and `--prune-dangling` then clears the orphaned query-side branch that led to them (guarded against a mass-wipe — see [graph-lifecycle.md](graph-lifecycle.md)).
 
 For the end-to-end add / edit / delete-a-document workflows built on these doubts, see [graph-lifecycle.md](graph-lifecycle.md).
 
@@ -196,7 +198,7 @@ Inspect the four types of doubts before recomputing:
 kb graph doctor ./my-corpus    # report ungrounded, stale, incomplete, and dangling nodes
 ```
 
-See [Graph doctor](#graph-doctor) for healing workflows and pruning options (`--prune-ungrounded`, `--prune-incomplete`). Pruning is CLI-only; MCP `graph_doctor` is report-only.
+See [Graph doctor](#graph-doctor) for healing workflows and the pruning options (`--prune-incomplete`, `--prune-ungrounded`, `--prune-dangling`, `--prune-stale`). Every prune is opt-in: `graph_doctor` is report-only unless a prune flag is passed — on the CLI and over MCP alike (the MCP tool takes the same `prune_*` booleans). Only the `dangling` mass-wipe override (`--force`) is CLI-only.
 
 ### 4. Generalize
 

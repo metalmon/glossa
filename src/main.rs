@@ -381,6 +381,9 @@ enum GraphAction {
         /// Delete dangling nodes (last resort; prefer restoring the terminal).
         #[arg(long = "prune-dangling")]
         prune_dangling: bool,
+        /// Delete stale nodes (source drifted; last resort — prefer re-syncing / rebuilding).
+        #[arg(long = "prune-stale")]
+        prune_stale: bool,
         /// Override the mass-wipe guard and force the dangling prune even when it looks like an
         /// ontology mismatch (zero live terminals) or over half the reasoning layer. Human-only:
         /// not exposed over MCP.
@@ -1441,6 +1444,7 @@ fn main() -> anyhow::Result<()> {
                 prune_incomplete,
                 prune_ungrounded,
                 mut prune_dangling,
+                prune_stale,
                 force,
             } => {
                 let path = resolve_root_logged(path);
@@ -1458,17 +1462,20 @@ fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
-                if prune_incomplete || prune_ungrounded || prune_dangling {
-                    let (inc, ung, dang) = glossa::graph::doctor::prune(
+                if prune_incomplete || prune_ungrounded || prune_dangling || prune_stale {
+                    let (inc, ung, dang, stale) = glossa::graph::doctor::prune(
                         &g,
                         &report,
                         &glossa::graph::doctor::PruneOpts {
                             incomplete: prune_incomplete,
                             ungrounded: prune_ungrounded,
                             dangling: prune_dangling,
+                            stale: prune_stale,
                         },
                     )?;
-                    println!("pruned: incomplete={inc} ungrounded={ung} dangling={dang}");
+                    println!(
+                        "pruned: incomplete={inc} ungrounded={ung} dangling={dang} stale={stale}"
+                    );
                 }
                 Ok(())
             }

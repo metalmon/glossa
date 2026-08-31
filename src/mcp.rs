@@ -530,6 +530,14 @@ struct DoctorArgs {
         description = "also delete dangling nodes (last resort; prefer restoring the terminal); default false (report-only)"
     )]
     prune_dangling: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(
+        description = "also delete stale nodes (source drifted; last resort — prefer re-syncing/rebuilding the source); default false (report-only)"
+    )]
+    prune_stale: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1629,7 +1637,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default — pass prune_incomplete/prune_ungrounded/prune_dangling (each opt-in, last resort — prefer re-grounding or restoring the terminal) to also delete that bucket; the response then includes the pruned counts. `stale` is never prunable — its source may be re-synced."
+        description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default — pass prune_incomplete/prune_ungrounded/prune_dangling/prune_stale (each opt-in, last resort — prefer re-grounding, restoring the terminal, or re-syncing/rebuilding the source over deleting) to also delete that bucket; the response then includes the pruned counts."
     )]
     async fn graph_doctor(
         &self,
@@ -1642,6 +1650,7 @@ impl GlossaServer {
         let prune_incomplete = a.prune_incomplete.unwrap_or(false);
         let prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
         let mut prune_dangling = a.prune_dangling.unwrap_or(false);
+        let prune_stale = a.prune_stale.unwrap_or(false);
         let mut refusal: Option<String> = None;
         if prune_dangling {
             if let Some(reason) = crate::graph::doctor::dangling_prune_risk(&report, &g, &ont) {
@@ -1649,19 +1658,20 @@ impl GlossaServer {
                 refusal = Some(reason);
             }
         }
-        if prune_incomplete || prune_ungrounded || prune_dangling {
-            let (inc, ung, dang) = crate::graph::doctor::prune(
+        if prune_incomplete || prune_ungrounded || prune_dangling || prune_stale {
+            let (inc, ung, dang, stale) = crate::graph::doctor::prune(
                 &g,
                 &report,
                 &crate::graph::doctor::PruneOpts {
                     incomplete: prune_incomplete,
                     ungrounded: prune_ungrounded,
                     dangling: prune_dangling,
+                    stale: prune_stale,
                 },
             )
             .map_err(internal)?;
             out.push_str(&format!(
-                "pruned: incomplete={inc} ungrounded={ung} dangling={dang}\n"
+                "pruned: incomplete={inc} ungrounded={ung} dangling={dang} stale={stale}\n"
             ));
         }
         if let Some(reason) = refusal {
@@ -2017,12 +2027,13 @@ mod tests {
         assert_eq!(ix.path, Some("a.md".to_string()));
 
         let da: DoctorArgs = serde_json::from_str(
-            r#"{"prune_incomplete":"true","prune_ungrounded":"false","prune_dangling":"true"}"#,
+            r#"{"prune_incomplete":"true","prune_ungrounded":"false","prune_dangling":"true","prune_stale":"true"}"#,
         )
         .unwrap();
         assert_eq!(da.prune_incomplete, Some(true));
         assert_eq!(da.prune_ungrounded, Some(false));
         assert_eq!(da.prune_dangling, Some(true));
+        assert_eq!(da.prune_stale, Some(true));
 
         // Absent optionals stay None (report-only default).
         let da2: DoctorArgs = serde_json::from_str(r#"{}"#).unwrap();
@@ -2030,9 +2041,10 @@ mod tests {
             (
                 da2.prune_incomplete,
                 da2.prune_ungrounded,
-                da2.prune_dangling
+                da2.prune_dangling,
+                da2.prune_stale
             ),
-            (None, None, None)
+            (None, None, None, None)
         );
 
         let g: GrepArgs = serde_json::from_str(

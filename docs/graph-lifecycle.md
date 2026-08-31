@@ -100,7 +100,7 @@ The report lists four kinds of doubt:
 | Doubt | What it means | What it asks of you |
 |---|---|---|
 | `ungrounded` | An answer node lost its link to a source section. | Re-ground it, or prune it if the source is gone. |
-| `stale` | An answer's source **document was edited** since it was built. | **Re-ground** (re-build that doc) — never just delete. |
+| `stale` | An answer's source **document was edited** since it was built. | **Re-ground** (re-build that doc); `--prune-stale` only as a last resort. |
 | `incomplete` | A node sits on no complete reasoning chain. | Finish the chain, or prune it. |
 | `dangling` | A query-side node can no longer reach any live answer (its terminal went stale/ungrounded/deleted). | Fix/restore the terminal, or prune the orphaned branch. |
 
@@ -151,20 +151,28 @@ kb graph doctor                   # confirm clean
 ### You edited a document
 
 Editing a source file makes the answers built from it **stale** — the extracted fact may no longer
-match the text. The fix is to **re-ground**, not to delete (the document is still there, it just
-changed).
+match the text. Prefer to **re-ground** (the document is still there, it just changed); delete only
+what genuinely no longer applies.
 
 ```bash
 kb index /path/to/corpus          # re-chunks the edited file, updates its signature
 kb graph doctor                   # shows `stale` terminals (+ `dangling` chains to them)
 ```
 
-Then re-ground the affected document:
+Then refresh the affected document:
 
 ```bash
-kbx build  /path/to/corpus        # the incremental delta detects the changed doc,
-                                  # drops its old reasoning nodes, re-extracts fresh ones
+kbx build  /path/to/corpus        # incremental: re-extracts fresh terminals from the changed doc
 kbx reason /path/to/corpus        # re-synthesizes the query-side layer
+```
+
+`kbx build` is **construct-only** — it never deletes, so a re-extract leaves the **old** stale
+terminals in place beside the fresh ones (unless a fresh one lands on the same label and re-grounds
+it). Clear the drifted leftovers: re-ground them node-by-node (below), or — once you've confirmed the
+old content is gone for good — prune the stale bucket:
+
+```bash
+kb graph doctor --prune-stale     # delete the terminals whose source drifted and weren't refreshed
 kb graph doctor                   # back to clean
 ```
 

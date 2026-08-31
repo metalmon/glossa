@@ -37,9 +37,9 @@ pub struct DoctorReport {
     pub stale: Vec<DoubtfulNode>,
     pub incomplete: Vec<DoubtfulNode>,
     /// Query-side nodes (type NOT `requires_grounding`) that reach no live grounded terminal —
-    /// derived/structural staleness. UNLIKE `stale`, `dangling` IS prunable — opt-in via
-    /// `prune_dangling` (MCP) / `--prune-dangling` (CLI), same "last resort" policy as
-    /// `ungrounded`. Because a whole-layer dangling flood is the signature of an ontology
+    /// derived/structural staleness. Prunable opt-in via `prune_dangling` (MCP) /
+    /// `--prune-dangling` (CLI), same "last resort" policy as `ungrounded`. Because a whole-layer
+    /// dangling flood is the signature of an ontology
     /// mismatch rather than genuine per-node rot, `dangling_prune_risk` gates the delete: an
     /// agent (MCP) can never mass-prune, only a human can force it (CLI `--force`).
     pub dangling: Vec<DoubtfulNode>,
@@ -59,6 +59,11 @@ pub struct PruneOpts {
     /// dangling node's terminal may come back live (source restored, or re-grounded), so this
     /// stays off unless explicitly requested.
     pub dangling: bool,
+    /// Opt-in: also delete `stale` nodes (the backing source drifted since the node was recorded).
+    /// Off by default — a stale node's source may be re-synced (or the doc rebuilt), refreshing it
+    /// in place; prune only once you've decided the drifted content is gone for good (typically a
+    /// cleanup pass after a rebuild).
+    pub stale: bool,
 }
 
 /// Run the four hygiene checks (ungrounded / incomplete / stale / dangling) over the live graph
@@ -195,21 +200,21 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
     Ok(rep)
 }
 
-/// Delete the incomplete, ungrounded and/or dangling nodes from `report` (per `opts`). Returns
-/// `(incomplete_pruned, ungrounded_pruned, dangling_pruned)`. `report.stale` is intentionally
-/// NEVER pruned — a stale node's source may be re-synced, at which point it is fresh again;
-/// deleting it would destroy reasoning work over what may be a transient state. `dangling` is
-/// prunable, but opt-in only (like `ungrounded`: last resort, prefer restoring the terminal) —
-/// by default a dangling node's terminal may come back live (source restored, or a new MENTIONS
-/// re-grounding it).
+/// Delete the incomplete, ungrounded, dangling and/or stale nodes from `report` (per `opts`).
+/// Returns `(incomplete_pruned, ungrounded_pruned, dangling_pruned, stale_pruned)`. Every bucket
+/// is opt-in and off by default (report-only): each delete is a last resort — prefer re-grounding
+/// (`ungrounded`), restoring the terminal (`dangling`), or re-syncing / rebuilding the source
+/// (`stale`, whose file may drift back into agreement). `dangling`'s extra mass-wipe guard lives
+/// in `dangling_prune_risk`, checked by the callers before they set `opts.dangling`.
 pub fn prune(
     g: &GraphStore,
     report: &DoctorReport,
     opts: &PruneOpts,
-) -> anyhow::Result<(usize, usize, usize)> {
+) -> anyhow::Result<(usize, usize, usize, usize)> {
     let mut inc = 0;
     let mut ung = 0;
     let mut dang = 0;
+    let mut stale = 0;
     if opts.incomplete && !report.incomplete.is_empty() {
         let ids: Vec<String> = report.incomplete.iter().map(|d| d.id.clone()).collect();
         inc = g.delete_nodes(&ids)?;
@@ -222,8 +227,11 @@ pub fn prune(
         let ids: Vec<String> = report.dangling.iter().map(|d| d.id.clone()).collect();
         dang = g.delete_nodes(&ids)?;
     }
-    // stale is intentionally NEVER pruned
-    Ok((inc, ung, dang))
+    if opts.stale && !report.stale.is_empty() {
+        let ids: Vec<String> = report.stale.iter().map(|d| d.id.clone()).collect();
+        stale = g.delete_nodes(&ids)?;
+    }
+    Ok((inc, ung, dang, stale))
 }
 
 /// Returns `Some(reason)` when pruning the `dangling` bucket would be a mass-wipe — the signal of
@@ -382,24 +390,43 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         assert_eq!(rep.ungrounded[0].id, "res:b");
         assert_eq!(rep.incomplete[0].id, "cau:orphan");
 
-        // prune removes incomplete + ungrounded, NOT stale
-        let (inc, ung, dang) = prune(
+        // prune removes incomplete + ungrounded; stale survives WITHOUT --prune-stale.
+        let (inc, ung, dang, stale) = prune(
             &g,
             &rep,
             &PruneOpts {
                 incomplete: true,
                 ungrounded: true,
                 dangling: false,
+                stale: false,
             },
         )
         .unwrap();
-        assert_eq!((inc, ung, dang), (1, 1, 0));
+        assert_eq!((inc, ung, dang, stale), (1, 1, 0, 0));
         assert!(
             g.get_node(&rep.stale[0].id).unwrap().is_some(),
-            "stale node must survive prune"
+            "stale node survives prune unless --prune-stale is set"
         );
         assert!(g.get_node("cau:orphan").unwrap().is_none());
         assert!(g.get_node("res:b").unwrap().is_none());
+
+        // Opt-in: --prune-stale deletes the stale bucket.
+        let (_, _, _, stale2) = prune(
+            &g,
+            &rep,
+            &PruneOpts {
+                incomplete: false,
+                ungrounded: false,
+                dangling: false,
+                stale: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(stale2, 1);
+        assert!(
+            g.get_node(&rep.stale[0].id).unwrap().is_none(),
+            "stale node is deleted when --prune-stale is set"
+        );
     }
 
     #[test]
@@ -532,41 +559,43 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         assert_eq!(rep.dangling.len(), 2);
 
         // dangling=false leaves both dangling nodes (and stale) untouched.
-        let (inc0, ung0, dang0) = prune(
+        let (inc0, ung0, dang0, stale0) = prune(
             &g,
             &rep,
             &PruneOpts {
                 incomplete: false,
                 ungrounded: false,
                 dangling: false,
+                stale: false,
             },
         )
         .unwrap();
-        assert_eq!((inc0, ung0, dang0), (0, 0, 0));
+        assert_eq!((inc0, ung0, dang0, stale0), (0, 0, 0, 0));
         assert!(g.get_node("sym:1").unwrap().is_some());
         assert!(g.get_node("cau:1").unwrap().is_some());
         assert!(
             g.get_node("res:1").unwrap().is_some(),
-            "stale node must survive prune regardless of the dangling flag"
+            "stale node survives prune unless --prune-stale is set"
         );
 
-        // dangling=true deletes exactly the dangling nodes; stale still survives.
-        let (inc1, ung1, dang1) = prune(
+        // dangling=true deletes exactly the dangling nodes; stale still survives (no --prune-stale).
+        let (inc1, ung1, dang1, stale1) = prune(
             &g,
             &rep,
             &PruneOpts {
                 incomplete: false,
                 ungrounded: false,
                 dangling: true,
+                stale: false,
             },
         )
         .unwrap();
-        assert_eq!((inc1, ung1, dang1), (0, 0, 2));
+        assert_eq!((inc1, ung1, dang1, stale1), (0, 0, 2, 0));
         assert!(g.get_node("sym:1").unwrap().is_none());
         assert!(g.get_node("cau:1").unwrap().is_none());
         assert!(
             g.get_node("res:1").unwrap().is_some(),
-            "stale node must survive prune even when dangling=true"
+            "stale node survives even when dangling=true (needs its own --prune-stale)"
         );
     }
 
