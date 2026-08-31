@@ -125,6 +125,7 @@ pub(crate) fn seed_source_text_all(
 /// not DB access), and every write funnels through `writer.upsert(..)`, which serializes the N
 /// worker threads in-process AND reuses the core file-lock so a concurrent `glossa` MCP writer
 /// can never interleave with an eval worker.
+#[allow(clippy::too_many_arguments)] // shared pool wiring; signature kept explicit
 pub fn chain_one_seed(
     paths: &KbxPaths,
     ont: &Ontology,

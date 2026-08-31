@@ -79,6 +79,10 @@ impl RetrievalProgress {
             self.fired = false;
         }
         let window_sum: usize = self.window.iter().sum();
+        // `G` is a tunable "new results in the window" threshold that currently sits at 0; keep the
+        // `<= G` form (not `== G`) so raising G stays correct — clippy only flags it because 0 is
+        // usize's min today.
+        #[allow(clippy::absurd_extreme_comparisons)]
         let plateaued = !self.fired
             && self.calls >= Self::M
             && self.seen.len() >= Self::E
@@ -121,6 +125,7 @@ pub fn is_retrieval_tool(name: &str) -> bool {
 ///     BARE, with no "read" word at all — `<path>#<ord> · <label>` for a Section (glossary's
 ///     exact-title stub at `tools.rs:765`, `edge_line`/neighbors at `tools.rs:1018`,
 ///     `render_reach_chain` at `tools.rs:1190`), or `<path>  (document)` — no ord — for a Document.
+///
 /// The first fix here only matched the "— read" form, so a totally normal move — `neighbors` on a
 /// Document returning its child Sections, or several glossary/reach calls landing on different
 /// Section/Document nodes — surfaced ZERO ids per call and falsely tripped the streak on a reader
@@ -337,6 +342,9 @@ impl ReaderSignals {
         }
 
         // 3. Plateau (armed + not already claimed by Streak this call).
+        // `<= G` (not `== G`) is deliberate — G is a tunable threshold at 0 today; see the twin
+        // note in `RetrievalProgress::observe`.
+        #[allow(clippy::absurd_extreme_comparisons)]
         if self.plateau_enabled
             && plateau_was_armed
             && self.calls >= Self::M
@@ -408,7 +416,7 @@ mod tests {
         for i in 0..12 {
             let id = format!("doc.md#{i}");
             assert_eq!(
-                p.observe(&[id.clone()]),
+                p.observe(std::slice::from_ref(&id)),
                 None,
                 "a call that adds a new id ({id}) must not plateau"
             );

@@ -672,15 +672,13 @@ fn parse_sheet_grid(xml: &str) -> SheetGrid {
                 }
                 _ => {}
             },
-            Ok(Event::Text(t)) => {
-                if in_cell {
-                    let s = t
-                        .decode()
-                        .ok()
-                        .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|u| u.into_owned()))
-                        .unwrap_or_default();
-                    buf.push_str(&s);
-                }
+            Ok(Event::Text(t)) if in_cell => {
+                let s = t
+                    .decode()
+                    .ok()
+                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|u| u.into_owned()))
+                    .unwrap_or_default();
+                buf.push_str(&s);
             }
             _ => {}
         }

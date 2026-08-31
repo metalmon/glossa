@@ -148,10 +148,6 @@ mod tests {
     use super::*;
     use glossa::graph::store::{Edge, Node, Provenance};
 
-    fn prov(source_path: &str, file_sig: Option<FileSig>) -> Provenance {
-        prov_origin(source_path, file_sig, "agent")
-    }
-
     fn prov_origin(source_path: &str, file_sig: Option<FileSig>, origin: &str) -> Provenance {
         Provenance {
             source_path: source_path.into(),

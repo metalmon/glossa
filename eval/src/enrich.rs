@@ -53,7 +53,7 @@ pub fn run_enrich(
     let work_buf: PathBuf = work.to_path_buf();
 
     for (i, case) in cases.iter().enumerate() {
-        println!("[{}/{}] enriching: {}", i + 1, cases.len(), &case._id);
+        println!("[{}/{}] enriching: {}", i + 1, cases.len(), case._id);
 
         // Clone per iteration so the move-captured exec closure doesn't consume the outer buf.
         let work_iter = work_buf.clone();

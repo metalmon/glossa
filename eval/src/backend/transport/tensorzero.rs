@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(episode::current().as_deref(), Some("ep-abc"));
 
         let req = server.join().unwrap();
-        let body_str = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+        let body_str = req.split_once("\r\n\r\n").map_or("", |x| x.1);
         let body: Value = serde_json::from_str(body_str).expect("request body must be JSON");
         assert_eq!(body["function_name"], "answer_hotpot");
         assert!(body["input"]["messages"].is_array());
@@ -294,7 +294,7 @@ mod tests {
             .unwrap();
 
         let req = server.join().unwrap();
-        let body_str = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+        let body_str = req.split_once("\r\n\r\n").map_or("", |x| x.1);
         let body: Value = serde_json::from_str(body_str).unwrap();
         let sent_id = body["episode_id"]
             .as_str()
@@ -348,12 +348,12 @@ mod tests {
             assert!(req.starts_with("POST /feedback"), "wrong path: {req}");
         }
         let body0: Value =
-            serde_json::from_str(reqs[0].splitn(2, "\r\n\r\n").nth(1).unwrap()).unwrap();
+            serde_json::from_str(reqs[0].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body0["episode_id"], "ep-xyz");
         assert_eq!(body0["metric_name"], "judge");
         assert_eq!(body0["value"], 0.5);
         let body1: Value =
-            serde_json::from_str(reqs[1].splitn(2, "\r\n\r\n").nth(1).unwrap()).unwrap();
+            serde_json::from_str(reqs[1].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body1["metric_name"], "correct");
         assert_eq!(body1["value"], false);
     }

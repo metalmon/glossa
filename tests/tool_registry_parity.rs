@@ -6,9 +6,9 @@
 //!
 //!   - MCP Reader profile   — the live `GlossaServer` tool_specs() an MCP client sees.
 //!   - TZ reader dump       — the tool list `kb dump-tz-tools` splices into the
-//!                            `answer_hotpot` function's `tools = [...]` line.
+//!     `answer_hotpot` function's `tools = [...]` line.
 //!   - OpenAI/kbx agent loop — the function list the kb-eval crate's OpenAI-format
-//!                            tool builder sends to the model.
+//!     tool builder sends to the model.
 //!
 //! The MCP Reader profile and the TZ reader dump are the SAME source: both come from
 //! `GlossaServer::new(.., Profile::Reader, ..).tool_specs()` (see

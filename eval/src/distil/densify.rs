@@ -155,6 +155,7 @@ pub(crate) fn densify_write(
 /// threads in-process AND reuses the core file-lock so a concurrent `glossa` MCP writer can never
 /// interleave with an eval worker (mirrors `build::extract::extract_doc`/
 /// `reason::seed::chain_one_seed`'s `GraphWriter` wiring).
+#[allow(clippy::too_many_arguments)] // shared pool wiring; signature kept explicit
 pub fn densify_doc(
     paths: &KbxPaths,
     ont: &Ontology,

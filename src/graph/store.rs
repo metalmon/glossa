@@ -659,8 +659,7 @@ impl GraphStore {
             return Ok(None);
         }
         let c = self.conn.lock().unwrap();
-        let placeholders = std::iter::repeat("?")
-            .take(candidates.len())
+        let placeholders = std::iter::repeat_n("?", candidates.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(

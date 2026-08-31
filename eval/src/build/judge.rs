@@ -177,6 +177,7 @@ fn spine_edge_for_build() -> &'static str {
 /// `spine_edge_for_build()`. Marks the checkpoint for EVERY judged group, empty-link-set or not —
 /// an empty result leaves no graph trace, so the checkpoint is the only thing that stops a
 /// `--resume` run from re-judging it.
+#[allow(clippy::too_many_arguments)] // config-passing entry point; signature kept explicit
 pub fn run_judge(
     root: &Path,
     lab: &LabConfig,

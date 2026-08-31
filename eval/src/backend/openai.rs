@@ -27,23 +27,23 @@ static NEW_TOKENS: AtomicU64 = AtomicU64::new(0);
 /// `NEW_TOKENS`, tallied by the same call in `chat_http`.
 static CACHED_TOKENS: AtomicU64 = AtomicU64::new(0);
 
-/// The PREVIOUS chat request's `prompt_tokens` within the current conversation (one agent-loop
-/// run: one reason seed, one build doc, one eval case, …). Each round of `run_agent_loop`
-/// re-sends the whole prior transcript as a prefix and appends to it, so on a server that omits
-/// `prompt_tokens_details.cached_tokens` (e.g. LM Studio), THIS round's re-sent prefix is exactly
-/// last round's `prompt_tokens` — see `usage_split_with_prefix`. Reset to 0 at the start of every
-/// conversation by `reset_conversation_prefix` so one seed's tail doesn't leak into the next
-/// seed's estimate.
-///
-/// **THREAD-LOCAL, not a process-global.** Under parallel workers (`kbx --jobs N`) each worker
-/// thread drives its own conversation concurrently with the others; a shared global here would let
-/// worker A's stored `prompt_tokens` leak into worker B's next estimate (interleaved conversations
-/// corrupting each other's prefix) — see the parallel-jobs design doc's "Caching under
-/// parallelism" section. Each thread gets its own independent cell, so the SEQUENTIAL-within-one-
-/// conversation assumption `usage_split_with_prefix` relies on holds per-thread even though many
-/// threads run concurrently. The cross-worker aggregates (`NEW_TOKENS`/`CACHED_TOKENS`/
-/// `CACHE_ESTIMATED`/`RESAMPLES`) stay process-global atomics — their SUM across workers is still
-/// the correct total, unlike this per-conversation prefix.
+// The PREVIOUS chat request's `prompt_tokens` within the current conversation (one agent-loop
+// run: one reason seed, one build doc, one eval case, …). Each round of `run_agent_loop`
+// re-sends the whole prior transcript as a prefix and appends to it, so on a server that omits
+// `prompt_tokens_details.cached_tokens` (e.g. LM Studio), THIS round's re-sent prefix is exactly
+// last round's `prompt_tokens` — see `usage_split_with_prefix`. Reset to 0 at the start of every
+// conversation by `reset_conversation_prefix` so one seed's tail doesn't leak into the next
+// seed's estimate.
+//
+// **THREAD-LOCAL, not a process-global.** Under parallel workers (`kbx --jobs N`) each worker
+// thread drives its own conversation concurrently with the others; a shared global here would let
+// worker A's stored `prompt_tokens` leak into worker B's next estimate (interleaved conversations
+// corrupting each other's prefix) — see the parallel-jobs design doc's "Caching under
+// parallelism" section. Each thread gets its own independent cell, so the SEQUENTIAL-within-one-
+// conversation assumption `usage_split_with_prefix` relies on holds per-thread even though many
+// threads run concurrently. The cross-worker aggregates (`NEW_TOKENS`/`CACHED_TOKENS`/
+// `CACHE_ESTIMATED`/`RESAMPLES`) stay process-global atomics — their SUM across workers is still
+// the correct total, unlike this per-conversation prefix.
 thread_local! {
     static PREV_PROMPT_TOKENS: Cell<u64> = const { Cell::new(0) };
 }
@@ -683,13 +683,18 @@ pub(crate) fn record_usage(resp: &Value) {
 /// `record_usage`. (The retired `lmstudio_chat` is gone — its body-building lives in
 /// `transport::openai::agent_chat_full` and its resample loop in `backend::resample`.)
 pub(crate) use crate::backend::transport::openai::{
-    chat_http, chat_http_full, content_of, parse_tool_args, tools_schema,
+    chat_http_full, content_of, parse_tool_args, tools_schema,
 };
+// `chat_http` is consumed only by this module's integration tests; re-export it under `cfg(test)`
+// so the non-test build doesn't see an unused import.
+#[cfg(test)]
+pub(crate) use crate::backend::transport::openai::chat_http;
 
 /// Unproductive-streak threshold. MOVED to `backend::agent_loop` (Task 3 of the multi-api-
 /// transport plan) along with the loop's dedup/streak/NBA logic; re-exported here so this
 /// module's own not-yet-moved tests (and `build::extract`'s regression test) keep compiling
 /// against `crate::backend::openai::UNPRODUCTIVE_STREAK_K` unchanged.
+#[cfg(test)]
 pub(crate) use crate::backend::agent_loop::UNPRODUCTIVE_STREAK_K;
 
 /// Cap on how many images one `exec` call's tool result feeds the model in a single vision
@@ -1540,7 +1545,7 @@ mod tests {
             json!({"node": "hub", "edge_types": ["REL_0"], "direction": "out"}),
         ];
         assert!(
-            variants.len() >= UNPRODUCTIVE_STREAK_K + 1,
+            variants.len() > UNPRODUCTIVE_STREAK_K,
             "need at least K+1 distinct variants"
         );
 
@@ -1701,7 +1706,7 @@ mod tests {
             json!({"node": "hub", "edge_types": ["REL_0"], "direction": "out"}),
         ];
         assert!(
-            variants.len() >= UNPRODUCTIVE_STREAK_K + 1,
+            variants.len() > UNPRODUCTIVE_STREAK_K,
             "need at least K+1 distinct variants"
         );
 
@@ -1762,7 +1767,7 @@ mod tests {
     #[test]
     fn vision_message_builds_canonical_data_uri_content_array() {
         let img = stub_image(1);
-        let msg = vision_user_message(&[img.clone()]).expect("one image -> Some(message)");
+        let msg = vision_user_message(std::slice::from_ref(&img)).expect("one image -> Some(message)");
         assert_eq!(msg["role"], "user");
         let content = msg["content"].as_array().expect("content must be an array");
         assert_eq!(

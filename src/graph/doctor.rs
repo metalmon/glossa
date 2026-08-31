@@ -146,8 +146,10 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
         })
     };
 
-    let mut rep = DoctorReport::default();
-    rep.live_terminal_count = live_terminal_ids.len();
+    let mut rep = DoctorReport {
+        live_terminal_count: live_terminal_ids.len(),
+        ..Default::default()
+    };
     for id in &ungrounded_ids {
         if let Some(d) = mk(id, Reason::Ungrounded) {
             rep.ungrounded.push(d);

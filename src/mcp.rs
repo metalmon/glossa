@@ -1918,8 +1918,10 @@ impl ServerHandler for GlossaServer {
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListPromptsResult, McpError>>
            + rmcp::service::MaybeSendFuture
            + '_ {
-        let mut r = rmcp::model::ListPromptsResult::default();
-        r.prompts = prompt_catalog();
+        let r = rmcp::model::ListPromptsResult {
+            prompts: prompt_catalog(),
+            ..Default::default()
+        };
         std::future::ready(Ok(r))
     }
 

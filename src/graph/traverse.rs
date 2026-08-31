@@ -157,6 +157,7 @@ fn community_factor(src: Option<i64>, cand: Option<i64>) -> f32 {
 ///
 /// - `to = None`  → **discovery:** collect nodes reached by forward-following `relation` as answers.
 /// - `to = Some`  → **verify:** early-exit with the first path that reaches `to`.
+///
 /// Global work budget for a single `reach`. Even on a pathologically dense graph (an
 /// over-connected LEADS_TO where nearly every node shares a bridgeable term), one reach must do
 /// bounded work: an uncapped traversal did O(nodes × shared-candidates) index queries and appeared

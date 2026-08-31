@@ -156,13 +156,13 @@ pub fn ppr(
     for _ in 0..max_iter {
         let mut next = vec![0.0f32; n];
         let mut dangling = 0.0f32;
-        for i in 0..n {
+        for (i, &ri) in r.iter().enumerate() {
             let wdeg: f32 = trans.adj[i].iter().map(|(_, w)| *w).sum();
             if wdeg <= 0.0 {
-                dangling += r[i];
+                dangling += ri;
             } else {
                 for &(j, w) in &trans.adj[i] {
-                    next[j] += r[i] * w / wdeg;
+                    next[j] += ri * w / wdeg;
                 }
             }
         }

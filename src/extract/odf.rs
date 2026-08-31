@@ -61,7 +61,7 @@ fn local(name: &[u8]) -> &[u8] {
     }
 }
 
-fn attr<'a>(e: &'a quick_xml::events::BytesStart, want: &[u8]) -> Option<String> {
+fn attr(e: &quick_xml::events::BytesStart, want: &[u8]) -> Option<String> {
     e.attributes().flatten().find_map(|a| {
         if local(a.key.as_ref()) == want {
             std::str::from_utf8(&a.value).ok().map(str::to_string)
@@ -246,8 +246,7 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                     let count = attr(&e, b"c")
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(1)
-                        .max(1)
-                        .min(1000);
+                        .clamp(1, 1000);
                     for _ in 0..count {
                         buf.push(' ');
                     }

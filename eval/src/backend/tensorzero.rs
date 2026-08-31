@@ -98,8 +98,8 @@ fn tool_kind(name: &str) -> ToolKind {
 /// Echo + exec args for one TZ tool_call block.
 ///
 /// OpenRouter providers reject the *next* turn if any prior assistant
-/// `function.arguments` is not valid JSON. When TZ hands back `arguments: null`
-/// + broken `raw_arguments`, we heal via `jsonrepair` when possible; only
+/// `function.arguments` is not valid JSON. When TZ hands back `arguments: null` +
+/// broken `raw_arguments`, we heal via `jsonrepair` when possible; only
 /// unrepairable junk becomes `{}` + a retry hint.
 struct NormalizedToolArgs {
     /// Value written into the echoed assistant `tool_call.arguments` (object or a

@@ -188,7 +188,7 @@ fn scores(out: &[RolloutOutcome]) -> Vec<f64> {
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
-        out.push_str("…");
+        out.push('…');
     }
     out
 }
@@ -341,6 +341,7 @@ fn rollout_one(
 /// — silently mismatches questions to outcomes if order isn't preserved. `run_units_parallel`
 /// returns results in COMPLETION order, not input order, so each unit here carries its original
 /// index and results are sorted back into place before returning.
+#[allow(clippy::too_many_arguments)] // config-passing helper; signature kept explicit
 fn score_questions(
     cfg: &GepaGraphConfig,
     url: &str,

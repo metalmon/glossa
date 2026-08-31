@@ -124,7 +124,7 @@ fn last_plateau_turn_index(messages: &[Value]) -> Option<usize> {
         .enumerate()
         .filter(|(_, m)| is_plateau_tool_message(m))
         .map(|(i, _)| i)
-        .last()
+        .next_back()
 }
 
 /// Whether a trajectory contains at least one plateau-signal tool message anywhere.

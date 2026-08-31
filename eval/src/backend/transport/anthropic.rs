@@ -531,7 +531,7 @@ mod tests {
             "must NOT use Bearer auth: {req0}"
         );
 
-        let body0_str = req0.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+        let body0_str = req0.split_once("\r\n\r\n").map_or("", |x| x.1);
         let body0: Value = serde_json::from_str(body0_str).expect("request body must be JSON");
         assert_eq!(body0["system"], "you are a test system");
         assert_eq!(body0["max_tokens"], json!(DEFAULT_MAX_TOKENS));
@@ -546,7 +546,7 @@ mod tests {
 
         // The 2nd request's assistant turn (echoed by the agent loop) must carry the tool_use
         // block AND its tool_result must be batched into a single following user message.
-        let body1_str = requests[1].splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+        let body1_str = requests[1].split_once("\r\n\r\n").map_or("", |x| x.1);
         let body1: Value = serde_json::from_str(body1_str).expect("2nd request body must be JSON");
         let msgs = body1["messages"].as_array().unwrap();
         let assistant_turn = msgs

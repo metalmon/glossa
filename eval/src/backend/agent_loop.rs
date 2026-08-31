@@ -243,7 +243,14 @@ pub fn run_agent_loop_capturing(
             } else {
                 let (body, ids) = exec(&call.name, &call.args);
                 last_key = Some(key);
-                let has_new = ids.into_iter().fold(false, |acc, i| seen.insert(i) || acc);
+                // Insert EVERY id (not `any`, which would short-circuit and leave later ids
+                // unseen, corrupting novelty detection on subsequent calls).
+                let mut has_new = false;
+                for i in ids {
+                    if seen.insert(i) {
+                        has_new = true;
+                    }
+                }
                 if has_new {
                     unproductive = 0;
                     body
