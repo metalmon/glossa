@@ -697,38 +697,17 @@ fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) 
 /// to a Section and render the section's `(path#ord · label)`, so the agent can `read(path, ord)`
 /// for the detail behind the node. Empty string when the node mentions no indexed section.
 pub(crate) fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> String {
-    // A node can be grounded to MORE THAN ONE chunk (several MENTIONS edges) — the answer may live in
-    // any of them, so list them all (deduped), not just the first. Capped so a heavily-grounded node
-    // can't flood the reply; a `(+N more)` tail flags when the cap bit so the reader knows to widen.
-    const MAX_ANCHORS: usize = 3;
-    let mut refs: Vec<String> = Vec::new();
-    let mut extra = 0usize;
     for e in g.outgoing(id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;
         }
         if let Ok(Some(sec)) = g.get_node(&e.to) {
             if let Some(r) = node_ref(idx, &sec) {
-                if refs.contains(&r) {
-                    continue;
-                }
-                if refs.len() < MAX_ANCHORS {
-                    refs.push(r);
-                } else {
-                    extra += 1;
-                }
+                return format!("   — read {r}");
             }
         }
     }
-    if refs.is_empty() {
-        return String::new();
-    }
-    let more = if extra > 0 {
-        format!(" (+{extra} more)")
-    } else {
-        String::new()
-    };
-    format!("   — read {}{more}", refs.join(", "))
+    String::new()
 }
 
 /// The document that "owns" `id`, for `scope` filtering: a Section/Document node's own
@@ -832,59 +811,6 @@ fn chain_lines(
             read_anchor(idx, g, &node.id),
         ));
         chain_lines(idx, g, &node.id, spec, depth + 1, seen, out, at, stale);
-    }
-}
-
-/// Backward twin of [`chain_lines`]: walk INCOMING spine edges (`g.incoming`) so a chain SINK — a
-/// grounded Resolution terminal with no outgoing spine hop — still renders the reasoning that leads
-/// TO it (`← RESOLVED_BY ← Cause ← CAUSED_BY ← Symptom`). Used for composed multi-hop targets, which
-/// are usually terminals: walking forward from them is empty, so the explanatory path is the
-/// incoming one. Same depth / total-line caps as `chain_lines`.
-#[allow(clippy::too_many_arguments)]
-fn chain_lines_incoming(
-    idx: &DocIndex,
-    g: &crate::graph::store::GraphStore,
-    id: &str,
-    spec: &ChainSpec,
-    depth: usize,
-    seen: &mut std::collections::HashSet<String>,
-    out: &mut Vec<String>,
-    at: Option<&str>,
-    stale: Option<&StaleChecker>,
-) {
-    const MAX_CHAIN_DEPTH: usize = 5;
-    const MAX_CHAIN_LINES: usize = 12;
-    if depth >= MAX_CHAIN_DEPTH || out.len() >= MAX_CHAIN_LINES {
-        return;
-    }
-    for e in g.incoming(id).unwrap_or_default() {
-        if out.len() >= MAX_CHAIN_LINES {
-            return;
-        }
-        if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
-            continue;
-        }
-        if !seen.insert(e.from.clone()) {
-            continue;
-        }
-        if let Some(a) = at {
-            if !g.visible_at(&e.from, a).unwrap_or(true) {
-                continue;
-            }
-        }
-        let Ok(Some(node)) = g.get_node(&e.from) else {
-            continue;
-        };
-        let indent = "    ".repeat(depth + 1);
-        out.push(format!(
-            "{indent}← {}  [{}]  {}{}{}",
-            e.edge_type,
-            node.node_type,
-            node.label,
-            meta_suffix(g, &node.id, stale),
-            read_anchor(idx, g, &node.id),
-        ));
-        chain_lines_incoming(idx, g, &node.id, spec, depth + 1, seen, out, at, stale);
     }
 }
 
@@ -1091,13 +1017,11 @@ pub fn glossary_with_query(
                 {
                     let shown: std::collections::HashSet<&str> =
                         ids.iter().map(|s| s.as_str()).collect();
-                    const COMPOSED_CHAIN_TOP_K: usize = 6;
                     let extra: Vec<String> = cands
                         .iter()
                         .filter(|c| !shown.contains(c.id.as_str()))
                         .filter(|c| in_scope(scope_glob.as_ref(), owning_doc(g, &c.id).as_deref()))
-                        .enumerate()
-                        .map(|(i, c)| {
+                        .map(|c| {
                             // Show the node's ACTUAL type, whatever the ontology calls it — never a
                             // hardcoded "Fact".
                             let ty = g
@@ -1106,57 +1030,12 @@ pub fn glossary_with_query(
                                 .flatten()
                                 .map(|n| n.node_type)
                                 .unwrap_or_default();
-                            let head = format!(
+                            format!(
                                 "{}  [{ty}]  {}{}",
                                 c.id,
                                 c.label,
                                 read_anchor(idx, g, &c.id)
-                            );
-                            // Give the top composed targets their reasoning PATH inline. This section
-                            // exists to surface the multi-hop terminal that shares no words with the
-                            // question — but a bare `id [type] label` line gives the reader no way to
-                            // see WHY it is the answer, so it distrusts the list and falls back to
-                            // full-text (the observed multihop failure). Forward (`→ cause →
-                            // resolution`) for an upstream node; if that is empty the node is a chain
-                            // sink (a grounded terminal), so show the incoming path (`← what leads
-                            // here`) instead. Capped to the top few (each already depth/line-bounded)
-                            // to avoid the uncapped-chain flood that once blew a glossary reply past
-                            // the output limit.
-                            if i >= COMPOSED_CHAIN_TOP_K {
-                                return head;
-                            }
-                            let mut seen = std::collections::HashSet::new();
-                            seen.insert(c.id.clone());
-                            let mut chain = Vec::new();
-                            chain_lines(
-                                idx,
-                                g,
-                                &c.id,
-                                spec,
-                                0,
-                                &mut seen,
-                                &mut chain,
-                                at.as_deref(),
-                                stale,
-                            );
-                            if chain.is_empty() {
-                                chain_lines_incoming(
-                                    idx,
-                                    g,
-                                    &c.id,
-                                    spec,
-                                    0,
-                                    &mut seen,
-                                    &mut chain,
-                                    at.as_deref(),
-                                    stale,
-                                );
-                            }
-                            if chain.is_empty() {
-                                head
-                            } else {
-                                format!("{head}\n{}", chain.join("\n"))
-                            }
+                            )
                         })
                         .collect();
                     if !extra.is_empty() {
