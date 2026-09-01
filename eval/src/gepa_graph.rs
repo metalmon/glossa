@@ -946,6 +946,16 @@ pub fn run(
     // Per-candidate cached reflect-minibatch, indexed parallel to `pool` (see `MbCache`). Grows
     // with `pool` on every accept; the seed starts uncached.
     let mut mb_cache: Vec<Option<MbCache>> = vec![None];
+    // A/B switch: `GEPA_FRESH_MINIBATCH=1` bypasses the cache entirely — every proposal re-samples a
+    // FRESH minibatch and re-scores the parent (canonical GEPA). The cache (default) trades that
+    // exploration diversity for a noise-stable accept baseline on a weak reader; this flag lets us
+    // measure which produces better full-set winners without a second binary.
+    let fresh_mb = std::env::var("GEPA_FRESH_MINIBATCH").is_ok();
+    if fresh_mb {
+        pb.println(
+            "GEPA_FRESH_MINIBATCH set: minibatch cache OFF — canonical fresh-per-proposal (A/B mode)",
+        );
+    }
 
     // DSPy-style budget: keep proposing candidates until the metric-call ceiling is hit OR the pool
     // reaches `max_candidates`. Every iteration either spends budget (a fresh minibatch is sampled &
@@ -966,7 +976,13 @@ pub fn run(
         // Reuse this parent's cached minibatch (score + fails) if it has one; otherwise sample a
         // minibatch that has failures, score the parent once, and cache it. Cloning the cache
         // Option (cheap vs a rollout) drops the borrow so the None branch can write it back.
-        let (batch, parent_mb_score, fails) = match mb_cache[parent_idx].clone() {
+        // `fresh_mb` forces the None branch every time (canonical GEPA — no cache reuse).
+        let cached = if fresh_mb {
+            None
+        } else {
+            mb_cache[parent_idx].clone()
+        };
+        let (batch, parent_mb_score, fails) = match cached {
             Some(mb) => (mb.batch, mb.score, mb.fails),
             None => {
                 let mut found = None;
