@@ -1480,7 +1480,17 @@ fn now_secs() -> u64 {
 /// A file (re)indexed within this many seconds of a freshen is treated as possibly still mid-copy,
 /// so its directory is held unsettled for one more pass (see the call in `reindex_dirs_locked`). Old
 /// corpus files sit far outside the window, so a normal freshen still settles immediately.
-const FRESH_WINDOW_SECS: u64 = 2;
+///
+/// Sized to comfortably exceed two things: the finalize latency of a real copy (a large file over a
+/// network share can take several seconds to land its full content after first appearing) AND the
+/// wall time of the freshen pass itself. The window is measured from the file's mtime to `now` at
+/// the END of the pass, both floored to whole seconds — so if the window is only a hair longer than
+/// a slow tantivy commit, a file written just before the pass can already read as "aged out" by the
+/// time we check, and the mid-copy hold silently fails to fire. That is exactly what flaked
+/// `freshen_gate_misses_content_finalized_after_a_settled_index` on the loaded CI windows runner. A
+/// generous window costs only a few extra dir re-stats for files touched in the last few seconds
+/// (freshens are throttled), so steady state stays cheap.
+const FRESH_WINDOW_SECS: u64 = 10;
 
 /// Given files just indexed under `root` with the signature we recorded for each, re-stat every one
 /// and return the set of `c:`-prefixed parent DIR KEYS (as produced by `dir_mtime_map`) whose
