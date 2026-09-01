@@ -140,11 +140,13 @@ pub struct TrainArgs {
     pub metric: String,
 }
 
-/// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only on a STRICT EM
-/// improvement over the seed prompt's own full-val EM, and never when `--no-apply` was passed
-/// (a dry-run: still writes `runs/<tag>/answer.md`, never touches the workspace file).
-pub(crate) fn should_apply(seed_score: f64, best_score: f64, no_apply: bool) -> bool {
-    !no_apply && best_score > seed_score
+/// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only when GEPA's
+/// full-set gate passed (`GepaGraphResult::applied` — the winner scored >= the seed on the FULL
+/// question set, not just the val split GEPA selected on, so a val-overfit winner that regresses is
+/// refused), and never when `--no-apply` was passed (a dry-run: still writes `runs/<tag>/answer.md`,
+/// never touches the workspace file).
+pub(crate) fn should_apply(applied: bool, no_apply: bool) -> bool {
+    !no_apply && applied
 }
 
 /// Run one `kbx train` pass: resolve the workspace, load `lab.toml`, GEPA-optimize `answer.md`
@@ -381,7 +383,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     std::fs::write(&winner_path, &result.prompt)
         .with_context(|| format!("write {}", winner_path.display()))?;
 
-    let apply = should_apply(result.baseline_score, result.best_score, args.no_apply);
+    let apply = should_apply(result.applied, args.no_apply);
     let report = format!(
         "# kbx train — {tag}\n\n\
          seed score (baseline, full val): {baseline_score:.3}\n\
@@ -428,11 +430,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_apply_only_on_strict_improvement_and_not_when_disabled() {
-        assert!(should_apply(0.5, 0.6, false));
-        assert!(!should_apply(0.5, 0.5, false)); // no improvement -> keep seed
-        assert!(!should_apply(0.5, 0.4, false)); // regression -> keep seed
-        assert!(!should_apply(0.5, 0.9, true)); // --no-apply -> never write answer.md
+    fn should_apply_gates_on_full_set_verdict_and_not_when_disabled() {
+        assert!(should_apply(true, false)); // full-set gate passed -> apply
+        assert!(!should_apply(false, false)); // winner regressed on full set -> keep seed
+        assert!(!should_apply(true, true)); // --no-apply -> never write answer.md
     }
 
     /// `jobs`' own precedence mirrors every other stage's tuning knob: CLI > lab.toml `[tuning]

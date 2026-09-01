@@ -104,6 +104,10 @@ pub struct GepaGraphResult {
     pub baseline_score: f64,
     pub best_score: f64,
     pub candidates: usize,
+    /// Apply-gate verdict: `true` when the winner scored >= the seed on the FULL question set (safe to
+    /// write over the prod prompt); `false` when the winner regressed there, in which case `prompt` is
+    /// the SEED (unchanged) and the caller must NOT apply. Guards against the val-overfit regression.
+    pub applied: bool,
 }
 
 #[derive(Clone)]
@@ -944,30 +948,13 @@ pub fn run(
     let mut mb_cache: Vec<Option<MbCache>> = vec![None];
 
     // DSPy-style budget: keep proposing candidates until the metric-call ceiling is hit OR the pool
-    // reaches `max_candidates`. `it` is incremented at the TOP so the many `continue` branches below
-    // (no-fail minibatch, reflect fail, leak-scan reject, child-worse) still advance the counter.
-    // Safety net for the metric-call `while`: a CACHED-parent iteration whose reflection fails or is
-    // leak-scanned out (see the two `continue`s below) spends ZERO metric calls, so the budget ceiling
-    // alone can't guarantee termination — a stuck reflection LM or a persistently-leaking reflection
-    // would spin forever. Bail after too many CONSECUTIVE zero-progress iterations.
-    const STALL_LIMIT: usize = 32;
+    // reaches `max_candidates`. Every iteration either spends budget (a fresh minibatch is sampled &
+    // the parent scored) or, on a cached-parent reflect-fail / leak-reject, EVICTS that parent's cache
+    // (see the two `continue`s below) so its next selection re-samples fresh — so the metric-call
+    // counter always advances and the ceiling alone guarantees termination (no stall counter needed).
     let mut it: usize = 0;
-    let mut stall: usize = 0;
-    let mut calls_at_prev_iter = usize::MAX;
     while metric_calls < cfg.max_metric_calls && pool.len() < cfg.max_candidates {
         it += 1;
-        if metric_calls == calls_at_prev_iter {
-            stall += 1;
-        } else {
-            stall = 0;
-        }
-        calls_at_prev_iter = metric_calls;
-        if stall >= STALL_LIMIT {
-            pb.println(format!(
-                "[gepa] {STALL_LIMIT} consecutive iterations spent no budget (stuck reflection / leak-scan) — stopping search early"
-            ));
-            break;
-        }
         // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
         // (ETA + tokens/resamples). No-op on a hidden bar.
         // Position = metric calls spent so far; the bar body renders `[spent/max_metric_calls]`.
@@ -1049,11 +1036,18 @@ pub fn run(
             Ok(p) => p,
             Err(e) => {
                 pb.println(format!("[iter {it}] reflection failed: {e:#}"));
+                // Evict this parent's cached minibatch so its next selection re-samples a FRESH batch
+                // (spending budget) instead of re-failing on the identical one — guarantees the
+                // metric-call counter advances, so the budget ceiling alone terminates the loop.
+                mb_cache[parent_idx] = None;
                 continue;
             }
         };
         if let Some(reason) = leak_scan(&child_prompt, &batch, &common_tokens) {
             pb.println(format!("[iter {it}] child REJECTED by leak-scan: {reason}"));
+            // Evict (see above): a fresh batch next time gives reflection new failures to work from,
+            // letting it escape a persistent leak, and guarantees budget progress.
+            mb_cache[parent_idx] = None;
             continue;
         }
 
@@ -1135,11 +1129,44 @@ pub fn run(
         pool.len(),
     ));
 
+    // Apply-gate: the winner was picked on the small val set that GEPA also selected on, so it can
+    // overfit and REGRESS on the full task. Re-score the winner AND the seed on the FULL question set
+    // and refuse to ship a winner that isn't at least as good as the seed. (Full set, not a further
+    // held-out split: at this dataset size a third split is too noisy, and the full set IS the eval
+    // objective we must not regress.)
+    let score_full = |prompt: &str| {
+        mean(&scores(&score_questions(
+            &cfg,
+            &url,
+            &tools,
+            prompt,
+            &questions,
+            &idx,
+            graph.as_ref(),
+            &spec,
+        )))
+    };
+    let winner_full = score_full(&best_prompt);
+    let seed_full = score_full(&cfg.seed_prompt);
+    let applied = winner_full >= seed_full;
+    if applied {
+        pb.println(format!(
+            "apply-gate: winner full-set={winner_full:.3} >= seed={seed_full:.3} — APPLYING winner"
+        ));
+    } else {
+        pb.println(format!(
+            "apply-gate: winner full-set={winner_full:.3} < seed={seed_full:.3} — winner regresses; KEEPING seed (not applied)"
+        ));
+        best_prompt = cfg.seed_prompt.clone();
+        best_score = seed_full;
+    }
+
     Ok(GepaGraphResult {
         prompt: best_prompt,
         baseline_score,
         best_score,
         candidates: pool.len(),
+        applied,
     })
 }
 
