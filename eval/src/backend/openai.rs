@@ -1220,9 +1220,13 @@ mod tests {
         assert_eq!((b_n1, b_c1), (320, 0));
         assert_eq!((b_n2, b_c2), (240, 300));
 
-        // The process-global aggregates still sum correctly across both worker threads.
-        assert_eq!(new_tokens(), a_n1 + a_n2 + b_n1 + b_n2);
-        assert_eq!(cached_tokens(), a_c1 + a_c2 + b_c1 + b_c2);
+        // NOTE: intentionally NOT asserting the process-global `new_tokens()`/`cached_tokens()`
+        // aggregates here. Those atomics are shared across the whole test binary, and cargo runs
+        // tests concurrently in one process, so another test's token accumulation or `reset_tokens()`
+        // races this assert (it flaked on CI's higher-core runner: new_tokens()==0 vs the expected
+        // sum). The thread-local ISOLATION this test exists to prove is fully covered by the per-worker
+        // return-value asserts above (A's and B's splits can't be right unless their thread-locals
+        // stayed independent) — no shared global needed.
 
         reset_tokens();
     }
