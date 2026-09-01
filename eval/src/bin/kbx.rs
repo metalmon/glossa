@@ -768,7 +768,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let pb = ProgressBar::new(cases.len() as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.white} {prefix} [{pos}/{len}] {bar:40.white} {elapsed_precise}{msg}",
+                "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
             )
             .unwrap_or_else(|_| ProgressStyle::default_bar())
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
