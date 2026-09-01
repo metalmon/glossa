@@ -3501,7 +3501,7 @@ mod tests {
         assert_eq!(read_dirsig(dir.path()), Some(cur));
 
         // Add a file → next freshen makes it searchable.
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
         std::fs::write(dir.path().join("b.md"), b"# B\nworld\n").unwrap();
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
@@ -3528,11 +3528,15 @@ mod tests {
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
 
         // Mid-copy: a freshen sees b.md with only PARTIAL content, indexes it, and settles the dir.
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
         std::fs::write(dir.path().join("b.md"), b"partialonly").unwrap();
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
 
         // The copy completes: b.md's real content lands (in-place content write — no dir-mtime bump).
+        // Sleep so the finalized write gets a distinctly later mtime than the partial one — the gate's
+        // re-stat compares timestamps, and a coarse-resolution FS (the CI windows runner) otherwise
+        // can't tell the two writes apart, which flaked this test.
+        std::thread::sleep(Duration::from_millis(150));
         std::fs::write(dir.path().join("b.md"), b"# B\nworldfinished\n").unwrap();
 
         // A freshen must still pick up the finalized content.
@@ -3554,7 +3558,7 @@ mod tests {
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
         freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
         // Add a file, then freshen — it must become searchable (via the scoped path).
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(150));
         std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
         freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
