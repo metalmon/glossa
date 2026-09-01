@@ -1841,6 +1841,37 @@ pub(crate) fn split_by_episode<T: Clone>(
     (train, val)
 }
 
+/// Stratified train/val split: group `items` by `stratum` (in first-seen order for determinism),
+/// split each group independently with [`split_by_episode`] at `val_frac`, then union the parts.
+/// The val split therefore represents each stratum proportionally — used by `gepa_graph::run` to
+/// stratify on `hop_type` so a small val set still covers every reasoning shape present. Within a
+/// stratum the split stays episode-keyed, so a gold's paraphrases never straddle train/val.
+pub(crate) fn split_by_episode_stratified<T: Clone>(
+    items: &[T],
+    episode_id: impl Fn(&T) -> &str,
+    stratum: impl Fn(&T) -> &str,
+    val_frac: f64,
+) -> (Vec<T>, Vec<T>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<T>> = std::collections::HashMap::new();
+    for item in items {
+        let key = stratum(item).to_string();
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(item.clone());
+    }
+    let mut train = Vec::new();
+    let mut val = Vec::new();
+    for key in order {
+        let group = &groups[&key];
+        let (t, v) = split_by_episode(group, &episode_id, val_frac);
+        train.extend(t);
+        val.extend(v);
+    }
+    (train, val)
+}
+
 pub fn run(
     cfg: GepaConfig,
     searches: Vec<SearchExample>,

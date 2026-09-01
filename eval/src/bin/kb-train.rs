@@ -851,13 +851,23 @@ fn run_optimize_graph(
         Ok(text)
     };
 
+    // `gepa_graph::run` moved from an iteration budget to a DSPy-style metric-call ceiling + a
+    // candidate-pool cap. This legacy research binary keeps its `--budget` (iteration) flag; map it
+    // loosely: `budget` candidates max, with a finite rollout ceiling (~a handful of minibatch/
+    // pareto passes per iteration) so a run that never accepts still terminates. `kbx train` is the
+    // maintained front-end with the real dataset-derived auto-budget.
+    let legacy_max_candidates = budget.max(1);
+    let legacy_max_metric_calls = budget
+        .saturating_mul(minibatch.saturating_add(pareto_size).saturating_mul(4))
+        .max(minibatch.max(1));
     let result = kb_eval::gepa_graph::run(
         kb_eval::gepa_graph::GepaGraphConfig {
             endpoint,
             model,
             api_key,
             val_frac,
-            budget,
+            max_metric_calls: legacy_max_metric_calls,
+            max_candidates: legacy_max_candidates,
             minibatch,
             seed_prompt: seed,
             work,

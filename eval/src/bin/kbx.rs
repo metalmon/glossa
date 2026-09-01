@@ -230,18 +230,28 @@ enum Cmd {
         /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
         /// current directory upward, else the current directory).
         path: Option<PathBuf>,
-        /// Number of GEPA candidates to explore.
-        #[arg(long, default_value_t = 12)]
-        budget: usize,
-        /// Minibatch size for per-candidate rollouts.
-        #[arg(long, default_value_t = 6)]
-        minibatch: usize,
-        /// Fraction of the dataset held out as the full-validation split.
-        #[arg(long = "val-frac", default_value_t = 0.3)]
-        val_frac: f64,
-        /// Max size of the Pareto frontier retained across candidates.
-        #[arg(long = "pareto-size", default_value_t = 12)]
-        pareto_size: usize,
+        /// Dataset-relative budget preset (tiny|light|medium|heavy): sizes the metric-call ceiling
+        /// as mult×N (N = answerable golds) and the candidate cap. Mutually exclusive with
+        /// --max-metric-calls / --max-full-evals; defaults to `light` when none is passed.
+        #[arg(long, value_enum)]
+        auto: Option<train::AutoPreset>,
+        /// Raw hard ceiling on total reader rollouts (metric calls) for the search — used verbatim.
+        /// Mutually exclusive with --auto / --max-full-evals.
+        #[arg(long = "max-metric-calls")]
+        max_metric_calls: Option<usize>,
+        /// Budget as K full passes over the N answerable golds (max_metric_calls = K×N). Mutually
+        /// exclusive with --auto / --max-metric-calls.
+        #[arg(long = "max-full-evals")]
+        max_full_evals: Option<usize>,
+        /// Minibatch size for per-candidate rollouts (default 3).
+        #[arg(long)]
+        minibatch: Option<usize>,
+        /// Fraction of the dataset held out as the full-validation split (default 0.2).
+        #[arg(long = "val-frac")]
+        val_frac: Option<f64>,
+        /// Max size of the Pareto frontier retained across candidates (default 12).
+        #[arg(long = "pareto-size")]
+        pareto_size: Option<usize>,
         /// Candidate-selection strategy (e.g. "pareto").
         #[arg(long = "candidate-selection", default_value = "pareto")]
         candidate_selection: String,
@@ -489,7 +499,9 @@ fn main() -> Result<()> {
         }
         Cmd::Train {
             path,
-            budget,
+            auto,
+            max_metric_calls,
+            max_full_evals,
             minibatch,
             val_frac,
             pareto_size,
@@ -506,7 +518,9 @@ fn main() -> Result<()> {
         } => train::run_train(
             path,
             TrainArgs {
-                budget,
+                auto,
+                max_metric_calls,
+                max_full_evals,
                 minibatch,
                 val_frac,
                 pareto_size,

@@ -57,7 +57,14 @@ pub struct GepaGraphConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub val_frac: f64,
-    pub budget: usize,
+    /// Hard ceiling on total reader rollouts (metric calls) the GEPA SEARCH may spend, DSPy-style.
+    /// Every `score_questions` pass adds the number of questions it scored to a running counter;
+    /// the candidate loop stops once the counter reaches this. Replaces the old fixed iteration
+    /// `budget` — a metric-calls budget is dataset-scale-invariant (see `train::auto_budget`).
+    pub max_metric_calls: usize,
+    /// Cap on the candidate pool size: the loop also stops accepting once the pool reaches this,
+    /// bounding the final full-val selection pass (which scores every pool candidate).
+    pub max_candidates: usize,
     pub minibatch: usize,
     pub seed_prompt: String,
     pub work: PathBuf,
@@ -353,8 +360,8 @@ fn score_questions(
     spec: &ChainSpec,
 ) -> Vec<RolloutOutcome> {
     let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
-    // The main training bar tracks GEPA ITERATIONS end-to-end (length = budget, position =
-    // iterations done; set in `run`), NOT individual scoring passes — so a pass must not rewind it.
+    // The main training bar tracks metric-call spend end-to-end (length = max_metric_calls, position
+    // = rollouts spent; set in `run`), NOT individual scoring passes — so a pass must not rewind it.
     // Per-rollout completion is fed to a throwaway hidden bar; within-pass liveness comes from the
     // `StatusTicker`'s live `{msg}` (elapsed/ETA/tokens) and the per-pass `pb.println` lines.
     let sink = ProgressBar::hidden();
@@ -845,18 +852,27 @@ pub fn run(
     // Full chat-completions URL, used verbatim (no suffix appended).
     let url = cfg.endpoint.clone();
 
-    let (train, val) = crate::gepa::split_by_episode(&questions, |q| q.id.as_str(), cfg.val_frac);
+    // Stratified by `hop_type` so the small val split proportionally represents each reasoning
+    // shape present in the dataset (empty `hop_type` forms one stratum); within each stratum the
+    // split is still by episode id, so no gold's paraphrases straddle train/val.
+    let (train, val) = crate::gepa::split_by_episode_stratified(
+        &questions,
+        |q| q.id.as_str(),
+        |q| q.hop_type.as_str(),
+        cfg.val_frac,
+    );
     // All user-facing progress lines below go through `pb.println` (not raw `println!`/`eprintln!`):
     // the bar is LIVE for the whole run (created in `run_train` before this fn is called), and a raw
     // print interleaved with indicatif's redraw garbles the bar's line. `pb.println` prints the line
     // ABOVE the bar and redraws it cleanly underneath; on a hidden bar (`--no-progress`/non-TTY) it
     // is equivalent to a plain `println!`.
     pb.println(format!(
-        "gepa_graph: {} questions ({} train, {} val), budget={}, minibatch={}, pareto_size={}, graph={}, selection={}, work={}",
+        "gepa_graph: {} questions ({} train, {} val), max_metric_calls={}, max_candidates={}, minibatch={}, pareto_size={}, graph={}, selection={}, work={}",
         questions.len(),
         train.len(),
         val.len(),
-        cfg.budget,
+        cfg.max_metric_calls,
+        cfg.max_candidates,
         cfg.minibatch,
         cfg.pareto_size,
         graph.is_some(),
@@ -868,13 +884,16 @@ pub fn run(
         "empty validation split — need >=2 distinct question ids"
     );
 
-    // Main bar tracks GEPA iterations end-to-end: length = budget (the only exactly-known, monotonic
-    // whole-run quantity — per-iteration rollout counts vary with resampling/accept branches), and
-    // position = iterations completed. This yields a real whole-run ETA (StatusTicker derives it from
-    // pos/len) instead of a jumpy per-pass one. The baseline/pareto passes below run at position 0.
-    pb.set_length(cfg.budget as u64);
+    // Main bar tracks metric-call spend end-to-end: length = max_metric_calls (the DSPy-style
+    // budget), position = rollouts spent so far. This yields a real whole-run ETA (StatusTicker
+    // derives it from pos/len). The baseline/pareto passes below run at position 0.
+    pb.set_length(cfg.max_metric_calls as u64);
     pb.set_position(0);
     pb.set_prefix("training · baseline");
+
+    // Running count of reader rollouts (metric calls) spent by the SEARCH; bumped after every
+    // `score_questions` pass by the number of questions it scored. Bounds the candidate loop.
+    let mut metric_calls: usize = 0;
 
     // Dataset-wide common proper-noun-shaped tokens (interrogatives, shared nouns recurring across
     // >=2 questions) that the per-minibatch leak-scan must NOT reject a child prompt over. Computed
@@ -892,6 +911,7 @@ pub fn run(
         graph.as_ref(),
         &spec,
     );
+    metric_calls += val.len();
     let baseline_score = mean(&scores(&baseline_out));
     pb.println(format!("baseline val: score={baseline_score:.3}"));
 
@@ -912,6 +932,7 @@ pub fn run(
         graph.as_ref(),
         &spec,
     );
+    metric_calls += pareto_set.len();
     let mut pool = vec![Candidate {
         prompt: cfg.seed_prompt.clone(),
         score_val: scores(&base_pareto),
@@ -922,11 +943,35 @@ pub fn run(
     // with `pool` on every accept; the seed starts uncached.
     let mut mb_cache: Vec<Option<MbCache>> = vec![None];
 
-    for it in 0..cfg.budget {
+    // DSPy-style budget: keep proposing candidates until the metric-call ceiling is hit OR the pool
+    // reaches `max_candidates`. `it` is incremented at the TOP so the many `continue` branches below
+    // (no-fail minibatch, reflect fail, leak-scan reject, child-worse) still advance the counter.
+    // Safety net for the metric-call `while`: a CACHED-parent iteration whose reflection fails or is
+    // leak-scanned out (see the two `continue`s below) spends ZERO metric calls, so the budget ceiling
+    // alone can't guarantee termination — a stuck reflection LM or a persistently-leaking reflection
+    // would spin forever. Bail after too many CONSECUTIVE zero-progress iterations.
+    const STALL_LIMIT: usize = 32;
+    let mut it: usize = 0;
+    let mut stall: usize = 0;
+    let mut calls_at_prev_iter = usize::MAX;
+    while metric_calls < cfg.max_metric_calls && pool.len() < cfg.max_candidates {
+        it += 1;
+        if metric_calls == calls_at_prev_iter {
+            stall += 1;
+        } else {
+            stall = 0;
+        }
+        calls_at_prev_iter = metric_calls;
+        if stall >= STALL_LIMIT {
+            pb.println(format!(
+                "[gepa] {STALL_LIMIT} consecutive iterations spent no budget (stuck reflection / leak-scan) — stopping search early"
+            ));
+            break;
+        }
         // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
         // (ETA + tokens/resamples). No-op on a hidden bar.
-        // Position = iterations completed so far; the bar body renders `[it/budget]`.
-        pb.set_position(it as u64);
+        // Position = metric calls spent so far; the bar body renders `[spent/max_metric_calls]`.
+        pb.set_position(metric_calls as u64);
         pb.set_prefix(format!("training · best={best_pareto_so_far:.3}"));
         let parent_idx = select_parent_idx(&pool, cfg.candidate_selection, &mut rng);
         let parent_prompt = pool[parent_idx].prompt.clone();
@@ -953,6 +998,7 @@ pub fn run(
                         graph.as_ref(),
                         &spec,
                     );
+                    metric_calls += batch.len();
                     if outcomes.iter().any(|o| o.score < 1.0) {
                         let score = mean(&scores(&outcomes));
                         let fails: Vec<FailCase> = batch
@@ -1021,6 +1067,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
         );
+        metric_calls += batch.len();
         let child_mb_score = mean(&scores(&child_mb));
         if child_mb_score <= parent_mb_score {
             pb.println(format!(
@@ -1039,6 +1086,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
         );
+        metric_calls += pareto_set.len();
         pool.push(Candidate {
             prompt: child_prompt,
             score_val: scores(&child_pareto),
@@ -1056,7 +1104,7 @@ pub fn run(
     }
 
     pb.println(format!("final full-val scoring: {} candidates", pool.len()));
-    pb.set_position(cfg.budget as u64);
+    pb.set_position(cfg.max_metric_calls as u64);
     pb.set_prefix(format!(
         "training · final-val · best={best_pareto_so_far:.3}"
     ));

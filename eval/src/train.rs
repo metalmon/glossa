@@ -27,13 +27,103 @@ use std::time::Duration;
 /// `build::DEFAULT_CHUNKS_PER_ROUND`/`reason::run::DEFAULT_FANOUT_MAX`.
 const DEFAULT_JOBS: usize = 3;
 
-/// CLI-facing knobs for `kbx train` (parsed by the later CLI-wiring task; this struct is its
-/// target shape).
+/// Auto-budget preset: sizes the DSPy-style metric-call budget and candidate cap RELATIVE to the
+/// dataset (N answerable golds), so the same flag scales from a tiny smoke-test to a heavy sweep
+/// without the caller hand-tuning `--max-metric-calls`. `mult` × N = total reader rollouts allowed
+/// for the search; `max_candidates` caps the pool (and thus the final full-val pass).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AutoPreset {
+    /// Smallest useful sweep (smoke-test): 6×N rollouts, ≤4 candidates.
+    Tiny,
+    /// Balanced default: 13×N rollouts, ≤6 candidates.
+    Light,
+    /// Deeper search: 17×N rollouts, ≤12 candidates.
+    Medium,
+    /// Heaviest sweep: 20×N rollouts, ≤18 candidates.
+    Heavy,
+}
+
+impl AutoPreset {
+    /// Metric-call multiplier: total allowed rollouts = `mult * n`.
+    fn mult(self) -> usize {
+        match self {
+            AutoPreset::Tiny => 6,
+            AutoPreset::Light => 13,
+            AutoPreset::Medium => 17,
+            AutoPreset::Heavy => 20,
+        }
+    }
+
+    /// Candidate-pool cap for this preset.
+    fn max_candidates(self) -> usize {
+        match self {
+            AutoPreset::Tiny => 4,
+            AutoPreset::Light => 6,
+            AutoPreset::Medium => 12,
+            AutoPreset::Heavy => 18,
+        }
+    }
+}
+
+/// Default candidate-pool cap when a RAW budget (`--max-metric-calls`/`--max-full-evals`) is given
+/// without an `--auto` preset to imply one.
+const DEFAULT_RAW_MAX_CANDIDATES: usize = 12;
+
+/// Resolved DSPy-style budget: hard ceiling on reader rollouts (`max_metric_calls`) plus the pool
+/// cap (`max_candidates`) and the `--auto` preset it derived from (`None` when a raw budget was
+/// given), for the AUTO-PARAMS print.
+struct AutoBudget {
+    max_metric_calls: usize,
+    max_candidates: usize,
+    preset: Option<AutoPreset>,
+}
+
+/// Derive the budget from the dataset size `n` (answerable golds) and the mutually-exclusive budget
+/// knobs. Exactly one of `{auto, max_metric_calls, max_full_evals}` should be `Some`; the caller
+/// enforces exclusivity and defaults `auto = Light` when none is set. A raw `--max-metric-calls m`
+/// is used verbatim; `--max-full-evals k` means `k` full passes over the N golds (`k * n`).
+fn auto_budget(
+    n: usize,
+    auto: Option<AutoPreset>,
+    max_metric_calls: Option<usize>,
+    max_full_evals: Option<usize>,
+) -> AutoBudget {
+    if let Some(m) = max_metric_calls {
+        return AutoBudget {
+            max_metric_calls: m.max(1),
+            max_candidates: DEFAULT_RAW_MAX_CANDIDATES,
+            preset: None,
+        };
+    }
+    if let Some(k) = max_full_evals {
+        return AutoBudget {
+            max_metric_calls: k.saturating_mul(n).max(1),
+            max_candidates: DEFAULT_RAW_MAX_CANDIDATES,
+            preset: None,
+        };
+    }
+    let preset = auto.unwrap_or(AutoPreset::Light);
+    AutoBudget {
+        max_metric_calls: preset.mult().saturating_mul(n).max(1),
+        max_candidates: preset.max_candidates(),
+        preset: Some(preset),
+    }
+}
+
+/// CLI-facing knobs for `kbx train`. The three budget knobs (`auto`/`max_metric_calls`/
+/// `max_full_evals`) are mutually exclusive; `minibatch`/`val_frac`/`pareto_size` are `Option`
+/// (defaulted in `run_train`) so "not passed" is distinguishable from an explicit value.
 pub struct TrainArgs {
-    pub budget: usize,
-    pub minibatch: usize,
-    pub val_frac: f64,
-    pub pareto_size: usize,
+    /// Dataset-relative budget preset (`tiny|light|medium|heavy`). Mutually exclusive with the two
+    /// raw-budget knobs; when all three are `None`, `run_train` defaults to `light`.
+    pub auto: Option<AutoPreset>,
+    /// Raw hard ceiling on total reader rollouts (metric calls) — used verbatim.
+    pub max_metric_calls: Option<usize>,
+    /// Budget expressed as K full passes over the N answerable golds (`max_metric_calls = k * n`).
+    pub max_full_evals: Option<usize>,
+    pub minibatch: Option<usize>,
+    pub val_frac: Option<f64>,
+    pub pareto_size: Option<usize>,
     pub candidate_selection: String,
     pub dataset: Option<PathBuf>,
     pub prompt: Option<PathBuf>,
@@ -139,19 +229,62 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         None
     };
 
+    // --- dataset analysis + DSPy-style auto-budget --------------------------------------------
+    // N = answerable golds GEPA optimizes against (unanswerable already filtered above). The
+    // budget is sized RELATIVE to N so one `--auto` preset scales across dataset sizes.
+    let n = dataset.len();
+    // hop_type breakdown (empty -> "(untyped)"), alphabetical for a deterministic printed line.
+    let mut hop_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for q in &dataset {
+        let key = if q.hop_type.is_empty() {
+            "(untyped)".to_string()
+        } else {
+            q.hop_type.clone()
+        };
+        *hop_counts.entry(key).or_default() += 1;
+    }
+    let hop_breakdown = hop_counts
+        .iter()
+        .map(|(k, c)| format!("{k} {c}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+
+    // The three budget knobs are mutually exclusive; when none is set, default to `auto = light`.
+    let n_budget_knobs = [
+        args.auto.is_some(),
+        args.max_metric_calls.is_some(),
+        args.max_full_evals.is_some(),
+    ]
+    .iter()
+    .filter(|&&set| set)
+    .count();
+    anyhow::ensure!(
+        n_budget_knobs <= 1,
+        "--auto, --max-metric-calls and --max-full-evals are mutually exclusive (pass at most one)"
+    );
+    let budget = auto_budget(n, args.auto, args.max_metric_calls, args.max_full_evals);
+    // Minibatch/val_frac/pareto default here (GEPA/DSPy guidance: small minibatch, small val so
+    // train stays large). Pareto defaults to a small constant — the true val size is only known
+    // inside `gepa_graph::run` after the split, so it can't be derived here.
+    let minibatch = args.minibatch.unwrap_or(3);
+    let val_frac = args.val_frac.unwrap_or(0.2);
+    let pareto_size = args.pareto_size.unwrap_or(12);
+
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
     let cfg = GepaGraphConfig {
         endpoint: model_ep.endpoint.clone(),
         model: model_ep.model.clone(),
         api_key: model_key,
-        val_frac: args.val_frac,
-        budget: args.budget,
-        minibatch: args.minibatch,
+        val_frac,
+        max_metric_calls: budget.max_metric_calls,
+        max_candidates: budget.max_candidates,
+        minibatch,
         seed_prompt: seed,
         work: paths.root.clone(),
         seed: rng_seed,
-        pareto_size: args.pareto_size,
+        pareto_size,
         candidate_selection,
         jobs,
         judge: judge_cfg,
@@ -189,14 +322,14 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     };
 
     // Visible progress bar for the long GEPA run (mirrors `kbx run`/build/reason): one bar owned
-    // here, driven per iteration by `gepa_graph::run` (length = budget, position = iterations done).
+    // here, driven by `gepa_graph::run` (length = max_metric_calls, position = rollouts spent).
     // Hidden on a non-TTY or under `--no-progress`, exactly like `run_eval`.
     let show_progress =
         !args.no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
     let pb = if show_progress {
-        // Length 0 at creation: `gepa_graph::run` sets the real length (= budget) once it starts, so
-        // the bar tracks GEPA iterations end-to-end (`[iter/budget]`). Seeding a count here would
-        // flash a misleading total for the brief window before that first `set_length`.
+        // Length 0 at creation: `gepa_graph::run` sets the real length (= max_metric_calls) once it
+        // starts, so the bar tracks metric-call spend end-to-end (`[spent/max_metric_calls]`).
+        // Seeding a count here would flash a misleading total before that first `set_length`.
         let pb = ProgressBar::new(0);
         pb.set_style(
             ProgressStyle::with_template(
@@ -217,6 +350,24 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     reset_resamples();
     pb.set_prefix("training");
     let ticker = StatusTicker::start(&pb);
+
+    // Dataset analysis + resolved auto-params, above the live bar (pb.println is a plain println on
+    // a hidden bar). Kept value-free (counts/params only — no gold/corpus text).
+    pb.println(format!("ANALYSIS: N={n} · {hop_breakdown}"));
+    pb.println(format!(
+        "AUTO-PARAMS: max_metric_calls={} max_candidates={} minibatch={minibatch} val_frac={val_frac} pareto={pareto_size} (auto={})",
+        budget.max_metric_calls,
+        budget.max_candidates,
+        match budget.preset {
+            Some(p) => format!("{p:?}").to_lowercase(),
+            None => "off".to_string(),
+        },
+    ));
+    if n < 30 {
+        pb.println(format!(
+            "WARNING: small dataset (N={n} < 30) — GEPA may overfit and the winner may not generalize"
+        ));
+    }
 
     let result = gepa_graph::run(cfg, dataset, &reflect, &pb)?;
 
@@ -294,5 +445,41 @@ mod tests {
         assert_eq!(resolve(None, Some(2), DEFAULT_JOBS).max(1), 2);
         assert_eq!(resolve(None, None, DEFAULT_JOBS).max(1), DEFAULT_JOBS);
         assert_eq!(resolve(Some(0), Some(2), DEFAULT_JOBS).max(1), 1);
+    }
+
+    /// Auto-budget: presets scale the metric-call ceiling with N and imply a candidate cap; the two
+    /// raw knobs override (verbatim `m`; `k * n` full passes) and fall back to the raw candidate cap.
+    #[test]
+    fn auto_budget_scales_with_n_and_raw_knobs_override() {
+        // Preset default (light) = 13×N rollouts, ≤6 candidates.
+        let b = auto_budget(40, Some(AutoPreset::Light), None, None);
+        assert_eq!(b.max_metric_calls, 13 * 40);
+        assert_eq!(b.max_candidates, 6);
+        assert_eq!(b.preset, Some(AutoPreset::Light));
+
+        // tiny/medium/heavy multipliers + candidate caps.
+        assert_eq!(
+            auto_budget(10, Some(AutoPreset::Tiny), None, None).max_metric_calls,
+            60
+        );
+        assert_eq!(
+            auto_budget(10, Some(AutoPreset::Medium), None, None).max_candidates,
+            12
+        );
+        assert_eq!(
+            auto_budget(10, Some(AutoPreset::Heavy), None, None).max_metric_calls,
+            200
+        );
+
+        // Raw max-metric-calls used verbatim, raw candidate cap.
+        let m = auto_budget(40, None, Some(250), None);
+        assert_eq!(m.max_metric_calls, 250);
+        assert_eq!(m.max_candidates, DEFAULT_RAW_MAX_CANDIDATES);
+        assert_eq!(m.preset, None);
+
+        // Full-evals = k passes over N.
+        let f = auto_budget(40, None, None, Some(5));
+        assert_eq!(f.max_metric_calls, 5 * 40);
+        assert_eq!(f.max_candidates, DEFAULT_RAW_MAX_CANDIDATES);
     }
 }
