@@ -3,7 +3,6 @@
 //! the harness parses back out. Reuses the same chat client the agent backend drives
 //! (`backend::openai::chat_once`) so judge calls hit the endpoint the same way.
 
-use crate::backend::openai::chat_once;
 use crate::lab::Endpoint;
 use anyhow::Context;
 use glossa::index::store::DocIndex;
@@ -143,7 +142,6 @@ pub fn judge(
     source: &[String],
     idx: Option<&DocIndex>,
 ) -> anyhow::Result<Judgement> {
-    let api_key = ep.resolve_key();
     // Trim the embedded fields so the judge message stays tidy and never ends on a stray newline
     // (some strict providers reject a message ending in `\n` — see prompt::user_prompt).
     let (question, gold, answer) = (question.trim(), gold.trim(), answer.trim());
@@ -154,15 +152,8 @@ pub fn judge(
         json!({ "role": "system", "content": judge_md }),
         json!({ "role": "user", "content": user }),
     ];
-    let msg = chat_once(
-        &ep.endpoint,
-        &ep.model,
-        &messages,
-        api_key.as_deref(),
-        ep.timeout_secs,
-        ep.resolve_temperature(),
-    )
-    .context("judge endpoint request failed")?;
+    let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
+        .context("judge endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
     Ok(parse_verdict(content))
 }

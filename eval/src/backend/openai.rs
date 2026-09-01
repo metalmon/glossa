@@ -592,6 +592,12 @@ impl OpenAiBackend {
 /// the same uniform rule as every other call site: `Some(t)` samples at `t`, `None` OMITS the
 /// `temperature` field so the provider/model applies its own default (callers resolve it via
 /// `Endpoint::resolve_temperature`, i.e. `KB_EVAL_TEMP` env > `ep.temperature` > `None`).
+///
+/// Retained under `cfg(test)` only: every production one-off call now goes through
+/// [`chat_once_resampled`] (raw `chat_once` had transport-level resilience but no degenerate
+/// resample). This is kept solely to exercise the tools-free body-building / verbatim-endpoint-URL
+/// path in the transport tests (`chat_once_posts_endpoint_url_verbatim`).
+#[cfg(test)]
 pub(crate) fn chat_once(
     endpoint: &str,
     model: &str,
@@ -625,6 +631,33 @@ pub(crate) fn chat_once(
             .cloned()
             .unwrap_or_else(|| json!({}))
     })
+}
+
+/// Single-shot model call with the SAME provider-neutral degenerate-resample as the reader's agent
+/// loop (length cap / repetition loop / empty turn — see [`crate::backend::resample`]). Use instead
+/// of raw [`chat_once`] for every one-off call (judge, reflect, user-sim, …) so a degenerate
+/// completion is retried uniformly and WORD-AGNOSTICALLY (never keyed on the reply's content).
+/// Returns the assistant message shaped like `chat_once` (a `{"role","content"}` object) so callers
+/// reading `.get("content")` are unchanged. `system` travels inside `messages` (as messages[0]),
+/// exactly as the raw `chat_once` sites already pass it.
+pub(crate) fn chat_once_resampled(
+    ep: &crate::lab::Endpoint,
+    messages: &[Value],
+) -> anyhow::Result<Value> {
+    let transport = crate::backend::transport::transport_for(ep);
+    let turn = crate::backend::resample::call_with_resample(
+        transport.as_ref(),
+        ep,
+        None,
+        messages,
+        None,
+        ep.resolve_temperature(),
+        crate::backend::resample::ResamplePolicy::default(),
+    )?;
+    Ok(serde_json::json!({
+        "role": "assistant",
+        "content": turn.text.unwrap_or_default(),
+    }))
 }
 
 /// True when an error body reflects a transient UPSTREAM failure of the gateway's own backend (its
@@ -682,13 +715,12 @@ pub(crate) fn record_usage(resp: &Value) {
 /// `chat_once` can extract the message itself. Both record token usage exactly once via
 /// `record_usage`. (The retired `lmstudio_chat` is gone — its body-building lives in
 /// `transport::openai::agent_chat_full` and its resample loop in `backend::resample`.)
-pub(crate) use crate::backend::transport::openai::{
-    chat_http_full, content_of, parse_tool_args, tools_schema,
-};
-// `chat_http` is consumed only by this module's integration tests; re-export it under `cfg(test)`
-// so the non-test build doesn't see an unused import.
+pub(crate) use crate::backend::transport::openai::{content_of, parse_tool_args, tools_schema};
+// `chat_http`/`chat_http_full` are now consumed only by this module's (cfg(test)) `chat_once` and
+// its integration tests; re-export them under `cfg(test)` so the non-test build doesn't see an
+// unused import.
 #[cfg(test)]
-pub(crate) use crate::backend::transport::openai::chat_http;
+pub(crate) use crate::backend::transport::openai::{chat_http, chat_http_full};
 
 /// Unproductive-streak threshold. MOVED to `backend::agent_loop` (Task 3 of the multi-api-
 /// transport plan) along with the loop's dedup/streak/NBA logic; re-exported here so this

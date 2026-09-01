@@ -24,7 +24,6 @@
 //! judged outcome and is marked done, so a `--resume` run doesn't re-ask the model about an entity
 //! it already decided has no genuine cross-doc steps.
 
-use crate::backend::openai::chat_once;
 use crate::build::candidates::CandidateGroup;
 use crate::build::chunks::chunk_text;
 use crate::checkpoint::Checkpoint;
@@ -124,8 +123,6 @@ pub fn judge_group(
     entity: &str,
     facts: &[GroupFact],
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let api_key = ep.resolve_key();
-
     let mut user = format!("Entity: {entity}\n\n");
     for (i, f) in facts.iter().enumerate() {
         user.push_str(&format!(
@@ -147,15 +144,8 @@ pub fn judge_group(
         json!({ "role": "system", "content": bridge_md }),
         json!({ "role": "user", "content": user }),
     ];
-    let msg = chat_once(
-        &ep.endpoint,
-        &ep.model,
-        &messages,
-        api_key.as_deref(),
-        ep.timeout_secs,
-        ep.resolve_temperature(),
-    )
-    .context("bridge group judge endpoint request failed")?;
+    let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
+        .context("bridge group judge endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
     let member_ids: HashSet<&str> = facts.iter().map(|f| f.id.as_str()).collect();

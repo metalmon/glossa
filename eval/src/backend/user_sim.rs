@@ -93,16 +93,8 @@ impl DialogueGate for UserSimGate<'_> {
             json!({ "role": "system", "content": self.prompt }),
             json!({ "role": "user", "content": Self::build_user_message(question, proposed) }),
         ];
-        let key = self.ep.resolve_key();
         // Fail OPEN: any transport error accepts the assistant's turn rather than hang/fail the run.
-        let msg = match crate::backend::openai::chat_once(
-            &self.ep.endpoint,
-            &self.ep.model,
-            &messages,
-            key.as_deref(),
-            self.ep.timeout_secs,
-            self.ep.resolve_temperature(),
-        ) {
+        let msg = match crate::backend::openai::chat_once_resampled(self.ep, &messages) {
             Ok(m) => m,
             Err(_) => return Ok(None),
         };

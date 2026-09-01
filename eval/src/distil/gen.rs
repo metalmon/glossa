@@ -11,7 +11,7 @@
 //! (question, answer) pair instead.
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::{chat_once, run_agent_loop};
+use crate::backend::openai::run_agent_loop;
 use crate::backend::transport::openai::agent_chat_full;
 use crate::lab::LabConfig;
 use crate::reason::schema_graph_block;
@@ -305,14 +305,7 @@ pub fn generate_one(
     // tools, no chain. If it answers correctly anyway, the question tests nothing and is dropped
     // regardless of the model's own gate_ok.
     let leak_messages = vec![json!({ "role": "user", "content": proposal.question.clone() })];
-    let leak_resp = chat_once(
-        &endpoint,
-        &model,
-        &leak_messages,
-        api_key.as_deref(),
-        distil_ep.timeout_secs,
-        distil_ep.resolve_temperature(),
-    )?;
+    let leak_resp = crate::backend::openai::chat_once_resampled(distil_ep, &leak_messages)?;
     let leak_text = leak_resp
         .get("content")
         .and_then(|c| c.as_str())

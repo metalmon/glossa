@@ -300,15 +300,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             serde_json::json!({"role": "system", "content": reflect_md}),
             serde_json::json!({"role": "user", "content": instruction}),
         ];
-        let key = reflect_ep.resolve_key();
-        let msg = crate::backend::openai::chat_once(
-            &reflect_ep.endpoint,
-            &reflect_ep.model,
-            &msgs,
-            key.as_deref(),
-            reflect_ep.timeout_secs,
-            reflect_ep.resolve_temperature(),
-        )?;
+        let msg = crate::backend::openai::chat_once_resampled(&reflect_ep, &msgs)?;
         let text = msg
             .get("content")
             .and_then(|v| v.as_str())
