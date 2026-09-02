@@ -12,6 +12,7 @@ use kb_eval::backend::openai::{
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::dataset::Question;
+use kb_eval::dataset_ops;
 use kb_eval::dataset_toml::parse_dataset_toml;
 use kb_eval::distil::{self, DistilArgs};
 use kb_eval::finetune::{
@@ -402,6 +403,56 @@ enum Cmd {
         #[arg(long = "max-chains")]
         max_chains: Option<usize>,
     },
+    /// Operate on `dataset.toml`-shape files (stat / merge / validate / dedup / sample). All
+    /// subcommands read+write through the single case parser, round-tripping every `[[case]]`
+    /// field.
+    Dataset {
+        #[command(subcommand)]
+        cmd: DatasetCmd,
+    },
+}
+
+/// `kbx dataset` subcommands — pure file ops on the `[[case]]` dataset format (logic lives in
+/// `kb_eval::dataset_ops`; this layer only parses args and prints).
+#[derive(Subcommand)]
+enum DatasetCmd {
+    /// Print counts/breakdowns for a dataset file (read-only): hop_type, answerable, needs_graph,
+    /// alias coverage, duplicate/blank counts, and question/answer length min/median/max.
+    Stat {
+        /// Dataset TOML to inspect.
+        file: PathBuf,
+    },
+    /// Append `--from`'s cases into `--into`: dedup by normalized question, re-id colliding ids,
+    /// back `--into` up to `<into>.bak`, then write the merged set.
+    Merge {
+        /// Source dataset whose cases are appended.
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination dataset, merged in place (backed up to `<into>.bak` first).
+        #[arg(long)]
+        into: PathBuf,
+    },
+    /// Check a dataset (non-empty q/a, valid hop_type, unique ids); exit non-zero on any issue.
+    Validate {
+        /// Dataset TOML to validate.
+        file: PathBuf,
+    },
+    /// Remove normalized-duplicate questions (keep first), backing up to `<file>.bak` first.
+    Dedup {
+        /// Dataset TOML to dedup in place.
+        file: PathBuf,
+    },
+    /// Print N cases chosen with a seeded RNG (reproducible).
+    Sample {
+        /// Dataset TOML to sample from.
+        file: PathBuf,
+        /// Number of cases to print (>= total prints all).
+        #[arg(short = 'n')]
+        n: usize,
+        /// RNG seed for a reproducible sample (default 0).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -604,6 +655,7 @@ fn main() -> Result<()> {
                 max_chains,
             },
         ),
+        Cmd::Dataset { cmd } => run_dataset(cmd),
     }
 }
 
@@ -1156,6 +1208,124 @@ fn run_export(args: ExportArgs) -> Result<()> {
     Ok(())
 }
 
+/// `kbx dataset` dispatch: thin arg-parse -> `dataset_ops` -> print. `validate` returns an `Err`
+/// (non-zero exit) when the file has any issue, so it doubles as a CI/pre-merge gate.
+fn run_dataset(cmd: DatasetCmd) -> Result<()> {
+    match cmd {
+        DatasetCmd::Stat { file } => {
+            let cases = dataset_ops::load_cases(&file)?;
+            let s = dataset_ops::compute_stat(&cases);
+            let pct = |n: usize| {
+                if s.total == 0 {
+                    0.0
+                } else {
+                    100.0 * n as f64 / s.total as f64
+                }
+            };
+            println!("cases: {}", s.total);
+            println!(
+                "hop_type: lexical {} ({:.0}%), multihop {} ({:.0}%), untyped {} ({:.0}%)",
+                s.lexical,
+                pct(s.lexical),
+                s.multihop,
+                pct(s.multihop),
+                s.untyped,
+                pct(s.untyped)
+            );
+            println!(
+                "answerable: {} ({:.0}%), unanswerable: {}",
+                s.answerable,
+                pct(s.answerable),
+                s.unanswerable
+            );
+            let ng = s
+                .needs_graph
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("needs_graph: {ng}");
+            println!(
+                "aliases: {} with, {} without",
+                s.with_aliases, s.without_aliases
+            );
+            println!(
+                "duplicates: {} question(s), {} answer(s)",
+                s.dup_questions, s.dup_answers
+            );
+            println!("blank question/answer: {}", s.blank);
+            println!(
+                "question chars: min {} / median {} / max {}",
+                s.q_len.min, s.q_len.median, s.q_len.max
+            );
+            println!(
+                "answer chars: min {} / median {} / max {}",
+                s.a_len.min, s.a_len.median, s.a_len.max
+            );
+            Ok(())
+        }
+        DatasetCmd::Merge { from, into } => {
+            let summary = dataset_ops::merge_files(&from, &into)?;
+            println!(
+                "merge: from={}, added={}, skipped_dup={}, total={} (backed up {} -> {})",
+                summary.from,
+                summary.added,
+                summary.skipped_dup,
+                summary.total,
+                into.display(),
+                dataset_ops::backup_path(&into).display()
+            );
+            Ok(())
+        }
+        DatasetCmd::Validate { file } => {
+            let cases = dataset_ops::load_cases(&file)?;
+            let issues = dataset_ops::validate_cases(&cases);
+            if issues.is_empty() {
+                println!("ok: {} cases", cases.len());
+                Ok(())
+            } else {
+                for i in &issues {
+                    println!("case {}: {}", i.id, i.problem);
+                }
+                anyhow::bail!("{} issue(s) found in {}", issues.len(), file.display())
+            }
+        }
+        DatasetCmd::Dedup { file } => {
+            let (removed, total) = dataset_ops::dedup_file(&file)?;
+            println!(
+                "dedup: removed {removed}, {total} remain (backed up {} -> {})",
+                file.display(),
+                dataset_ops::backup_path(&file).display()
+            );
+            Ok(())
+        }
+        DatasetCmd::Sample { file, n, seed } => {
+            let cases = dataset_ops::load_cases(&file)?;
+            let chosen = dataset_ops::sample_cases(&cases, n, seed);
+            for c in &chosen {
+                let hop = if c.hop_type.is_empty() {
+                    "(untyped)"
+                } else {
+                    c.hop_type.as_str()
+                };
+                println!("{} [{}] {}", c.id, hop, c.question);
+                println!("    -> {}", truncate_chars(&c.answer, 100));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Truncate `s` to at most `max` chars, appending an ellipsis when cut — keeps `sample`'s answer
+/// column readable without wrapping the terminal on a paragraph-length gold.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}…")
+}
+
 /// Gold answer forms accepted for scoring: the primary `answer` plus any `answer_aliases` —
 /// mirrors the `golds` vector `run::eval_one` builds for the same reason (MuSiQue/SQuAD-style
 /// alias-aware EM/F1).
@@ -1544,6 +1714,50 @@ mod tests {
             }
             _ => panic!("expected Cmd::Eval"),
         }
+    }
+
+    #[test]
+    fn dataset_subcommands_parse() {
+        let cli = Cli::try_parse_from(["kbx", "dataset", "stat", "d.toml"]).unwrap();
+        match cli.cmd {
+            Cmd::Dataset {
+                cmd: DatasetCmd::Stat { file },
+            } => assert_eq!(file, PathBuf::from("d.toml")),
+            _ => panic!("expected dataset stat"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "kbx", "dataset", "merge", "--from", "s.toml", "--into", "d.toml",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Dataset {
+                cmd: DatasetCmd::Merge { from, into },
+            } => {
+                assert_eq!(from, PathBuf::from("s.toml"));
+                assert_eq!(into, PathBuf::from("d.toml"));
+            }
+            _ => panic!("expected dataset merge"),
+        }
+
+        // sample: -n required, --seed defaults to 0.
+        let cli = Cli::try_parse_from(["kbx", "dataset", "sample", "d.toml", "-n", "5"]).unwrap();
+        match cli.cmd {
+            Cmd::Dataset {
+                cmd: DatasetCmd::Sample { file, n, seed },
+            } => {
+                assert_eq!(file, PathBuf::from("d.toml"));
+                assert_eq!(n, 5);
+                assert_eq!(seed, 0, "--seed defaults to 0 for reproducibility");
+            }
+            _ => panic!("expected dataset sample"),
+        }
+    }
+
+    #[test]
+    fn truncate_chars_cuts_and_marks() {
+        assert_eq!(truncate_chars("short", 100), "short");
+        assert_eq!(truncate_chars("abcdef", 3), "abc…");
     }
 
     #[test]

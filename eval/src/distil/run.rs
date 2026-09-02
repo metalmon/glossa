@@ -285,6 +285,34 @@ fn write_dataset_toml(out_path: &std::path::Path, kept: &[OutCase]) -> Result<()
     Ok(())
 }
 
+/// Resolve a `--emit-golds`/`--out` gold path so it can never silently pollute the indexed corpus:
+///
+/// * an ABSOLUTE path is honored verbatim (the caller owns the location);
+/// * a RELATIVE path is resolved under `paths.kbx_dir` (`<root>/.glossa/kbx/`) — the SAME
+///   not-indexed location as the default `dataset.synthetic.toml`, NOT the current working
+///   directory (running from the corpus root, a bare relative name would land in the indexed tree
+///   and the doc indexer would ingest it — the bug this guards).
+///
+/// Then GUARD: if the final path lands inside the corpus root (`paths.root`) but NOT under its
+/// `.glossa/` subtree, reject it — writing golds there would feed them back into the index. Pure
+/// and side-effect-free so it can be unit-tested without touching the model/filesystem.
+fn resolve_golds_out(paths: &KbxPaths, out: &std::path::Path) -> Result<PathBuf> {
+    let resolved = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        paths.kbx_dir.join(out)
+    };
+    let glossa = paths.root.join(".glossa");
+    if resolved.starts_with(&paths.root) && !resolved.starts_with(&glossa) {
+        bail!(
+            "refusing to write golds into the indexed corpus tree ({}); use a path under \
+             .glossa/kbx/ or an absolute path outside the corpus",
+            resolved.display()
+        );
+    }
+    Ok(resolved)
+}
+
 /// Orchestrate `kbx distil` over the corpus at `path` (kb-style PATH resolution via
 /// `workspace::resolve`): load `lab.toml` + ontology + `distil_golds.md` (the gold-gen mode's own
 /// prompt file, separate from densify's `distil.md`), build the seed pool, attempt `args.count`
@@ -326,10 +354,10 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         );
     }
 
-    let out_path = args
-        .out
-        .clone()
-        .unwrap_or_else(|| paths.kbx_dir.join("dataset.synthetic.toml"));
+    let out_path = match &args.out {
+        Some(p) => resolve_golds_out(&paths, p)?,
+        None => paths.kbx_dir.join("dataset.synthetic.toml"),
+    };
 
     // Attempt budget: `--target N` keeps generating until N are KEPT, bounded by `max_attempts`
     // (default N*4, floored at N) so a stubborn gate can't loop forever; otherwise a fixed `--count`
@@ -403,7 +431,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
                     ));
                 }
                 pb.println(format!(
-                    "distil {i}: kept \"{}\" (seed {})",
+                    "distil {i}: kept [{hop_type}] \"{}\" (seed {})",
                     p.question, seed.id
                 ));
                 // Sequential id over KEPT golds (no gaps from dropped attempts).
@@ -963,6 +991,36 @@ relations = ["LEADS_TO"]
         assert_eq!(parsed[0].hop_type, "multihop", "hop_type round-trips");
         assert_eq!(parsed[1].id, "synth-1");
         assert_eq!(parsed[1].hop_type, "lexical");
+    }
+
+    // ---- emit-golds path resolution + guard (Part A), model-free -------------------------------
+
+    #[test]
+    fn resolve_golds_out_puts_relative_under_kbx_dir() {
+        let paths = KbxPaths::for_root(PathBuf::from("/corp"));
+        // A bare relative name resolves under `<root>/.glossa/kbx/`, NOT the cwd/corpus tree.
+        let r = resolve_golds_out(&paths, std::path::Path::new("golds.toml")).unwrap();
+        assert_eq!(r, paths.kbx_dir.join("golds.toml"));
+        assert!(r.starts_with(paths.root.join(".glossa")));
+    }
+
+    #[test]
+    fn resolve_golds_out_honors_absolute_outside_corpus() {
+        let paths = KbxPaths::for_root(PathBuf::from("/corp"));
+        let abs = PathBuf::from("/tmp/elsewhere/golds.toml");
+        assert_eq!(resolve_golds_out(&paths, &abs).unwrap(), abs);
+    }
+
+    #[test]
+    fn resolve_golds_out_rejects_in_corpus_non_glossa_path() {
+        let paths = KbxPaths::for_root(PathBuf::from("/corp"));
+        // An ABSOLUTE path inside the corpus root but outside `.glossa/` would pollute the index.
+        let inside = paths.root.join("docs").join("golds.toml");
+        let err = resolve_golds_out(&paths, &inside).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to write golds"),
+            "expected the in-corpus guard error, got: {err}"
+        );
     }
 
     // ---- densify orchestrator (Task 3): doc selection + checkpoint, model-free ----------------

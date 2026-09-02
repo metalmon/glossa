@@ -12,6 +12,7 @@ pub mod constraint_score;
 pub mod constraint_synthetic;
 pub mod corpus;
 pub mod dataset;
+pub mod dataset_ops;
 pub mod dataset_toml;
 pub mod distil;
 pub mod enrich;
