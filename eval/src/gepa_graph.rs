@@ -1015,6 +1015,12 @@ pub fn run(
     // Per-candidate cached reflect-minibatch, indexed parallel to `pool` (see `MbCache`). Grows
     // with `pool` on every accept; the seed starts uncached.
     let mut mb_cache: Vec<Option<MbCache>> = vec![None];
+    // Train questions to STOP sampling into reflect minibatches: a question whose rollout failed on
+    // the endpoint (a deterministic context-length overflow / 500) would fail identically every time
+    // it is resampled, burning budget + wall-clock and shrinking each minibatch for zero signal. The
+    // val/D_pareto side is pre-filtered once via `drop_baseline_errored`; the train side has no
+    // baseline pass, so we blocklist a question the first time it errors and skip it thereafter.
+    let mut blocked_train: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Minibatch-cache mode (see `GepaGraphConfig::minibatch_cache`). Default OFF = canonical GEPA
     // (fresh minibatch + parent re-roll every proposal). Turn ON only for a weak, high-variance
     // reader. Source: lab.toml `[tuning].gepa_minibatch_cache` (cfg.minibatch_cache); env
@@ -1061,7 +1067,13 @@ pub fn run(
             None => {
                 let mut found = None;
                 for _ in 0..MINIBATCH_RESAMPLE_ATTEMPTS {
-                    let batch = sample_questions(&train, cfg.minibatch, &mut rng);
+                    // Sample only from train questions not yet blocklisted by a prior endpoint error.
+                    let available: Vec<Question> = train
+                        .iter()
+                        .filter(|q| !blocked_train.contains(&q.id))
+                        .cloned()
+                        .collect();
+                    let batch = sample_questions(&available, cfg.minibatch, &mut rng);
                     if batch.is_empty() {
                         break;
                     }
@@ -1076,6 +1088,17 @@ pub fn run(
                         &spec,
                     );
                     metric_calls += batch.len();
+                    // Blocklist any question that errored on the endpoint so it is never sampled
+                    // again (a context-length overflow is deterministic — resampling only wastes
+                    // budget/time). Log once, when first dropped, so the exclusion is visible.
+                    for (q, o) in batch.iter().zip(&outcomes) {
+                        if o.errored && blocked_train.insert(q.id.clone()) {
+                            pb.println(format!(
+                                "train: dropped q {} from the minibatch pool (endpoint error — excluded from future sampling)",
+                                q.id
+                            ));
+                        }
+                    }
                     // Only a NON-errored sub-perfect rollout is a teachable failure: an endpoint
                     // error is not a wrong answer and must never seed a reflect batch or become a
                     // FailCase.
