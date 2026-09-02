@@ -259,6 +259,10 @@ fn rollout_one(
     idx: &DocIndex,
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
+    // The live training bar: error notices go through `pb.println` (prints ABOVE the bar) instead of
+    // a raw `eprintln!` that would garble the bar. Safe from parallel rollout workers (indicatif
+    // serializes internally); a hidden bar makes it a plain println.
+    pb: &ProgressBar,
 ) -> RolloutOutcome {
     let trace = TraceLog::disabled();
     let steps = std::cell::RefCell::new(Vec::<ToolStep>::new());
@@ -342,7 +346,7 @@ fn rollout_one(
             // ENDPOINT/TRANSPORT failure (500, context-length overflow, …): the reader never
             // produced an answer. Flag the outcome `errored` so scored means exclude it — it is NOT
             // a wrong answer and must not be counted as a real 0.0.
-            eprintln!("graph rollout failed for q {}: {e:#}", q.id);
+            pb.println(format!("graph rollout failed for q {}: {e:#}", q.id));
             (String::new(), true)
         }
     };
@@ -373,7 +377,7 @@ fn rollout_one(
                 // teacher guessing at the failure mode.
                 Ok(j) => (verdict_to_score(j.verdict), Some(j.reason)),
                 Err(e) => {
-                    eprintln!("judge failed (scored 0): {e:#}");
+                    pb.println(format!("judge failed (scored 0): {e:#}"));
                     (0.0, None)
                 }
             },
@@ -415,6 +419,9 @@ fn score_questions(
     idx: &DocIndex,
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
+    // Threaded to `rollout_one` so a rollout's endpoint/judge error prints ABOVE the live bar (via
+    // `pb.println`) instead of a raw `eprintln!` that garbles it.
+    pb: &ProgressBar,
 ) -> Vec<RolloutOutcome> {
     let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
     // The main training bar tracks metric-call spend end-to-end (length = max_metric_calls, position
@@ -430,7 +437,7 @@ fn score_questions(
         |(i, q)| {
             Ok((
                 *i,
-                rollout_one(cfg, url, tools, prompt, q, idx, graph, spec),
+                rollout_one(cfg, url, tools, prompt, q, idx, graph, spec, pb),
             ))
         },
     )
@@ -967,6 +974,7 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
+        pb,
     );
     metric_calls += val.len();
     // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored on the
@@ -1004,6 +1012,7 @@ pub fn run(
         &idx,
         graph.as_ref(),
         &spec,
+        pb,
     );
     metric_calls += pareto_set.len();
     let mut pool = vec![Candidate {
@@ -1086,6 +1095,7 @@ pub fn run(
                         &idx,
                         graph.as_ref(),
                         &spec,
+                        pb,
                     );
                     metric_calls += batch.len();
                     // Blocklist any question that errored on the endpoint so it is never sampled
@@ -1176,6 +1186,7 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
+            pb,
         );
         metric_calls += batch.len();
         let child_mb_score = mean_scored(&child_mb);
@@ -1195,6 +1206,7 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
+            pb,
         );
         metric_calls += pareto_set.len();
         pool.push(Candidate {
@@ -1235,6 +1247,7 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
+            pb,
         );
         let em = mean_scored(&out);
         if em > best_score {
@@ -1265,6 +1278,7 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
+            pb,
         ))
     };
     let winner_full = score_full(&best_prompt);
