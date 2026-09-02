@@ -1003,6 +1003,13 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// Serializes the tests that read/write the PROCESS-GLOBAL token counters (`NEW_TOKENS`,
+    /// `CACHED_TOKENS`, `CACHE_ESTIMATED`, and the `record_usage`/`chat_http` paths that mutate them).
+    /// libtest runs tests of one binary concurrently, so without this a test asserting an exact
+    /// global sum races another test's `record_usage`/`reset_tokens` and flakes (observed on CI).
+    /// `into_inner` recovers from a poisoned lock so one panicking test doesn't cascade-fail the rest.
+    static TOKEN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn transient_upstream_retries_but_real_bad_request_fails_fast() {
         // Upstream failures a gateway surfaces with a 400 / 200-error body — retry these.
@@ -1102,6 +1109,7 @@ mod tests {
 
     #[test]
     fn token_summary_carries_tilde_only_when_estimated() {
+        let _tg = TOKEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_tokens();
         NEW_TOKENS.store(600, Ordering::Relaxed);
         CACHED_TOKENS.store(1000, Ordering::Relaxed);
@@ -1122,6 +1130,7 @@ mod tests {
     /// `CACHE_ESTIMATED` end to end, not just that the pure fn is correct in isolation.
     #[test]
     fn chat_http_estimates_cache_across_two_sequential_calls_in_one_conversation() {
+        let _tg = TOKEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -1170,6 +1179,7 @@ mod tests {
 
     #[test]
     fn reset_conversation_prefix_stops_the_next_call_crediting_a_stale_prefix() {
+        let _tg = TOKEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A new conversation must not inherit the previous conversation's tail prompt_tokens as a
         // false "cached prefix" — `run_agent_loop` calls this at the top of every conversation for
         // exactly this reason.
@@ -1191,6 +1201,7 @@ mod tests {
     /// equal the sum of what each thread computed on its own.
     #[test]
     fn prev_prompt_tokens_is_thread_local_across_parallel_workers() {
+        let _tg = TOKEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_tokens();
 
         // Worker A: a 2-round conversation with one prefix size; worker B: a DIFFERENT 2-round
@@ -1299,6 +1310,7 @@ mod tests {
 
     #[test]
     fn tokens_used_resets_and_accumulates() {
+        let _tg = TOKEN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Process-global counters — reset first so this test isn't order-dependent on whatever
         // other tests in this file (or run concurrently) touched them.
         reset_tokens();
