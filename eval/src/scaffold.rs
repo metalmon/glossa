@@ -1,7 +1,7 @@
 //! `kbx init` scaffolding: writes a fresh `<root>/.glossa/kbx/` eval workspace — `lab.toml`
 //! (endpoints only, no corpus) + the editable `answer.md`/`builder.md`/`bridge.md`/`judge.md`
 //! prompt files + `reflect.md`/`reason.md` stubs + the two `distil` prompts (`distil.md` for the
-//! default densify pass, `distil_golds.md` for the retained `--emit-golds` gold generator — each
+//! default densify pass, `golds.md` for the retained `--emit-golds` gold generator — each
 //! mode reads its own file) + a starter `dataset.toml`, plus an empty `runs/` dir — from the
 //! embedded templates in `eval/templates/`. Without `--force`, an existing file is left untouched
 //! (skip-existing) so re-running `kbx init` on a live workspace never clobbers edits by accident.
@@ -19,7 +19,7 @@ const REFLECT_MD: &str = include_str!("../templates/reflect.md");
 const REASON_MD: &str = include_str!("../templates/reason.md");
 const DISTIL_MD: &str = include_str!("../templates/distil.md");
 const ALIASES_MD: &str = include_str!("../templates/aliases.md");
-const DISTIL_GOLDS_MD: &str = include_str!("../templates/distil_golds.md");
+const GOLDS_MD: &str = include_str!("../templates/golds.md");
 const USER_SIM_MD: &str = include_str!("../templates/user_sim.md");
 const DATASET_TOML: &str = include_str!("../templates/dataset.toml");
 
@@ -46,7 +46,7 @@ pub fn scaffold_init(root: &Path, force: bool) -> anyhow::Result<KbxPaths> {
         (&paths.reason, REASON_MD),
         (&paths.distil, DISTIL_MD),
         (&paths.aliases, ALIASES_MD),
-        (&paths.distil_golds, DISTIL_GOLDS_MD),
+        (&paths.golds, GOLDS_MD),
         (&paths.user_sim, USER_SIM_MD),
         (&paths.dataset, DATASET_TOML),
     ];
@@ -78,7 +78,7 @@ mod tests {
             &p.reflect,
             &p.reason,
             &p.distil,
-            &p.distil_golds,
+            &p.golds,
             &p.user_sim,
             &p.dataset,
         ] {
@@ -162,17 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn init_writes_distil_golds_md_with_seed_generation_markers() {
+    fn init_writes_golds_md_with_seed_generation_markers() {
         let dir = tempfile::tempdir().unwrap();
         let p = scaffold_init(dir.path(), false).unwrap();
-        let golds = std::fs::read_to_string(&p.distil_golds).unwrap();
+        let golds = std::fs::read_to_string(&p.golds).unwrap();
         assert!(
             golds.contains("propose_gold"),
-            "distil_golds.md must instruct the model to call propose_gold"
+            "golds.md must instruct the model to call propose_gold"
         );
         assert!(
             golds.contains("gate_ok"),
-            "distil_golds.md must instruct the model to self-gate via gate_ok"
+            "golds.md must instruct the model to self-gate via gate_ok"
         );
     }
 

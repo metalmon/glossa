@@ -13,7 +13,7 @@ pub struct KbxPaths {
     pub reflect: PathBuf,
     pub reason: PathBuf,
     pub distil: PathBuf,
-    pub distil_golds: PathBuf,
+    pub golds: PathBuf,
     /// `--aliases-only` enrichment prompt (`aliases.md`).
     pub aliases: PathBuf,
     /// Persona prompt for the reader's simulated-user dialogue gate (`backend::user_sim`). Loaded
@@ -36,7 +36,7 @@ impl KbxPaths {
             reflect: f("reflect.md"),
             reason: f("reason.md"),
             distil: f("distil.md"),
-            distil_golds: f("distil_golds.md"),
+            golds: f("golds.md"),
             aliases: f("aliases.md"),
             user_sim: f("user_sim.md"),
             kbx_dir: kbx,

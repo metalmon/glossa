@@ -314,7 +314,7 @@ fn resolve_golds_out(paths: &KbxPaths, out: &std::path::Path) -> Result<PathBuf>
 }
 
 /// Orchestrate `kbx distil` over the corpus at `path` (kb-style PATH resolution via
-/// `workspace::resolve`): load `lab.toml` + ontology + `distil_golds.md` (the gold-gen mode's own
+/// `workspace::resolve`): load `lab.toml` + ontology + `golds.md` (the gold-gen mode's own
 /// prompt file, separate from densify's `distil.md`), build the seed pool, attempt `args.count`
 /// generate+gate passes (`gen::generate_one`), and write the kept golds to `args.out` (default
 /// `<kbx>/dataset.synthetic.toml`).
@@ -334,8 +334,8 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     // indexed. Needed so `read` calls the generator makes resolve real chunks.
     glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
 
-    let distil_golds_md = std::fs::read_to_string(&paths.distil_golds)
-        .with_context(|| format!("reading {}", paths.distil_golds.display()))?;
+    let golds_md = std::fs::read_to_string(&paths.golds)
+        .with_context(|| format!("reading {}", paths.golds.display()))?;
 
     let g = GraphStore::open(&paths.root)?;
     // Shared read-only index for the code-B (retrieval) hop_type probe on kept golds — opened once,
@@ -402,7 +402,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
             }
             &seeds[k % seeds.len()]
         };
-        let outcome = match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed) {
+        let outcome = match generate_one(&paths, &ontology, &lab, &golds_md, seed) {
             Ok(o) => o,
             Err(e) => {
                 // Don't abort the whole run on one endpoint error — drop this attempt, blocklist the
