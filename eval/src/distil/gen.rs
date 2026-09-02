@@ -761,7 +761,10 @@ relations = ["LEADS_TO"]
     }
 
     #[test]
-    fn distil_tools_schema_advertises_reader_tools_and_propose_gold_but_never_graph_upsert() {
+    fn distil_tools_schema_is_propose_gold_only_no_reader_tools_no_graph_upsert() {
+        // One-shot generation: the model gets all context up front (terminal + source + incoming
+        // chain), so the ONLY tool is propose_gold — no reader tools (no wandering / no overflow),
+        // and never graph_upsert (read-only pass).
         let tools = distil_tools_schema();
         let names: Vec<String> = tools
             .as_array()
@@ -770,24 +773,16 @@ relations = ["LEADS_TO"]
             .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
             .map(String::from)
             .collect();
-        for t in [
-            "search",
-            "read",
-            "grep",
-            "glob",
-            "glossary",
-            "reach",
-            "sql",
-            "propose_gold",
-        ] {
+        assert_eq!(
+            names,
+            vec!["propose_gold".to_string()],
+            "distil generator must advertise ONLY propose_gold: {names:?}"
+        );
+        for forbidden in ["search", "read", "grep", "glossary", "reach", "sql", "graph_upsert"] {
             assert!(
-                names.contains(&t.to_string()),
-                "missing tool {t}: {names:?}"
+                !names.contains(&forbidden.to_string()),
+                "distil must not advertise {forbidden}: {names:?}"
             );
         }
-        assert!(
-            !names.contains(&"graph_upsert".to_string()),
-            "distil must NEVER advertise graph_upsert (read-only): {names:?}"
-        );
     }
 }
