@@ -63,6 +63,9 @@ constraint = ["dep:glossa-constraint", "notebook"]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+# Deterministic mtimes in the freshen tests (set a new file's dir mtime strictly after the prior
+# state) instead of racing a coarse-granularity Windows FS clock with thread::sleep.
+filetime = "0.2"
 
 [workspace]
 members = ["eval", "constraint"]

@@ -139,7 +139,12 @@ impl DocIndex {
         std::fs::create_dir_all(&idx_path).with_context(|| format!("create {idx_path:?}"))?;
         let index = match Index::create_in_dir(&idx_path, schema.clone()) {
             Ok(i) => i,
-            Err(TantivyError::IndexAlreadyExists) => Index::open_in_dir(&idx_path)?,
+            // Open reads `meta.json` (`atomic_read` + serde parse); on Windows that read can hit a
+            // transient lock / partial read while another pass is mid temp+rename. Drive it through
+            // the bounded transient-FS retry instead of failing the whole open.
+            Err(TantivyError::IndexAlreadyExists) => {
+                with_writer_retry(|| Index::open_in_dir(&idx_path))?
+            }
             Err(e) => return Err(e.into()),
         };
         register_tokenizers(&index);
@@ -1080,12 +1085,13 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
     )
 }
 
-/// Retry a tantivy index-write past a transient Windows filesystem error. A file that was just
+/// Retry a tantivy index-write/open past a transient Windows filesystem error. A file that was just
 /// created (or is still mmap'd by an open reader) can be briefly held by the OS — Windows Defender
-/// scanning it, a lingering handle — so opening the writer or committing occasionally fails with
-/// "Access is denied (os error 5)" (`ErrorKind::PermissionDenied`). A short bounded backoff clears
-/// it; on other platforms the first attempt succeeds. Only permission-denied IO errors retry — a
-/// real failure (LockFailure, NotFound, …) propagates immediately.
+/// scanning it, a lingering handle, an in-progress `meta.json` temp+rename — so opening the index or
+/// writer, or committing, occasionally fails with a transient IO/lock error. A short BOUNDED backoff
+/// (capped attempts) clears it; on other platforms the first attempt succeeds. `is_transient_fs`
+/// decides what counts as transient; a structural error propagates immediately, and even a
+/// persistently-transient-looking error propagates once the attempt cap is hit (never an infinite loop).
 fn with_writer_retry<T>(mut op: impl FnMut() -> tantivy::Result<T>) -> tantivy::Result<T> {
     let mut attempt = 0u32;
     loop {
@@ -1099,9 +1105,33 @@ fn with_writer_retry<T>(mut op: impl FnMut() -> tantivy::Result<T>) -> tantivy::
     }
 }
 
-/// True for a transient Windows "Access is denied (os error 5)" IO error — safe to retry.
+/// True for a transient Windows filesystem error surfaced during an index open/commit — safe to
+/// retry a bounded number of times. Windows briefly holds a just-written or mmap'd index file
+/// (Defender scan, a lingering reader handle, an in-progress atomic temp+rename of `meta.json`), and
+/// that contention surfaces through several tantivy frames, not just `PermissionDenied`:
+///   - `IoError` of ANY `io::Error` kind — Windows reports a locked / partially-read file as
+///     `PermissionDenied`, `Other`, or a raw OS error, so we retry every kind (not just os error 5).
+///   - `OpenDirectoryError` / `OpenReadError` / `OpenWriteError` — the directory abstraction wraps the
+///     underlying io error before it reaches `TantivyError::IoError`; `meta.json` is read via
+///     `atomic_read`, whose failure comes back as `OpenReadError`.
+///   - `LockFailure` — the writer lockfile was momentarily held by a racing pass.
+///
+/// This widening is the hypothesized fix for the intermittent Windows tantivy `meta.json`/commit
+/// flakes (`reindex_dirs_matches_full_across_scenarios`,
+/// `freshen_blocking_picks_up_new_file_and_is_noop_when_fresh`); the exact error frame is to be
+/// confirmed by a CI stress lane. It stays a BOUNDED retry (see `with_writer_retry`'s attempt cap),
+/// so a genuinely permanent failure still propagates after a few wasted attempts and can never loop.
+/// A structural error (`FieldNotFound`, `SchemaError`, `DataCorruption`, …) is NOT transient and
+/// propagates on the first attempt — retrying can't fix it.
 fn is_transient_fs(e: &TantivyError) -> bool {
-    matches!(e, TantivyError::IoError(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+    matches!(
+        e,
+        TantivyError::IoError(_)
+            | TantivyError::OpenDirectoryError(_)
+            | TantivyError::OpenReadError(_)
+            | TantivyError::OpenWriteError(_)
+            | TantivyError::LockFailure(_, _)
+    )
 }
 
 /// The persisted per-directory map the index was last built from (`.glossa/dirsig`, JSON), or `None`
@@ -1410,7 +1440,10 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         }
         next.notes = std::mem::take(&mut delta.next.notes);
     }
-    writer.commit()?;
+    // Commit under the bounded transient-FS retry — the commit writes+renames `meta.json`, the same
+    // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
+    // writer's pending ops stay staged, so re-committing after a transient failure is safe.
+    with_writer_retry(|| writer.commit())?;
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(dir)?;
     // Advance dirsig, holding back any dir whose file changed mid-pass so a full index can't poison
@@ -1448,7 +1481,8 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
     let mut manifest = Manifest::load(dir);
     manifest.files.insert(rel.to_string(), sig);
     let _ = resolve_reference_links(&graph, &idx.root, &manifest.files, &links);
-    writer.commit()?;
+    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked).
+    with_writer_retry(|| writer.commit())?;
     let mut m = Manifest::load(dir);
     m.files.insert(rel.to_string(), sig);
     m.save(dir)?;
@@ -1685,7 +1719,8 @@ pub fn reindex_dirs_locked(
     }
     manifest.unresolved_links = resolve_reference_links(&graph, &idx.root, &manifest.files, &all);
 
-    writer.commit()?;
+    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked).
+    with_writer_retry(|| writer.commit())?;
     manifest.save(dir)?;
     // Advance dirsig, but hold back any dir whose file changed under us (still being written): the
     // lock is held, so the on-disk dirsig is still the value we diffed against (`stored`).
@@ -3364,13 +3399,41 @@ mod retry_tests {
     }
 
     #[test]
+    fn with_writer_retry_recovers_from_non_permission_transient_io() {
+        // Windows surfaces a locked / partially-read `meta.json` through IO kinds other than
+        // PermissionDenied (Other, or a raw OS error). The widened predicate retries every IO kind,
+        // so such a transient failure must also clear rather than propagate on the first attempt.
+        let calls = Cell::new(0u32);
+        let out: tantivy::Result<u32> = with_writer_retry(|| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n < 3 {
+                Err(std::io::Error::other("sharing violation").into())
+            } else {
+                Ok(n)
+            }
+        });
+        assert_eq!(
+            out.unwrap(),
+            3,
+            "a non-permission transient IO error is retried"
+        );
+        assert_eq!(calls.get(), 3, "retried both non-permission IO failures");
+    }
+
+    #[test]
     fn with_writer_retry_propagates_non_transient_error() {
+        // A structural error (not IO/lock/open) can never be fixed by retrying — it must propagate
+        // on the FIRST attempt, so the bounded retry can never mask a real permanent failure.
         let calls = Cell::new(0u32);
         let out: tantivy::Result<u32> = with_writer_retry(|| {
             calls.set(calls.get() + 1);
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into())
+            Err(TantivyError::SchemaError("bad schema".to_string()))
         });
-        assert!(out.is_err(), "a non-permission-denied error propagates");
+        assert!(
+            out.is_err(),
+            "a non-transient (structural) error propagates"
+        );
         assert_eq!(calls.get(), 1, "a non-transient error is not retried");
     }
 }
@@ -3378,6 +3441,19 @@ mod retry_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set `dir`'s mtime to a fixed point in the future so the freshen dir-mtime gate sees a value
+    /// STRICTLY AFTER any previously recorded one — deterministic where a `thread::sleep` + wall-clock
+    /// bump flakes on a coarse-granularity Windows FS (the new file may not distinctly re-bump the
+    /// parent-dir mtime, so `dir_mtime_map == dirsig` still holds and the gate never re-opens). Only
+    /// the directory mtime is set; the new file's own mtime — and thus the FRESH_WINDOW mid-copy
+    /// guard, which keys on the FILE signature — is left untouched.
+    fn bump_dir_mtime_future(dir: &Path) {
+        let future = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+        );
+        filetime::set_file_mtime(dir, future).expect("set dir mtime");
+    }
 
     #[test]
     fn creates_then_reopens_index() {
@@ -3510,9 +3586,10 @@ mod tests {
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         assert_eq!(read_dirsig(dir.path()), Some(cur));
 
-        // Add a file → next freshen makes it searchable.
-        std::thread::sleep(Duration::from_millis(150));
+        // Add a file → next freshen makes it searchable. Bump the dir mtime deterministically
+        // (strictly after the settled state) so the gate reliably re-opens on a coarse-granularity FS.
         std::fs::write(dir.path().join("b.md"), b"# B\nworld\n").unwrap();
+        bump_dir_mtime_future(dir.path());
         freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx
@@ -3567,9 +3644,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
         freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
-        // Add a file, then freshen — it must become searchable (via the scoped path).
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Add a file, then freshen — it must become searchable (via the scoped path). Set the dir
+        // mtime deterministically past the settled state instead of racing the FS clock with a sleep.
         std::fs::write(dir.path().join("b.md"), b"# B\nbravo\n").unwrap();
+        bump_dir_mtime_future(dir.path());
         freshen_blocking(dir.path(), std::time::Duration::from_secs(3)).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(idx

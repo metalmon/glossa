@@ -586,10 +586,16 @@ impl GraphStore {
     }
 
     fn all_nodes_c(c: &Connection) -> anyhow::Result<Vec<Node>> {
+        // `ORDER BY id` makes row order deterministic across runs. The node-index rebuild
+        // (`ensure_node_index_fresh`) assigns tantivy DocIds in exactly this iteration order, and
+        // `TopDocs::order_by_score()` breaks a BM25 score tie by DocId — so an unordered SQLite scan
+        // let two labels that tie on quantized fieldnorm flip their top-hit rank run to run (the
+        // Windows-only `assignment_resolves_paraphrased_field_name` node-index flake). A stable id
+        // order pins DocId assignment; the resolve ranking also tie-breaks on id (see `NodeIndex::search`).
         let mut stmt = c
             .prepare(
                 "SELECT id, node_type, label, aliases, source_path, range, file_sig, origin, \
-                 confidence, created_at FROM nodes",
+                 confidence, created_at FROM nodes ORDER BY id",
             )
             .context("prepare all_nodes")?;
         let rows = stmt

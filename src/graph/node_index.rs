@@ -140,14 +140,24 @@ impl NodeIndex {
         let bq = BooleanQuery::new(clauses);
         let searcher = self.reader.searcher();
         let top = searcher.search(&bq, &TopDocs::with_limit(limit.max(1)).order_by_score())?;
-        let mut ids = Vec::with_capacity(top.len());
-        for (_score, addr) in top {
+        let mut scored: Vec<(f32, String)> = Vec::with_capacity(top.len());
+        for (score, addr) in top {
             let d: TantivyDocument = searcher.doc(addr)?;
             if let Some(v) = d.get_first(self.id).and_then(|v| v.as_str()) {
-                ids.push(v.to_string());
+                scored.push((score, v.to_string()));
             }
         }
-        Ok(ids)
+        // Deterministic tie-break: BM25 score descending, then node id ascending. tantivy breaks an
+        // equal-score tie by internal DocId, which depends on index-build order and quantized
+        // fieldnorms — two near-identical labels ("<field>" vs "<field> enum") that tie on score
+        // would otherwise flip their order run to run (the Windows node-index flake). Ordering equal
+        // scores by the stable node id makes the top hit deterministic regardless of tantivy internals.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        Ok(scored.into_iter().map(|(_, id)| id).collect())
     }
 
     /// Tokenize `text` with the index's own analyzer (same morphology + language detection as
