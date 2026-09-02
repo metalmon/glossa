@@ -33,3 +33,12 @@ spines = [
   { anchor = "FailureMode", relations = ["CAUSED_BY", "CONTROLLED_BY"] },
 ]
 mentions = "MENTIONS"
+
+# ── Retrieval tuning (optional) ──────────────────────────────────────────────
+# Per-corpus retrieval weights. Uncomment to override the engine default.
+# [retrieval]
+# PPR transition weight of a mechanical SIMILAR edge relative to a reasoning
+# edge (which is 1.0). Default 0.1. Lower = leaner similarity mass (suits a
+# stronger reader model); higher = heavier (suits a weaker reader, e.g. a 4B).
+# The env var GLOSSA_PPR_SIM_WEIGHT overrides this for one-off sweeps.
+# sim_weight = 0.1

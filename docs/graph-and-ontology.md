@@ -132,6 +132,38 @@ into the graph today with a `valid_from` years in the past, or scheduled with a
 `valid_from` in the future — the two clocks are independent, and only the
 former is queried by `--as-of`.
 
+### Retrieval tuning
+
+An optional `[retrieval]` table holds per-corpus retrieval-time knobs. Today it
+carries one:
+
+```toml
+[retrieval]
+sim_weight = 0.1
+```
+
+**`sim_weight`** is the weight a mechanical `SIMILAR` edge (derived by `graph
+generalize` from token/embedding overlap) carries in the Personalized-PageRank
+walk, relative to an authored reasoning edge, which is always `1.0`. It scales
+the whole similarity tier; a per-edge `confidence` still down-weights individual
+weak links within it.
+
+- **Lower** (→ `0.0`) makes retrieval lean on authored reasoning and structural
+  edges, treating similarity as a faint hint. This suits a **stronger reader**
+  that composes multi-hop chains on its own and is only distracted by extra
+  similarity mass.
+- **Higher** (→ `1.0`) lets similarity carry as much as reasoning, flooding the
+  neighborhood with lexically-adjacent nodes. This can help a **weaker reader**
+  that needs the answer floated closer, at the cost of precision.
+
+The best value depends on the **reader model, not the graph**, so it is a config
+knob rather than something auto-derived. The default is `0.1` (a conservative,
+generally-safe setting). The environment variable `GLOSSA_PPR_SIM_WEIGHT`
+overrides the file for a one-off sweep without editing the corpus; precedence is
+**env → `[retrieval].sim_weight` → default**. The resolved weight is baked into
+the PPR transition cache, so changing either the file or the env var rebuilds the
+matrix on the next query automatically.
+
 ## Graph doctor
 
 The graph accumulates four types of doubts as documents and reasoning edges evolve. The `graph doctor` command reports all four, and offers targeted pruning options for two (with a third planned):

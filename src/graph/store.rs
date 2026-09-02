@@ -323,11 +323,18 @@ impl GraphStore {
     /// when the persisted signature matches (survives the process), else built and persisted. The
     /// signature covers node ids + edge endpoints, so a delete / in-place edit / re-index — anything
     /// that changes the graph topology — forces a rebuild, unlike a count-only key.
+    /// The corpus's `.glossa` directory. PPR reads it to resolve `[retrieval].sim_weight` from the
+    /// sibling `ontology.toml` (`gdir.parent()/.glossa/ontology.toml`).
+    pub(crate) fn gdir(&self) -> &std::path::Path {
+        &self.gdir
+    }
+
     pub fn ppr_transition(&self) -> anyhow::Result<std::sync::Arc<crate::graph::ppr::Transition>> {
-        // Hot path: a cheap file stat + env read. The persisted matrix bakes in `w_sim` (edge
-        // weights are tier-scaled by it), so the key is (DB file signature, w_sim) — if neither the
-        // DB files nor `GLOSSA_PPR_SIM_WEIGHT` changed, the in-memory transition is still valid.
-        let w_sim = crate::graph::ppr::sim_weight();
+        // Hot path: a cheap file stat + resolved-weight read. The persisted matrix bakes in `w_sim`
+        // (edge weights are tier-scaled by it), so the key is (DB file signature, w_sim) — if neither
+        // the DB files nor the resolved weight (env `GLOSSA_PPR_SIM_WEIGHT` > `[retrieval].sim_weight`
+        // in ontology.toml > default) changed, the in-memory transition is still valid.
+        let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let key = (self.db_filesig(), w_sim.to_bits());
         if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
             if *k == key {

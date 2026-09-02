@@ -12,6 +12,7 @@
 
 use crate::graph::store::GraphStore;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Mechanical-similarity edge types: derived by `generalize` from token/embedding overlap, NOT
 /// authored reasoning. A SYSTEM-level tier (like STRUCTURAL_NODES), not a domain-ontology choice.
@@ -20,15 +21,36 @@ use std::collections::HashMap;
 const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
 
 /// `w_sim`: the transition weight of a mechanical-similarity edge relative to a reasoning edge (1.0).
-/// Env-tunable (`GLOSSA_PPR_SIM_WEIGHT`) so a sweep re-runs without recompiling. Default 0.3 — it
-/// beat 0.1 on a kb-abac A/B (graded 0.655 vs 0.603, multihop 0.500 vs 0.429); with confidence
-/// already down-weighting weak SIMILAR the tier can be less aggressive than the original 0.1.
-pub(crate) fn sim_weight() -> f32 {
-    std::env::var("GLOSSA_PPR_SIM_WEIGHT")
+///
+/// Resolution precedence: the `GLOSSA_PPR_SIM_WEIGHT` env var (a sweep re-runs without recompiling
+/// and without editing the corpus) > the per-corpus `[retrieval].sim_weight` in `ontology.toml` >
+/// the engine default **0.1**. `gdir` is the corpus's `.glossa` directory; the ontology sits at
+/// `gdir/ontology.toml`, so its root is `gdir.parent()`.
+///
+/// Why a knob and not a fixed default: the best value depends on the READER, not the graph. A weak
+/// reader (e.g. a 4B) benefits from heavier SIMILAR mass (~0.3 won a kb-abac A/B on 4B); a strong
+/// reader (e.g. a 35B) does better with the leaner 0.1. The graph can't see which reader consumes
+/// it, so auto-deriving from graph structure would tune the wrong axis — hence a per-corpus config
+/// value with an env override. 0.1 is the conservative general default (MuSiQue-validated). The
+/// resolved weight is folded into the PPR transition cache signature (`cache_sig`), so changing the
+/// env var OR the ontology value invalidates the matrix exactly like a graph edit does.
+pub(crate) fn sim_weight(gdir: &Path) -> f32 {
+    let valid = |w: f32| (w >= 0.0 && w.is_finite()).then_some(w);
+    if let Some(w) = std::env::var("GLOSSA_PPR_SIM_WEIGHT")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
-        .filter(|w| *w >= 0.0 && w.is_finite())
-        .unwrap_or(0.3)
+        .and_then(valid)
+    {
+        return w;
+    }
+    if let Some(w) = gdir
+        .parent()
+        .and_then(|root| crate::graph::ontology::Ontology::load_or_default(root).ppr_sim_weight())
+        .and_then(valid)
+    {
+        return w;
+    }
+    0.1
 }
 
 /// Fold `w_sim` into the transition cache's content signature. The persisted transition matrix bakes
@@ -111,7 +133,7 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
         });
     }
     let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ids.len()];
-    let w_sim = sim_weight();
+    let w_sim = sim_weight(g.gdir());
     for e in g.all_edges()? {
         if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
             if a != b {
@@ -338,15 +360,45 @@ mod tests {
 
     #[test]
     fn similarity_edges_weigh_below_reasoning() {
-        // default w_sim = 0.3 (no env set in test)
-        let w_sim = sim_weight();
+        // Tier semantics only (explicit weight — resolution is tested separately): reasoning +
+        // structural edges carry full mass, SIMILAR carries the configured `w_sim`, unknown = full.
+        let w_sim = 0.1_f32;
         assert_eq!(edge_tier_weight("LEADS_TO", w_sim), 1.0);
         assert_eq!(edge_tier_weight("MENTIONS", w_sim), 1.0);
         assert_eq!(edge_tier_weight("CONTAINS", w_sim), 1.0); // structural still carries cross-doc mass
         assert_eq!(edge_tier_weight("NEXT", w_sim), 1.0);
         assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
-        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.3);
+        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
         assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
+    }
+
+    #[test]
+    fn sim_weight_resolves_default_then_ontology() {
+        // Neutralize any ambient env override (a dev/CI shell may export GLOSSA_PPR_SIM_WEIGHT) so
+        // this test exercises the config + default path deterministically.
+        std::env::remove_var("GLOSSA_PPR_SIM_WEIGHT");
+        let d = tempfile::tempdir().unwrap();
+        let gdir = d.path().join(".glossa");
+        std::fs::create_dir_all(&gdir).unwrap();
+
+        // No ontology (or no [retrieval] key) → engine default 0.1.
+        assert_eq!(sim_weight(&gdir), 0.1);
+
+        // A per-corpus [retrieval].sim_weight is read.
+        std::fs::write(
+            gdir.join("ontology.toml"),
+            "[retrieval]\nsim_weight = 0.42\n",
+        )
+        .unwrap();
+        assert_eq!(sim_weight(&gdir), 0.42);
+
+        // A malformed (negative) value is rejected → falls back to the default.
+        std::fs::write(
+            gdir.join("ontology.toml"),
+            "[retrieval]\nsim_weight = -1.0\n",
+        )
+        .unwrap();
+        assert_eq!(sim_weight(&gdir), 0.1);
     }
 
     #[test]
@@ -371,6 +423,9 @@ mod tests {
 
     #[test]
     fn build_transition_weights_similar_below_reasoning() {
+        // Neutralize any ambient env override so this asserts the engine default (0.1) on a corpus
+        // with no `[retrieval].sim_weight`.
+        std::env::remove_var("GLOSSA_PPR_SIM_WEIGHT");
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         for x in ["a", "b", "c"] {
@@ -398,7 +453,7 @@ mod tests {
             .map(|(j, w)| (t.ids()[*j].clone(), *w))
             .collect();
         assert_eq!(w["b"], 1.0);
-        assert_eq!(w["c"], 0.3); // SIMILAR down-weighted (default tier)
+        assert_eq!(w["c"], 0.1); // SIMILAR down-weighted to the default tier (0.1)
     }
 
     #[test]

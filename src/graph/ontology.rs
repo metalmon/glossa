@@ -45,6 +45,18 @@ struct RawValidation {
     strict: bool,
 }
 
+/// The `[retrieval]` overlay: per-corpus retrieval-time tuning knobs. Kept in the ontology (the only
+/// per-corpus config file) so a deployment can tune retrieval without recompiling or setting env
+/// vars. All keys optional; an unset key falls back to the engine default.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawRetrieval {
+    /// PPR transition weight of a mechanical `SIMILAR` edge relative to a reasoning edge (1.0). Unset
+    /// → engine default (see `graph::ppr::sim_weight`). Lower = leaner similarity mass (suits a
+    /// stronger reader); higher = heavier (suits a weaker reader).
+    #[serde(default)]
+    sim_weight: Option<f32>,
+}
+
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
 /// (e.g. anchor `Symptom`, relations `[CAUSED_BY, RESOLVED_BY]`). A node survives hygiene if it
 /// lies on a COMPLETE instance of ANY declared spine — so distinct case shapes (causal
@@ -218,6 +230,8 @@ struct RawOntology {
     #[serde(default)]
     validation: RawValidation,
     #[serde(default)]
+    retrieval: RawRetrieval,
+    #[serde(default)]
     reasoning: RawReasoning,
     #[serde(default)]
     constraint_types: BTreeMap<String, RawConstraintType>,
@@ -246,6 +260,9 @@ pub struct Ontology {
     grounding_types: std::collections::BTreeSet<String>,
     /// Entity types whose nodes must carry a valid-time interval.
     validity_types: std::collections::BTreeSet<String>,
+    /// Per-corpus PPR `SIMILAR`-edge weight from `[retrieval].sim_weight`, validated finite ≥ 0.
+    /// `None` when unset → PPR uses the engine default. See [`Ontology::ppr_sim_weight`].
+    ppr_sim_weight: Option<f32>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -364,6 +381,10 @@ impl Ontology {
             id_prefixes,
             relations: raw.relations,
             strict: raw.validation.strict,
+            ppr_sim_weight: raw
+                .retrieval
+                .sim_weight
+                .filter(|w| w.is_finite() && *w >= 0.0),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -515,6 +536,12 @@ impl Ontology {
             Ok(s) => Ontology::parse(&s).unwrap_or_default(),
             Err(_) => Ontology::default(),
         }
+    }
+
+    /// Per-corpus PPR `SIMILAR`-edge weight from `[retrieval].sim_weight` (validated finite ≥ 0), or
+    /// `None` when the ontology declares none — in which case PPR applies its engine default.
+    pub fn ppr_sim_weight(&self) -> Option<f32> {
+        self.ppr_sim_weight
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
