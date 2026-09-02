@@ -352,16 +352,45 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     let mut kept: Vec<OutCase> = Vec::new();
     let mut n_dropped = 0usize;
     let mut attempts = 0usize;
+    // Seeds whose attempt failed on an ENDPOINT/transport error (a 500 / context-length overflow on
+    // a server without middle-out is deterministic and reproduces every cycle): blocklist and skip
+    // rather than re-fail — mirrors the GEPA train blocklist. One such error must NOT abort the run.
+    let mut blocked: HashSet<String> = HashSet::new();
 
     while attempts < cap {
         if target.is_some_and(|t| kept.len() >= t) {
             break;
         }
+        if blocked.len() >= seeds.len() {
+            pb.println("distil: every seed errored on the endpoint — stopping".to_string());
+            break;
+        }
         let i = attempts;
-        let seed = &seeds[i % seeds.len()];
-        match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed)
-            .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
-        {
+        // Next non-blocklisted seed, cycling forward from `i` (the len guard above ensures one exists).
+        let seed = {
+            let mut k = i;
+            while blocked.contains(&seeds[k % seeds.len()].id) {
+                k += 1;
+            }
+            &seeds[k % seeds.len()]
+        };
+        let outcome = match generate_one(&paths, &ontology, &lab, &distil_golds_md, seed) {
+            Ok(o) => o,
+            Err(e) => {
+                // Don't abort the whole run on one endpoint error — drop this attempt, blocklist the
+                // seed (a deterministic overflow won't succeed on retry), and continue.
+                pb.println(format!(
+                    "distil {i}: dropped (endpoint error — seed blocklisted): {e:#} (seed {})",
+                    seed.id
+                ));
+                blocked.insert(seed.id.clone());
+                n_dropped += 1;
+                attempts += 1;
+                pb.inc(1);
+                continue;
+            }
+        };
+        match outcome {
             GenOutcome::Kept(p) => {
                 // Objective (code-B) hop_type: the authoritative label for the emitted gold —
                 // pure lexical retrieval, graph-independent (see `gen::code_b_hop_type`). The
