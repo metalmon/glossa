@@ -6,9 +6,10 @@
 //! written to the graph.
 //!
 //! Mirrors `chain_one_seed`'s shape closely (same `paths`/`ont`/`lab` inputs, same
-//! open-store-per-call pattern) so the two stay recognizably siblings — `chain_one_seed` walks
-//! backward from a grounded terminal; `generate_one` walks FORWARD from a seed to invent a new
-//! (question, answer) pair instead.
+//! open-store-per-call pattern) so the two stay recognizably siblings — BOTH now walk BACKWARD
+//! from a grounded terminal. `chain_one_seed` synthesizes the query-side reasoning layer that
+//! leads to the terminal; `generate_one` instead invents a NEW (question, answer) pair whose
+//! fixed ANSWER is that terminal fact and whose new entry angle requires reasoning to reach it.
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::run_agent_loop;
@@ -21,10 +22,26 @@ use anyhow::anyhow;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
+use glossa::tools::ChainSpec;
 use glossa::trace::TraceLog;
 use serde_json::{json, Value};
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::Duration;
+
+/// Depth/breadth caps on the backward incoming-chain gather ([`gather_incoming_chain`]) so a
+/// densely-connected hub terminal can't explode the prompt: at most this many predecessor hops
+/// back, and at most [`GATHER_MAX_LINKS`] links total.
+const GATHER_MAX_DEPTH: usize = 3;
+const GATHER_MAX_LINKS: usize = 6;
+
+/// Per-link source-text cap (chars) when rendering the existing chain into the prompt — one chunk
+/// can be large, and this block is only context ("what already exists"), not the working set.
+const GATHER_SRC_MAX: usize = 400;
+
+/// Top-K depth for the objective (code-B) `hop_type` retrieval probe (see [`code_b_hop_type`]).
+const HOP_TYPE_TOPK: usize = 5;
 
 /// High cap on tool-call rounds for one seed's generate pass — mirrors `chain_one_seed`'s
 /// `MAX_ROUNDS`, trimmed a little since this pass has no writes to make, only exploration plus
@@ -48,6 +65,10 @@ pub struct GoldProposal {
     pub chain_node_ids: Vec<String>,
     pub gate_ok: bool,
     pub gate_reason: String,
+    /// The MODEL's own hop-type self-report (`"lexical"`/`"multihop"`/`""` when absent). Advisory
+    /// only — the emitted gold's `hop_type` is the OBJECTIVE code-B retrieval verdict
+    /// ([`code_b_hop_type`]); this is kept solely to log model/retrieval disagreement.
+    pub hop_type: String,
 }
 
 /// Why an attempted synthetic gold was NOT kept.
@@ -109,12 +130,19 @@ pub fn parse_propose_gold(args: &Value) -> Option<GoldProposal> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let hop_type = args
+        .get("hop_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     Some(GoldProposal {
         question,
         answer,
         chain_node_ids,
         gate_ok,
         gate_reason,
+        hop_type,
     })
 }
 
@@ -140,12 +168,13 @@ fn distil_tools_schema() -> Value {
         "type": "function",
         "function": {
             "name": "propose_gold",
-            "description": "Emit ONE synthetic (question, answer) gold once you've traced a real \
-                chain from the seed node along the ontology's relations to a grounded terminal \
-                fact. `chain_node_ids` lists the ids you walked, seed through terminal, in order. \
-                Set `gate_ok` to false (with a short `gate_reason`) if the question is answerable \
-                without the chain, or if the chain you traced doesn't actually reach the answer — \
-                an honest false is useful, a dishonest true is not.",
+            "description": "Emit ONE synthetic (question, answer) gold: a NEW question whose fixed \
+                ANSWER is the given grounded terminal, reachable only by reasoning through the \
+                corpus to it. `chain_node_ids` lists the ids on the path you expect a reader to \
+                walk, entry through terminal, in order. Set `gate_ok` to false (with a short \
+                `gate_reason`) if the question is answerable without that reasoning, or if the \
+                path doesn't actually reach the terminal answer — an honest false is useful, a \
+                dishonest true is not. `hop_type` is your own read of the question's shape.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -153,7 +182,8 @@ fn distil_tools_schema() -> Value {
                     "answer": { "type": "string" },
                     "chain_node_ids": { "type": "array", "items": { "type": "string" } },
                     "gate_ok": { "type": "boolean" },
-                    "gate_reason": { "type": "string" }
+                    "gate_reason": { "type": "string" },
+                    "hop_type": { "type": "string", "enum": ["lexical", "multihop"] }
                 },
                 "required": ["question", "answer", "gate_ok"]
             }
@@ -189,6 +219,221 @@ fn seed_source_text(
     text
 }
 
+/// One predecessor on an existing incoming reasoning chain: its node id/type/label plus the
+/// grounded source text it was read from (empty when ungrounded). Ontology-general — carries only
+/// whatever `node_type` the ontology assigned, never a hardcoded domain type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainLink {
+    pub id: String,
+    pub node_type: String,
+    pub label: String,
+    pub source_text: String,
+}
+
+/// Walk BACKWARD from a grounded terminal along CHAINING-role edges (the ontology's spine
+/// relations, from [`ChainSpec::spine_rels`] — the SAME set `reason`/`glossary` chain on) via
+/// `g.incoming`, collecting the existing predecessor links that already lead to this terminal. This
+/// is the "what already exists" context shown to the model so it can invent a DIFFERENT entry angle
+/// rather than reproduce a covered question. Bounded by [`GATHER_MAX_DEPTH`]/[`GATHER_MAX_LINKS`]
+/// so a hub terminal can't explode the prompt. Ontology-general: the chaining edge set comes from
+/// the ontology, never a named relation. Empty when the terminal has no incoming chaining edges.
+pub(crate) fn gather_incoming_chain(
+    root: &Path,
+    idx: &DocIndex,
+    g: &GraphStore,
+    spec: &ChainSpec,
+    terminal_id: &str,
+) -> Vec<ChainLink> {
+    let mut out: Vec<ChainLink> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(terminal_id.to_string());
+    let mut frontier = vec![terminal_id.to_string()];
+    let mut depth = 0;
+    while depth < GATHER_MAX_DEPTH && out.len() < GATHER_MAX_LINKS && !frontier.is_empty() {
+        let mut next: Vec<String> = Vec::new();
+        for node in &frontier {
+            for e in g.incoming(node).unwrap_or_default() {
+                if !spec.spine_rels.iter().any(|r| r == &e.edge_type) {
+                    continue;
+                }
+                if !seen.insert(e.from.clone()) {
+                    continue;
+                }
+                if let Ok(Some(pred)) = g.get_node(&e.from) {
+                    let source_text = seed_source_text(root, idx, g, &pred.id);
+                    out.push(ChainLink {
+                        id: pred.id.clone(),
+                        node_type: pred.node_type,
+                        label: pred.label,
+                        source_text,
+                    });
+                    next.push(pred.id);
+                    if out.len() >= GATHER_MAX_LINKS {
+                        break;
+                    }
+                }
+            }
+            if out.len() >= GATHER_MAX_LINKS {
+                break;
+            }
+        }
+        frontier = next;
+        depth += 1;
+    }
+    out
+}
+
+/// Count the DIRECT incoming chaining-role edges into `terminal_id` — the cheap per-terminal
+/// "how many existing chains enter here" metric behind `--max-chains`. Each direct incoming
+/// chaining edge is one existing chain arriving at the terminal; a terminal already fed by many
+/// is well-covered and worth skipping so generation spreads to under-covered terminals.
+/// Ontology-general (chaining set from [`ChainSpec`]); never walks deeper than one hop, by design.
+pub(crate) fn incoming_chain_count(g: &GraphStore, spec: &ChainSpec, terminal_id: &str) -> usize {
+    g.incoming(terminal_id)
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| spec.spine_rels.iter().any(|r| r == &e.edge_type))
+        .count()
+}
+
+/// Pure code-B classifier: `"lexical"` when the terminal's grounding chunk id appears among the
+/// question's top-K lexical (BM25) hit chunk ids — the answer is lexically reachable from the
+/// question — else `"multihop"` (the question's own tokens don't retrieve the terminal, so a
+/// reader must traverse to it). Both sides are `<path>#<ord>` chunk ids. No graph/glossary/PPR
+/// involved — that is the whole point (a graph-aware probe would surface the terminal THROUGH the
+/// reasoning chain and falsely read "lexical").
+pub(crate) fn classify_hop_type(terminal_chunk: &str, topk_chunk_ids: &[String]) -> &'static str {
+    if topk_chunk_ids.iter().any(|c| c == terminal_chunk) {
+        "lexical"
+    } else {
+        "multihop"
+    }
+}
+
+/// The terminal seed's grounding chunk id (`<path>#<ord>`): its first outgoing `MENTIONS` target.
+/// `None` when ungrounded.
+fn seed_grounding_chunk(g: &GraphStore, seed_id: &str) -> Option<String> {
+    g.outgoing(seed_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|e| e.edge_type == glossa::graph::MENTIONS)
+        .map(|e| e.to)
+}
+
+/// Objective (code-B) `hop_type` for a kept proposal, computed with NO model call: run the
+/// question through the PURE LEXICAL document index (`DocIndex::search`, BM25 over the doc body —
+/// graph-INDEPENDENT) and check whether the terminal's grounding chunk lands in the top-K
+/// ([`HOP_TYPE_TOPK`]) hits via [`classify_hop_type`]. This is the label emitted for the gold.
+/// Falls back to `"multihop"` when the terminal has no grounding chunk (nothing lexical to hit).
+pub(crate) fn code_b_hop_type(
+    idx: &DocIndex,
+    g: &GraphStore,
+    seed_id: &str,
+    question: &str,
+) -> String {
+    let Some(chunk) = seed_grounding_chunk(g, seed_id) else {
+        return "multihop".to_string();
+    };
+    let hits = idx.search(question, HOP_TYPE_TOPK).unwrap_or_default();
+    let topk: Vec<String> = hits
+        .iter()
+        .map(|h| format!("{}#{}", h.path, h.ord))
+        .collect();
+    classify_hop_type(&chunk, &topk).to_string()
+}
+
+/// Truncate `s` to at most `max` chars (char-boundary safe), appending an ellipsis when cut — keeps
+/// one large chunk of existing-chain context from dominating the prompt.
+fn truncate_for_prompt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max).collect();
+        format!("{t}…")
+    }
+}
+
+/// Render the existing incoming chain as an indented, bounded block for the prompt. Empty input
+/// renders a clear "nothing yet" line so the model never sees a blank section.
+fn format_existing_chain(links: &[ChainLink]) -> String {
+    if links.is_empty() {
+        return "(no existing chain currently leads to this terminal)".to_string();
+    }
+    links
+        .iter()
+        .map(|l| {
+            let src = if l.source_text.is_empty() {
+                String::new()
+            } else {
+                let t = truncate_for_prompt(&l.source_text, GATHER_SRC_MAX);
+                format!("\n    {}", t.replace('\n', "\n    "))
+            };
+            format!("  - {} [{}] \"{}\"{}", l.id, l.node_type, l.label, src)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the per-seed user message for the BACKWARD, terminal-anchored gold generator: the seed is
+/// the fixed grounded terminal (the ANSWER), its source text grounds what the terminal is about,
+/// and the existing incoming chain is shown ONLY as covered context to invent a different entry
+/// angle from. Pure (no I/O) so it is unit-testable; ontology-general (names no concrete types).
+pub(crate) fn build_distil_user_message(
+    seed: &Seed,
+    source_text: &str,
+    existing: &[ChainLink],
+) -> String {
+    let body = if source_text.is_empty() {
+        "(no grounded source text found for this terminal)"
+    } else {
+        source_text
+    };
+    format!(
+        "Grounded TERMINAL node — this is the fixed ANSWER: {} [{}] \"{}\"\nIts grounded source \
+         text:\n{}\n\nA chain that ALREADY leads to this terminal (shown ONLY so you can see what \
+         is already covered and understand what the terminal is about — do NOT reproduce it or its \
+         question):\n{}\n\nInvent ONE NEW question, from a DIFFERENT entry angle, whose answer is \
+         this same terminal fact and which a reader can reach only by reasoning through the corpus \
+         to it. End with exactly one `propose_gold` call.",
+        seed.id,
+        seed.node_type,
+        seed.label,
+        body,
+        format_existing_chain(existing),
+    )
+}
+
+/// Forces the generator to end with a `propose_gold` TOOL CALL, not a plain text turn. The shared
+/// agent loop treats the first tool-free text turn as a final answer and returns — correct for the
+/// reader, wrong here: a distil attempt is only recorded through `propose_gold`, so a model that
+/// "thinks out loud" instead of calling the tool would silently waste the whole attempt (observed:
+/// weak models emit a prose answer or an empty turn and never call the tool). This reuses the loop's
+/// existing `DialogueGate` seam (the same one `user_sim` uses): on a tool-free turn it deflects with
+/// a nudge to call `propose_gold` and lets the loop continue, UNTIL a proposal has actually been
+/// captured — then it accepts, so the loop exits cleanly right after the tool call. `resample` still
+/// retries a genuinely degenerate (empty/looped/length) turn underneath this.
+struct ProposeGoldGate<'a> {
+    proposal: &'a RefCell<Option<GoldProposal>>,
+}
+
+impl crate::backend::user_sim::DialogueGate for ProposeGoldGate<'_> {
+    fn judge(&self, _q: &str, _messages: &[Value], _proposed: &str) -> anyhow::Result<Option<String>> {
+        if self.proposal.borrow().is_some() {
+            // The tool call already landed — accept this closing text turn and let the loop end.
+            Ok(None)
+        } else {
+            // No proposal yet: push the model back to the tool instead of accepting a text answer.
+            Ok(Some(
+                "You have not called `propose_gold` yet. A plain text reply is NOT recorded — your \
+                 work counts ONLY through the `propose_gold` tool call. Call `propose_gold` now with \
+                 question, answer, chain_node_ids, gate_ok, gate_reason, and hop_type (use \
+                 gate_ok=false if you could not build a usable question)."
+                    .to_string(),
+            ))
+        }
+    }
+}
+
 /// Run one seed's generate + verify-gate pass: a strong model (`lab.distil`) explores the corpus
 /// via the read-only reader tools from `seed`, then either proposes a gated synthetic gold via
 /// `propose_gold` or leaves nothing to keep. Verify-gate is MVP-level: the model's own `gate_ok`,
@@ -211,24 +456,15 @@ pub fn generate_one(
     let g = GraphStore::open(root)?;
     let idx = DocIndex::open_or_create(root)?;
     let trace = TraceLog::disabled();
-    let spec = glossa::tools::ChainSpec::from_ontology(ont);
+    let spec = ChainSpec::from_ontology(ont);
 
     let source_text = seed_source_text(root, &idx, &g, &seed.id);
+    // The existing incoming chain(s) that already lead to this terminal — ontology-general backward
+    // walk along chaining-role edges, shown to the model only as covered context (invent a new
+    // entry angle, don't reproduce it).
+    let existing = gather_incoming_chain(root, &idx, &g, &spec, &seed.id);
     let system = format!("{}\n\n{distil_md}", schema_graph_block(ont));
-    let user = format!(
-        "Seed node: {} [{}] \"{}\"\nGrounded source text:\n{}\n\nExplore from this seed, trace a \
-         real chain along the ontology's relations, and call `propose_gold` with one question \
-         answerable only by following that chain, its grounded terminal answer, and your honest \
-         self-gate.",
-        seed.id,
-        seed.node_type,
-        seed.label,
-        if source_text.is_empty() {
-            "(no grounded source text found for this seed)"
-        } else {
-            source_text.as_str()
-        }
-    );
+    let user = build_distil_user_message(seed, &source_text, &existing);
     let messages = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": user }),
@@ -290,9 +526,16 @@ pub fn generate_one(
         )
     };
 
-    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS, None)?;
+    // Gate the loop on an actual `propose_gold` tool call (see `ProposeGoldGate`): deflect tool-free
+    // text turns back to the tool instead of accepting them as a final answer, until a proposal is
+    // captured. Extract via `borrow_mut().take()` (not `into_inner`, which would move `proposal`
+    // while the gate still borrows it).
+    let gate = ProposeGoldGate {
+        proposal: &proposal,
+    };
+    run_agent_loop(chat, messages, exec, on_repeat, MAX_ROUNDS, Some(&gate))?;
 
-    let Some(proposal) = proposal.into_inner() else {
+    let Some(proposal) = proposal.borrow_mut().take() else {
         return Ok(GenOutcome::Dropped(DropReason::NoProposal));
     };
     if !proposal.gate_ok {
@@ -328,7 +571,8 @@ mod tests {
             "answer": " the terminal fact ",
             "chain_node_ids": ["seed-1", "mid-1", "term-1"],
             "gate_ok": true,
-            "gate_reason": "chain checks out"
+            "gate_reason": "chain checks out",
+            "hop_type": " multihop "
         });
         let p = parse_propose_gold(&args).expect("well-formed payload parses");
         assert_eq!(p.question, "what step follows the seed?");
@@ -336,6 +580,7 @@ mod tests {
         assert_eq!(p.chain_node_ids, vec!["seed-1", "mid-1", "term-1"]);
         assert!(p.gate_ok);
         assert_eq!(p.gate_reason, "chain checks out");
+        assert_eq!(p.hop_type, "multihop", "hop_type parsed and trimmed");
     }
 
     #[test]
@@ -348,6 +593,166 @@ mod tests {
             "gate_ok must default to false, never an accidental pass"
         );
         assert!(p.gate_reason.is_empty());
+        assert!(
+            p.hop_type.is_empty(),
+            "hop_type defaults to empty when absent"
+        );
+    }
+
+    #[test]
+    fn classify_hop_type_lexical_when_terminal_in_topk_else_multihop() {
+        let topk = vec![
+            "a.md#1".to_string(),
+            "b.md#3".to_string(),
+            "c.md#2".to_string(),
+        ];
+        assert_eq!(classify_hop_type("b.md#3", &topk), "lexical");
+        assert_eq!(classify_hop_type("z.md#9", &topk), "multihop");
+        assert_eq!(
+            classify_hop_type("a.md#1", &[]),
+            "multihop",
+            "empty hit list is never lexical"
+        );
+    }
+
+    // ---- backward incoming-chain gatherer (ontology-general, chaining-role edges only) ----------
+
+    const CHAIN_ONT: &str = r#"
+[entities.Fact]
+requires_grounding = true
+[entities.Document]
+[entities.Section]
+
+[relations.LEADS_TO]
+from = ["Fact"]
+to = ["Fact"]
+role = "chaining"
+
+[reasoning]
+[[reasoning.spines]]
+anchor = "Fact"
+relations = ["LEADS_TO"]
+"#;
+
+    fn prov() -> glossa::graph::store::Provenance {
+        glossa::graph::store::Provenance {
+            source_path: "d.md".into(),
+            range: None,
+            file_sig: None,
+            origin: "test".into(),
+            confidence: 0.9,
+            created_at: 1,
+        }
+    }
+
+    /// A terminal with two grounded predecessors reachable via chaining-role incoming edges is
+    /// gathered (each predecessor's grounded chunk text included); a terminal with no incoming
+    /// chaining edges gathers nothing. Ontology-general: the chaining set comes from the ontology.
+    #[test]
+    fn gather_incoming_chain_collects_grounded_predecessors_and_is_empty_without_them() {
+        use glossa::graph::store::{Edge, Node};
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::parse(CHAIN_ONT).unwrap();
+        let spec = ChainSpec::from_ontology(&ont);
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            glossa::model::Chunk {
+                doc_path: "d.md".into(),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "PRED ONE body".into(),
+            },
+            glossa::model::Chunk {
+                doc_path: "d.md".into(),
+                location: "S2".into(),
+                file_type: "md".into(),
+                text: "PRED TWO body".into(),
+            },
+        ])
+        .unwrap();
+
+        for (id, label, chunk) in [
+            ("term", "terminal", 3u64),
+            ("pred-a", "pred a", 1),
+            ("pred-b", "pred b", 2),
+        ] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: label.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+            g.put_edge(&Edge {
+                from: id.into(),
+                to: format!("d.md#{chunk}"),
+                edge_type: glossa::graph::MENTIONS.to_string(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        // pred-a --LEADS_TO--> term, pred-b --LEADS_TO--> term (chaining, incoming to term).
+        for from in ["pred-a", "pred-b"] {
+            g.put_edge(&Edge {
+                from: from.into(),
+                to: "term".into(),
+                edge_type: "LEADS_TO".into(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+
+        let links = gather_incoming_chain(dir.path(), &idx, &g, &spec, "term");
+        let ids: HashSet<&str> = links.iter().map(|l| l.id.as_str()).collect();
+        assert!(
+            ids.contains("pred-a") && ids.contains("pred-b"),
+            "both predecessors: {ids:?}"
+        );
+        let texts: String = links.iter().map(|l| l.source_text.clone()).collect();
+        assert!(
+            texts.contains("PRED ONE body") && texts.contains("PRED TWO body"),
+            "grounded text: {texts}"
+        );
+
+        // A terminal with no incoming chaining edges gathers nothing.
+        assert!(
+            gather_incoming_chain(dir.path(), &idx, &g, &spec, "pred-a").is_empty(),
+            "no incoming chaining edges -> empty"
+        );
+    }
+
+    /// `incoming_chain_count` counts direct incoming chaining-role edges (and ignores non-chaining
+    /// incoming edges like MENTIONS), driving the `--max-chains` skip metric.
+    #[test]
+    fn incoming_chain_count_counts_direct_chaining_edges_only() {
+        use glossa::graph::store::{Edge, Node};
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::parse(CHAIN_ONT).unwrap();
+        let spec = ChainSpec::from_ontology(&ont);
+        let g = GraphStore::open(dir.path()).unwrap();
+        for id in ["term", "pred-a", "pred-b"] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        for from in ["pred-a", "pred-b"] {
+            g.put_edge(&Edge {
+                from: from.into(),
+                to: "term".into(),
+                edge_type: "LEADS_TO".into(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        assert_eq!(incoming_chain_count(&g, &spec, "term"), 2);
+        assert_eq!(incoming_chain_count(&g, &spec, "pred-a"), 0);
     }
 
     #[test]

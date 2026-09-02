@@ -92,6 +92,12 @@ pub struct DistilArgs {
     /// A reasoning node is "alias-poor" (eligible for `--aliases-only` enrichment) when its alias
     /// count is strictly below this. Default 3 (wired in `kbx.rs`). Alias mode only.
     pub min_aliases: usize,
+    /// Golds mode only: skip terminals that are ALREADY well-covered. A terminal whose count of
+    /// direct incoming chaining-role edges (each is one existing chain arriving at it — the cheap
+    /// metric `gen::incoming_chain_count` computes) is `>= N` is dropped from the seed pool, so
+    /// generation spreads to under-covered terminals and avoids near-duplicate golds. `None`
+    /// (default) = no filter.
+    pub max_chains: Option<usize>,
 }
 
 /// Which pipeline `distil::run` dispatches to — decided purely from `DistilArgs.emit_golds`, kept
@@ -219,14 +225,37 @@ pub fn seed_pool(g: &GraphStore, ont: &Ontology, seed_type: Option<&str>) -> Res
     Ok(seeds)
 }
 
+/// Drop already-well-covered terminals from a seed pool for `--max-chains N`: a seed whose direct
+/// incoming chaining-edge count (`gen::incoming_chain_count`, ontology-general) is `>= N` is
+/// excluded; a seed with fewer is kept. `None` returns the pool untouched. Order-preserving and
+/// model-free, so `--max-chains` is unit-testable without a live model. See
+/// [`DistilArgs::max_chains`].
+pub fn filter_by_max_chains(
+    seeds: Vec<Seed>,
+    g: &GraphStore,
+    spec: &glossa::tools::ChainSpec,
+    max_chains: Option<usize>,
+) -> Vec<Seed> {
+    let Some(n) = max_chains else {
+        return seeds;
+    };
+    seeds
+        .into_iter()
+        .filter(|s| crate::distil::gen::incoming_chain_count(g, spec, &s.id) < n)
+        .collect()
+}
+
 /// One kept synthetic gold, in the exact `[[case]]` shape `dataset_toml::parse_dataset_toml`
-/// reads back (`id`/`question`/`answer`; `aliases`/`tags` are optional there and simply omitted
-/// here — they default to empty on read-back).
+/// reads back (`id`/`question`/`answer`/`hop_type`; `aliases`/`tags` are optional there and
+/// simply omitted here — they default to empty on read-back).
 #[derive(Debug, Serialize)]
 struct OutCase {
     id: String,
     question: String,
     answer: String,
+    /// Objective (code-B) retrieval verdict for this gold — `"lexical"`/`"multihop"`. Read back by
+    /// `dataset_toml::parse_dataset_toml`'s `hop_type` field for the by-question-type report slice.
+    hop_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +276,7 @@ fn write_dataset_toml(out_path: &std::path::Path, kept: &[OutCase]) -> Result<()
                 id: c.id.clone(),
                 question: c.question.clone(),
                 answer: c.answer.clone(),
+                hop_type: c.hop_type.clone(),
             })
             .collect(),
     };
@@ -280,11 +310,19 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         .with_context(|| format!("reading {}", paths.distil_golds.display()))?;
 
     let g = GraphStore::open(&paths.root)?;
+    // Shared read-only index for the code-B (retrieval) hop_type probe on kept golds — opened once,
+    // reused every attempt. Distinct from `generate_one`'s own per-call index (it opens its own).
+    let idx = DocIndex::open_or_create(&paths.root)?;
+    let spec = glossa::tools::ChainSpec::from_ontology(&ontology);
     let seeds = seed_pool(&g, &ontology, args.seed_type.as_deref())?;
+    // `--max-chains N`: drop terminals already fed by >= N incoming chaining chains (well-covered),
+    // so generation spreads to under-covered terminals. No-op when unset.
+    let seeds = filter_by_max_chains(seeds, &g, &spec, args.max_chains);
     if seeds.is_empty() {
         bail!(
             "kbx distil: no grounded seed nodes found (need a node of an eligible type carrying \
-             an outgoing MENTIONS edge) — build the graph first (`kbx build`)"
+             an outgoing MENTIONS edge; --max-chains may have filtered the pool) — build the \
+             graph first (`kbx build`)"
         );
     }
 
@@ -325,12 +363,23 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
             .with_context(|| format!("distil attempt {i} (seed {})", seed.id))?
         {
             GenOutcome::Kept(p) => {
+                // Objective (code-B) hop_type: the authoritative label for the emitted gold —
+                // pure lexical retrieval, graph-independent (see `gen::code_b_hop_type`). The
+                // model's own `p.hop_type` is advisory only; log one line when they disagree.
+                let hop_type = crate::distil::gen::code_b_hop_type(&idx, &g, &seed.id, &p.question);
+                if !p.hop_type.is_empty() && p.hop_type != hop_type {
+                    pb.println(format!(
+                        "hop_type: model said {}, retrieval says {} (using {})",
+                        p.hop_type, hop_type, hop_type
+                    ));
+                }
                 println!("distil {i}: kept \"{}\" (seed {})", p.question, seed.id);
                 // Sequential id over KEPT golds (no gaps from dropped attempts).
                 kept.push(OutCase {
                     id: format!("synth-{}", kept.len()),
                     question: p.question,
                     answer: p.answer,
+                    hop_type,
                 });
             }
             GenOutcome::Dropped(reason) => {
@@ -774,6 +823,85 @@ to = ["Fact"]
         assert_eq!(ids, vec!["fact-a", "fact-b", "fact-c"]);
     }
 
+    /// Ontology WITH a reasoning spine so `ChainSpec::spine_rels` (hence `incoming_chain_count`)
+    /// is non-empty — the `--max-chains` filter is meaningless without a chaining relation set.
+    const CHAIN_SPINE_ONT: &str = r#"
+[entities.Fact]
+requires_grounding = true
+[entities.Document]
+[entities.Section]
+
+[relations.LEADS_TO]
+from = ["Fact"]
+to = ["Fact"]
+role = "chaining"
+
+[reasoning]
+[[reasoning.spines]]
+anchor = "Fact"
+relations = ["LEADS_TO"]
+"#;
+
+    /// `--max-chains N` excludes a terminal fed by `>= N` incoming chaining chains and keeps one
+    /// below N; `None` leaves the pool untouched.
+    #[test]
+    fn filter_by_max_chains_excludes_well_covered_terminals() {
+        use glossa::graph::store::{Edge, Node};
+        let dir = tempfile::tempdir().unwrap();
+        let ont = Ontology::parse(CHAIN_SPINE_ONT).unwrap();
+        let spec = glossa::tools::ChainSpec::from_ontology(&ont);
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // Nodes: `rich` (2 incoming chaining chains), `lean` (1), plus their predecessors.
+        for id in ["rich", "lean", "p1", "p2", "p3"] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: vec![],
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        for from in ["p1", "p2"] {
+            g.put_edge(&Edge {
+                from: from.into(),
+                to: "rich".into(),
+                edge_type: "LEADS_TO".into(),
+                prov: prov(),
+            })
+            .unwrap();
+        }
+        g.put_edge(&Edge {
+            from: "p3".into(),
+            to: "lean".into(),
+            edge_type: "LEADS_TO".into(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        let seeds = vec![
+            Seed {
+                id: "rich".into(),
+                node_type: "Fact".into(),
+                label: "rich".into(),
+            },
+            Seed {
+                id: "lean".into(),
+                node_type: "Fact".into(),
+                label: "lean".into(),
+            },
+        ];
+
+        // N=2: `rich` (2 >= 2) excluded, `lean` (1 < 2) kept.
+        let kept = filter_by_max_chains(seeds.clone(), &g, &spec, Some(2));
+        let ids: Vec<&str> = kept.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["lean"], "well-covered terminal excluded: {ids:?}");
+
+        // None => untouched.
+        assert_eq!(filter_by_max_chains(seeds, &g, &spec, None).len(), 2);
+    }
+
     #[test]
     fn write_dataset_toml_round_trips_through_the_real_parser() {
         let dir = tempfile::tempdir().unwrap();
@@ -783,11 +911,13 @@ to = ["Fact"]
                 id: "synth-0".into(),
                 question: "what follows the seed?".into(),
                 answer: "the terminal fact".into(),
+                hop_type: "multihop".into(),
             },
             OutCase {
                 id: "synth-1".into(),
                 question: "second question?".into(),
                 answer: "second answer".into(),
+                hop_type: "lexical".into(),
             },
         ];
         write_dataset_toml(&out_path, &kept).unwrap();
@@ -798,7 +928,9 @@ to = ["Fact"]
         assert_eq!(parsed[0].id, "synth-0");
         assert_eq!(parsed[0].question, "what follows the seed?");
         assert_eq!(parsed[0].answer, "the terminal fact");
+        assert_eq!(parsed[0].hop_type, "multihop", "hop_type round-trips");
         assert_eq!(parsed[1].id, "synth-1");
+        assert_eq!(parsed[1].hop_type, "lexical");
     }
 
     // ---- densify orchestrator (Task 3): doc selection + checkpoint, model-free ----------------
@@ -898,6 +1030,7 @@ to = ["Fact"]
             emit_golds: None,
             aliases_only: false,
             min_aliases: 3,
+            max_chains: None,
         };
         assert_eq!(args.doc.as_deref(), Some("a.md"));
         assert!(args.force);
@@ -969,6 +1102,7 @@ to = ["Fact"]
             emit_golds,
             aliases_only: false,
             min_aliases: 3,
+            max_chains: None,
         }
     }
 

@@ -395,6 +395,12 @@ enum Cmd {
         /// this many aliases (default 3). Alias mode only.
         #[arg(long = "min-aliases", default_value_t = 3)]
         min_aliases: usize,
+        /// Skip already-well-covered terminals: a terminal fed by this many or more existing
+        /// incoming chaining chains is dropped from the seed pool, spreading generation to
+        /// under-covered terminals and avoiding near-duplicate golds. Unset = no filter. Golds
+        /// mode only (`--emit-golds`).
+        #[arg(long = "max-chains")]
+        max_chains: Option<usize>,
     },
 }
 
@@ -576,6 +582,7 @@ fn main() -> Result<()> {
             jobs,
             aliases_only,
             min_aliases,
+            max_chains,
         } => distil::run(
             path,
             DistilArgs {
@@ -594,6 +601,7 @@ fn main() -> Result<()> {
                 jobs,
                 aliases_only,
                 min_aliases,
+                max_chains,
             },
         ),
     }
