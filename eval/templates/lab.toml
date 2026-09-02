@@ -125,3 +125,7 @@ jobs_eval = 3           # worker-pool size for `kbx eval`'s per-case reader+judg
                                  # minibatch — opt-in ONLY for a weak, high-variance reader (e.g. a
                                  # 4B) where canonical's per-proposal noise drowns the accept signal.
                                  # Env GEPA_MINIBATCH_CACHE=1/0 overrides for a one-off sweep.
+# gepa_rollout_samples = 1       # `kbx train` rollouts averaged per question. 1 (default) = a single
+                                 # rollout (today's behavior). K>1 rolls each question K times and
+                                 # averages the score, so accept/Pareto/apply-gate decisions are less
+                                 # noisy for a weak, high-variance reader — at K× the model-call cost.

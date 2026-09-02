@@ -876,6 +876,8 @@ fn run_optimize_graph(
             candidate_selection,
             // Legacy research binary has no lab.toml; use the canonical-GEPA default (no cache).
             minibatch_cache: false,
+            // Legacy binary has no lab.toml; single rollout = no behavior change.
+            rollout_samples: 1,
             // Legacy research binary has no `--jobs` flag; keep its rollouts sequential (no
             // behaviour change).
             jobs: 1,

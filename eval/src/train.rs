@@ -275,6 +275,10 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     // Minibatch-cache mode: lab.toml `[tuning] gepa_minibatch_cache` (default false = canonical
     // fresh-per-proposal GEPA); env `GEPA_MINIBATCH_CACHE` overrides inside `gepa_graph::run`.
     let minibatch_cache = lab.tuning.gepa_minibatch_cache.unwrap_or(false);
+    // Rollout-averaging: K rollouts per question, averaged, to cut a weak reader's variance in the
+    // accept/Pareto/apply-gate decisions. lab.toml `[tuning] gepa_rollout_samples`; None/1 = a
+    // single rollout (today's behavior). Floored at 1 so a stray 0 can't disable scoring.
+    let rollout_samples = lab.tuning.gepa_rollout_samples.unwrap_or(1).max(1);
 
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
@@ -292,6 +296,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         pareto_size,
         candidate_selection,
         minibatch_cache,
+        rollout_samples,
         jobs,
         judge: judge_cfg,
         user_sim: lab.user_sim.clone(),

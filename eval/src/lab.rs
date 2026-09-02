@@ -239,6 +239,13 @@ pub struct Tuning {
     /// `GEPA_MINIBATCH_CACHE=1/0` overrides.
     #[serde(default)]
     pub gepa_minibatch_cache: Option<bool>,
+    /// `kbx train` GEPA rollout-averaging: lab.toml `[tuning] gepa_rollout_samples`. `None`/`1`
+    /// (default) = a single rollout per question (today's behavior). `K>1` rolls each question K
+    /// times and averages the score — cutting a noisy/weak reader's per-rollout variance in the
+    /// accept/Pareto/apply-gate decisions — at K× the model-call cost. See
+    /// `gepa_graph::GepaGraphConfig::rollout_samples`.
+    #[serde(default)]
+    pub gepa_rollout_samples: Option<usize>,
 }
 
 /// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,

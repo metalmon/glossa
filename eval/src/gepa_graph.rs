@@ -80,6 +80,11 @@ pub struct GepaGraphConfig {
     /// nothing was accepted). The apply-gate guards BOTH modes from shipping a regression. Sourced
     /// from lab.toml `[tuning].gepa_minibatch_cache`; env `GEPA_MINIBATCH_CACHE=1/0` overrides.
     pub minibatch_cache: bool,
+    /// How many rollouts to average per question when scoring (variance reduction for a noisy/weak
+    /// reader). 1 (default) = a single rollout, today's behavior. K>1 rolls each question K times
+    /// and averages the score, so accept/Pareto/apply-gate decisions are less noisy — at K× the
+    /// model-call cost.
+    pub rollout_samples: usize,
     /// Worker-pool size for `score_questions`'s per-question rollouts. Rollouts are graph-READ
     /// reader navigations only (train never writes) — safe to run `jobs` of them concurrently
     /// sharing the one opened `GraphStore`/`DocIndex` (both read-only shareable). The GEPA
@@ -400,6 +405,80 @@ fn rollout_one(
     }
 }
 
+/// Combine K per-question rollout samples into ONE `RolloutOutcome` (variance reduction for a
+/// noisy/weak reader).
+///
+/// - `score` = mean of the per-sample `score` over the NON-errored samples; 0.0 when ALL samples
+///   errored (mean of an empty set), matching `mean_scored`'s treatment of endpoint errors.
+/// - `errored` = true IFF every sample errored — an endpoint/context-overflow error is
+///   deterministic, so K samples all error; a genuine answer (even a wrong one) means
+///   `errored: false` and is scored normally.
+/// - `pred`/`steps`/`judge_reason` come from a REPRESENTATIVE sample: prefer a non-errored FAILING
+///   one (`!errored && score < 1.0`) so a `FailCase` fed to the reflector still shows a real
+///   wrong-answer trajectory, not an averaged phantom; else the first non-errored sample; else the
+///   first sample.
+///
+/// A single-element input (K=1) returns that outcome unchanged (score = its own score, errored =
+/// its own flag, representative = itself), so the default path is byte-for-byte today's behavior.
+fn combine_samples(mut samples: Vec<RolloutOutcome>) -> RolloutOutcome {
+    debug_assert!(!samples.is_empty(), "combine_samples needs >= 1 sample");
+    let scored: Vec<f64> = samples
+        .iter()
+        .filter(|o| !o.errored)
+        .map(|o| o.score)
+        .collect();
+    // Every sample errored => the combined outcome is errored (excluded from scored means).
+    let errored = scored.is_empty();
+    // Mean over non-errored samples; `mean` returns 0.0 for the all-errored (empty) case.
+    let score = mean(&scored);
+    // Representative: a non-errored failing sample first (real wrong-answer trajectory for the
+    // reflector), else the first non-errored sample, else the first sample.
+    let rep = samples
+        .iter()
+        .position(|o| !o.errored && o.score < 1.0)
+        .or_else(|| samples.iter().position(|o| !o.errored))
+        .unwrap_or(0);
+    let RolloutOutcome {
+        pred,
+        steps,
+        judge_reason,
+        ..
+    } = samples.swap_remove(rep);
+    RolloutOutcome {
+        score,
+        pred,
+        steps,
+        judge_reason,
+        errored,
+    }
+}
+
+/// Roll one question `k` times via `rollout_one` (sequentially) and combine into a single
+/// `RolloutOutcome` (see [`combine_samples`]). `k <= 1` calls `rollout_one` exactly once and
+/// returns it unchanged — byte-for-byte today's behavior. Called from `score_questions`'s per-unit
+/// work closure, so the K samples run INSIDE the existing one-unit-per-question parallelism (the
+/// pool shape is unchanged — units stay one-per-question). `rollout_one` is left the untouched
+/// single-rollout primitive.
+#[allow(clippy::too_many_arguments)]
+fn rollout_sampled(
+    cfg: &GepaGraphConfig,
+    url: &str,
+    tools: &Value,
+    prompt: &str,
+    q: &Question,
+    idx: &DocIndex,
+    graph: Option<&GraphStore>,
+    spec: &ChainSpec,
+    pb: &ProgressBar,
+    k: usize,
+) -> RolloutOutcome {
+    let k = k.max(1);
+    let samples: Vec<RolloutOutcome> = (0..k)
+        .map(|_| rollout_one(cfg, url, tools, prompt, q, idx, graph, spec, pb))
+        .collect();
+    combine_samples(samples)
+}
+
 /// Score `questions` with `cfg.jobs` concurrent read-only rollout workers.
 ///
 /// The returned `Vec<RolloutOutcome>` MUST stay in `questions`' input order: `Candidate::score_val`
@@ -435,9 +514,22 @@ fn score_questions(
         &sink,
         |_unit| 1,
         |(i, q)| {
+            // Each question is rolled `cfg.rollout_samples` times and averaged (see
+            // `rollout_sampled`/`combine_samples`); K=1 = a single `rollout_one`, today's behavior.
             Ok((
                 *i,
-                rollout_one(cfg, url, tools, prompt, q, idx, graph, spec, pb),
+                rollout_sampled(
+                    cfg,
+                    url,
+                    tools,
+                    prompt,
+                    q,
+                    idx,
+                    graph,
+                    spec,
+                    pb,
+                    cfg.rollout_samples,
+                ),
             ))
         },
     )
@@ -958,6 +1050,10 @@ pub fn run(
     // Running count of reader rollouts (metric calls) spent by the SEARCH; bumped after every
     // `score_questions` pass by the number of questions it scored. Bounds the candidate loop.
     let mut metric_calls: usize = 0;
+    // Each question now costs `cfg.rollout_samples` model calls (K rollouts averaged into one
+    // score), so every metric-call increment below is `<set>.len() * k`. K=1 (default) = ×1, no
+    // change from the pre-averaging accounting.
+    let k = cfg.rollout_samples;
 
     // Dataset-wide common proper-noun-shaped tokens (interrogatives, shared nouns recurring across
     // >=2 questions) that the per-minibatch leak-scan must NOT reject a child prompt over. Computed
@@ -976,7 +1072,7 @@ pub fn run(
         &spec,
         pb,
     );
-    metric_calls += val.len();
+    metric_calls += val.len() * k;
     // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored on the
     // endpoint (a deterministic 500 / context-overflow reproduces for every candidate). Doing this
     // ONCE, before D_pareto is built, keeps every candidate's per-instance `score_val` vector aligned
@@ -1014,7 +1110,7 @@ pub fn run(
         &spec,
         pb,
     );
-    metric_calls += pareto_set.len();
+    metric_calls += pareto_set.len() * k;
     let mut pool = vec![Candidate {
         prompt: cfg.seed_prompt.clone(),
         score_val: scores(&base_pareto),
@@ -1097,7 +1193,7 @@ pub fn run(
                         &spec,
                         pb,
                     );
-                    metric_calls += batch.len();
+                    metric_calls += batch.len() * k;
                     // Blocklist any question that errored on the endpoint so it is never sampled
                     // again (a context-length overflow is deterministic — resampling only wastes
                     // budget/time). Log once, when first dropped, so the exclusion is visible.
@@ -1188,7 +1284,7 @@ pub fn run(
             &spec,
             pb,
         );
-        metric_calls += batch.len();
+        metric_calls += batch.len() * k;
         let child_mb_score = mean_scored(&child_mb);
         if child_mb_score <= parent_mb_score {
             pb.println(format!(
@@ -1208,7 +1304,7 @@ pub fn run(
             &spec,
             pb,
         );
-        metric_calls += pareto_set.len();
+        metric_calls += pareto_set.len() * k;
         pool.push(Candidate {
             prompt: child_prompt,
             // Per-instance Pareto vector uses raw `scores()` (positional, aligned across candidates).
@@ -1675,6 +1771,80 @@ mod tests {
         assert_eq!(mean_scored(&[outcome(0.0, true), outcome(0.0, true)]), 0.0);
         // No errors -> identical to a plain mean.
         assert!((mean_scored(&[outcome(1.0, false), outcome(0.0, false)]) - 0.5).abs() < 1e-9);
+    }
+
+    fn outcome_pred(score: f64, errored: bool, pred: &str) -> RolloutOutcome {
+        RolloutOutcome {
+            score,
+            pred: pred.to_string(),
+            steps: vec![ToolStep {
+                name: "read".to_string(),
+                args: json!({"tag": pred}),
+                result: pred.to_string(),
+            }],
+            judge_reason: None,
+            errored,
+        }
+    }
+
+    #[test]
+    fn combine_samples_averages_and_picks_failing_representative() {
+        // Both non-errored: score is the mean (0.5), errored=false, and the representative
+        // pred/steps come from the FAILING (0.0) sample so the reflector sees a real wrong-answer
+        // trajectory — not the passing (1.0) one, nor an averaged phantom.
+        let combined = combine_samples(vec![
+            outcome_pred(1.0, false, "ok"),
+            outcome_pred(0.0, false, "wrong"),
+        ]);
+        assert!((combined.score - 0.5).abs() < 1e-9, "mean of 1.0 and 0.0");
+        assert!(!combined.errored);
+        assert_eq!(
+            combined.pred, "wrong",
+            "representative is the failing sample"
+        );
+        assert_eq!(combined.steps.len(), 1);
+        assert_eq!(combined.steps[0].result, "wrong");
+    }
+
+    #[test]
+    fn combine_samples_excludes_errored_from_mean() {
+        // One clean 1.0 + one endpoint error: the error is EXCLUDED from the mean (score 1.0, not
+        // 0.5), and errored=false because at least one sample produced a real answer. The lone
+        // non-errored sample is the representative even though it is not failing.
+        let combined = combine_samples(vec![
+            outcome_pred(1.0, false, "ok"),
+            outcome_pred(0.0, true, "endpoint-err"),
+        ]);
+        assert!(
+            (combined.score - 1.0).abs() < 1e-9,
+            "errored sample excluded from the mean"
+        );
+        assert!(!combined.errored);
+        assert_eq!(
+            combined.pred, "ok",
+            "representative is the non-errored sample"
+        );
+    }
+
+    #[test]
+    fn combine_samples_all_errored_is_errored_zero() {
+        // Every sample errored -> the combined outcome is errored with score 0.0 (excluded from
+        // scored means downstream), never a divide-by-zero.
+        let combined = combine_samples(vec![
+            outcome_pred(0.0, true, "e1"),
+            outcome_pred(0.0, true, "e2"),
+        ]);
+        assert!(combined.errored);
+        assert_eq!(combined.score, 0.0);
+    }
+
+    #[test]
+    fn combine_samples_single_sample_is_identity() {
+        // K=1: the combined outcome is byte-for-byte the single rollout (default path unchanged).
+        let combined = combine_samples(vec![outcome_pred(0.0, false, "solo")]);
+        assert_eq!(combined.score, 0.0);
+        assert!(!combined.errored);
+        assert_eq!(combined.pred, "solo");
     }
 
     #[test]

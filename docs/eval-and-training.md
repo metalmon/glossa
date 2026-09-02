@@ -140,6 +140,11 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   minibatch and reuse it (a stable but biased baseline). A strong, low-variance reader wants the
   default. `GEPA_MINIBATCH_CACHE=1/0` overrides the file for a one-off sweep. Either way the
   full-set **apply-gate** refuses to write a winner that regresses against the seed prompt.
+- **GEPA rollout averaging** — `[tuning] gepa_rollout_samples` (default `1`). `K>1` rolls each
+  question `K` times and averages its score, so every downstream decision (accept child-vs-parent,
+  the Pareto vectors, the full-set apply-gate) rests on a less noisy estimate — cutting a weak,
+  high-variance reader's per-rollout variance at `K×` the model-call cost. `1` = a single rollout
+  (today's behavior).
 - **user_sim dialogue gate** — an opt-in patient simulated user that deflects a non-answer back into
   the reader loop instead of accepting it (eval + train).
 - **Evidence-grounded judge** — grades an answer against the retrieved source evidence, not only the gold string.
