@@ -362,7 +362,7 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
             break;
         }
         if blocked.len() >= seeds.len() {
-            pb.println("distil: every seed errored on the endpoint — stopping".to_string());
+            pb.println("distil: every seed errored on the endpoint — stopping");
             break;
         }
         let i = attempts;

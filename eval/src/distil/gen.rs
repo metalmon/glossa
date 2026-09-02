@@ -146,24 +146,16 @@ pub fn parse_propose_gold(args: &Value) -> Option<GoldProposal> {
     })
 }
 
-/// OpenAI-function tool schema for the distil generator: the full read-only reader registry
-/// (`search`/`read`/`grep`/`glob`/`glossary`/`reach`/`sql` — glossa's registry order, unfiltered;
-/// distil always has a graph open, so nothing is gated here) plus `propose_gold`. Deliberately NO
-/// `graph_upsert` — this pass never writes to the graph.
+/// OpenAI-function tool schema for the distil generator: ONLY `propose_gold`. The reader tools
+/// (`search`/`read`/`grep`/`glob`/`glossary`/`reach`/`sql`) are deliberately OMITTED — the generator
+/// is handed everything it needs up front (the terminal, its full grounded source text, and the
+/// existing incoming chain), so it constructs the (question, answer) in ONE shot instead of
+/// exploring. This removes the two failure modes of a tool-driven pass on a weak model: it can no
+/// longer wander for `MAX_ROUNDS` and never call `propose_gold`, and it can no longer balloon the
+/// trajectory with accumulated tool output into a context-length overflow. NO `graph_upsert` either
+/// — this pass never writes to the graph.
 fn distil_tools_schema() -> Value {
-    let mut tools: Vec<Value> = glossa::tools::registry::registry()
-        .iter()
-        .map(|d| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
-                }
-            })
-        })
-        .collect();
+    let mut tools: Vec<Value> = Vec::new();
     tools.push(json!({
         "type": "function",
         "function": {

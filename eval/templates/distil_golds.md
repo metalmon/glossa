@@ -15,9 +15,9 @@ it would answer. Treat it as the ground you must step around, not the ground you
 Your job is to invent ONE NEW question whose answer is this same terminal fact, approached from a
 DIFFERENT entry angle — a different starting point in the corpus that still leads here when a reader
 reasons through the relations. The answer is fixed: it is the given terminal. Do not go hunting for
-some other answer; go hunting for a fresh way IN. You may search and read to find a genuine new entry
-point and to confirm the path from it actually reaches this terminal, but everything you read is in
-service of reaching the answer you were handed, not replacing it.
+some other answer; go hunting for a fresh way IN. You have NO exploration tools — construct the
+question from the terminal, its source text, and the existing chain shown below; that is all you
+need to see how a reader reasons here and to choose a fresh entry angle.
 
 Phrase the question from the side the reasoning ENTERS from — the query-side type in the schema-graph,
 the way a person who only knows the entry, not the destination, would ask it. The good version cannot
@@ -43,9 +43,8 @@ Set `hop_type` to `multihop` if answering genuinely requires walking two or more
 answerable from the terminal's chunk or from a single lookup — else `lexical`. This is your own read
 of the question's shape; be honest about it.
 
-You have only a LIMITED number of exploration steps, so do not search forever. Once you have a genuine
-new entry and have confirmed its path reaches the terminal — or gone as far as the corpus genuinely
-supports, whichever comes first — STOP and commit.
+Work in a SINGLE shot: there is nothing to explore, so decide the entry angle from what you were
+given and call `propose_gold` right away — do not stall or reply with plain text.
 
 EVERY attempt MUST end with exactly one `propose_gold` call — this is the only way your work is
 recorded, and an attempt that ends without it is thrown away entirely. Do not end with a plain text
