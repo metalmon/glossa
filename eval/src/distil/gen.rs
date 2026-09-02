@@ -417,7 +417,12 @@ struct ProposeGoldGate<'a> {
 }
 
 impl crate::backend::user_sim::DialogueGate for ProposeGoldGate<'_> {
-    fn judge(&self, _q: &str, _messages: &[Value], _proposed: &str) -> anyhow::Result<Option<String>> {
+    fn judge(
+        &self,
+        _q: &str,
+        _messages: &[Value],
+        _proposed: &str,
+    ) -> anyhow::Result<Option<String>> {
         if self.proposal.borrow().is_some() {
             // The tool call already landed — accept this closing text turn and let the loop end.
             Ok(None)
