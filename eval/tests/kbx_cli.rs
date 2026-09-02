@@ -27,7 +27,7 @@ fn kbx_init_scaffolds_glossa_kbx_workspace_and_skips_existing_without_force() {
         "reflect.md",
         "reason.md",
         "distil.md",
-        "distil_golds.md",
+        "golds.md",
         "dataset.toml",
     ] {
         assert!(
