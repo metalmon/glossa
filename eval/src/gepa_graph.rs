@@ -71,6 +71,15 @@ pub struct GepaGraphConfig {
     pub seed: u64,
     pub pareto_size: usize,
     pub candidate_selection: CandidateSelection,
+    /// Minibatch-cache mode. **`false` (default) = canonical GEPA:** every proposal re-samples a
+    /// FRESH reflect minibatch and re-scores the parent on it, an unbiased paired accept with better
+    /// exploration. **`true` = cached minibatch** (opt-in for a WEAK, high-variance reader): a
+    /// candidate's minibatch + score are frozen the first time it parents and reused, trading
+    /// exploration + freedom from batch-overfit for a noise-stable accept baseline (on a 4B,
+    /// canonical's per-proposal noise — minibatch=3, one flip = 0.33 — drowned the accept signal so
+    /// nothing was accepted). The apply-gate guards BOTH modes from shipping a regression. Sourced
+    /// from lab.toml `[tuning].gepa_minibatch_cache`; env `GEPA_MINIBATCH_CACHE=1/0` overrides.
+    pub minibatch_cache: bool,
     /// Worker-pool size for `score_questions`'s per-question rollouts. Rollouts are graph-READ
     /// reader navigations only (train never writes) — safe to run `jobs` of them concurrently
     /// sharing the one opened `GraphStore`/`DocIndex` (both read-only shareable). The GEPA
@@ -127,6 +136,13 @@ struct RolloutOutcome {
     /// tell the teacher WHY a case was marked wrong. `None` on the exact-match path (no judge) or
     /// when the judge call errored.
     judge_reason: Option<String>,
+    /// True when the reader's ENDPOINT/TRANSPORT failed (`run_agent_loop` returned `Err` — e.g. a
+    /// 500 or a context-length overflow), so the rollout never produced an answer. Such an outcome
+    /// is EXCLUDED from scored means (`mean_scored`) rather than counted as a real 0.0 — an endpoint
+    /// failure is deterministic and would otherwise inject noise into GEPA's minibatch scores and
+    /// deflate the reported number. A rollout that returned wrong/empty TEXT is `errored: false` and
+    /// scored normally (a real 0.0). It also never becomes a `FailCase` fed to the reflector.
+    errored: bool,
 }
 
 #[derive(Clone)]
@@ -194,6 +210,33 @@ fn mean(v: &[f64]) -> f64 {
 
 fn scores(out: &[RolloutOutcome]) -> Vec<f64> {
     out.iter().map(|o| o.score).collect()
+}
+
+/// Mean `score` over ONLY non-errored outcomes: an endpoint-errored rollout (`errored: true`) never
+/// produced an answer, so it is EXCLUDED from the average rather than dragged in as a real 0.0.
+/// Returns 0.0 when every outcome errored (mean of an empty slice). Used for all the simple
+/// rollout-mean computations (baseline/minibatch/child/apply-gate); the per-instance Pareto vectors
+/// keep using `scores()` and rely on the baseline pre-filter (see `drop_baseline_errored`) instead.
+fn mean_scored(out: &[RolloutOutcome]) -> f64 {
+    let kept: Vec<f64> = out.iter().filter(|o| !o.errored).map(|o| o.score).collect();
+    mean(&kept)
+}
+
+/// Drop the val questions whose BASELINE rollout errored on the endpoint, keeping the surviving
+/// `(questions, outcomes)` and the dropped count. An endpoint/context-overflow error is
+/// deterministic, so it reproduces for every candidate — dropping such a question once, up front,
+/// keeps every candidate's Pareto `score_val` vector aligned on the SAME scorable instances and
+/// excludes the error from scoring entirely (instead of scoring it a misleading 0.0). Extracted so
+/// the pre-filter is unit-testable without a live endpoint.
+fn drop_baseline_errored(
+    val: Vec<Question>,
+    out: Vec<RolloutOutcome>,
+) -> (Vec<Question>, Vec<RolloutOutcome>, usize) {
+    let n_before = val.len();
+    let (kept_q, kept_o): (Vec<Question>, Vec<RolloutOutcome>) =
+        val.into_iter().zip(out).filter(|(_, o)| !o.errored).unzip();
+    let dropped = n_before - kept_q.len();
+    (kept_q, kept_o, dropped)
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -291,13 +334,16 @@ fn rollout_one(
     let user_sim = gate
         .as_ref()
         .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
-    let raw = match crate::backend::openai::run_agent_loop(
+    let (raw, errored) = match crate::backend::openai::run_agent_loop(
         chat, messages, exec, nba, MAX_ROUNDS, user_sim,
     ) {
-        Ok(r) => r,
+        Ok(r) => (r, false),
         Err(e) => {
+            // ENDPOINT/TRANSPORT failure (500, context-length overflow, …): the reader never
+            // produced an answer. Flag the outcome `errored` so scored means exclude it — it is NOT
+            // a wrong answer and must not be counted as a real 0.0.
             eprintln!("graph rollout failed for q {}: {e:#}", q.id);
-            String::new()
+            (String::new(), true)
         }
     };
     let pred = crate::backend::prompt::parse_answer(&raw);
@@ -307,32 +353,38 @@ fn rollout_one(
     // judge exists for corpora whose gold answers are long paragraphs, where exact-EM is ~0 for
     // every candidate and GEPA has no gradient to climb. Judge only the primary gold `q.answer`
     // (aliases are exact-match forms).
-    let (score, judge_reason) = match &cfg.judge {
-        Some(jc) => match crate::judge::judge(
-            &jc.ep,
-            &jc.md,
-            &q.question,
-            &q.answer,
-            &pred,
-            &q.source,
-            Some(idx),
-        ) {
-            // Keep the judge's reason alongside the score — the reflector surfaces it to the
-            // teacher as WHY this case was wrong (signal B). Dropping it here is what left the
-            // teacher guessing at the failure mode.
-            Ok(j) => (verdict_to_score(j.verdict), Some(j.reason)),
-            Err(e) => {
-                eprintln!("judge failed (scored 0): {e:#}");
-                (0.0, None)
+    // An endpoint-errored rollout is not scored (no answer to grade): score stays 0.0, judge_reason
+    // None, and `errored` excludes it from every scored mean. Only real answers reach the judge/EM.
+    let (score, judge_reason) = if errored {
+        (0.0, None)
+    } else {
+        match &cfg.judge {
+            Some(jc) => match crate::judge::judge(
+                &jc.ep,
+                &jc.md,
+                &q.question,
+                &q.answer,
+                &pred,
+                &q.source,
+                Some(idx),
+            ) {
+                // Keep the judge's reason alongside the score — the reflector surfaces it to the
+                // teacher as WHY this case was wrong (signal B). Dropping it here is what left the
+                // teacher guessing at the failure mode.
+                Ok(j) => (verdict_to_score(j.verdict), Some(j.reason)),
+                Err(e) => {
+                    eprintln!("judge failed (scored 0): {e:#}");
+                    (0.0, None)
+                }
+            },
+            None => {
+                let s = if crate::score::exact_match_any(&pred, &golds_of(q)) {
+                    1.0
+                } else {
+                    0.0
+                };
+                (s, None)
             }
-        },
-        None => {
-            let s = if crate::score::exact_match_any(&pred, &golds_of(q)) {
-                1.0
-            } else {
-                0.0
-            };
-            (s, None)
         }
     };
     RolloutOutcome {
@@ -340,6 +392,7 @@ fn rollout_one(
         pred,
         steps: steps.into_inner(),
         judge_reason,
+        errored,
     }
 }
 
@@ -916,7 +969,23 @@ pub fn run(
         &spec,
     );
     metric_calls += val.len();
-    let baseline_score = mean(&scores(&baseline_out));
+    // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored on the
+    // endpoint (a deterministic 500 / context-overflow reproduces for every candidate). Doing this
+    // ONCE, before D_pareto is built, keeps every candidate's per-instance `score_val` vector aligned
+    // on the SAME scorable instances and excludes endpoint errors from the reported score. Surfaced,
+    // never silently dropped.
+    let (val, baseline_out, dropped) = drop_baseline_errored(val, baseline_out);
+    if dropped > 0 {
+        pb.println(format!(
+            "pareto set: dropped {dropped} question(s) that errored on the endpoint (excluded from scoring)"
+        ));
+    }
+    anyhow::ensure!(
+        !val.is_empty(),
+        "every validation question errored on the endpoint — check the reader endpoint"
+    );
+    // No errored outcomes remain after the pre-filter, so `mean_scored` here equals a plain mean.
+    let baseline_score = mean_scored(&baseline_out);
     pb.println(format!("baseline val: score={baseline_score:.3}"));
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
@@ -946,16 +1015,21 @@ pub fn run(
     // Per-candidate cached reflect-minibatch, indexed parallel to `pool` (see `MbCache`). Grows
     // with `pool` on every accept; the seed starts uncached.
     let mut mb_cache: Vec<Option<MbCache>> = vec![None];
-    // A/B switch: `GEPA_FRESH_MINIBATCH=1` bypasses the cache entirely — every proposal re-samples a
-    // FRESH minibatch and re-scores the parent (canonical GEPA). The cache (default) trades that
-    // exploration diversity for a noise-stable accept baseline on a weak reader; this flag lets us
-    // measure which produces better full-set winners without a second binary.
-    let fresh_mb = std::env::var("GEPA_FRESH_MINIBATCH").is_ok();
-    if fresh_mb {
-        pb.println(
-            "GEPA_FRESH_MINIBATCH set: minibatch cache OFF — canonical fresh-per-proposal (A/B mode)",
-        );
-    }
+    // Minibatch-cache mode (see `GepaGraphConfig::minibatch_cache`). Default OFF = canonical GEPA
+    // (fresh minibatch + parent re-roll every proposal). Turn ON only for a weak, high-variance
+    // reader. Source: lab.toml `[tuning].gepa_minibatch_cache` (cfg.minibatch_cache); env
+    // `GEPA_MINIBATCH_CACHE=1/0` overrides for a one-off sweep without editing the lab file.
+    let cache_on = match std::env::var("GEPA_MINIBATCH_CACHE").ok().as_deref() {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => cfg.minibatch_cache,
+    };
+    let fresh_mb = !cache_on;
+    pb.println(if fresh_mb {
+        "minibatch cache OFF — canonical fresh-per-proposal (default)"
+    } else {
+        "minibatch cache ON — frozen per-candidate minibatch (weak-reader mode)"
+    });
 
     // DSPy-style budget: keep proposing candidates until the metric-call ceiling is hit OR the pool
     // reaches `max_candidates`. Every iteration either spends budget (a fresh minibatch is sampled &
@@ -1002,12 +1076,15 @@ pub fn run(
                         &spec,
                     );
                     metric_calls += batch.len();
-                    if outcomes.iter().any(|o| o.score < 1.0) {
-                        let score = mean(&scores(&outcomes));
+                    // Only a NON-errored sub-perfect rollout is a teachable failure: an endpoint
+                    // error is not a wrong answer and must never seed a reflect batch or become a
+                    // FailCase.
+                    if outcomes.iter().any(|o| !o.errored && o.score < 1.0) {
+                        let score = mean_scored(&outcomes);
                         let fails: Vec<FailCase> = batch
                             .iter()
                             .zip(&outcomes)
-                            .filter(|(_, o)| o.score < 1.0)
+                            .filter(|(_, o)| !o.errored && o.score < 1.0)
                             .map(|(q, o)| FailCase {
                                 question: q.question.clone(),
                                 gold: golds_of(q).join(" | "),
@@ -1078,7 +1155,7 @@ pub fn run(
             &spec,
         );
         metric_calls += batch.len();
-        let child_mb_score = mean(&scores(&child_mb));
+        let child_mb_score = mean_scored(&child_mb);
         if child_mb_score <= parent_mb_score {
             pb.println(format!(
                 "[iter {it}] child_mb {child_mb_score:.3} <= parent_mb {parent_mb_score:.3} — discarded"
@@ -1099,6 +1176,11 @@ pub fn run(
         metric_calls += pareto_set.len();
         pool.push(Candidate {
             prompt: child_prompt,
+            // Per-instance Pareto vector uses raw `scores()` (positional, aligned across candidates).
+            // The baseline pre-filter already removed every deterministically-erroring instance, so
+            // an errored 0.0 here would only be a RARE residual mid-run failure on an instance that
+            // survived the pre-filter; leaving that column at 0.0 is a neutral carry (it neither helps
+            // nor hurts dominance, since every candidate hits the same deterministic error).
             score_val: scores(&child_pareto),
         });
         mb_cache.push(None); // keep parallel to `pool`; the new child starts uncached
@@ -1131,7 +1213,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
         );
-        let em = mean(&scores(&out));
+        let em = mean_scored(&out);
         if em > best_score {
             best_score = em;
             best_prompt = c.prompt.clone();
@@ -1151,7 +1233,7 @@ pub fn run(
     // held-out split: at this dataset size a third split is too noisy, and the full set IS the eval
     // objective we must not regress.)
     let score_full = |prompt: &str| {
-        mean(&scores(&score_questions(
+        mean_scored(&score_questions(
             &cfg,
             &url,
             &tools,
@@ -1160,7 +1242,7 @@ pub fn run(
             &idx,
             graph.as_ref(),
             &spec,
-        )))
+        ))
     };
     let winner_full = score_full(&best_prompt);
     let seed_full = score_full(&cfg.seed_prompt);
@@ -1535,6 +1617,52 @@ mod tests {
     fn mean_f64_handles_empty_and_grades() {
         assert_eq!(mean(&[]), 0.0);
         assert_eq!(mean(&[1.0, 0.5, 0.0]), 0.5);
+    }
+
+    fn outcome(score: f64, errored: bool) -> RolloutOutcome {
+        RolloutOutcome {
+            score,
+            pred: String::new(),
+            steps: Vec::new(),
+            judge_reason: None,
+            errored,
+        }
+    }
+
+    #[test]
+    fn mean_scored_skips_errored_outcomes() {
+        // The errored 0.0 is EXCLUDED, so the mean is over {1.0, 0.0} = 0.5 (not 1.0/3 ≈ 0.33).
+        let out = vec![outcome(1.0, false), outcome(0.0, true), outcome(0.0, false)];
+        assert!((mean_scored(&out) - 0.5).abs() < 1e-9);
+        // Every outcome errored -> 0.0 (mean of the empty kept-set), never a divide-by-zero.
+        assert_eq!(mean_scored(&[outcome(0.0, true), outcome(0.0, true)]), 0.0);
+        // No errors -> identical to a plain mean.
+        assert!((mean_scored(&[outcome(1.0, false), outcome(0.0, false)]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drop_baseline_errored_removes_erroring_questions() {
+        let val = vec![
+            q("a", "qa", "A", &[]),
+            q("b", "qb", "B", &[]),
+            q("c", "qc", "C", &[]),
+        ];
+        // The middle question's baseline rollout errored on the endpoint.
+        let out = vec![outcome(1.0, false), outcome(0.0, true), outcome(0.0, false)];
+        let (kept_q, kept_o, dropped) = drop_baseline_errored(val, out);
+        assert_eq!(dropped, 1, "one baseline-erroring question dropped");
+        let ids: Vec<&str> = kept_q.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "c"],
+            "erroring question removed, order preserved"
+        );
+        assert!(
+            kept_o.iter().all(|o| !o.errored),
+            "no errored outcome survives the pre-filter"
+        );
+        // Surviving questions and outcomes stay positionally aligned (load-bearing for Pareto vectors).
+        assert_eq!(kept_q.len(), kept_o.len());
     }
 
     #[test]

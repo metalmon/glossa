@@ -272,6 +272,9 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let minibatch = args.minibatch.unwrap_or(3);
     let val_frac = args.val_frac.unwrap_or(0.2);
     let pareto_size = args.pareto_size.unwrap_or(12);
+    // Minibatch-cache mode: lab.toml `[tuning] gepa_minibatch_cache` (default false = canonical
+    // fresh-per-proposal GEPA); env `GEPA_MINIBATCH_CACHE` overrides inside `gepa_graph::run`.
+    let minibatch_cache = lab.tuning.gepa_minibatch_cache.unwrap_or(false);
 
     let model_ep = lab.model.clone();
     let model_key = model_ep.resolve_key();
@@ -288,6 +291,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         seed: rng_seed,
         pareto_size,
         candidate_selection,
+        minibatch_cache,
         jobs,
         judge: judge_cfg,
         user_sim: lab.user_sim.clone(),

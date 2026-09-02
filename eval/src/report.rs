@@ -32,6 +32,14 @@ pub struct CaseResult {
     /// `hop_type` on a separate axis.
     #[serde(default)]
     pub needs_graph: String,
+    /// True when the reader's ENDPOINT/TRANSPORT failed (e.g. a 500, or a context-length overflow
+    /// on a server without middle-out truncation) — the reader never produced an answer, so this is
+    /// NOT a wrong answer. Such a case is EXCLUDED from the graded-quality denominator (it would
+    /// unfairly deflate the score) and surfaced as a separate count instead of being scored 0.0. A
+    /// case where the reader returned wrong/empty TEXT is `errored: false` and scored normally.
+    /// `#[serde(default)]` keeps run reports persisted before this field existed loadable.
+    #[serde(default)]
+    pub errored: bool,
 }
 
 /// Run-level metadata carried in the report header. `timestamp` is passed in by the caller (never
@@ -69,13 +77,30 @@ fn verdict_label(v: Verdict) -> &'static str {
 /// Verdict tallies shared by `quality`, `summary_text`, and `lexical_text` so the three never
 /// disagree on how a run's cases are counted.
 struct Tally {
+    /// All cases, including endpoint-errored ones (used only for the `total` line + verdict %).
     total: usize,
     correct: usize,
     partial: usize,
     wrong: usize,
     unscored: usize,
+    /// Reader-endpoint-errored cases (`CaseResult.errored`). Counted but EXCLUDED from every scored
+    /// denominator (graded quality, EM/F1) so an endpoint failure never deflates the reported score.
+    errored: usize,
+    /// Non-errored case count — the denominator for the lexical EM/F1 means (errored cases never
+    /// contribute an EM/F1 sample).
+    scored: usize,
     f1_sum: f32,
     em_sum: f32,
+}
+
+impl Tally {
+    /// Graded-quality denominator: cases with a REAL verdict (Correct/Partial/Wrong). Excludes both
+    /// endpoint-errored cases and judge-`Unscored` cases, so neither an endpoint failure nor a judge
+    /// error deflates the headline. `0` in the no-judge path (every case Unscored) — callers guard
+    /// against dividing by it.
+    fn graded(&self) -> usize {
+        self.correct + self.partial + self.wrong
+    }
 }
 
 fn tally(results: &[CaseResult]) -> Tally {
@@ -85,10 +110,18 @@ fn tally(results: &[CaseResult]) -> Tally {
         partial: 0,
         wrong: 0,
         unscored: 0,
+        errored: 0,
+        scored: 0,
         f1_sum: 0.0,
         em_sum: 0.0,
     };
     for r in results {
+        // An endpoint-errored case never produced an answer: exclude it from every scored tally
+        // (verdict counts, EM/F1 sums) and count it separately.
+        if r.errored {
+            t.errored += 1;
+            continue;
+        }
         match r.verdict {
             Verdict::Correct => t.correct += 1,
             Verdict::Partial => t.partial += 1,
@@ -97,19 +130,23 @@ fn tally(results: &[CaseResult]) -> Tally {
         }
         t.f1_sum += r.f1;
         t.em_sum += r.em;
+        t.scored += 1;
     }
     t
 }
 
-/// Shared graded-quality arithmetic: `(correct*1.0 + partial*0.5) / total`, i.e. a correct case
-/// scores 1.0, a partial case scores 0.5, wrong/unscored score 0.0. Returns 0.0 for `total == 0`
-/// rather than dividing by zero. Factored out of `quality` so the overall headline and the
-/// by-question-type breakdown (`by_type_text`) never disagree on the formula.
-fn quality_score(correct: usize, partial: usize, total: usize) -> f32 {
-    if total == 0 {
+/// Shared graded-quality arithmetic: `(correct*1.0 + partial*0.5) / graded`, i.e. a correct case
+/// scores 1.0, a partial case scores 0.5, wrong scores 0.0. `graded` is the count of cases with a
+/// REAL verdict (Correct/Partial/Wrong) — endpoint-errored and judge-`Unscored` cases are excluded
+/// from it by the callers, so neither deflates the headline. Returns 0.0 for `graded == 0` (the
+/// no-judge path, where every case is Unscored) rather than dividing by zero. Factored out of
+/// `quality` so the overall headline and the by-question-type breakdown never disagree on the
+/// formula.
+fn quality_score(correct: usize, partial: usize, graded: usize) -> f32 {
+    if graded == 0 {
         return 0.0;
     }
-    (correct as f32 + 0.5 * partial as f32) / total as f32
+    (correct as f32 + 0.5 * partial as f32) / graded as f32
 }
 
 /// Primary headline metric for eval report golds: long free-text paragraph answers make
@@ -117,7 +154,7 @@ fn quality_score(correct: usize, partial: usize, total: usize) -> f32 {
 /// LLM-judge verdict is the real signal. See `quality_score` for the formula.
 pub fn quality(results: &[CaseResult]) -> f32 {
     let t = tally(results);
-    quality_score(t.correct, t.partial, t.total)
+    quality_score(t.correct, t.partial, t.graded())
 }
 
 /// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
@@ -136,9 +173,14 @@ pub fn summary_text(results: &[CaseResult]) -> String {
     let q = quality(results);
 
     let mut s = format!(
-        "judge quality (graded): {q:.3}  (correct + 0.5*partial) / total\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
+        "judge quality (graded): {q:.3}  (correct + 0.5*partial) / answered\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
         t.correct, pct(t.correct), t.partial, pct(t.partial), t.wrong, pct(t.wrong), t.unscored, pct(t.unscored), t.total
     );
+    // Surface endpoint-errored cases as their own line (never silently dropped): they are excluded
+    // from the graded-quality denominator above, so this makes the exclusion visible.
+    if t.errored > 0 {
+        s.push_str(&format!("errored (endpoint, excluded): {}\n", t.errored));
+    }
     // Prominent per-hop-type breakdown right under the headline, so the multihop-vs-lexical gap is
     // visible at a glance (the full table still lives in the "By question type" section below).
     let hop = hop_summary_line(results);
@@ -152,28 +194,36 @@ pub fn summary_text(results: &[CaseResult]) -> String {
 /// graded `quality_score` and case count per `hop_type`, alphabetical (deterministic). Empty when
 /// there are no results.
 fn hop_summary_line(results: &[CaseResult]) -> String {
-    let mut g: std::collections::BTreeMap<&str, (usize, usize, usize)> =
-        std::collections::BTreeMap::new(); // value -> (correct, partial, n)
+    let mut g: std::collections::BTreeMap<&str, (usize, usize, usize, usize)> =
+        std::collections::BTreeMap::new(); // value -> (correct, partial, wrong, answered_n)
     for r in results {
+        // Endpoint-errored cases never produced an answer — keep them out of the per-hop breakdown
+        // and its denominator (which divides by answered cases, matching the headline).
+        if r.errored {
+            continue;
+        }
         let k = if r.hop_type.is_empty() {
             "(untyped)"
         } else {
             r.hop_type.as_str()
         };
         let e = g.entry(k).or_default();
-        e.2 += 1;
+        e.3 += 1;
         match r.verdict {
             Verdict::Correct => e.0 += 1,
             Verdict::Partial => e.1 += 1,
-            _ => {}
+            Verdict::Wrong => e.2 += 1,
+            Verdict::Unscored => {}
         }
     }
     if g.is_empty() {
         return String::new();
     }
+    // Graded denominator per group is `correct+partial+wrong` (Unscored excluded); the shown `(n)`
+    // is the answered count.
     let parts: Vec<String> = g
         .iter()
-        .map(|(k, (c, p, n))| format!("{k} {:.3} ({n})", quality_score(*c, *p, *n)))
+        .map(|(k, (c, p, w, n))| format!("{k} {:.3} ({n})", quality_score(*c, *p, *c + *p + *w)))
         .collect();
     format!("by hop_type: {}\n", parts.join(" · "))
 }
@@ -183,15 +233,17 @@ fn hop_summary_line(results: &[CaseResult]) -> String {
 /// answers these evals grade — EM is ~always 0 and F1 only weakly correlates with judge quality.
 pub fn lexical_text(results: &[CaseResult]) -> String {
     let t = tally(results);
-    let f1_mean = if t.total == 0 {
+    // Divide by the non-errored (`scored`) count — an endpoint-errored case contributed no EM/F1
+    // sample, so including it in the denominator would deflate both means.
+    let f1_mean = if t.scored == 0 {
         0.0
     } else {
-        t.f1_sum / t.total as f32
+        t.f1_sum / t.scored as f32
     };
-    let em_mean = if t.total == 0 {
+    let em_mean = if t.scored == 0 {
         0.0
     } else {
-        t.em_sum / t.total as f32
+        t.em_sum / t.scored as f32
     };
     format!("EM mean: {em_mean:.3}\nF1 mean: {f1_mean:.3}\n")
 }
@@ -208,6 +260,11 @@ fn by_type_table(
     let mut groups: std::collections::BTreeMap<&str, Vec<&CaseResult>> =
         std::collections::BTreeMap::new();
     for r in results {
+        // Endpoint-errored cases are excluded from the per-type breakdown (they never produced an
+        // answer), keeping each row's denominator on answered cases like the headline.
+        if r.errored {
+            continue;
+        }
         let k = key(r);
         let k = if k.is_empty() { "(untyped)" } else { k };
         groups.entry(k).or_default().push(r);
@@ -221,7 +278,9 @@ fn by_type_table(
         let partial = rs.iter().filter(|r| r.verdict == Verdict::Partial).count();
         let wrong = rs.iter().filter(|r| r.verdict == Verdict::Wrong).count();
         let n = rs.len();
-        let q = quality_score(correct, partial, n);
+        // Graded denominator excludes Unscored (a judge error must not deflate the row); `n` remains
+        // the answered group size for context.
+        let q = quality_score(correct, partial, correct + partial + wrong);
         out.push_str(&format!(
             "| {name} | {n} | {q:.3} | {correct} | {partial} | {wrong} |\n"
         ));
@@ -376,6 +435,7 @@ mod tests {
                 judge_raw: "VERDICT: correct".into(),
                 hop_type: "lexical".into(),
                 needs_graph: "no".into(),
+                errored: false,
             },
             CaseResult {
                 id: "q2".into(),
@@ -389,6 +449,7 @@ mod tests {
                 judge_raw: "VERDICT: wrong".into(),
                 hop_type: "multihop".into(),
                 needs_graph: "yes".into(),
+                errored: false,
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -419,6 +480,7 @@ mod tests {
             judge_raw: String::new(),
             hop_type: String::new(),
             needs_graph: String::new(),
+            errored: false,
         }
     }
 
@@ -520,20 +582,60 @@ mod tests {
     }
 
     #[test]
-    fn quality_scores_correct_full_partial_half_wrong_unscored_zero() {
+    fn quality_scores_correct_full_partial_half_wrong_and_excludes_unscored() {
         let rs = vec![
             case("q1", Verdict::Correct),
             case("q2", Verdict::Partial),
             case("q3", Verdict::Wrong),
             case("q4", Verdict::Unscored),
         ];
-        // (1.0 + 0.5 + 0.0 + 0.0) / 4 = 0.375
-        assert!((quality(&rs) - 0.375).abs() < 1e-6);
+        // Graded denominator counts only real verdicts (Correct/Partial/Wrong); the Unscored case
+        // (e.g. a judge error) is excluded so it can't deflate the headline:
+        // (1.0 + 0.5 + 0.0) / 3 = 0.5
+        assert!((quality(&rs) - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn quality_is_zero_for_empty_results() {
         assert_eq!(quality(&[]), 0.0);
+    }
+
+    #[test]
+    fn quality_is_zero_when_all_unscored_no_judge_path() {
+        // No-judge path: every case is Unscored, so the graded denominator is 0 — must print 0.0,
+        // not divide by zero.
+        let rs = vec![case("q1", Verdict::Unscored), case("q2", Verdict::Unscored)];
+        assert_eq!(quality(&rs), 0.0);
+    }
+
+    #[test]
+    fn errored_case_excluded_from_graded_quality_and_surfaced() {
+        // One Correct, one Wrong, one endpoint-errored: the errored case leaves the graded
+        // denominator, so quality = (1 + 0) / 2 = 0.5, and the errored count is surfaced.
+        let mut errored = case("q3", Verdict::Unscored);
+        errored.errored = true;
+        let rs = vec![
+            case("q1", Verdict::Correct),
+            case("q2", Verdict::Wrong),
+            errored,
+        ];
+        assert!((quality(&rs) - 0.5).abs() < 1e-6);
+        let s = summary_text(&rs);
+        assert!(
+            s.contains("errored (endpoint, excluded): 1"),
+            "errored count must be visible in the summary: {s}"
+        );
+        // total still reports every case (errored included).
+        assert!(s.contains("total 3"));
+    }
+
+    #[test]
+    fn unscored_judge_error_excluded_from_graded_denominator() {
+        // A judge-errored (Unscored, NOT reader-errored) case must not deflate graded quality:
+        // (1) / 1 = 1.0, and no endpoint-error line appears.
+        let rs = vec![case("q1", Verdict::Correct), case("q2", Verdict::Unscored)];
+        assert!((quality(&rs) - 1.0).abs() < 1e-6);
+        assert!(!summary_text(&rs).contains("errored (endpoint"));
     }
 
     fn by_type_cases() -> Vec<CaseResult> {

@@ -232,6 +232,13 @@ pub struct Tuning {
     /// `jobs_build`.
     #[serde(default)]
     pub jobs_eval: Option<usize>,
+    /// `kbx train` GEPA minibatch-cache mode. `None`/`false` (default) = canonical GEPA (fresh
+    /// minibatch + parent re-roll every proposal). `true` = frozen per-candidate minibatch — an
+    /// opt-in ONLY for a weak, high-variance reader (e.g. a 4B) where canonical's per-proposal noise
+    /// drowns the accept signal. See `gepa_graph::GepaGraphConfig::minibatch_cache`; env
+    /// `GEPA_MINIBATCH_CACHE=1/0` overrides.
+    #[serde(default)]
+    pub gepa_minibatch_cache: Option<bool>,
 }
 
 /// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,

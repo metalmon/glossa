@@ -839,6 +839,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 String,                                        // reason
                 String,                                        // judge_raw
                 kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
+                bool,                                          // errored (reader endpoint failure)
             );
             let run_sample = |capture: bool| -> Sample {
                 // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
@@ -849,20 +850,25 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // (nothing ever calls `kb_eval::episode::set`, so `current()` stays `None`).
                 kb_eval::episode::reset();
                 let mut episode = kb_eval::backend::agent_loop::CapturedEpisode::default();
-                let answer = if capture {
+                // `errored` = the reader's ENDPOINT/TRANSPORT failed (500, context-length overflow,
+                // …) so it never produced an answer. This is NOT a wrong answer: the case is marked
+                // errored, the judge is skipped, and the report EXCLUDES it from the graded-quality
+                // denominator (see `report::tally`) instead of scoring it 0.0. A reader that returns
+                // wrong/empty TEXT is `Ok` here (errored=false) and scored normally.
+                let (answer, errored) = if capture {
                     match backend.answer_capturing(&paths.root, q, Some(&mut episode)) {
-                        Ok(a) => a,
+                        Ok(a) => (a, false),
                         Err(e) => {
                             pb.println(format!("case {}: agent error: {e}", q.id));
-                            format!("(error: {e})")
+                            (format!("(error: {e})"), true)
                         }
                     }
                 } else {
                     match backend.answer(&paths.root, q) {
-                        Ok(a) => a,
+                        Ok(a) => (a, false),
                         Err(e) => {
                             pb.println(format!("case {}: agent error: {e}", q.id));
-                            format!("(error: {e})")
+                            (format!("(error: {e})"), true)
                         }
                     }
                 };
@@ -876,35 +882,52 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 };
 
                 let golds = gold_forms(q);
-                let em = if relaxed_match_any(&answer, &golds) {
+                // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the
+                // report excludes them from those denominators too.
+                let em = if !errored && relaxed_match_any(&answer, &golds) {
                     1.0
                 } else {
                     0.0
                 };
-                let f1 = token_f1_any(&answer, &golds);
+                let f1 = if errored {
+                    0.0
+                } else {
+                    token_f1_any(&answer, &golds)
+                };
 
-                let (verdict, reason, judge_raw) = match (&judge_md, &lab.judge) {
-                    (Some(jmd), Some(jep)) => match judge(
-                        jep,
-                        jmd,
-                        &q.question,
-                        &q.answer,
-                        &answer,
-                        &q.source,
-                        judge_idx.as_ref(),
-                    ) {
-                        Ok(Judgement {
-                            verdict,
-                            reason,
-                            raw,
-                        }) => (verdict, reason, raw),
-                        Err(e) => (
-                            Verdict::Unscored,
-                            format!("judge error: {e}"),
-                            String::new(),
-                        ),
-                    },
-                    _ => (Verdict::Unscored, String::new(), String::new()),
+                // On an endpoint error, skip the judge entirely (there is no answer to grade) and
+                // record an Unscored verdict; the case is flagged `errored` so the report surfaces it
+                // as an excluded count rather than a scored 0.0.
+                let (verdict, reason, judge_raw) = if errored {
+                    (
+                        Verdict::Unscored,
+                        "reader endpoint error (excluded from scoring)".to_string(),
+                        String::new(),
+                    )
+                } else {
+                    match (&judge_md, &lab.judge) {
+                        (Some(jmd), Some(jep)) => match judge(
+                            jep,
+                            jmd,
+                            &q.question,
+                            &q.answer,
+                            &answer,
+                            &q.source,
+                            judge_idx.as_ref(),
+                        ) {
+                            Ok(Judgement {
+                                verdict,
+                                reason,
+                                raw,
+                            }) => (verdict, reason, raw),
+                            Err(e) => (
+                                Verdict::Unscored,
+                                format!("judge error: {e}"),
+                                String::new(),
+                            ),
+                        },
+                        _ => (Verdict::Unscored, String::new(), String::new()),
+                    }
                 };
 
                 // TensorZero episode feedback: post the judge verdict on the episode this rollout
@@ -934,12 +957,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 }
 
                 (
-                    answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode,
+                    answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode, errored,
                 )
             };
 
             // Sample 0 produces the reported CaseResult (and its trajectory when capturing).
-            let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode) =
+            let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode, errored) =
                 run_sample(args.capture);
 
             // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
@@ -989,6 +1012,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 judge_raw,
                 hop_type: q.hop_type.clone(),
                 needs_graph: q.needs_graph.clone(),
+                errored,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;

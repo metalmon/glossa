@@ -132,6 +132,14 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   judge feedback for TZ observability).
 - **Rate-limit resilience** — opt-in per-endpoint retry/backoff + throttle and an ordered fallback chain.
 - **Per-endpoint temperature**; **parallel workers** per stage via `[tuning] jobs_*`.
+- **GEPA minibatch mode** — `kbx train` defaults to **canonical GEPA**: every proposal samples a
+  fresh reflect minibatch and re-scores the parent on it (an unbiased paired accept with the best
+  exploration, and no over-fitting to one frozen batch). For a **weak, high-variance reader** (e.g. a
+  4B) whose per-proposal noise drowns the accept signal — minibatch of 3, one flip = 0.33, so nothing
+  reliably "beats" its parent — set `[tuning] gepa_minibatch_cache = true` to freeze each candidate's
+  minibatch and reuse it (a stable but biased baseline). A strong, low-variance reader wants the
+  default. `GEPA_MINIBATCH_CACHE=1/0` overrides the file for a one-off sweep. Either way the
+  full-set **apply-gate** refuses to write a winner that regresses against the seed prompt.
 - **user_sim dialogue gate** — an opt-in patient simulated user that deflects a non-answer back into
   the reader loop instead of accepting it (eval + train).
 - **Evidence-grounded judge** — grades an answer against the retrieved source evidence, not only the gold string.
