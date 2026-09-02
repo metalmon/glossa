@@ -778,7 +778,15 @@ relations = ["LEADS_TO"]
             vec!["propose_gold".to_string()],
             "distil generator must advertise ONLY propose_gold: {names:?}"
         );
-        for forbidden in ["search", "read", "grep", "glossary", "reach", "sql", "graph_upsert"] {
+        for forbidden in [
+            "search",
+            "read",
+            "grep",
+            "glossary",
+            "reach",
+            "sql",
+            "graph_upsert",
+        ] {
             assert!(
                 !names.contains(&forbidden.to_string()),
                 "distil must not advertise {forbidden}: {names:?}"
