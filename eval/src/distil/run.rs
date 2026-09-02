@@ -373,7 +373,10 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
                         p.hop_type, hop_type, hop_type
                     ));
                 }
-                println!("distil {i}: kept \"{}\" (seed {})", p.question, seed.id);
+                pb.println(format!(
+                    "distil {i}: kept \"{}\" (seed {})",
+                    p.question, seed.id
+                ));
                 // Sequential id over KEPT golds (no gaps from dropped attempts).
                 kept.push(OutCase {
                     id: format!("synth-{}", kept.len()),
@@ -383,11 +386,11 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
                 });
             }
             GenOutcome::Dropped(reason) => {
-                println!(
+                pb.println(format!(
                     "distil {i}: dropped ({}) (seed {})",
                     reason.describe(),
                     seed.id
-                );
+                ));
                 n_dropped += 1;
             }
         }
