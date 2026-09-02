@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Manual build-only run: produces the release-profile binaries as downloadable
+  # workflow ARTIFACTS without cutting a GitHub Release (the publish job below is
+  # gated to tag pushes). Use to deploy a release-quality kbx/kb without a version bump.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -63,7 +67,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}".Substring(1)
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
           $stem = "glossa-${tag}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
@@ -81,6 +85,9 @@ jobs:
   release:
     name: publish GitHub Release
     needs: build
+    # Publish ONLY on a version tag push; a manual workflow_dispatch build stops at
+    # artifacts (no Release created).
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
