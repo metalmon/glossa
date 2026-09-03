@@ -24,7 +24,8 @@ use kb_eval::lab::{self, LabConfig};
 use kb_eval::parallel::run_units_parallel;
 use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{
-    lexical_text, load_cases, summary_text, write_case, write_run, CaseResult, RunMeta,
+    lexical_text, load_cases, summary_text, write_answers_csv, write_case, write_run, AnswerRow,
+    CaseResult, RunMeta,
 };
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
@@ -129,6 +130,19 @@ enum Cmd {
         /// Ignored without `--capture`; the reported EM/F1/verdict still come from the first sample.
         #[arg(long, default_value_t = 1)]
         samples: usize,
+        /// Predict-only: run the agent over the dataset's questions WITHOUT scoring — skips the
+        /// judge, keeps `answerable=false` cases (there are no golds to be un/answerable), and
+        /// tolerates empty gold answers. Use for a fresh question list you only want answered. The
+        /// end-of-run graded-quality summary is omitted (nothing to score against).
+        #[arg(long = "no-gold")]
+        no_gold: bool,
+        /// Also write a flat question->answer CSV (UTF-8 BOM, Excel-friendly) for handing to the
+        /// customer to grade — always with a trailing blank `quality` column. With golds it also
+        /// carries `gold`+`verdict` columns; under `--no-gold` just `id,question,answer,quality`. A
+        /// relative path resolves under `runs/<tag>/` (never the indexed corpus); absolute is used
+        /// as given.
+        #[arg(long)]
+        answers: Option<PathBuf>,
     },
     /// Post-process captured `runs/<tag>/trajectories.jsonl` into an Unsloth-ready fine-tuning
     /// dataset: SFT (`messages`/`sharegpt`) from Correct trajectories, or DPO
@@ -478,6 +492,8 @@ fn main() -> Result<()> {
             jobs,
             capture,
             samples,
+            no_gold,
+            answers,
         } => run_eval(EvalArgs {
             path,
             tag,
@@ -492,6 +508,8 @@ fn main() -> Result<()> {
             jobs,
             capture,
             samples,
+            no_gold,
+            answers,
         }),
         Cmd::Export {
             path,
@@ -675,6 +693,10 @@ struct EvalArgs {
     capture: bool,
     /// With `--capture`, samples per case (varied trajectories for DPO). Default 1.
     samples: usize,
+    /// Predict-only: run the agent without scoring (no judge, keep unanswerable, tolerate empty gold).
+    no_gold: bool,
+    /// Optional path for a question->answer CSV deliverable (relative resolves under runs/<tag>/).
+    answers: Option<PathBuf>,
 }
 
 struct ExportArgs {
@@ -746,14 +768,27 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         .with_context(|| format!("reading dataset {}", paths.dataset.display()))?;
     let mut cases = parse_dataset_toml(&dataset_text)?;
 
+    // id -> (question, gold answer) for the whole parsed dataset, built BEFORE any slicing so the
+    // `--answers` CSV can join a question + gold onto every result (including `--resume`d cases
+    // whose persisted `CaseResult` doesn't carry the question text).
+    let qmeta: std::collections::HashMap<String, (String, String)> = cases
+        .iter()
+        .map(|q| (q.id.clone(), (q.question.clone(), q.answer.clone())))
+        .collect();
+
     // Drop cases marked `answerable = false` (out-of-corpus golds) BEFORE any resume/tag/limit
     // slicing so they never enter scoring — they'd only cap the achievable metric. Absent field
-    // => all `true` => nothing dropped (unchanged behavior).
-    let before_answerable = cases.len();
-    cases.retain(|q| q.answerable);
-    let excluded_unanswerable = before_answerable - cases.len();
-    if excluded_unanswerable > 0 {
-        println!("excluded {excluded_unanswerable} unanswerable (answerable=false) — not scored");
+    // => all `true` => nothing dropped (unchanged behavior). Skipped under `--no-gold`: there are
+    // no golds to be un/answerable, so every question is run.
+    if !args.no_gold {
+        let before_answerable = cases.len();
+        cases.retain(|q| q.answerable);
+        let excluded_unanswerable = before_answerable - cases.len();
+        if excluded_unanswerable > 0 {
+            println!(
+                "excluded {excluded_unanswerable} unanswerable (answerable=false) — not scored"
+            );
+        }
     }
 
     if let Some(t) = &args.tag_filter {
@@ -796,7 +831,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         None
     };
 
-    let use_judge = !args.no_judge && lab.judge.is_some();
+    let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
     let judge_md = if use_judge {
         Some(
             std::fs::read_to_string(&paths.judge_prompt).with_context(|| {
@@ -1120,8 +1155,51 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         timestamp,
     };
     let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
-    println!("{}", summary_text(&all_results));
-    println!("{}", lexical_text(&all_results));
+    if args.no_gold {
+        // Predict-only: no golds to score against, so the graded/lexical summaries are meaningless.
+        let answered = all_results
+            .iter()
+            .filter(|r| !r.answer.trim().is_empty())
+            .count();
+        let errored = all_results.iter().filter(|r| r.errored).count();
+        println!(
+            "predict-only: {} question(s), {answered} answered, {errored} endpoint-errored",
+            all_results.len()
+        );
+    } else {
+        println!("{}", summary_text(&all_results));
+        println!("{}", lexical_text(&all_results));
+    }
+
+    // `--answers`: flat question->answer CSV deliverable. A relative path lands under runs/<tag>/
+    // (inside .glossa, never the indexed corpus); an absolute path is used verbatim.
+    if let Some(ap) = &args.answers {
+        let out_path = if ap.is_absolute() {
+            ap.clone()
+        } else {
+            runs_dir.join(&tag).join(ap)
+        };
+        let rows: Vec<AnswerRow> = all_results
+            .iter()
+            .map(|r| {
+                let (question, gold) = qmeta.get(&r.id).cloned().unwrap_or_default();
+                AnswerRow {
+                    id: r.id.clone(),
+                    question,
+                    answer: r.answer.clone(),
+                    gold,
+                    verdict: if use_judge {
+                        format!("{:?}", r.verdict)
+                    } else {
+                        String::new()
+                    },
+                }
+            })
+            .collect();
+        let written = write_answers_csv(&out_path, &rows, !args.no_gold)?;
+        println!("wrote answers -> {}", written.display());
+    }
+
     let footnote = if cache_is_estimated() {
         " (cache estimated from prompt re-send)"
     } else {

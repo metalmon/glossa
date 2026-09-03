@@ -415,9 +415,124 @@ pub fn write_run(
     Ok(report_path)
 }
 
+/// One row of the customer-facing question -> answer deliverable written by `write_answers_csv`.
+/// `gold`/`verdict` are only rendered when the run had golds (`with_gold`); for a `--no-gold`
+/// predict-only run they are left empty and their columns are omitted entirely.
+pub struct AnswerRow {
+    pub id: String,
+    pub question: String,
+    pub answer: String,
+    pub gold: String,
+    pub verdict: String,
+}
+
+/// Quote one CSV field per RFC 4180: always wrap in double quotes (safe for free text containing
+/// commas, quotes, or newlines) and double any embedded quote. Excel reads this unambiguously.
+fn csv_field(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Write the run as a flat question->answer table for handing to the customer to grade. UTF-8 with a
+/// leading BOM so Excel opens Cyrillic correctly on double-click; CRLF line endings (Excel-friendly).
+/// A trailing empty `quality` column is always present for the customer to fill in. Columns:
+///   with_gold=true  -> id,question,answer,gold,verdict,quality
+///   with_gold=false -> id,question,answer,quality
+/// Returns the path written (creating parent dirs as needed).
+pub fn write_answers_csv(
+    path: &Path,
+    rows: &[AnswerRow],
+    with_gold: bool,
+) -> anyhow::Result<PathBuf> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create answers dir {}", parent.display()))?;
+        }
+    }
+    let header: &[&str] = if with_gold {
+        &["id", "question", "answer", "gold", "verdict", "quality"]
+    } else {
+        &["id", "question", "answer", "quality"]
+    };
+    let mut out = String::from("\u{FEFF}"); // BOM
+    out.push_str(
+        &header
+            .iter()
+            .map(|h| csv_field(h))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    out.push_str("\r\n");
+    for r in rows {
+        let fields: Vec<String> = if with_gold {
+            vec![
+                csv_field(&r.id),
+                csv_field(&r.question),
+                csv_field(&r.answer),
+                csv_field(&r.gold),
+                csv_field(&r.verdict),
+                csv_field(""), // quality — blank for the customer
+            ]
+        } else {
+            vec![
+                csv_field(&r.id),
+                csv_field(&r.question),
+                csv_field(&r.answer),
+                csv_field(""), // quality — blank for the customer
+            ]
+        };
+        out.push_str(&fields.join(","));
+        out.push_str("\r\n");
+    }
+    fs::write(path, out).with_context(|| format!("write answers csv {}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_csv_quotes_columns_and_bom_adapts_to_gold() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // with_gold=true: 6 columns, embedded comma/quote/newline survive quoting.
+        let rows = vec![AnswerRow {
+            id: "q1".into(),
+            question: "Line one,\nwith a \"quote\"".into(),
+            answer: "Because A leads to B.".into(),
+            gold: "A -> B".into(),
+            verdict: "Correct".into(),
+        }];
+        let p = dir.path().join("with_gold.csv");
+        write_answers_csv(&p, &rows, true).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with('\u{FEFF}'), "must start with a BOM");
+        let header = text.lines().next().unwrap();
+        assert_eq!(
+            header.trim_start_matches('\u{FEFF}'),
+            "\"id\",\"question\",\"answer\",\"gold\",\"verdict\",\"quality\""
+        );
+        // The embedded quote is doubled and the whole field stays wrapped in quotes.
+        assert!(text.contains("\"Line one,\nwith a \"\"quote\"\"\""));
+        assert!(text.contains("\"Correct\""));
+        // Trailing quality column present and blank.
+        assert!(text.trim_end().ends_with(",\"\""));
+
+        // with_gold=false: 4 columns, no gold/verdict.
+        let p2 = dir.path().join("no_gold.csv");
+        write_answers_csv(&p2, &rows, false).unwrap();
+        let text2 = std::fs::read_to_string(&p2).unwrap();
+        let header2 = text2.lines().next().unwrap();
+        assert_eq!(
+            header2.trim_start_matches('\u{FEFF}'),
+            "\"id\",\"question\",\"answer\",\"quality\""
+        );
+        assert!(
+            !text2.contains("\"gold\""),
+            "no-gold run omits the gold column"
+        );
+    }
 
     #[test]
     fn report_has_counts_table_and_traces() {

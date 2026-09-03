@@ -147,6 +147,13 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   (today's behavior).
 - **user_sim dialogue gate** — an opt-in patient simulated user that deflects a non-answer back into
   the reader loop instead of accepting it (eval + train).
+- **Customer-facing prediction runs** — `kbx eval --no-gold` runs the reader over a question list
+  WITHOUT scoring (skips the judge, keeps `answerable=false` cases, tolerates empty gold answers), so
+  a fresh unanswered question set can be run as-is. `--answers <path>` writes a flat question→answer
+  CSV (UTF-8 BOM so Excel opens Cyrillic, RFC-4180 quoting, a trailing blank `quality` column for the
+  reviewer) for handing to a customer to grade. With golds present the CSV also carries `gold` +
+  `verdict` columns (validate against gold and export the transcript in one run). A relative
+  `--answers` path resolves under `runs/<tag>/` (never the indexed corpus); absolute is used as given.
 - **Evidence-grounded judge** — grades an answer against the retrieved source evidence, not only the gold string.
 - **Anti-loop retrieval signals** — neutral plateau/repeat/streak markers curb search spirals and feed
   DPO-on-plateau fine-tuning pairs.
