@@ -140,6 +140,7 @@ carries one:
 ```toml
 [retrieval]
 sim_weight = 0.1
+spine_weight = 1.0
 ```
 
 **`sim_weight`** is the weight a mechanical `SIMILAR` edge (derived by `graph
@@ -163,6 +164,27 @@ overrides the file for a one-off sweep without editing the corpus; precedence is
 **env → `[retrieval].sim_weight` → default**. The resolved weight is baked into
 the PPR transition cache, so changing either the file or the env var rebuilds the
 matrix on the next query automatically.
+
+**`spine_weight`** is the mirror knob for the other tier: the weight a
+reasoning-**spine** edge carries, relative to a plain reasoning edge (`1.0`). A
+spine edge is any relation whose ontology `role` is `Chaining` — the edges that
+advance the reasoning chain (the same ones the traverse layer walks); it is read
+from ontology data, never a hardcoded relation name. Where `sim_weight`
+*penalizes* the similarity tier (`< 1.0`), `spine_weight` *boosts* the spine
+(`> 1.0`), so a node's single load-bearing bridge edge is not diluted by
+out-degree against its many grounding/descriptive edges — aimed squarely at
+multi-hop questions where the connecting edge exists but ranks too low.
+
+- The default is **`1.0` (a no-op)**: existing corpora are byte-identical until
+  one opts in, so this is safe to ship and easy to A/B.
+- **Higher** (e.g. `2.0`–`3.0`) concentrates walk mass on the chain, floating
+  the multi-hop terminal higher; too high starves lateral context, so validate
+  on your multi-hop eval rather than assuming higher is better.
+
+Precedence and caching match `sim_weight`: **env `GLOSSA_PPR_SPINE_WEIGHT` →
+`[retrieval].spine_weight` → default `1.0`**, and the resolved value is folded
+into the transition cache so a change rebuilds the matrix automatically. A clean
+A/B is a pure env flip: `GLOSSA_PPR_SPINE_WEIGHT=1` vs `=2` on the same corpus.
 
 ## Graph doctor
 

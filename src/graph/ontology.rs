@@ -55,6 +55,12 @@ struct RawRetrieval {
     /// stronger reader); higher = heavier (suits a weaker reader).
     #[serde(default)]
     sim_weight: Option<f32>,
+    /// PPR transition weight of a reasoning-SPINE edge (a relation whose [`RelationRole`] is
+    /// `Chaining`) relative to a plain reasoning edge (1.0). Unset → engine default `1.0` (a no-op).
+    /// `> 1.0` BOOSTS the spine so a node's load-bearing bridge edge isn't diluted by out-degree
+    /// against its Grounding/descriptive edges. See `graph::ppr::spine_weight`.
+    #[serde(default)]
+    spine_weight: Option<f32>,
 }
 
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
@@ -263,6 +269,10 @@ pub struct Ontology {
     /// Per-corpus PPR `SIMILAR`-edge weight from `[retrieval].sim_weight`, validated finite ≥ 0.
     /// `None` when unset → PPR uses the engine default. See [`Ontology::ppr_sim_weight`].
     ppr_sim_weight: Option<f32>,
+    /// Per-corpus PPR spine (Chaining-role) edge weight from `[retrieval].spine_weight`, validated
+    /// finite ≥ 0. `None` when unset → PPR uses the engine default (1.0). See
+    /// [`Ontology::ppr_spine_weight`].
+    ppr_spine_weight: Option<f32>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -384,6 +394,10 @@ impl Ontology {
             ppr_sim_weight: raw
                 .retrieval
                 .sim_weight
+                .filter(|w| w.is_finite() && *w >= 0.0),
+            ppr_spine_weight: raw
+                .retrieval
+                .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
             reasoning: raw.reasoning,
             constraint_types: raw
@@ -542,6 +556,13 @@ impl Ontology {
     /// `None` when the ontology declares none — in which case PPR applies its engine default.
     pub fn ppr_sim_weight(&self) -> Option<f32> {
         self.ppr_sim_weight
+    }
+
+    /// Per-corpus PPR spine (Chaining-role) edge weight from `[retrieval].spine_weight` (validated
+    /// finite ≥ 0), or `None` when the ontology declares none — in which case PPR applies its engine
+    /// default (1.0, a no-op). See [`Ontology::relation_role`] for which edges count as spine.
+    pub fn ppr_spine_weight(&self) -> Option<f32> {
+        self.ppr_spine_weight
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {

@@ -53,21 +53,58 @@ pub(crate) fn sim_weight(gdir: &Path) -> f32 {
     0.1
 }
 
-/// Fold `w_sim` into the transition cache's content signature. The persisted transition matrix bakes
-/// in `w_sim` (edge weights = tier * confidence, tier scaled by `w_sim`), so a cache built at one
-/// `w_sim` MUST NOT be reused at another — otherwise changing `GLOSSA_PPR_SIM_WEIGHT` silently has no
-/// effect while the graph is unchanged. Mixing the weight's bits into the content signature makes a
-/// different `w_sim` a cache miss (rebuild), exactly like a graph edit does.
-pub(crate) fn cache_sig(content_sig: u64, w_sim: f32) -> u64 {
-    content_sig ^ (w_sim.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+/// `w_spine`: the transition weight of a reasoning-SPINE edge (a relation whose ontology
+/// [`RelationRole`](crate::graph::ontology::RelationRole) is `Chaining` — the edges the traverse
+/// layer walks) relative to a plain reasoning edge (1.0). `> 1.0` BOOSTS the spine so a node's one
+/// load-bearing bridge edge isn't diluted by out-degree against its many Grounding/descriptive edges.
+///
+/// Resolution mirrors [`sim_weight`]: `GLOSSA_PPR_SPINE_WEIGHT` env > `[retrieval].spine_weight` in
+/// `ontology.toml` > engine default **1.0 (a no-op)**. The 1.0 default keeps every existing graph
+/// byte-identical until a corpus opts in — and makes an A/B a pure env flip. Like `w_sim`, the
+/// resolved value is folded into the transition cache signature ([`cache_sig`]) so a change rebuilds
+/// the matrix instead of silently no-op'ing. Reads the role from ontology DATA (never a hardcoded
+/// relation name), so the engine stays ontology-blind.
+pub(crate) fn spine_weight(gdir: &Path) -> f32 {
+    let valid = |w: f32| (w >= 0.0 && w.is_finite()).then_some(w);
+    if let Some(w) = std::env::var("GLOSSA_PPR_SPINE_WEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .and_then(valid)
+    {
+        return w;
+    }
+    if let Some(w) = gdir
+        .parent()
+        .and_then(|root| crate::graph::ontology::Ontology::load_or_default(root).ppr_spine_weight())
+        .and_then(valid)
+    {
+        return w;
+    }
+    1.0
 }
 
-/// System-level tier weight for an edge in the PPR walk. Reads only `edge_type` membership in a
-/// fixed set — never node_type or domain relations (the ontology-blind contract holds).
-/// `w_sim` is the weight for similarity edges; reasoning edges always return 1.0.
-pub(crate) fn edge_tier_weight(edge_type: &str, w_sim: f32) -> f32 {
+/// Fold `w_sim` AND `w_spine` into the transition cache's content signature. The persisted transition
+/// matrix bakes in both weights (edge weights = tier * confidence, tier scaled by whichever tier the
+/// edge is in), so a cache built at one weight pair MUST NOT be reused at another — otherwise changing
+/// `GLOSSA_PPR_SIM_WEIGHT`/`GLOSSA_PPR_SPINE_WEIGHT` silently has no effect while the graph is
+/// unchanged. Mixing both weights' bits into the content signature makes a different pair a cache miss
+/// (rebuild), exactly like a graph edit does.
+pub(crate) fn cache_sig(content_sig: u64, w_sim: f32, w_spine: f32) -> u64 {
+    content_sig
+        ^ (w_sim.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (w_spine.to_bits() as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+}
+
+/// System-level tier weight for an edge in the PPR walk. `w_sim` is the weight for mechanical
+/// similarity edges; `w_spine` the weight for reasoning-spine edges (`is_spine` — the caller resolves
+/// it from the ontology's `RelationRole`, keeping this helper a pure lookup); plain reasoning edges
+/// return 1.0. SIMILAR is checked FIRST, so a soft edge is never mistaken for spine even though a
+/// missing role fails open to `Chaining`.
+pub(crate) fn edge_tier_weight(edge_type: &str, w_sim: f32, w_spine: f32, is_spine: bool) -> f32 {
     if SIMILARITY_EDGES.contains(&edge_type) {
         w_sim
+    } else if is_spine {
+        w_spine
     } else {
         1.0
     }
@@ -134,6 +171,16 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
     }
     let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ids.len()];
     let w_sim = sim_weight(g.gdir());
+    let w_spine = spine_weight(g.gdir());
+    // Ontology loaded ONCE for the per-edge spine (Chaining-role) lookup — reading role from ontology
+    // DATA keeps the weighting ontology-blind (no hardcoded relation names). `load_or_default` never
+    // fails, so a missing/absent ontology yields the default (every non-SIMILAR edge fails open to
+    // Chaining → spine); with the 1.0 default `w_spine` that is still a no-op.
+    let onto = g
+        .gdir()
+        .parent()
+        .map(crate::graph::ontology::Ontology::load_or_default)
+        .unwrap_or_default();
     for e in g.all_edges()? {
         if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
             if a != b {
@@ -144,7 +191,9 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
                 } else {
                     1.0
                 };
-                let w = edge_tier_weight(&e.edge_type, w_sim) * confidence;
+                let is_spine = onto.relation_role(&e.edge_type)
+                    == crate::graph::ontology::RelationRole::Chaining;
+                let w = edge_tier_weight(&e.edge_type, w_sim, w_spine, is_spine) * confidence;
                 adj[a].push((b, w));
                 adj[b].push((a, w)); // symmetric — a multi-hop answer may need to walk "backward"
             }
@@ -359,17 +408,22 @@ mod tests {
     }
 
     #[test]
-    fn similarity_edges_weigh_below_reasoning() {
-        // Tier semantics only (explicit weight — resolution is tested separately): reasoning +
-        // structural edges carry full mass, SIMILAR carries the configured `w_sim`, unknown = full.
-        let w_sim = 0.1_f32;
-        assert_eq!(edge_tier_weight("LEADS_TO", w_sim), 1.0);
-        assert_eq!(edge_tier_weight("MENTIONS", w_sim), 1.0);
-        assert_eq!(edge_tier_weight("CONTAINS", w_sim), 1.0); // structural still carries cross-doc mass
-        assert_eq!(edge_tier_weight("NEXT", w_sim), 1.0);
-        assert!(edge_tier_weight("SIMILAR", w_sim) < 1.0);
-        assert_eq!(edge_tier_weight("SIMILAR", w_sim), 0.1);
-        assert_eq!(edge_tier_weight("ANYTHING_UNKNOWN", w_sim), 1.0); // default = reasoning tier
+    fn three_tier_edge_weights() {
+        // Tier semantics only (explicit weights; role resolution is the caller's job, tested
+        // separately). w_sim = 0.1 (penalize SIMILAR), w_spine = 2.0 (boost the reasoning spine).
+        let (w_sim, w_spine) = (0.1_f32, 2.0_f32);
+        // Non-spine reasoning/structural edges (is_spine=false) carry full mass.
+        assert_eq!(edge_tier_weight("MENTIONS", w_sim, w_spine, false), 1.0);
+        assert_eq!(edge_tier_weight("CONTAINS", w_sim, w_spine, false), 1.0);
+        assert_eq!(edge_tier_weight("NEXT", w_sim, w_spine, false), 1.0);
+        // A spine (Chaining-role) edge is BOOSTED.
+        assert_eq!(edge_tier_weight("LEADS_TO", w_sim, w_spine, true), 2.0);
+        // SIMILAR is checked FIRST — even if a missing role failed open to spine (is_spine=true), a
+        // soft edge still gets `w_sim`, never the boost.
+        assert_eq!(edge_tier_weight("SIMILAR", w_sim, w_spine, true), 0.1);
+        assert!(edge_tier_weight("SIMILAR", w_sim, w_spine, false) < 1.0);
+        // Default w_spine = 1.0 makes the spine tier a no-op (backward compatible).
+        assert_eq!(edge_tier_weight("LEADS_TO", w_sim, 1.0, true), 1.0);
     }
 
     #[test]
@@ -402,14 +456,39 @@ mod tests {
     }
 
     #[test]
-    fn cache_sig_differs_by_w_sim() {
-        // Same content signature, different w_sim → different cache signature, so a cache built at
-        // one w_sim is a miss at another (the whole point — GLOSSA_PPR_SIM_WEIGHT must take effect
-        // even when the graph is unchanged). Same w_sim → same sig (a hit).
+    fn cache_sig_differs_by_either_weight() {
+        // Same content signature, different w_sim OR w_spine → different cache signature, so a cache
+        // built at one weight pair is a miss at another (the whole point — a GLOSSA_PPR_*_WEIGHT flip
+        // must take effect even when the graph is unchanged). Same pair → same sig (a hit).
         let content = 0xDEAD_BEEF_u64;
-        assert_ne!(cache_sig(content, 0.1), cache_sig(content, 0.3));
-        assert_ne!(cache_sig(content, 0.1), cache_sig(content, 0.2));
-        assert_eq!(cache_sig(content, 0.3), cache_sig(content, 0.3));
+        assert_ne!(cache_sig(content, 0.1, 1.0), cache_sig(content, 0.3, 1.0)); // w_sim varies
+        assert_ne!(cache_sig(content, 0.1, 1.0), cache_sig(content, 0.1, 2.0)); // w_spine varies
+        assert_ne!(cache_sig(content, 0.1, 2.0), cache_sig(content, 0.2, 1.0)); // both vary
+        assert_eq!(cache_sig(content, 0.3, 1.5), cache_sig(content, 0.3, 1.5)); // identical pair
+    }
+
+    #[test]
+    fn spine_weight_resolves_default_then_ontology() {
+        std::env::remove_var("GLOSSA_PPR_SPINE_WEIGHT");
+        let d = tempfile::tempdir().unwrap();
+        let gdir = d.path().join(".glossa");
+        std::fs::create_dir_all(&gdir).unwrap();
+        // No ontology (or no [retrieval] key) → engine default 1.0 (a no-op).
+        assert_eq!(spine_weight(&gdir), 1.0);
+        // A per-corpus [retrieval].spine_weight is read (a boost > 1 is allowed).
+        std::fs::write(
+            gdir.join("ontology.toml"),
+            "[retrieval]\nspine_weight = 2.5\n",
+        )
+        .unwrap();
+        assert_eq!(spine_weight(&gdir), 2.5);
+        // A malformed (negative) value is rejected → falls back to the default.
+        std::fs::write(
+            gdir.join("ontology.toml"),
+            "[retrieval]\nspine_weight = -1.0\n",
+        )
+        .unwrap();
+        assert_eq!(spine_weight(&gdir), 1.0);
     }
 
     #[test]

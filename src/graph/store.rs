@@ -251,11 +251,12 @@ pub struct GraphStore {
     ppr_transition: Mutex<PprTransitionCache>,
 }
 
-/// Cache slot for the PPR transition matrix: `((DB file signature, w_sim bits), matrix)`. A named
-/// alias so the field type stays readable and clippy-clean (`type_complexity`) — see
-/// `GraphStore::ppr_transition`.
+/// Cache slot for the PPR transition matrix: `((DB file signature, w_sim bits, w_spine bits),
+/// matrix)`. A named alias so the field type stays readable and clippy-clean (`type_complexity`) —
+/// see `GraphStore::ppr_transition`. Both weight bits are in the key so a change to either
+/// `w_sim`/`w_spine` (env or ontology) is an in-memory cache miss, matching `ppr::cache_sig`.
 type PprTransitionCache = Option<(
-    (DbFileSig, u32),
+    (DbFileSig, u32, u32),
     std::sync::Arc<crate::graph::ppr::Transition>,
 )>;
 
@@ -335,18 +336,19 @@ impl GraphStore {
         // the DB files nor the resolved weight (env `GLOSSA_PPR_SIM_WEIGHT` > `[retrieval].sim_weight`
         // in ontology.toml > default) changed, the in-memory transition is still valid.
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
-        let key = (self.db_filesig(), w_sim.to_bits());
+        let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
+        let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
         if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
             if *k == key {
                 return Ok(t.clone());
             }
         }
-        // Cold, or the DB / w_sim changed: now the O(nodes+edges) content signature is worth it, to
-        // validate the on-disk cache (which survives across processes, where mtime isn't comparable).
-        // Fold `w_sim` into it so a cache built at one weight is a miss at another.
+        // Cold, or the DB / w_sim / w_spine changed: now the O(nodes+edges) content signature is worth
+        // it, to validate the on-disk cache (which survives across processes, where mtime isn't
+        // comparable). Fold both weights into it so a cache built at one pair is a miss at another.
         let csig = {
             let c = self.conn.lock().unwrap();
-            crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim)
+            crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim, w_spine)
         };
         let arc = if let Some(t) = self.load_ppr_transition(csig) {
             std::sync::Arc::new(t)
