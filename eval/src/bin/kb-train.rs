@@ -886,6 +886,10 @@ fn run_optimize_graph(
             // Legacy research binary has no `[user_sim]` wiring; gate off (no behaviour change).
             user_sim: None,
             user_sim_prompt: None,
+            // Legacy research binary has no lab.toml; balanced policy = today's behavior (no
+            // abstention credit, no FP ceiling).
+            credit_abstention: false,
+            fp_gate: false,
         },
         qs,
         &reflect,

@@ -20,12 +20,12 @@ use kb_eval::finetune::{
     TrajectoryRecord,
 };
 use kb_eval::judge::{judge, Judgement, Verdict};
-use kb_eval::lab::{self, LabConfig};
+use kb_eval::lab::{self, AbstentionPolicy, LabConfig};
 use kb_eval::parallel::run_units_parallel;
 use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{
-    lexical_text, load_cases, summary_text, write_answers_csv, write_case, write_run, AnswerRow,
-    CaseResult, RunMeta,
+    confusion_text, lexical_text, load_cases, summary_text, write_answers_csv, write_case,
+    write_run, AnswerRow, CaseResult, RunMeta,
 };
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
@@ -776,20 +776,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         .map(|q| (q.id.clone(), (q.question.clone(), q.answer.clone())))
         .collect();
 
-    // Drop cases marked `answerable = false` (out-of-corpus golds) BEFORE any resume/tag/limit
-    // slicing so they never enter scoring — they'd only cap the achievable metric. Absent field
-    // => all `true` => nothing dropped (unchanged behavior). Skipped under `--no-gold`: there are
-    // no golds to be un/answerable, so every question is run.
-    if !args.no_gold {
-        let before_answerable = cases.len();
-        cases.retain(|q| q.answerable);
-        let excluded_unanswerable = before_answerable - cases.len();
-        if excluded_unanswerable > 0 {
-            println!(
-                "excluded {excluded_unanswerable} unanswerable (answerable=false) — not scored"
-            );
-        }
-    }
+    // `answerable = false` cases are ABSTENTION tests, not excluded. The correct behavior for such a
+    // question (out of corpus / not covered / a routing or non-technical request) is for the reader to
+    // DECLINE — say the answer isn't in the knowledge base or route onward — rather than fabricate an
+    // answer. The judge grades that abstention as `correct` and a fabricated answer as `wrong` (see
+    // `judge::build_user`), so keeping them makes the eval measure abstention quality instead of
+    // silently dropping it. (Grading needs a judge; without one they land Unscored — see below.)
+    let n_unanswerable = cases.iter().filter(|q| !q.answerable).count();
 
     if let Some(t) = &args.tag_filter {
         cases.retain(|q| q.tags.iter().any(|x| x == t));
@@ -832,6 +825,21 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     };
 
     let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
+    // Abstention policy (FP-vs-FN operating point): balanced (default) or safety_first. Only affects
+    // how the judge scores a decline on an ANSWERABLE question (safety_first credits it `partial`).
+    let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
+    let credit_abstention = policy.credit_abstention();
+    if n_unanswerable > 0 {
+        if use_judge {
+            println!(
+                "{n_unanswerable} unanswerable case(s) scored as abstention tests (correct = the reader declines / says it's not in the KB)"
+            );
+        } else {
+            println!(
+                "{n_unanswerable} unanswerable case(s) present but no judge — they cannot be graded (land Unscored). Configure a [judge] endpoint to score abstention."
+            );
+        }
+    }
     let judge_md = if use_judge {
         Some(
             std::fs::read_to_string(&paths.judge_prompt).with_context(|| {
@@ -1008,6 +1016,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                             &q.answer,
                             &answer,
                             &q.source,
+                            q.answerable,
+                            credit_abstention,
                             judge_idx.as_ref(),
                         ) {
                             Ok(Judgement {
@@ -1108,6 +1118,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 hop_type: q.hop_type.clone(),
                 needs_graph: q.needs_graph.clone(),
                 errored,
+                answerable: q.answerable,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
@@ -1168,6 +1179,10 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         );
     } else {
         println!("{}", summary_text(&all_results));
+        let conf = confusion_text(&all_results);
+        if !conf.is_empty() {
+            println!("{conf}");
+        }
         println!("{}", lexical_text(&all_results));
     }
 

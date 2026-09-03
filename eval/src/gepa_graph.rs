@@ -102,6 +102,26 @@ pub struct GepaGraphConfig {
     /// The simulated-user persona prompt (`user_sim.md`) for the gate above; only used when
     /// `user_sim` is also `Some`.
     pub user_sim_prompt: Option<String>,
+    /// Safety-first: credit a decline on an ANSWERABLE question as `partial` (a safe miss) instead of
+    /// `wrong`, so the reward prefers "abstain when unsure" over "guess wrong". Passed to the judge.
+    /// `false` (default/balanced) = a decline grades `wrong`, today's behavior. See
+    /// `lab::AbstentionPolicy`.
+    pub credit_abstention: bool,
+    /// Safety-first: enforce a FALSE-POSITIVE ceiling in the apply-gate — reject a winner whose
+    /// full-set FP (Wrong) rate exceeds the seed's, even if its mean score rose. `false`
+    /// (default/balanced) = quality-only gate, today's behavior.
+    pub fp_gate: bool,
+}
+
+/// False-positive rate over non-errored outcomes: `count(is_fp) / count(!errored)`. `0.0` when every
+/// outcome errored (no denominator). Mirrors `mean_scored`'s errored-exclusion so the FP ceiling and
+/// the quality gate share the same denominator.
+fn fp_rate(out: &[RolloutOutcome]) -> f64 {
+    let scored = out.iter().filter(|o| !o.errored).count();
+    if scored == 0 {
+        return 0.0;
+    }
+    out.iter().filter(|o| !o.errored && o.is_fp).count() as f64 / scored as f64
 }
 
 /// Verdict → graded score: Correct=1.0, Partial=0.5, Wrong/Unscored=0.0.
@@ -148,6 +168,11 @@ struct RolloutOutcome {
     /// deflate the reported number. A rollout that returned wrong/empty TEXT is `errored: false` and
     /// scored normally (a real 0.0). It also never becomes a `FailCase` fed to the reflector.
     errored: bool,
+    /// True when this rollout is a FALSE POSITIVE — the reader asserted an incorrect answer (judge
+    /// `Wrong`). Under safety-first (`credit_abstention`) a decline grades `partial`, so `Wrong`
+    /// isolates fabrication; the apply-gate's FP ceiling counts these. Always false on the exact-EM
+    /// path and when the policy is balanced (the gate is then off anyway).
+    is_fp: bool,
 }
 
 #[derive(Clone)]
@@ -364,8 +389,12 @@ fn rollout_one(
     // (aliases are exact-match forms).
     // An endpoint-errored rollout is not scored (no answer to grade): score stays 0.0, judge_reason
     // None, and `errored` excludes it from every scored mean. Only real answers reach the judge/EM.
-    let (score, judge_reason) = if errored {
-        (0.0, None)
+    // `is_fp` = a FALSE POSITIVE: the reader ASSERTED something incorrect. Under the safety-first
+    // policy (`cfg.credit_abstention`) the judge grades a decline as `partial`, so a `Wrong` verdict
+    // means an incorrect substantive answer — a fabrication — which is exactly what the FP-gate caps.
+    // Only meaningful on the judge path under safety-first; false otherwise (and the FP-gate is off).
+    let (score, judge_reason, is_fp) = if errored {
+        (0.0, None, false)
     } else {
         match &cfg.judge {
             Some(jc) => match crate::judge::judge(
@@ -375,15 +404,21 @@ fn rollout_one(
                 &q.answer,
                 &pred,
                 &q.source,
+                q.answerable,
+                cfg.credit_abstention,
                 Some(idx),
             ) {
                 // Keep the judge's reason alongside the score — the reflector surfaces it to the
                 // teacher as WHY this case was wrong (signal B). Dropping it here is what left the
                 // teacher guessing at the failure mode.
-                Ok(j) => (verdict_to_score(j.verdict), Some(j.reason)),
+                Ok(j) => (
+                    verdict_to_score(j.verdict),
+                    Some(j.reason),
+                    j.verdict == crate::judge::Verdict::Wrong,
+                ),
                 Err(e) => {
                     pb.println(format!("judge failed (scored 0): {e:#}"));
-                    (0.0, None)
+                    (0.0, None, false)
                 }
             },
             None => {
@@ -392,7 +427,7 @@ fn rollout_one(
                 } else {
                     0.0
                 };
-                (s, None)
+                (s, None, false)
             }
         }
     };
@@ -402,6 +437,7 @@ fn rollout_one(
         steps: steps.into_inner(),
         judge_reason,
         errored,
+        is_fp,
     }
 }
 
@@ -442,6 +478,7 @@ fn combine_samples(mut samples: Vec<RolloutOutcome>) -> RolloutOutcome {
         pred,
         steps,
         judge_reason,
+        is_fp,
         ..
     } = samples.swap_remove(rep);
     RolloutOutcome {
@@ -450,6 +487,9 @@ fn combine_samples(mut samples: Vec<RolloutOutcome>) -> RolloutOutcome {
         steps,
         judge_reason,
         errored,
+        // FP status of the representative (a failing sample when one exists) — the combined outcome
+        // counts as a false positive iff its representative rollout asserted an incorrect answer.
+        is_fp,
     }
 }
 
@@ -1364,8 +1404,8 @@ pub fn run(
     // and refuse to ship a winner that isn't at least as good as the seed. (Full set, not a further
     // held-out split: at this dataset size a third split is too noisy, and the full set IS the eval
     // objective we must not regress.)
-    let score_full = |prompt: &str| {
-        mean_scored(&score_questions(
+    let outcomes_full = |prompt: &str| {
+        score_questions(
             &cfg,
             &url,
             &tools,
@@ -1375,19 +1415,34 @@ pub fn run(
             graph.as_ref(),
             &spec,
             pb,
-        ))
+        )
     };
-    let winner_full = score_full(&best_prompt);
-    let seed_full = score_full(&cfg.seed_prompt);
-    let applied = winner_full >= seed_full;
+    let winner_out = outcomes_full(&best_prompt);
+    let seed_out = outcomes_full(&cfg.seed_prompt);
+    let winner_full = mean_scored(&winner_out);
+    let seed_full = mean_scored(&seed_out);
+    let quality_ok = winner_full >= seed_full;
+    // Safety-first FP ceiling: even if the mean score rose, refuse a winner that hallucinates MORE
+    // than the seed (higher full-set false-positive rate). Off under the balanced policy.
+    let (winner_fp, seed_fp) = (fp_rate(&winner_out), fp_rate(&seed_out));
+    let fp_ok = !cfg.fp_gate || winner_fp <= seed_fp;
+    let applied = quality_ok && fp_ok;
     if applied {
         pb.println(format!(
-            "apply-gate: winner full-set={winner_full:.3} >= seed={seed_full:.3} — APPLYING winner"
+            "apply-gate: winner full-set={winner_full:.3} >= seed={seed_full:.3}{} — APPLYING winner",
+            if cfg.fp_gate {
+                format!(" (FP {winner_fp:.3} <= seed {seed_fp:.3})")
+            } else {
+                String::new()
+            }
         ));
     } else {
-        pb.println(format!(
-            "apply-gate: winner full-set={winner_full:.3} < seed={seed_full:.3} — winner regresses; KEEPING seed (not applied)"
-        ));
+        let why = if !quality_ok {
+            format!("winner full-set={winner_full:.3} < seed={seed_full:.3} (quality regresses)")
+        } else {
+            format!("winner FP={winner_fp:.3} > seed FP={seed_fp:.3} (more hallucination)")
+        };
+        pb.println(format!("apply-gate: {why} — KEEPING seed (not applied)"));
         best_prompt = cfg.seed_prompt.clone();
         best_score = seed_full;
     }
@@ -1759,6 +1814,7 @@ mod tests {
             steps: Vec::new(),
             judge_reason: None,
             errored,
+            is_fp: false,
         }
     }
 
@@ -1784,6 +1840,7 @@ mod tests {
             }],
             judge_reason: None,
             errored,
+            is_fp: false,
         }
     }
 

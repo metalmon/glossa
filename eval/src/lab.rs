@@ -246,6 +246,47 @@ pub struct Tuning {
     /// `gepa_graph::GepaGraphConfig::rollout_samples`.
     #[serde(default)]
     pub gepa_rollout_samples: Option<usize>,
+    /// Abstention policy — the FP-vs-FN operating point for scoring an out-of-corpus question and, in
+    /// training, for the apply-gate. `None`/`"balanced"` (default) = today's behavior: a decline on an
+    /// ANSWERABLE question grades `wrong` (a miss), and no false-positive ceiling gates GEPA.
+    /// `"safety_first"` = credit that decline as `partial` (a safe miss, not a fabrication) AND gate
+    /// GEPA on the false-positive (Wrong) rate so a candidate that hallucinates more than the seed is
+    /// rejected even if its mean score rose. The INVARIANT — on an UNANSWERABLE question a decline is
+    /// `correct` and a fabricated answer is `wrong` — holds under every policy. See
+    /// `judge::build_user` (credit_abstention) and `gepa_graph` (fp_gate).
+    #[serde(default)]
+    pub abstention_policy: Option<String>,
+}
+
+/// The FP-vs-FN operating point, parsed from `[tuning] abstention_policy`. `Balanced` is the default
+/// and byte-compatible with pre-policy behavior; `SafetyFirst` credits a safe decline and gates GEPA
+/// on the false-positive rate. An unrecognized string falls back to `Balanced`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbstentionPolicy {
+    Balanced,
+    SafetyFirst,
+}
+
+impl AbstentionPolicy {
+    /// Parse the `[tuning] abstention_policy` string (case-insensitive). `None`/unknown -> `Balanced`.
+    pub fn from_opt(s: Option<&str>) -> Self {
+        match s.map(|v| v.trim().to_lowercase()).as_deref() {
+            Some("safety_first") | Some("safety-first") | Some("safety") => Self::SafetyFirst,
+            _ => Self::Balanced,
+        }
+    }
+
+    /// Whether a decline on an ANSWERABLE question is credited as `partial` (a safe miss) instead of
+    /// graded `wrong` — true only under `SafetyFirst`.
+    pub fn credit_abstention(self) -> bool {
+        matches!(self, Self::SafetyFirst)
+    }
+
+    /// Whether GEPA's apply-gate also enforces a false-positive (Wrong-rate) ceiling — true only under
+    /// `SafetyFirst`.
+    pub fn fp_gate(self) -> bool {
+        matches!(self, Self::SafetyFirst)
+    }
 }
 
 /// The precedence every kbx pipeline's tuning knob resolves through: an explicit CLI flag wins,

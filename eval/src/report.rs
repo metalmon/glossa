@@ -40,6 +40,16 @@ pub struct CaseResult {
     /// `#[serde(default)]` keeps run reports persisted before this field existed loadable.
     #[serde(default)]
     pub errored: bool,
+    /// Whether the case is answerable from the corpus. `false` = an abstention test (out of scope);
+    /// the correct behavior is to decline. Carried so the confusion matrix can split answerable vs
+    /// abstention cells from `(answerable, verdict)` alone — no phrase matching, ontology-agnostic.
+    /// `#[serde(default = "default_true")]` so pre-existing persisted cases load as answerable.
+    #[serde(default = "default_true")]
+    pub answerable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Run-level metadata carried in the report header. `timestamp` is passed in by the caller (never
@@ -155,6 +165,70 @@ fn quality_score(correct: usize, partial: usize, graded: usize) -> f32 {
 pub fn quality(results: &[CaseResult]) -> f32 {
     let t = tally(results);
     quality_score(t.correct, t.partial, t.graded())
+}
+
+/// Confusion view over `(answerable, verdict)` — the FP-vs-FN picture, ontology-agnostic (no phrase
+/// matching). Derived purely from each case's `answerable` flag and graded verdict; endpoint-errored
+/// and `Unscored` cases are excluded (never graded). Empty string when nothing was graded (e.g. a
+/// `--no-judge`/`--no-gold` run) so callers can print it unconditionally.
+///
+/// Cells (non-errored, real verdict):
+/// - answerable: Correct = answered right (coverage) · Wrong = FP (wrong assertion) · Partial = a
+///   partial/declined answer (safe-ish miss)
+/// - abstention (`answerable=false`): Correct = correctly declined · Wrong = FP (hallucination) ·
+///   Partial = declined but added unsupported claims
+///
+/// Rates: coverage = answerable-correct / answerable-graded; hallucination = abstention-wrong /
+/// abstention-graded; false-positive = all-wrong / all-graded (under safety_first a decline is
+/// `partial`, so Wrong isolates fabrication and this IS the FP rate the apply-gate caps).
+pub fn confusion_text(results: &[CaseResult]) -> String {
+    let (mut a_c, mut a_p, mut a_w) = (0usize, 0usize, 0usize);
+    let (mut u_c, mut u_p, mut u_w) = (0usize, 0usize, 0usize);
+    for r in results {
+        if r.errored {
+            continue;
+        }
+        match (r.answerable, r.verdict) {
+            (true, Verdict::Correct) => a_c += 1,
+            (true, Verdict::Partial) => a_p += 1,
+            (true, Verdict::Wrong) => a_w += 1,
+            (false, Verdict::Correct) => u_c += 1,
+            (false, Verdict::Partial) => u_p += 1,
+            (false, Verdict::Wrong) => u_w += 1,
+            (_, Verdict::Unscored) => {}
+        }
+    }
+    let a_graded = a_c + a_p + a_w;
+    let u_graded = u_c + u_p + u_w;
+    if a_graded + u_graded == 0 {
+        return String::new();
+    }
+    let rate = |num: usize, den: usize| -> f32 {
+        if den == 0 {
+            0.0
+        } else {
+            num as f32 / den as f32
+        }
+    };
+    let mut s = String::from("confusion (FP vs FN):\n");
+    if a_graded > 0 {
+        s.push_str(&format!(
+            "answerable  n={a_graded}: correct {a_c} | partial {a_p} | wrong/FP {a_w}   -> coverage {:.3}\n",
+            rate(a_c, a_graded)
+        ));
+    }
+    if u_graded > 0 {
+        s.push_str(&format!(
+            "abstention  n={u_graded}: declined(correct) {u_c} | wrong/hallucination {u_w} | partial {u_p}   -> abstention-acc {:.3}, hallucination {:.3}\n",
+            rate(u_c, u_graded),
+            rate(u_w, u_graded)
+        ));
+    }
+    s.push_str(&format!(
+        "false-positive rate (wrong assertions / graded): {:.3}",
+        rate(a_w + u_w, a_graded + u_graded)
+    ));
+    s
 }
 
 /// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
@@ -378,6 +452,13 @@ pub fn write_run(
     out.push_str(&summary_text(results));
     out.push('\n');
 
+    let confusion = confusion_text(results);
+    if !confusion.is_empty() {
+        out.push_str("\n## Abstention / FP-vs-FN\n\n");
+        out.push_str(&confusion);
+        out.push('\n');
+    }
+
     out.push_str("## By question type\n\n");
     out.push_str(&by_type_text(results));
     out.push('\n');
@@ -551,6 +632,7 @@ mod tests {
                 hop_type: "lexical".into(),
                 needs_graph: "no".into(),
                 errored: false,
+                answerable: true,
             },
             CaseResult {
                 id: "q2".into(),
@@ -565,6 +647,7 @@ mod tests {
                 hop_type: "multihop".into(),
                 needs_graph: "yes".into(),
                 errored: false,
+                answerable: true,
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -596,6 +679,7 @@ mod tests {
             hop_type: String::new(),
             needs_graph: String::new(),
             errored: false,
+            answerable: true,
         }
     }
 
@@ -607,6 +691,25 @@ mod tests {
             needs_graph: needs_graph.into(),
             ..case(id, verdict)
         }
+    }
+
+    #[test]
+    fn confusion_text_splits_answerable_and_abstention_cells() {
+        let a1 = case("a1", Verdict::Correct); // answerable, answered right
+        let a2 = case("a2", Verdict::Wrong); // answerable, wrong assertion (FP)
+        let mut u1 = case("u1", Verdict::Correct); // abstention, correctly declined
+        u1.answerable = false;
+        let mut u2 = case("u2", Verdict::Wrong); // abstention, hallucinated (FP)
+        u2.answerable = false;
+        let c = confusion_text(&[a1, a2, u1, u2]);
+        assert!(c.contains("coverage 0.500"), "1 correct / 2 answerable");
+        assert!(c.contains("hallucination 0.500"), "1 wrong / 2 abstention");
+        assert!(
+            c.contains("false-positive rate (wrong assertions / graded): 0.500"),
+            "2 wrong / 4 graded"
+        );
+        // Nothing graded (all Unscored) -> empty string, so callers can print unconditionally.
+        assert_eq!(confusion_text(&[case("x", Verdict::Unscored)]).len(), 0);
     }
 
     #[test]

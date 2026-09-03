@@ -129,3 +129,14 @@ jobs_eval = 3           # worker-pool size for `kbx eval`'s per-case reader+judg
                                  # rollout (today's behavior). K>1 rolls each question K times and
                                  # averages the score, so accept/Pareto/apply-gate decisions are less
                                  # noisy for a weak, high-variance reader — at K× the model-call cost.
+# abstention_policy = "balanced" # FP-vs-FN operating point for OUT-OF-CORPUS questions (answerable=false).
+                                 # "balanced" (default): a decline on an ANSWERABLE question grades
+                                 # `wrong` (a miss), and train excludes unanswerable golds + uses a
+                                 # quality-only apply-gate — today's behavior. "safety_first": credit a
+                                 # decline as `partial` (a safe miss, not a fabrication), INCLUDE
+                                 # unanswerable golds in training, and gate GEPA on the false-positive
+                                 # (hallucination) rate so a candidate that fabricates more than the
+                                 # seed is rejected even if its mean score rose. Pick "safety_first"
+                                 # for a support/high-stakes bot where a confidently-wrong answer costs
+                                 # more than an "I don't know". INVARIANT under every policy: on an
+                                 # unanswerable question a decline is correct and a fabrication is wrong.

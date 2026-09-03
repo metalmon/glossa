@@ -114,15 +114,54 @@ fn evidence_block(snippets: &[(String, String)]) -> Option<String> {
 
 /// Build the judge user message. With `evidence`, the block is injected between `GOLD:` and
 /// `ANSWER:`. Without it (`None`), the message is byte-identical to the historical gold-only form.
-fn build_user(question: &str, gold: &str, answer: &str, evidence: Option<&str>) -> String {
+///
+/// When `answerable` is `false` the case is an ABSTENTION test: the question cannot be answered from
+/// the knowledge base (out of scope / not covered / a routing or non-technical request), so there is
+/// no gold text to compare against. The correct behavior is for the reader to DECLINE — say it has no
+/// answer / the info isn't in the KB / route to a human — without inventing a technical answer. The
+/// message then carries the abstention rubric instead of GOLD/EVIDENCE.
+fn build_user(
+    question: &str,
+    gold: &str,
+    answer: &str,
+    evidence: Option<&str>,
+    answerable: bool,
+    credit_abstention: bool,
+) -> String {
+    if !answerable {
+        return format!(
+            "QUESTION: {question}\n\
+             NOTE: This question CANNOT be answered from the knowledge base — it is out of scope, not \
+             covered by the corpus, or a non-technical / routing request. There is no gold answer.\n\
+             The CORRECT behavior is for the assistant to state it has no answer / the information is \
+             not in the knowledge base, or to decline or route to a human — WITHOUT inventing a \
+             technical answer.\n\
+             ANSWER: {answer}\n\
+             Grade `correct` if the ANSWER appropriately declines or states there is no answer; \
+             `wrong` if it gives a substantive or fabricated technical answer as if it knew; \
+             `partial` if it declines but still adds unsupported specific claims.\n\
+             Reply with one line reason then `VERDICT: correct|partial|wrong`."
+        );
+    }
+    // Safety-first only: a decline on an ANSWERABLE question is a SAFE miss, not a fabrication — grade
+    // it `partial` rather than `wrong`, so the reward teaches "decline when unsure" over "guess wrong".
+    // Under the default (balanced) policy this note is omitted and a decline grades `wrong` (a miss),
+    // byte-identical to the historical prompt.
+    let abstain_note = if credit_abstention {
+        "\nNote: if the ANSWER declines / says the information is not in the knowledge base instead of \
+         answering, grade `partial` (a safe miss), NOT `wrong`; reserve `wrong` for an INCORRECT \
+         substantive answer."
+    } else {
+        ""
+    };
     match evidence {
         Some(ev) => format!(
             "QUESTION: {question}\nGOLD: {gold}\n{ev}\nANSWER: {answer}\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`."
+             Reply with one line reason then `VERDICT: correct|partial|wrong`.{abstain_note}"
         ),
         None => format!(
             "QUESTION: {question}\nGOLD: {gold}\nANSWER: {answer}\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`."
+             Reply with one line reason then `VERDICT: correct|partial|wrong`.{abstain_note}"
         ),
     }
 }
@@ -133,6 +172,7 @@ fn build_user(question: &str, gold: &str, answer: &str, evidence: Option<&str>) 
 /// credited, not penalized (see `evidence_block`). When `source` is empty, `idx` is `None`, or no
 /// ref loads, the EVIDENCE block is omitted and the prompt is byte-identical to the gold-only form.
 /// Posts to `ep` via `chat_once` and parses the reply with `parse_verdict`.
+#[allow(clippy::too_many_arguments)]
 pub fn judge(
     ep: &Endpoint,
     judge_md: &str,
@@ -140,6 +180,8 @@ pub fn judge(
     gold: &str,
     answer: &str,
     source: &[String],
+    answerable: bool,
+    credit_abstention: bool,
     idx: Option<&DocIndex>,
 ) -> anyhow::Result<Judgement> {
     // Trim the embedded fields so the judge message stays tidy and never ends on a stray newline
@@ -147,7 +189,14 @@ pub fn judge(
     let (question, gold, answer) = (question.trim(), gold.trim(), answer.trim());
     let snippets = load_evidence(source, idx);
     let evidence = evidence_block(&snippets);
-    let user = build_user(question, gold, answer, evidence.as_deref());
+    let user = build_user(
+        question,
+        gold,
+        answer,
+        evidence.as_deref(),
+        answerable,
+        credit_abstention,
+    );
     let messages = vec![
         json!({ "role": "system", "content": judge_md }),
         json!({ "role": "user", "content": user }),
@@ -220,7 +269,7 @@ mod tests {
         // Stubbed chunk text (mock) — no corpus, no network.
         let snippets = vec![("a.pdf#p.1".to_string(), "stub evidence text".to_string())];
         let ev = evidence_block(&snippets);
-        let prompt = build_user("Q?", "G", "A", ev.as_deref());
+        let prompt = build_user("Q?", "G", "A", ev.as_deref(), true, false);
         assert!(prompt.contains("EVIDENCE:\n[a.pdf#p.1]\nstub evidence text"));
         // Block sits between GOLD and ANSWER.
         let gold_at = prompt.find("GOLD: G").unwrap();
@@ -230,9 +279,48 @@ mod tests {
     }
 
     #[test]
+    fn build_user_unanswerable_uses_abstention_rubric_not_gold() {
+        // answerable=false → abstention rubric, no GOLD/EVIDENCE (there is no gold to compare).
+        let u = build_user("Q?", "", "not in the knowledge base", None, false, false);
+        assert!(
+            u.contains("CANNOT be answered"),
+            "carries the abstention note"
+        );
+        assert!(
+            u.contains("declines"),
+            "grades on declining, not on gold match"
+        );
+        assert!(
+            !u.contains("GOLD:"),
+            "unanswerable prompt must not carry a GOLD line"
+        );
+        assert!(u.contains("ANSWER: not in the knowledge base"));
+        // answerable=true still emits the gold-anchored form.
+        let a = build_user("Q?", "G", "A", None, true, false);
+        assert!(a.contains("GOLD: G"));
+        assert!(!a.contains("CANNOT be answered"));
+    }
+
+    #[test]
+    fn build_user_credit_abstention_adds_safe_miss_note_only_when_enabled() {
+        // Balanced (credit_abstention=false): no safe-miss note — a decline stays a miss (`wrong`).
+        let balanced = build_user("Q?", "G", "A", None, true, false);
+        assert!(!balanced.contains("safe miss"));
+        // Safety-first (credit_abstention=true): the answerable prompt tells the judge to grade a
+        // decline as `partial`, not `wrong`.
+        let safety = build_user("Q?", "G", "A", None, true, true);
+        assert!(safety.contains("safe miss"));
+        // The note is answerable-only: an unanswerable prompt is unaffected by credit_abstention.
+        assert_eq!(
+            build_user("Q?", "", "A", None, false, false),
+            build_user("Q?", "", "A", None, false, true)
+        );
+    }
+
+    #[test]
     fn user_prompt_without_source_is_byte_identical_to_gold_only() {
         // With no evidence, build_user must reproduce the historical gold-only message byte-for-byte.
-        let got = build_user("Q?", "G", "A", None);
+        let got = build_user("Q?", "G", "A", None, true, false);
         let expected = format!(
             "QUESTION: {}\nGOLD: {}\nANSWER: {}\n\
              Reply with one line reason then `VERDICT: correct|partial|wrong`.",

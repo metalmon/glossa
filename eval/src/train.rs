@@ -14,7 +14,7 @@
 use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
 use crate::gepa::{self, CandidateSelection};
 use crate::gepa_graph::{self, GepaGraphConfig};
-use crate::lab::LabConfig;
+use crate::lab::{AbstentionPolicy, LabConfig};
 use crate::workspace;
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -174,19 +174,29 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let dataset_text = std::fs::read_to_string(&dataset_path)
         .with_context(|| format!("read dataset {}", dataset_path.display()))?;
     let dataset = crate::dataset_toml::parse_dataset_toml(&dataset_text)?;
-    // Filter out `answerable = false` (out-of-corpus) golds before they reach GEPA — the whole
-    // `dataset` vec below flows into `gepa_graph::run`, which derives the train/val split,
-    // minibatches, rollouts, and Pareto set from it, so filtering here covers every GEPA site.
-    // Absent field => all `true` => nothing dropped (unchanged behavior).
-    let before_answerable = dataset.len();
-    let dataset: Vec<crate::dataset::Question> =
-        dataset.into_iter().filter(|q| q.answerable).collect();
-    let excluded_unanswerable = before_answerable - dataset.len();
-    if excluded_unanswerable > 0 {
-        println!(
-            "kbx train: excluded {excluded_unanswerable} unanswerable (answerable=false) — not optimized against"
-        );
-    }
+    // Abstention policy (FP-vs-FN operating point). Decides BOTH whether out-of-corpus golds are
+    // optimized against and whether the apply-gate enforces a false-positive ceiling.
+    let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
+    // Under BALANCED (default), `answerable = false` (out-of-corpus) golds are filtered out before
+    // they reach GEPA — the reader can't learn to answer what the corpus can't ground, so they'd only
+    // cap the metric (today's behavior). Under SAFETY_FIRST they are KEPT: they are the abstention
+    // tests carrying the false-positive signal the policy optimizes against (a correct decline scores,
+    // a fabrication is penalized + gated). `dataset` flows into `gepa_graph::run`, which derives the
+    // train/val split, minibatches, rollouts, and Pareto set from it, so this one filter covers all.
+    let dataset: Vec<crate::dataset::Question> = if policy.credit_abstention() {
+        dataset
+    } else {
+        let before = dataset.len();
+        let kept: Vec<crate::dataset::Question> =
+            dataset.into_iter().filter(|q| q.answerable).collect();
+        let excluded = before - kept.len();
+        if excluded > 0 {
+            println!(
+                "kbx train: excluded {excluded} unanswerable (answerable=false) — balanced policy, not optimized against"
+            );
+        }
+        kept
+    };
 
     let reflect_md_path = args
         .reflect_prompt
@@ -301,6 +311,8 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         judge: judge_cfg,
         user_sim: lab.user_sim.clone(),
         user_sim_prompt,
+        credit_abstention: policy.credit_abstention(),
+        fp_gate: policy.fp_gate(),
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.
