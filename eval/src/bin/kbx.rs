@@ -144,6 +144,11 @@ enum Cmd {
         /// `runs/<tag>/` (never the indexed corpus); absolute is used as given.
         #[arg(long)]
         answers: Option<PathBuf>,
+        /// Override the `lab.toml` path (default `<root>/.glossa/kbx/lab.toml`). Use to run a
+        /// cross-model job: point eval at e.g. `lab.9b.toml` while a concurrent `kbx train` uses
+        /// `lab.35b.toml`. Prompt files still come from the workspace.
+        #[arg(long)]
+        lab: Option<PathBuf>,
     },
     /// Post-process captured `runs/<tag>/trajectories.jsonl` into an Unsloth-ready fine-tuning
     /// dataset: SFT (`messages`/`sharegpt`) from Correct trajectories, or DPO
@@ -303,6 +308,11 @@ enum Cmd {
         /// to 1 (never zero workers).
         #[arg(long)]
         jobs: Option<usize>,
+        /// Override the `lab.toml` path (default `<root>/.glossa/kbx/lab.toml`). Use to run a
+        /// cross-model job: point train at e.g. `lab.35b.toml` while a concurrent `kbx eval` uses
+        /// `lab.9b.toml`. Prompt files still come from the workspace.
+        #[arg(long)]
+        lab: Option<PathBuf>,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -495,6 +505,7 @@ fn main() -> Result<()> {
             samples,
             no_gold,
             answers,
+            lab,
         } => run_eval(EvalArgs {
             path,
             tag,
@@ -511,6 +522,7 @@ fn main() -> Result<()> {
             samples,
             no_gold,
             answers,
+            lab,
         }),
         Cmd::Export {
             path,
@@ -591,6 +603,7 @@ fn main() -> Result<()> {
             no_apply,
             no_progress,
             jobs,
+            lab,
         } => train::run_train(
             path,
             TrainArgs {
@@ -610,6 +623,7 @@ fn main() -> Result<()> {
                 no_progress,
                 jobs,
                 metric,
+                lab,
             },
         ),
         Cmd::Reason {
@@ -698,6 +712,8 @@ struct EvalArgs {
     no_gold: bool,
     /// Optional path for a question->answer CSV deliverable (relative resolves under runs/<tag>/).
     answers: Option<PathBuf>,
+    /// Override the lab.toml path (default `<root>/.glossa/kbx/lab.toml`) — for cross-model runs.
+    lab: Option<PathBuf>,
 }
 
 struct ExportArgs {
@@ -759,8 +775,11 @@ fn verdict_score(v: Verdict) -> f32 {
 
 fn run_eval(args: EvalArgs) -> Result<()> {
     let kbx_paths = workspace::resolve(args.path);
-    let lab = LabConfig::load_at(&kbx_paths.lab)
-        .with_context(|| format!("loading {}", kbx_paths.lab.display()))?;
+    // `--lab` overrides only the lab config (endpoints/tuning); prompt files still come from the
+    // workspace. Enables cross-model runs (eval on one reader while train runs on another).
+    let lab_path = args.lab.clone().unwrap_or_else(|| kbx_paths.lab.clone());
+    let lab =
+        LabConfig::load_at(&lab_path).with_context(|| format!("loading {}", lab_path.display()))?;
     let paths = resolve_eval_paths(&kbx_paths, args.dataset, args.prompt, args.judge);
 
     let answer_md = std::fs::read_to_string(&paths.prompt)

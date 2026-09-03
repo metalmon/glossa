@@ -138,6 +138,10 @@ pub struct TrainArgs {
     /// Selection metric: `"judge"` (default, graded LLM judge: Correct=1.0/Partial=0.5/Wrong=0.0)
     /// or `"exact"` (exact-match EM — byte-for-byte the pre-metric behavior).
     pub metric: String,
+    /// Override the workspace's `lab.toml` path. `None` uses `<root>/.glossa/kbx/lab.toml`. Lets a
+    /// cross-model run point train at its own lab (e.g. a 35B reader) while a concurrent `kbx eval`
+    /// uses a different one (a 9B reader) — the prompt files still come from the workspace.
+    pub lab: Option<PathBuf>,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only when GEPA's
@@ -154,7 +158,10 @@ pub(crate) fn should_apply(applied: bool, no_apply: bool) -> bool {
 /// winner under `runs/<tag>/`, and apply it to the workspace when it earns its keep.
 pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     let paths = workspace::resolve(path);
-    let lab = LabConfig::load_at(&paths.lab)?;
+    // `--lab` overrides only the lab config (endpoints/tuning); prompt files still come from the
+    // workspace. Enables cross-model runs (train on one reader, eval concurrently on another).
+    let lab_path = args.lab.clone().unwrap_or_else(|| paths.lab.clone());
+    let lab = LabConfig::load_at(&lab_path)?;
     // Worker-pool size for `gepa_graph::score_questions`'s concurrent read-only rollouts
     // (CLI `--jobs` > `[tuning] jobs_train` > DEFAULT_JOBS), clamped to at least 1.
     let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_train, DEFAULT_JOBS).max(1);
