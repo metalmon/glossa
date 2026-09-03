@@ -136,11 +136,12 @@ enum Cmd {
         /// end-of-run graded-quality summary is omitted (nothing to score against).
         #[arg(long = "no-gold")]
         no_gold: bool,
-        /// Also write a flat question->answer CSV (UTF-8 BOM, Excel-friendly) for handing to the
-        /// customer to grade — always with a trailing blank `quality` column. With golds it also
-        /// carries `gold`+`verdict` columns; under `--no-gold` just `id,question,answer,quality`. A
-        /// relative path resolves under `runs/<tag>/` (never the indexed corpus); absolute is used
-        /// as given.
+        /// Also write a flat question->answer CSV for handing to the customer to grade — always with
+        /// a trailing blank `quality` column. With golds it also carries `gold`+`verdict`; under
+        /// `--no-gold` just `id;question;answer;quality`. Excel-oriented: UTF-8 BOM (Cyrillic opens
+        /// on double-click), `;`-separated (the list separator most non-US Excel locales expect), and
+        /// every field collapsed to one line (no row spill). A relative path resolves under
+        /// `runs/<tag>/` (never the indexed corpus); absolute is used as given.
         #[arg(long)]
         answers: Option<PathBuf>,
     },
@@ -1198,16 +1199,25 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .iter()
             .map(|r| {
                 let (question, gold) = qmeta.get(&r.id).cloned().unwrap_or_default();
-                AnswerRow {
-                    id: r.id.clone(),
-                    question,
-                    answer: r.answer.clone(),
-                    gold,
-                    verdict: if use_judge {
+                // An endpoint-errored case never produced a real answer (its `answer` is a raw
+                // "(error: ...)" transport dump) and was excluded from scoring — present it honestly
+                // rather than leaking the 500 into the customer sheet.
+                let (answer, verdict) = if r.errored {
+                    (String::new(), "endpoint-error (not answered)".to_string())
+                } else {
+                    let v = if use_judge {
                         format!("{:?}", r.verdict)
                     } else {
                         String::new()
-                    },
+                    };
+                    (r.answer.clone(), v)
+                };
+                AnswerRow {
+                    id: r.id.clone(),
+                    question,
+                    answer,
+                    gold,
+                    verdict,
                 }
             })
             .collect();

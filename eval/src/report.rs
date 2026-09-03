@@ -507,17 +507,27 @@ pub struct AnswerRow {
     pub verdict: String,
 }
 
-/// Quote one CSV field per RFC 4180: always wrap in double quotes (safe for free text containing
-/// commas, quotes, or newlines) and double any embedded quote. Excel reads this unambiguously.
+/// Field separator for the answers CSV: a SEMICOLON, not a comma. Excel uses the locale list
+/// separator when opening a `.csv` by double-click — `;` on many non-US locales (e.g. RU/EU) — so a
+/// comma-delimited file lands entirely in column A there. `;` is what those Excels expect, and the
+/// free-text fields (which do contain commas) stay quoted regardless.
+const CSV_SEP: &str = ";";
+
+/// Quote one CSV field: collapse ALL internal whitespace (newlines/tabs/repeated spaces) to single
+/// spaces so a field never spans multiple spreadsheet rows, then wrap in double quotes and double any
+/// embedded quote (RFC 4180). A multi-line quoted field is valid CSV but Excel spills it across rows
+/// when it doesn't recognize the delimiter — collapsing removes that failure mode entirely.
 fn csv_field(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("\"{}\"", flat.replace('"', "\"\""))
 }
 
 /// Write the run as a flat question->answer table for handing to the customer to grade. UTF-8 with a
-/// leading BOM so Excel opens Cyrillic correctly on double-click; CRLF line endings (Excel-friendly).
-/// A trailing empty `quality` column is always present for the customer to fill in. Columns:
-///   with_gold=true  -> id,question,answer,gold,verdict,quality
-///   with_gold=false -> id,question,answer,quality
+/// leading BOM so Excel opens Cyrillic correctly on double-click; `;`-separated (see `CSV_SEP`);
+/// CRLF line endings; every field collapsed to a single line. A trailing empty `quality` column is
+/// always present for the customer to fill in. Columns:
+///   with_gold=true  -> id;question;answer;gold;verdict;quality
+///   with_gold=false -> id;question;answer;quality
 /// Returns the path written (creating parent dirs as needed).
 pub fn write_answers_csv(
     path: &Path,
@@ -541,7 +551,7 @@ pub fn write_answers_csv(
             .iter()
             .map(|h| csv_field(h))
             .collect::<Vec<_>>()
-            .join(","),
+            .join(CSV_SEP),
     );
     out.push_str("\r\n");
     for r in rows {
@@ -562,7 +572,7 @@ pub fn write_answers_csv(
                 csv_field(""), // quality — blank for the customer
             ]
         };
-        out.push_str(&fields.join(","));
+        out.push_str(&fields.join(CSV_SEP));
         out.push_str("\r\n");
     }
     fs::write(path, out).with_context(|| format!("write answers csv {}", path.display()))?;
@@ -592,13 +602,16 @@ mod tests {
         let header = text.lines().next().unwrap();
         assert_eq!(
             header.trim_start_matches('\u{FEFF}'),
-            "\"id\",\"question\",\"answer\",\"gold\",\"verdict\",\"quality\""
+            "\"id\";\"question\";\"answer\";\"gold\";\"verdict\";\"quality\""
         );
-        // The embedded quote is doubled and the whole field stays wrapped in quotes.
-        assert!(text.contains("\"Line one,\nwith a \"\"quote\"\"\""));
+        // Embedded newline is COLLAPSED to a space (no multi-row spill); embedded quote is doubled
+        // and the field stays wrapped in quotes.
+        assert!(text.contains("\"Line one, with a \"\"quote\"\"\""));
         assert!(text.contains("\"Correct\""));
+        // Every record is exactly one physical line: header + 1 row = 2 lines.
+        assert_eq!(text.lines().count(), 2, "one physical line per record");
         // Trailing quality column present and blank.
-        assert!(text.trim_end().ends_with(",\"\""));
+        assert!(text.trim_end().ends_with(";\"\""));
 
         // with_gold=false: 4 columns, no gold/verdict.
         let p2 = dir.path().join("no_gold.csv");
@@ -607,7 +620,7 @@ mod tests {
         let header2 = text2.lines().next().unwrap();
         assert_eq!(
             header2.trim_start_matches('\u{FEFF}'),
-            "\"id\",\"question\",\"answer\",\"quality\""
+            "\"id\";\"question\";\"answer\";\"quality\""
         );
         assert!(
             !text2.contains("\"gold\""),
