@@ -5,30 +5,81 @@
 //! from those in-memory parts, `open` maps the files back without loading the matrix onto the
 //! heap.
 //!
-//! On-disk layout (all integers little-endian):
-//! - `ppr_transition.csr`: header `{magic:u32, version:u32, sig:u64, n:u64, e2:u64}` followed by
-//!   `offsets:[u64; n+1]`, `cols:[u32; e2]`, `weights:[f32; e2]` (`e2` = 2 × edge count, since the
+//! On-disk layout (all integers little-endian). All three files are **sig-scoped** — their names
+//! embed the `content_sig` (`ppr_transition.<sig:016x>.<ext>`) so a rebuild for a changed graph
+//! writes a NEW set and never overwrites the files a live reader is mmapping (the torn-read hazard).
+//! - `ppr_transition.<sig>.csr`: header `{magic:u32, version:u32, sig:u64, n:u64, e2:u64}` followed
+//!   by `offsets:[u64; n+1]`, `cols:[u32; e2]`, `weights:[f32; e2]` (`e2` = 2 × edge count, since the
 //!   adjacency is undirected and stored both directions).
-//! - `ppr_transition.fst`: raw `fst::Map` bytes, id → row index.
-//! - `ppr_transition.idtab`: `[u64; n+1]` byte offsets into a trailing blob of concatenated id
+//! - `ppr_transition.<sig>.fst`: raw `fst::Map` bytes, id → row index.
+//! - `ppr_transition.<sig>.idtab`: `[u64; n+1]` byte offsets into a trailing blob of concatenated id
 //!   strings (row `i`'s id is the byte range `offsets[i]..offsets[i+1]`).
 //!
 //! `content_sig` is an opaque caller-supplied fingerprint of the source graph (e.g. a hash over
-//! node/edge content); `open` returns `None` when the stored sig doesn't match, which is the
+//! node/edge content); `open` returns `None` when the files for that sig are absent, which is the
 //! cache-invalidation signal for callers to rebuild.
+//!
+//! **Atomic publish:** `build` writes each part to a per-process temp file, then renames it into
+//! place — renaming the `.csr` LAST. Because `open` checks (and header-validates) the `.csr` first,
+//! the appearance of the final `.csr` means all three parts are already published, so a concurrent
+//! `open` sees either the complete previous set or the complete new one, never a mix. After
+//! publishing, `build` best-effort deletes stale-sig and legacy fixed-name files.
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAGIC: u32 = 0x4353_5231; // "CSR1"
 const VERSION: u32 = 1;
 
-const CSR_FILE: &str = "ppr_transition.csr";
-const FST_FILE: &str = "ppr_transition.fst";
-const IDTAB_FILE: &str = "ppr_transition.idtab";
+/// Shared basename of the three CSR part files; the full name is `<PREFIX>.<sig:016x>.<ext>`.
+const FILE_PREFIX: &str = "ppr_transition";
+
+/// Final path of a sig-scoped part file (`ext` ∈ {`csr`, `fst`, `idtab`}).
+fn part_path(dir: &Path, sig: u64, ext: &str) -> PathBuf {
+    dir.join(format!("{FILE_PREFIX}.{sig:016x}.{ext}"))
+}
+
+/// Per-process temp path a part is written to before its atomic rename into `part_path`. The pid
+/// suffix keeps two processes' temps distinct even if the build lock is unavailable (degraded mode).
+fn tmp_path(dir: &Path, sig: u64, ext: &str) -> PathBuf {
+    dir.join(format!(
+        "{FILE_PREFIX}.{sig:016x}.{ext}.{}.tmp",
+        std::process::id()
+    ))
+}
+
+/// Best-effort removal of every CSR part file that is NOT for `keep_sig` — stale sigs from earlier
+/// builds and legacy fixed-name files (`ppr_transition.csr` etc.) from before sig-scoping. Ignores
+/// errors: on Windows a file still mmapped by a live reader cannot be deleted, and that is fine —
+/// the reader keeps a valid snapshot and the next build retries the cleanup. Never touches `.tmp`
+/// files (a concurrent builder may be mid-write) or the `keep_sig` set.
+fn cleanup_stale(dir: &Path, keep_sig: u64) {
+    let keep: [String; 3] = ["csr", "fst", "idtab"].map(|e| {
+        part_path(dir, keep_sig, e)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    });
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(FILE_PREFIX) {
+            continue;
+        }
+        let is_part = name.ends_with(".csr") || name.ends_with(".fst") || name.ends_with(".idtab");
+        if !is_part || keep.iter().any(|k| k == name) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
 
 /// Header size in bytes: magic(4) + version(4) + sig(8) + n(8) + e2(8).
 const HEADER_LEN: usize = 4 + 4 + 8 + 8 + 8;
@@ -126,25 +177,29 @@ impl CsrTransition {
             offsets.push(running);
         }
 
-        let csr_path = dir.join(CSR_FILE);
-        let file =
-            File::create(&csr_path).with_context(|| format!("creating {}", csr_path.display()))?;
-        let mut w = BufWriter::new(file);
-        w.write_all(&MAGIC.to_le_bytes())?;
-        w.write_all(&VERSION.to_le_bytes())?;
-        w.write_all(&content_sig.to_le_bytes())?;
-        w.write_all(&(n as u64).to_le_bytes())?;
-        w.write_all(&(e2 as u64).to_le_bytes())?;
-        for off in &offsets {
-            w.write_all(&off.to_le_bytes())?;
+        // Each part is written to a temp file whose handle is dropped (closed) BEFORE the rename —
+        // renaming a still-open file trips a Windows sharing violation.
+        let csr_tmp = tmp_path(dir, content_sig, "csr");
+        {
+            let file = File::create(&csr_tmp)
+                .with_context(|| format!("creating {}", csr_tmp.display()))?;
+            let mut w = BufWriter::new(file);
+            w.write_all(&MAGIC.to_le_bytes())?;
+            w.write_all(&VERSION.to_le_bytes())?;
+            w.write_all(&content_sig.to_le_bytes())?;
+            w.write_all(&(n as u64).to_le_bytes())?;
+            w.write_all(&(e2 as u64).to_le_bytes())?;
+            for off in &offsets {
+                w.write_all(&off.to_le_bytes())?;
+            }
+            for c in &cols {
+                w.write_all(&c.to_le_bytes())?;
+            }
+            for wt in &weights {
+                w.write_all(&wt.to_le_bytes())?;
+            }
+            w.flush()?;
         }
-        for c in &cols {
-            w.write_all(&c.to_le_bytes())?;
-        }
-        for wt in &weights {
-            w.write_all(&wt.to_le_bytes())?;
-        }
-        w.flush()?;
 
         // --- .fst: id -> idx, keys must be inserted in sorted byte order ---
         let mut sorted: Vec<(&str, u32)> = ids
@@ -154,15 +209,17 @@ impl CsrTransition {
             .collect();
         sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
-        let fst_path = dir.join(FST_FILE);
-        let fst_file =
-            File::create(&fst_path).with_context(|| format!("creating {}", fst_path.display()))?;
-        let fst_writer = BufWriter::new(fst_file);
-        let mut builder = fst::MapBuilder::new(fst_writer)?;
-        for (id, idx) in &sorted {
-            builder.insert(id.as_bytes(), *idx as u64)?;
+        let fst_tmp = tmp_path(dir, content_sig, "fst");
+        {
+            let fst_file = File::create(&fst_tmp)
+                .with_context(|| format!("creating {}", fst_tmp.display()))?;
+            let fst_writer = BufWriter::new(fst_file);
+            let mut builder = fst::MapBuilder::new(fst_writer)?;
+            for (id, idx) in &sorted {
+                builder.insert(id.as_bytes(), *idx as u64)?;
+            }
+            builder.finish()?; // flushes + closes the underlying writer
         }
-        builder.finish()?;
 
         // --- .idtab: [u64; n+1] byte offsets + concatenated id bytes, in original row order ---
         let mut id_offsets: Vec<u64> = Vec::with_capacity(n + 1);
@@ -173,18 +230,32 @@ impl CsrTransition {
             id_offsets.push(running);
         }
 
-        let idtab_path = dir.join(IDTAB_FILE);
-        let idtab_file = File::create(&idtab_path)
-            .with_context(|| format!("creating {}", idtab_path.display()))?;
-        let mut w = BufWriter::new(idtab_file);
-        for off in &id_offsets {
-            w.write_all(&off.to_le_bytes())?;
+        let idtab_tmp = tmp_path(dir, content_sig, "idtab");
+        {
+            let idtab_file = File::create(&idtab_tmp)
+                .with_context(|| format!("creating {}", idtab_tmp.display()))?;
+            let mut w = BufWriter::new(idtab_file);
+            for off in &id_offsets {
+                w.write_all(&off.to_le_bytes())?;
+            }
+            for id in ids {
+                w.write_all(id.as_bytes())?;
+            }
+            w.flush()?;
         }
-        for id in ids {
-            w.write_all(id.as_bytes())?;
-        }
-        w.flush()?;
 
+        // Publish atomically: rename `.fst` and `.idtab` FIRST, then `.csr` LAST. `open` gates on the
+        // `.csr` (existence + header) before touching the others, so a `.csr` present ⟺ all three
+        // published — a concurrent reader never sees a mixed/partial set.
+        std::fs::rename(&fst_tmp, part_path(dir, content_sig, "fst"))
+            .with_context(|| format!("publishing {}", fst_tmp.display()))?;
+        std::fs::rename(&idtab_tmp, part_path(dir, content_sig, "idtab"))
+            .with_context(|| format!("publishing {}", idtab_tmp.display()))?;
+        std::fs::rename(&csr_tmp, part_path(dir, content_sig, "csr"))
+            .with_context(|| format!("publishing {}", csr_tmp.display()))?;
+
+        // Reclaim disk from superseded sigs / legacy fixed-name files (best-effort; see fn docs).
+        cleanup_stale(dir, content_sig);
         Ok(())
     }
 
@@ -192,9 +263,10 @@ impl CsrTransition {
     /// the files are missing or the stored `content_sig`/version doesn't match — the caller's
     /// signal to rebuild via `build` rather than trust a stale cache.
     pub fn open(dir: &Path, content_sig: u64) -> Result<Option<CsrTransition>> {
-        let csr_path = dir.join(CSR_FILE);
-        let fst_path = dir.join(FST_FILE);
-        let idtab_path = dir.join(IDTAB_FILE);
+        // Sig-scoped names: absence just means "not built for this sig" → rebuild signal.
+        let csr_path = part_path(dir, content_sig, "csr");
+        let fst_path = part_path(dir, content_sig, "fst");
+        let idtab_path = part_path(dir, content_sig, "idtab");
         if !csr_path.exists() || !fst_path.exists() || !idtab_path.exists() {
             return Ok(None);
         }
@@ -370,5 +442,62 @@ mod tests {
     fn csr_open_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(CsrTransition::open(dir.path(), 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn rebuild_for_new_sig_keeps_old_reader_valid_and_publishes_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = vec!["a".to_string(), "b".to_string()];
+        let adj = vec![vec![(1usize, 1.0f32)], vec![(0usize, 1.0f32)]];
+        CsrTransition::build(&ids, &adj, dir.path(), 100).unwrap();
+        let old = CsrTransition::open(dir.path(), 100)
+            .unwrap()
+            .expect("sig 100 opens");
+        // A "graph changed" rebuild under a NEW sig writes a fresh file set and must NOT disturb the
+        // live `old` reader (the sig-scoped names + RCU guarantee that underpins the shared handle).
+        CsrTransition::build(&ids, &adj, dir.path(), 200).unwrap();
+        assert_eq!(old.idx_of("a"), Some(0));
+        assert_eq!(old.id_of(1), Some("b"));
+        assert_eq!(old.neighbors(0).count(), 1);
+        assert!(
+            CsrTransition::open(dir.path(), 200).unwrap().is_some(),
+            "the new sig is published and openable"
+        );
+    }
+
+    #[test]
+    fn build_cleans_stale_sigs_and_legacy_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = vec!["x".to_string()];
+        let adj: Vec<Vec<(usize, f32)>> = vec![vec![]];
+        // A legacy fixed-name file from before sig-scoping must be reclaimed on the next build.
+        std::fs::write(dir.path().join("ppr_transition.csr"), b"legacy").unwrap();
+
+        CsrTransition::build(&ids, &adj, dir.path(), 1).unwrap();
+        // No reader holds sig 1, so the next build's cleanup can delete it cross-platform.
+        CsrTransition::build(&ids, &adj, dir.path(), 2).unwrap();
+
+        assert!(
+            CsrTransition::open(dir.path(), 1).unwrap().is_none(),
+            "superseded sig 1 was cleaned up"
+        );
+        assert!(
+            CsrTransition::open(dir.path(), 2).unwrap().is_some(),
+            "current sig 2 is present"
+        );
+        assert!(
+            !dir.path().join("ppr_transition.csr").exists(),
+            "legacy fixed-name file was cleaned up"
+        );
+        let temps: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            temps.is_empty(),
+            "no temp files left after publish: {temps:?}"
+        );
     }
 }

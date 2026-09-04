@@ -424,10 +424,10 @@ impl GraphStore {
             }
         }
         // Miss: serialize the open-or-BUILD below so two concurrent readers that both miss right after
-        // the same corpus edit don't both call `CsrTransition::build` on the same files at once (an
-        // in-process torn-write race). Lock ordering is `csr_build` -> (briefly) `csr` / `conn`, and
-        // nothing acquires those before `csr_build`, so no cycle. (Cross-PROCESS builds still need an
-        // advisory file lock + atomic rename — the documented pre-flip hardening for `engine = mmap`.)
+        // the same corpus edit don't both build. This mutex covers THIS process's threads; the
+        // cross-PROCESS tier is `build_csr_locked`'s advisory file lock. Lock ordering is `csr_build`
+        // -> (briefly) `csr` / `conn` -> build-lock, and nothing acquires those before `csr_build`,
+        // so no cycle.
         let _build = self.csr_build.lock().unwrap_or_else(|e| e.into_inner());
         // Re-check under the build lock: another thread may have just built for this exact key.
         if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
@@ -445,16 +445,62 @@ impl GraphStore {
         };
         let csr = match CsrTransition::open(&self.gdir, csig)? {
             Some(c) => c,
-            None => {
-                let t = self.ppr_transition()?;
-                CsrTransition::build(t.ids(), t.adj(), &self.gdir, csig)?;
-                CsrTransition::open(&self.gdir, csig)?
-                    .context("CSR missing immediately after build")?
-            }
+            None => self.build_csr_locked(csig)?,
         };
         let arc = std::sync::Arc::new(csr);
         *self.csr.lock().unwrap() = Some((key, arc.clone()));
         Ok(Some(arc))
+    }
+
+    /// Build (or adopt a just-published) CSR for `csig` under a CROSS-PROCESS advisory lock, so
+    /// multiple processes on the same corpus (server + CLI, or several editor instances) don't each
+    /// run the O(N+E) build or race on the part files. Blocks until it wins the lock, then re-checks
+    /// on-disk first — a peer may have published while we waited. Best-effort locking: if the lock
+    /// file can't be opened we degrade to a lockless build, which is still correct (per-process temp
+    /// names + atomic rename + deterministic output make a concurrent build safe, just wasteful).
+    /// The in-process `csr_build` mutex (held by the caller) already serializes THIS process's
+    /// threads; this adds the cross-process tier.
+    fn build_csr_locked(&self, csig: u64) -> anyhow::Result<crate::graph::csr::CsrTransition> {
+        use crate::graph::csr::CsrTransition;
+        use fs4::FileExt;
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(self.gdir.join("ppr_transition.build.lock"))
+            .ok();
+        // Try to win the advisory lock; if a peer process holds it (building the same sig), poll —
+        // waiting for them to publish rather than duplicate the O(N+E) build. Bounded (~10s) so a
+        // dead lock-holder never wedges us: on timeout we build anyway, which is still correct
+        // (per-process temp names + atomic rename + deterministic output make a concurrent build safe).
+        let mut holding = false;
+        if let Some(f) = &lock_file {
+            for _ in 0..50 {
+                if f.try_lock().is_ok() {
+                    holding = true;
+                    break;
+                }
+                if CsrTransition::open(&self.gdir, csig)?.is_some() {
+                    break; // a peer already published for this sig — adopt it, no build needed
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        let result = (|| -> anyhow::Result<CsrTransition> {
+            // Re-check on disk: a peer may have published while we waited for (or won) the lock.
+            if let Some(c) = CsrTransition::open(&self.gdir, csig)? {
+                return Ok(c);
+            }
+            let t = self.ppr_transition()?;
+            CsrTransition::build(t.ids(), t.adj(), &self.gdir, csig)?;
+            CsrTransition::open(&self.gdir, csig)?.context("CSR missing immediately after build")
+        })();
+        if holding {
+            if let Some(f) = &lock_file {
+                let _ = FileExt::unlock(f);
+            }
+        }
+        result
     }
 
     /// (mtime_nanos, len) of `graph.sqlite` and its `-wal` sidecar; missing files read as (0, 0).
