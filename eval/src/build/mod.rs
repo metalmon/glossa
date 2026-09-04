@@ -104,6 +104,12 @@ pub struct BuildOpts {
     /// jobs_build`, then `DEFAULT_JOBS` (3) — resolved in `run_build`. Stored for now; the
     /// worker pool itself lands in a later task (see `parallel::run_units_parallel`).
     pub jobs: Option<usize>,
+    /// One-off reasoning-scope denylist substrings from `--exclude` (repeatable), MERGED with
+    /// `lab.toml`'s durable `[tuning] reasoning_exclude`.
+    pub exclude: Vec<String>,
+    /// Reasoning-scope allowlist substrings from `--only` (repeatable): when non-empty, mine ONLY
+    /// docs whose path contains one of these (after `--exclude`). Empty = every non-excluded doc.
+    pub only: Vec<String>,
 }
 
 impl Default for BuildOpts {
@@ -121,6 +127,8 @@ impl Default for BuildOpts {
             chunks_per_round: None,
             max_rounds: None,
             jobs: None,
+            exclude: Vec::new(),
+            only: Vec::new(),
         }
     }
 }
@@ -239,18 +247,25 @@ fn clear_checkpoint(run_dir: &Path) -> Result<()> {
 /// `bridge.md`; Candidates and Finalize need neither. This means `--stage finalize` or
 /// `--stage candidates` runs on an indexed corpus with no `.glossa/kbx/` prompt files present at
 /// all — only Extract/Judge (which call a model) require a scaffolded workspace.
-/// Reasoning-scope denylist: drop every doc whose corpus-relative path CONTAINS any `exclude`
-/// substring, so generic-reference docs (a vendor SDK manual) are never mined into the reasoning
-/// graph. Returns `(kept_docs, dropped_count)`. Empty `exclude` is a no-op. Substring match mirrors
-/// `kb graph prune --source`, so the same pattern cleans an old graph and scopes a fresh build.
-pub(crate) fn apply_reasoning_scope(docs: Vec<String>, exclude: &[String]) -> (Vec<String>, usize) {
-    if exclude.is_empty() {
+/// Reasoning-scope filter over the doc list. `exclude` = denylist: drop any doc whose corpus-relative
+/// path CONTAINS an exclude substring (generic vendor refs — never mined into the reasoning graph).
+/// `only` = allowlist: when non-empty, keep ONLY docs matching an `only` substring (scope a build/
+/// densify to a subset). Exclude wins over only. Returns `(kept_docs, dropped_count)`; both empty is a
+/// no-op. Substring match mirrors `kb graph prune --source`, so one pattern cleans an old graph and
+/// scopes a fresh build.
+pub(crate) fn apply_reasoning_scope(
+    docs: Vec<String>,
+    exclude: &[String],
+    only: &[String],
+) -> (Vec<String>, usize) {
+    if exclude.is_empty() && only.is_empty() {
         return (docs, 0);
     }
     let before = docs.len();
     let kept: Vec<String> = docs
         .into_iter()
         .filter(|d| !exclude.iter().any(|p| d.contains(p)))
+        .filter(|d| only.is_empty() || only.iter().any(|p| d.contains(p)))
         .collect();
     let dropped = before - kept.len();
     (kept, dropped)
@@ -313,12 +328,26 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // become reasoning nodes (the CODESYS-SDK-as-junk-Resolutions problem). Substring match on
         // the corpus-relative path, matching `kb graph prune --source`. `build` is the sole creator
         // of grounded terminals from docs, so excluding here also scopes `reason`/`distil`.
+        // Config denylist + any one-off `--exclude`, then the optional `--only` allowlist.
+        let exclude: Vec<String> = lab
+            .tuning
+            .reasoning_exclude
+            .iter()
+            .chain(&opts.exclude)
+            .cloned()
+            .collect();
+        let only: Vec<String> = lab
+            .tuning
+            .reasoning_only
+            .iter()
+            .chain(&opts.only)
+            .cloned()
+            .collect();
         let dropped;
-        (docs, dropped) = apply_reasoning_scope(docs, &lab.tuning.reasoning_exclude);
+        (docs, dropped) = apply_reasoning_scope(docs, &exclude, &only);
         if dropped > 0 {
             eprintln!(
-                "kbx build: reasoning-scope excluded {dropped} document(s) matching {:?}",
-                lab.tuning.reasoning_exclude
+                "kbx build: reasoning-scope dropped {dropped} document(s) (exclude={exclude:?} only={only:?})"
             );
         }
 
@@ -654,6 +683,8 @@ mod tests {
             chunks_per_round: Some(3),
             max_rounds: None,
             jobs: None,
+            exclude: Vec::new(),
+            only: Vec::new(),
         };
         run_build(paths, opts).unwrap();
     }
@@ -724,6 +755,8 @@ mod tests {
             chunks_per_round: Some(3),
             max_rounds: None,
             jobs: None,
+            exclude: Vec::new(),
+            only: Vec::new(),
         };
         run_build(paths, opts).unwrap();
 
@@ -779,12 +812,20 @@ mod tests {
         let (kept, dropped) = apply_reasoning_scope(
             docs.clone(),
             &["CODESYS Control V3".into(), "CheatSheet".into()],
+            &[],
         );
         assert_eq!(dropped, 2);
         assert_eq!(kept, vec!["PLC/product-manual.pdf", "IVK/device-guide.pdf"]);
-        // Empty denylist is a no-op (every doc kept).
-        let (kept2, dropped2) = apply_reasoning_scope(docs.clone(), &[]);
+        // Empty exclude + empty only is a no-op (every doc kept).
+        let (kept2, dropped2) = apply_reasoning_scope(docs.clone(), &[], &[]);
         assert_eq!((kept2.len(), dropped2), (docs.len(), 0));
+        // `only` allowlist keeps just the matching docs (few to list vs excluding everything else).
+        let (kept3, _) = apply_reasoning_scope(docs.clone(), &[], &["PLC/".into()]);
+        assert_eq!(kept3, vec!["PLC/product-manual.pdf"]);
+        // Exclude wins over only when a doc matches both.
+        let (kept4, _) =
+            apply_reasoning_scope(docs.clone(), &["CheatSheet".into()], &["Codesys".into()]);
+        assert_eq!(kept4, vec!["Runtime/Codesys/CODESYS Control V3 Manual.pdf"]);
     }
 
     /// `--force` bypasses the delta entirely: every enumerated doc, even ones the delta doesn't
@@ -948,6 +989,8 @@ mod tests {
                 chunks_per_round: Some(3),
                 max_rounds: None,
                 jobs: None,
+                exclude: Vec::new(),
+                only: Vec::new(),
             };
             let report = run_build(paths, opts).unwrap();
             assert!(report.docs_extracted.is_empty());

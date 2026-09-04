@@ -62,6 +62,12 @@ pub struct DistilArgs {
     /// Restrict `run_densify` to a single document (its structural-graph `Document` node id, i.e.
     /// its corpus-relative path) — mirrors `BuildOpts::doc`/`ReasonArgs`' single-unit narrowing.
     pub doc: Option<String>,
+    /// Reasoning-scope denylist substrings from `--exclude`, MERGED with `lab.toml` `[tuning]
+    /// reasoning_exclude` (mirrors `BuildOpts::exclude`).
+    pub exclude: Vec<String>,
+    /// Reasoning-scope allowlist substrings from `--only`, MERGED with `lab.toml` `[tuning]
+    /// reasoning_only` (mirrors `BuildOpts::only`).
+    pub only: Vec<String>,
     /// Clear this run's `distil:{doc}` checkpoint first — a true full rebuild of the densify pass
     /// (mirrors `BuildOpts::force`/`ReasonArgs::force`).
     pub force: bool,
@@ -576,6 +582,31 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         crate::build::enumerate_docs(&g)?
     };
     docs = select_docs(docs, args.doc.as_deref());
+    // Same reasoning-scope as build: config denylist/allowlist + one-off --exclude/--only, so
+    // densify never enriches a generic-reference doc that build was scoped to skip.
+    {
+        let exclude: Vec<String> = lab
+            .tuning
+            .reasoning_exclude
+            .iter()
+            .chain(&args.exclude)
+            .cloned()
+            .collect();
+        let only: Vec<String> = lab
+            .tuning
+            .reasoning_only
+            .iter()
+            .chain(&args.only)
+            .cloned()
+            .collect();
+        let dropped;
+        (docs, dropped) = crate::build::apply_reasoning_scope(docs, &exclude, &only);
+        if dropped > 0 {
+            eprintln!(
+                "kbx distil: reasoning-scope dropped {dropped} document(s) (exclude={exclude:?} only={only:?})"
+            );
+        }
+    }
     if docs.is_empty() {
         bail!(
             "kbx distil densify: no document matched (corpus empty, or --doc names a document \
@@ -1112,6 +1143,8 @@ relations = ["LEADS_TO"]
             seed_type: None,
             no_progress: true,
             doc: Some("a.md".to_string()),
+            exclude: Vec::new(),
+            only: Vec::new(),
             force: true,
             resume: false,
             chunks_per_round: Some(3),
@@ -1184,6 +1217,8 @@ relations = ["LEADS_TO"]
             seed_type: None,
             no_progress: true,
             doc: None,
+            exclude: Vec::new(),
+            only: Vec::new(),
             force: false,
             resume: false,
             chunks_per_round: Some(3),

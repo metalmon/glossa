@@ -218,6 +218,12 @@ pub struct Tuning {
     /// Resolutions, which pollutes glossary. Substring match, mirroring `kb graph prune --source`.
     #[serde(default)]
     pub reasoning_exclude: Vec<String>,
+    /// Reasoning-scope ALLOWLIST (the inverse of `reasoning_exclude`): when non-empty, `kbx build`
+    /// mines ONLY documents whose corpus-relative path contains one of these substrings. Use when the
+    /// support docs are few and listing them is shorter than excluding every reference doc. `exclude`
+    /// still wins over `only`. Merged with the `--only` CLI flag.
+    #[serde(default)]
+    pub reasoning_only: Vec<String>,
     #[serde(default)]
     pub max_rounds: Option<usize>,
     #[serde(default)]

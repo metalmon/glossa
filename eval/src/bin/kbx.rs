@@ -204,6 +204,14 @@ enum Cmd {
         /// Only extract the first N enumerated documents.
         #[arg(long)]
         limit: Option<usize>,
+        /// Reasoning-scope denylist substring (repeatable): skip mining any doc whose path contains
+        /// it. MERGED with `lab.toml` `[tuning] reasoning_exclude`. E.g. --exclude "CODESYS Control V3".
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Reasoning-scope allowlist substring (repeatable): mine ONLY docs whose path contains it
+        /// (after --exclude). MERGED with `lab.toml` `[tuning] reasoning_only`. Empty = all non-excluded.
+        #[arg(long = "only")]
+        only: Vec<String>,
         /// Bypass the incremental delta (which by default extracts only new/changed docs) for a
         /// full rebuild: extract every document and re-judge every candidate pair.
         #[arg(long)]
@@ -366,6 +374,14 @@ enum Cmd {
         /// Restrict densify to a single document (its corpus-relative path). Densify mode only.
         #[arg(long)]
         doc: Option<String>,
+        /// Reasoning-scope denylist substring (repeatable), MERGED with `[tuning] reasoning_exclude`:
+        /// never densify a doc whose path contains it. Densify mode only.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Reasoning-scope allowlist substring (repeatable), MERGED with `[tuning] reasoning_only`:
+        /// densify ONLY docs whose path contains it (after --exclude). Densify mode only.
+        #[arg(long = "only")]
+        only: Vec<String>,
         /// Clear this run's densify checkpoint first — a full rebuild of the densify pass.
         /// Densify mode only.
         #[arg(long)]
@@ -551,6 +567,8 @@ fn main() -> Result<()> {
             stage,
             doc,
             limit,
+            exclude,
+            only,
             force,
             resume,
             no_progress,
@@ -568,6 +586,8 @@ fn main() -> Result<()> {
                     stage,
                     doc,
                     limit,
+                    exclude,
+                    only,
                     force,
                     resume,
                     no_progress,
@@ -654,6 +674,8 @@ fn main() -> Result<()> {
             path,
             emit_golds,
             doc,
+            exclude,
+            only,
             force,
             resume,
             chunks_per_round,
@@ -678,6 +700,8 @@ fn main() -> Result<()> {
                 seed_type,
                 no_progress,
                 doc,
+                exclude,
+                only,
                 force,
                 resume,
                 chunks_per_round,
@@ -1650,6 +1674,8 @@ mod tests {
                 stage,
                 doc,
                 limit,
+                exclude,
+                only,
                 force,
                 resume,
                 no_progress,
@@ -1664,6 +1690,7 @@ mod tests {
                 assert_eq!(stage, BuildStage::All);
                 assert!(doc.is_none());
                 assert!(limit.is_none());
+                assert!(exclude.is_empty() && only.is_empty());
                 assert!(!force);
                 assert!(!resume);
                 assert!(!no_progress);
@@ -1722,6 +1749,8 @@ mod tests {
                 stage,
                 doc,
                 limit,
+                exclude: _,
+                only: _,
                 force,
                 resume,
                 no_progress,
