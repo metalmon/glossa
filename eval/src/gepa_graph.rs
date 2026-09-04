@@ -769,7 +769,7 @@ fn gold_retrieved(gold: &str, steps: &[ToolStep]) -> bool {
     })
 }
 
-// --- leak guard -----------------------------------------------------------------------------
+// --- token helpers --------------------------------------------------------------------------
 
 fn tokens_lower(s: &str) -> Vec<String> {
     s.to_lowercase()
@@ -777,97 +777,6 @@ fn tokens_lower(s: &str) -> Vec<String> {
         .filter(|w| !w.is_empty())
         .map(String::from)
         .collect()
-}
-
-fn contains_subsequence(hay: &[String], needle: &[String]) -> bool {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return false;
-    }
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
-/// A single gold form or proper noun leaked into `hay` (candidate tokens)?
-fn value_leaked(hay: &[String], value: &str) -> bool {
-    let needle = tokens_lower(value);
-    match needle.len() {
-        0 => false,
-        // Single short tokens (yes/no, numbers under 4 chars) are too collision-prone to flag.
-        1 => needle[0].len() >= 4 && hay.contains(&needle[0]),
-        _ => contains_subsequence(hay, &needle),
-    }
-}
-
-/// Question-specific proper nouns: capitalized, alphabetic, len>=4, not the leading interrogative.
-fn question_proper_nouns(question: &str) -> Vec<String> {
-    question
-        .split_whitespace()
-        .skip(1)
-        .filter_map(|w| {
-            let t: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
-            let first_upper = t.chars().next().is_some_and(|c| c.is_uppercase());
-            if first_upper && t.chars().all(|c| c.is_alphabetic()) && t.chars().count() >= 4 {
-                Some(t)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Lowercased proper-noun-SHAPED tokens that occur across `>= 2` DISTINCT questions of the whole
-/// dataset. A purely lexical `question_proper_nouns` rule can't tell a real entity from a
-/// capitalized COMMON word (a sentence-initial interrogative like "Why"/"How", or a shared noun) —
-/// both are Title-case. Frequency separates them: a question-specific entity typically appears in a
-/// SINGLE question, while a common word recurs. Tokens returned here are EXCLUDED from the
-/// per-question proper-noun leak check so GEPA isn't denied a good child prompt over a common word.
-/// Language-agnostic — derived from the data, NOT a hardcoded stopword list. Counting is by
-/// distinct question (a token repeated within one question counts once), and MUST be fed the FULL
-/// train+val set so the frequency is global, not per-minibatch. An empty result (every candidate
-/// token unique to one question) reproduces the pre-relaxation behavior exactly.
-fn common_proper_noun_tokens(questions: &[Question]) -> HashSet<String> {
-    let mut per_token: std::collections::HashMap<String, HashSet<usize>> =
-        std::collections::HashMap::new();
-    for (qi, q) in questions.iter().enumerate() {
-        for pn in question_proper_nouns(&q.question) {
-            per_token.entry(pn.to_lowercase()).or_default().insert(qi);
-        }
-    }
-    per_token
-        .into_iter()
-        .filter(|(_, qs)| qs.len() >= 2)
-        .map(|(t, _)| t)
-        .collect()
-}
-
-/// Reject a child prompt that echoes any gold answer or question proper noun from the minibatch.
-/// Returns `Some(reason)` on a leak, `None` when clean. `common_tokens` are dataset-wide common
-/// proper-noun-shaped words (see [`common_proper_noun_tokens`]) that are NOT treated as leakable
-/// entities; the gold-answer guard is unaffected by it.
-fn leak_scan(
-    candidate: &str,
-    minibatch: &[Question],
-    common_tokens: &HashSet<String>,
-) -> Option<String> {
-    let hay = tokens_lower(candidate);
-    for q in minibatch {
-        for g in golds_of(q) {
-            if value_leaked(&hay, &g) {
-                return Some(format!("contains gold answer {g:?}"));
-            }
-        }
-        for pn in question_proper_nouns(&q.question) {
-            // A proper-noun-shaped token that recurs across >=2 dataset questions is a COMMON word
-            // (interrogative / shared noun), not a question-specific entity — don't reject over it.
-            // A token unique to ONE question is absent from `common_tokens` and stays flagged.
-            if common_tokens.contains(&pn.to_lowercase()) {
-                continue;
-            }
-            if value_leaked(&hay, &pn) {
-                return Some(format!("contains question proper noun {pn:?}"));
-            }
-        }
-    }
-    None
 }
 
 // --- sampling + Pareto (single-objective, local; see module note) ---------------------------
@@ -1095,12 +1004,6 @@ pub fn run(
     // change from the pre-averaging accounting.
     let k = cfg.rollout_samples;
 
-    // Dataset-wide common proper-noun-shaped tokens (interrogatives, shared nouns recurring across
-    // >=2 questions) that the per-minibatch leak-scan must NOT reject a child prompt over. Computed
-    // ONCE over the FULL train+val set so the frequency is global, then threaded into every
-    // `leak_scan` call.
-    let common_tokens = common_proper_noun_tokens(&questions);
-
     let baseline_out = score_questions(
         &cfg,
         &url,
@@ -1305,14 +1208,6 @@ pub fn run(
                 continue;
             }
         };
-        if let Some(reason) = leak_scan(&child_prompt, &batch, &common_tokens) {
-            pb.println(format!("[iter {it}] child REJECTED by leak-scan: {reason}"));
-            // Evict (see above): a fresh batch next time gives reflection new failures to work from,
-            // letting it escape a persistent leak, and guarantees budget progress.
-            mb_cache[parent_idx] = None;
-            continue;
-        }
-
         let child_mb = score_questions(
             &cfg,
             &url,
@@ -1471,101 +1366,6 @@ mod tests {
             tags: vec![],
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn leak_scan_rejects_gold_answer_token() {
-        let mb = vec![q("e1", "Who founded Foobar Corp?", "Ada Lovelace", &[])];
-        // A candidate that leaks the multi-word gold answer must be rejected.
-        let leaked = "Follow the chain. The answer is often Ada Lovelace for such cases.";
-        let reason = leak_scan(leaked, &mb, &HashSet::new()).expect("gold answer must be caught");
-        assert!(reason.contains("Ada Lovelace"), "reason: {reason}");
-    }
-
-    #[test]
-    fn leak_scan_catches_alias_and_proper_noun() {
-        let mb = vec![q(
-            "e1",
-            "Where is Foobar located?",
-            "Paris",
-            &["City of Light"],
-        )];
-        assert!(
-            leak_scan("… known as the City of Light …", &mb, &HashSet::new()).is_some(),
-            "alias leaked"
-        );
-        assert!(
-            leak_scan("… mention Foobar directly …", &mb, &HashSet::new()).is_some(),
-            "proper noun leaked"
-        );
-    }
-
-    #[test]
-    fn leak_scan_passes_clean_general_prompt() {
-        let mb = vec![
-            q("e1", "Who founded Foobar Corp?", "Ada Lovelace", &[]),
-            q("e2", "What year did Barsoft ship?", "1998", &[]),
-        ];
-        // General graph-reader guidance with no example values must pass — note it contains "not",
-        // "node", "no" which must NOT collide with the short "no" family via substring matching.
-        let clean = "Start from an entity, call glossary, then read the source chunk. Do not stop \
-                     at the first node; follow neighbors until the answer is grounded. Reply with one \
-                     ANSWER line holding the shortest exact span.";
-        assert!(
-            leak_scan(clean, &mb, &HashSet::new()).is_none(),
-            "clean prompt wrongly rejected"
-        );
-    }
-
-    #[test]
-    fn short_gold_values_are_not_flagged_by_substring() {
-        // gold "no" must not fire on "node"/"not"; single short tokens are skipped.
-        let mb = vec![q("e1", "Is it raining?", "no", &["yes"])];
-        assert!(leak_scan("Use the graph node and do not guess.", &mb, &HashSet::new()).is_none());
-    }
-
-    #[test]
-    fn common_proper_noun_across_two_questions_is_not_flagged() {
-        // A capitalized COMMON word (proper-noun-SHAPED, non-first token) that appears in >=2
-        // DISTINCT questions is dataset-common, not a question-specific entity. The frequency guard
-        // must exclude it so a child prompt using that word is NOT rejected — while the SAME word
-        // stays flagged when the common-token set is empty (pre-relaxation behavior).
-        let qs = vec![
-            q("e1", "First, Which region ships it?", "Ada", &[]),
-            q("e2", "Overall, Which method applies?", "Bee", &[]),
-        ];
-        let common = common_proper_noun_tokens(&qs);
-        assert!(common.contains("which"), "token in >=2 questions is common");
-        let cand = "Decide which node to expand and follow the chain to a grounded answer.";
-        // Relaxed: common word does not trigger a leak.
-        assert!(
-            leak_scan(cand, &qs, &common).is_none(),
-            "common proper-noun-shaped word wrongly rejected"
-        );
-        // Absent common set == today's strict behavior: the same word IS flagged.
-        assert!(
-            leak_scan(cand, &qs, &HashSet::new()).is_some(),
-            "empty common set must reproduce the old strict rejection"
-        );
-    }
-
-    #[test]
-    fn single_question_proper_noun_stays_common_free_and_flagged() {
-        // A proper-noun token that appears in only ONE question is NOT common, so it is still
-        // caught by the leak-scan (the primary entity guard is preserved).
-        let qs = vec![
-            q("e1", "Who founded Foobar Corp?", "Ada", &[]),
-            q("e2", "What shipped in the update?", "Bee", &[]),
-        ];
-        let common = common_proper_noun_tokens(&qs);
-        assert!(
-            !common.contains("foobar"),
-            "single-question entity is not common"
-        );
-        assert!(
-            leak_scan("please mention Foobar in guidance", &qs, &common).is_some(),
-            "single-question proper noun must still be flagged"
-        );
     }
 
     #[test]
