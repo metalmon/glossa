@@ -88,6 +88,122 @@ fn resilient_call(
     )
 }
 
+/// Reactive client-side middle-out truncation (for servers with a hard context window and NO
+/// server-side middle-out): a normal tool-calling search piles up `role:"tool"` results over rounds
+/// until the prompt exceeds the window and the server HARD-rejects the request. We catch THAT specific
+/// error, shrink the transcript, and retry — see [`call_with_context_retry`].
+///
+/// How many of the most-recent tool results are kept full on the first truncation pass; escalation
+/// keeps fewer on later passes.
+const KEEP_RECENT_TOOL: usize = 4;
+/// On escalation, cap an individual (even recent) tool body to this many chars — handles the case
+/// where ONE giant tool result (e.g. a glossary flood) is the culprit, not the accumulation.
+const GIANT_TOOL_CAP_CHARS: usize = 4000;
+/// Max reactive truncation retries before giving up and propagating the error (case `errored`, no
+/// worse than today).
+const MAX_CONTEXT_RETRIES: usize = 3;
+/// Marker prefix for an elided tool body, so re-truncation skips already-stubbed messages.
+const ELIDED_PREFIX: &str = "[older tool output elided";
+
+/// True when `err` is a context-window rejection (input too large) — the ONLY error that truncation
+/// can fix. Matches the phrasings real providers emit (case-insensitive). Deliberately narrow: a
+/// rate-limit / network / other 5xx must NOT match (truncating wouldn't help; it should propagate).
+fn is_context_overflow(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}").to_lowercase();
+    [
+        "maximum context length",
+        "context_length_exceeded",
+        "reduce the length",
+        "prompt is too long",
+        "too many tokens",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
+/// Middle-out shrink pass number `round` (0-based, escalating). Preserves message COUNT and the
+/// assistant-tool_call ↔ tool-result pairing (only `content` is rewritten), so the request stays
+/// valid for providers that require every `tool_call_id` to have a response. Head (system is a
+/// separate arg; the first user question) is never touched. Returns `true` if it shrank anything this
+/// pass — `false` means nothing left to prune, so the caller should give up.
+/// - round 0: stub the OLDEST tool bodies, keep the last `KEEP_RECENT_TOOL` full.
+/// - round 1: keep only the last 2 full, AND cap any oversized recent body (the one-giant case).
+/// - round ≥2: stub every tool body.
+fn middle_out_truncate(messages: &mut [Value], round: usize) -> bool {
+    let tool_idx: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.get("role").and_then(Value::as_str) == Some("tool"))
+        .map(|(i, _)| i)
+        .collect();
+    if tool_idx.is_empty() {
+        return false;
+    }
+    let keep = match round {
+        0 => KEEP_RECENT_TOOL,
+        1 => 2,
+        _ => 0,
+    };
+    let cap_recent = round >= 1;
+    let n = tool_idx.len();
+    let mut changed = false;
+    for (rank, &i) in tool_idx.iter().enumerate() {
+        let content = messages[i]
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if content.starts_with(ELIDED_PREFIX) {
+            continue; // already stubbed on an earlier pass
+        }
+        let is_recent = rank >= n.saturating_sub(keep);
+        if !is_recent {
+            if content.len() > 80 {
+                messages[i]["content"] =
+                    json!(format!("{ELIDED_PREFIX}: {} chars]", content.len()));
+                changed = true;
+            }
+        } else if cap_recent && content.chars().count() > GIANT_TOOL_CAP_CHARS {
+            let head: String = content.chars().take(GIANT_TOOL_CAP_CHARS).collect();
+            messages[i]["content"] = json!(format!(
+                "{head}\n[truncated: {} chars total]",
+                content.len()
+            ));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// [`resilient_call`] wrapped in reactive middle-out truncation. On a context-overflow error it
+/// shrinks `messages` in place (escalating) and retries, up to [`MAX_CONTEXT_RETRIES`]; any other
+/// error, or an exhausted/unprunable transcript, propagates unchanged (case `errored`, as before).
+fn call_with_context_retry(
+    transport: &dyn ChatTransport,
+    ep: &Endpoint,
+    system: Option<&str>,
+    messages: &mut Vec<Value>,
+    tools: Option<&Value>,
+    temperature: Option<f64>,
+) -> anyhow::Result<TurnReply> {
+    let mut round = 0;
+    loop {
+        match resilient_call(transport, ep, system, messages, tools, temperature) {
+            Ok(reply) => return Ok(reply),
+            Err(e) => {
+                if round < MAX_CONTEXT_RETRIES
+                    && is_context_overflow(&e)
+                    && middle_out_truncate(messages, round)
+                {
+                    round += 1;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row
 /// that each surface zero new identifiers trips the steer. Named so the TDD tests and the loop
 /// agree on one number instead of a magic literal in two places. `pub(crate)` so callers outside
@@ -196,7 +312,7 @@ pub fn run_agent_loop_capturing(
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
-            resilient_call(transport, ep, system, &messages, tools, temperature)?;
+            call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
             let text = reply.text.clone().unwrap_or_default();
             match user_sim {
@@ -274,7 +390,7 @@ pub fn run_agent_loop_capturing(
         "role": "user",
         "content": "Stop searching. Give your final answer now on a single line beginning with `ANSWER:`."
     }));
-    let reply = resilient_call(transport, ep, system, &messages, tools, temperature)?;
+    let reply = call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
     let text = reply.text.unwrap_or_default();
     record_episode(&mut capture, system, tools, &messages, &text);
     Ok(text)
@@ -808,5 +924,192 @@ mod tests {
             "fail-open must not re-enter the loop"
         );
         assert_eq!(*gate.calls.borrow(), 1);
+    }
+
+    // ---- reactive middle-out truncation ----
+
+    fn tool_msg(id: &str, body: &str) -> Value {
+        json!({ "role": "tool", "tool_call_id": id, "content": body })
+    }
+
+    #[test]
+    fn is_context_overflow_matches_real_rejections_only() {
+        assert!(is_context_overflow(&anyhow::anyhow!(
+            "chat endpoint returned 500: This model's maximum context length is 65536 tokens. \
+             However, you requested 16384 output tokens and your prompt contains 49153 input tokens"
+        )));
+        assert!(is_context_overflow(&anyhow::anyhow!(
+            "Error: context_length_exceeded"
+        )));
+        assert!(is_context_overflow(&anyhow::anyhow!(
+            "prompt is too long: 200000 tokens"
+        )));
+        // Unrelated failures must NOT trigger truncation (it wouldn't help — they must propagate).
+        assert!(!is_context_overflow(&anyhow::anyhow!(
+            "429 Too Many Requests"
+        )));
+        assert!(!is_context_overflow(&anyhow::anyhow!(
+            "connection reset by peer"
+        )));
+    }
+
+    #[test]
+    fn middle_out_stubs_oldest_keeps_recent_preserves_count() {
+        let big = "Z".repeat(500);
+        let mut msgs = vec![json!({ "role": "user", "content": "the question" })];
+        for i in 0..8 {
+            msgs.push(json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": format!("c{i}") }] }));
+            msgs.push(tool_msg(&format!("c{i}"), &big));
+        }
+        let before = msgs.len();
+        assert!(
+            middle_out_truncate(&mut msgs, 0),
+            "round 0 shrinks something"
+        );
+        assert_eq!(
+            msgs.len(),
+            before,
+            "message count preserved (pairing intact)"
+        );
+        assert_eq!(
+            msgs[0]["content"], "the question",
+            "head/question untouched"
+        );
+        let stubbed = msgs
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .filter(|m| m["content"].as_str().unwrap().starts_with(ELIDED_PREFIX))
+            .count();
+        assert_eq!(
+            stubbed,
+            8 - KEEP_RECENT_TOOL,
+            "oldest stubbed, last K kept full"
+        );
+        // Escalate to round 2 -> all stubbed; then nothing left -> false.
+        middle_out_truncate(&mut msgs, 2);
+        assert!(msgs
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .all(|m| m["content"].as_str().unwrap().starts_with(ELIDED_PREFIX)));
+        assert!(
+            !middle_out_truncate(&mut msgs, 2),
+            "nothing left to prune -> false"
+        );
+    }
+
+    #[test]
+    fn middle_out_caps_a_giant_recent_result_on_escalation() {
+        let giant = "Q".repeat(GIANT_TOOL_CAP_CHARS * 3);
+        let mut msgs = vec![json!({ "role": "user", "content": "q" })];
+        msgs.push(json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": "c0" }] }));
+        msgs.push(tool_msg("c0", "small"));
+        msgs.push(json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": "c1" }] }));
+        msgs.push(tool_msg("c1", &giant));
+        // Both tool results are "recent" (only 2, keep>=2) -> round 0 changes nothing.
+        assert!(!middle_out_truncate(&mut msgs, 0));
+        // Round 1 caps the giant recent body.
+        assert!(middle_out_truncate(&mut msgs, 1));
+        let max = msgs
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap().chars().count())
+            .max()
+            .unwrap();
+        assert!(
+            max <= GIANT_TOOL_CAP_CHARS + 40,
+            "giant capped near the cap, got {max}"
+        );
+    }
+
+    /// A transport that 400s with a context-overflow message while the transcript exceeds `limit`,
+    /// then succeeds once it has been shrunk under it — so the wrapper's truncate-and-retry is what
+    /// gets it to `Ok`.
+    struct OverflowMock {
+        limit: usize,
+        calls: RefCell<usize>,
+    }
+    impl ChatTransport for OverflowMock {
+        fn tools_schema(&self, _g: bool) -> Value {
+            json!([])
+        }
+        fn call(
+            &self,
+            _ep: &Endpoint,
+            _s: Option<&str>,
+            messages: &[Value],
+            _t: Option<&Value>,
+            _temp: Option<f64>,
+        ) -> anyhow::Result<TurnReply> {
+            *self.calls.borrow_mut() += 1;
+            let size: usize = messages
+                .iter()
+                .filter_map(|m| m.get("content").and_then(Value::as_str))
+                .map(str::len)
+                .sum();
+            if size > self.limit {
+                anyhow::bail!(
+                    "chat endpoint returned 400: This model's maximum context length is 65536 \
+                     tokens; reduce the length of the input prompt"
+                );
+            }
+            Ok(reply_text("done"))
+        }
+        fn push_assistant_turn(&self, m: &mut Vec<Value>, r: &TurnReply) {
+            m.push(r.raw.clone());
+        }
+        fn push_tool_results(&self, m: &mut Vec<Value>, res: &[(String, String)]) {
+            for (id, body) in res {
+                m.push(json!({ "role": "tool", "tool_call_id": id, "content": body }));
+            }
+        }
+    }
+
+    #[test]
+    fn context_retry_truncates_then_succeeds() {
+        let big = "Z".repeat(500);
+        let mut msgs = vec![json!({ "role": "user", "content": "q" })];
+        for i in 0..8 {
+            msgs.push(json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": format!("c{i}") }] }));
+            msgs.push(tool_msg(&format!("c{i}"), &big));
+        }
+        // Full transcript (~4000 chars) overflows; a stubbed one fits under 1500.
+        let transport = OverflowMock {
+            limit: 1500,
+            calls: RefCell::new(0),
+        };
+        let ep = test_endpoint();
+        let out = call_with_context_retry(&transport, &ep, None, &mut msgs, None, None);
+        assert!(out.is_ok(), "should recover via truncation");
+        assert_eq!(out.unwrap().text.as_deref(), Some("done"));
+        assert!(
+            *transport.calls.borrow() >= 2,
+            "at least one overflow + one success"
+        );
+    }
+
+    #[test]
+    fn context_retry_propagates_non_overflow_error() {
+        struct AlwaysRateLimited;
+        impl ChatTransport for AlwaysRateLimited {
+            fn tools_schema(&self, _g: bool) -> Value {
+                json!([])
+            }
+            fn call(
+                &self,
+                _ep: &Endpoint,
+                _s: Option<&str>,
+                _m: &[Value],
+                _t: Option<&Value>,
+                _temp: Option<f64>,
+            ) -> anyhow::Result<TurnReply> {
+                anyhow::bail!("429 Too Many Requests: rate limited")
+            }
+            fn push_assistant_turn(&self, _m: &mut Vec<Value>, _r: &TurnReply) {}
+            fn push_tool_results(&self, _m: &mut Vec<Value>, _r: &[(String, String)]) {}
+        }
+        let mut msgs = vec![json!({ "role": "user", "content": "q" })];
+        let ep = test_endpoint();
+        let out = call_with_context_retry(&AlwaysRateLimited, &ep, None, &mut msgs, None, None);
+        assert!(out.is_err(), "non-overflow error must propagate");
     }
 }
