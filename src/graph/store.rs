@@ -257,6 +257,12 @@ pub struct GraphStore {
     /// hands readers a stable snapshot. Empty until the first `csr()` under `engine = mmap`; stays
     /// empty forever under `in_memory` (that path returns early and never touches it).
     csr: Mutex<CsrCache>,
+    /// Serializes the open-or-build of the CSR in [`csr()`](Self::csr) (double-checked against `csr`),
+    /// so concurrent readers that miss the cache after the same corpus edit build the mmap files once
+    /// instead of racing on the writes. Distinct from `csr` (which only guards the cache SLOT) and
+    /// from any server-level handle lock. Contended only across a rebuild; the cache-hit path never
+    /// takes it. In-process only — cross-process builds need a file lock (pre-flip hardening).
+    csr_build: Mutex<()>,
 }
 
 /// Cache slot for the out-of-core CSR transition: `((DB file signature, w_sim bits, w_spine bits),
@@ -333,6 +339,7 @@ impl GraphStore {
             gdir,
             ppr_transition: Mutex::new(None),
             csr: Mutex::new(None),
+            csr_build: Mutex::new(()),
         })
     }
 
@@ -411,6 +418,18 @@ impl GraphStore {
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
         let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
+        if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
+            if *k == key {
+                return Ok(Some(c.clone()));
+            }
+        }
+        // Miss: serialize the open-or-BUILD below so two concurrent readers that both miss right after
+        // the same corpus edit don't both call `CsrTransition::build` on the same files at once (an
+        // in-process torn-write race). Lock ordering is `csr_build` -> (briefly) `csr` / `conn`, and
+        // nothing acquires those before `csr_build`, so no cycle. (Cross-PROCESS builds still need an
+        // advisory file lock + atomic rename — the documented pre-flip hardening for `engine = mmap`.)
+        let _build = self.csr_build.lock().unwrap_or_else(|e| e.into_inner());
+        // Re-check under the build lock: another thread may have just built for this exact key.
         if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
             if *k == key {
                 return Ok(Some(c.clone()));
