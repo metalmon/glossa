@@ -249,6 +249,11 @@ pub struct GraphStore {
     /// signature with `w_sim` folded in, so it survives the process and self-heals on a delete /
     /// in-place edit / re-index / `w_sim` change that a count would miss.
     ppr_transition: Mutex<PprTransitionCache>,
+    /// Cached out-of-core CSR transition (the `mmap` engine), keyed by the same content signature as
+    /// `ppr_transition` (`cache_sig(transition_sig, w_sim, w_spine)`). Held as an `Arc` so a
+    /// `GraphHandle` swap (Task 5) hands readers a stable snapshot. Empty until the first `csr()` call
+    /// under `engine = mmap`; stays empty forever under `in_memory` (that path never touches it).
+    csr: Mutex<Option<(u64, std::sync::Arc<crate::graph::csr::CsrTransition>)>>,
 }
 
 /// Cache slot for the PPR transition matrix: `((DB file signature, w_sim bits, w_spine bits),
@@ -316,6 +321,7 @@ impl GraphStore {
             node_index,
             gdir,
             ppr_transition: Mutex::new(None),
+            csr: Mutex::new(None),
         })
     }
 
@@ -359,6 +365,61 @@ impl GraphStore {
         };
         *self.ppr_transition.lock().unwrap() = Some((key, arc.clone()));
         Ok(arc)
+    }
+
+    /// Resolve the PPR engine: env `GLOSSA_PPR_ENGINE` > `[retrieval].engine` in the sibling
+    /// `ontology.toml` > the default `InMemory`. Mirrors `ppr::sim_weight`'s precedence so a sweep can
+    /// flip the engine without editing the corpus.
+    fn resolve_engine(&self) -> crate::graph::ontology::Engine {
+        use crate::graph::ontology::Engine;
+        if let Some(e) = std::env::var("GLOSSA_PPR_ENGINE")
+            .ok()
+            .and_then(|s| Engine::parse(&s))
+        {
+            return e;
+        }
+        self.gdir
+            .parent()
+            .map(|root| Ontology::load_or_default(root).ppr_engine())
+            .unwrap_or_default()
+    }
+
+    /// The out-of-core CSR transition for the current graph, or `None` when the engine is not `mmap`
+    /// (the byte-compatible `in_memory` path never builds a CSR). Keyed by the same content signature
+    /// as [`ppr_transition`](Self::ppr_transition): served from the in-memory `Arc` cache on a sig
+    /// hit; else `mmap`'d from `.glossa/ppr_transition.csr` when its stamped sig matches; else built
+    /// once from the in-memory `Transition` (the existing O(N+E) path), then mmap'd. Load is O(1) —
+    /// the OS pages in only the rows a query touches — so RSS is independent of corpus size.
+    pub fn csr(&self) -> anyhow::Result<Option<std::sync::Arc<crate::graph::csr::CsrTransition>>> {
+        use crate::graph::csr::CsrTransition;
+        if self.resolve_engine() != crate::graph::ontology::Engine::Mmap {
+            return Ok(None);
+        }
+        let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
+        let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
+        let csig = {
+            let c = self.conn.lock().unwrap();
+            crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim, w_spine)
+        };
+        if let Some((s, c)) = self.csr.lock().unwrap().as_ref() {
+            if *s == csig {
+                return Ok(Some(c.clone()));
+            }
+        }
+        // Miss: open the on-disk CSR if its stamped sig matches (survives the process), else build it
+        // from the in-memory transition (which itself loads-or-builds + persists the JSON), then open.
+        let csr = match CsrTransition::open(&self.gdir, csig)? {
+            Some(c) => c,
+            None => {
+                let t = self.ppr_transition()?;
+                CsrTransition::build(t.ids(), t.adj(), &self.gdir, csig)?;
+                CsrTransition::open(&self.gdir, csig)?
+                    .context("CSR missing immediately after build")?
+            }
+        };
+        let arc = std::sync::Arc::new(csr);
+        *self.csr.lock().unwrap() = Some((csig, arc.clone()));
+        Ok(Some(arc))
     }
 
     /// (mtime_nanos, len) of `graph.sqlite` and its `-wal` sidecar; missing files read as (0, 0).
@@ -2760,6 +2821,29 @@ mod tests {
         assert!(
             t.adj().iter().all(|row| row.iter().all(|(_, w)| *w > 0.0)),
             "rebuilt cache has weights, not the stale int shape"
+        );
+    }
+
+    #[test]
+    fn csr_built_and_reused_by_sig() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        fact(&g, "a", "A", &[]);
+        fact(&g, "b", "B", &[]);
+        fact(&g, "c", "C", &[]);
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+
+        std::env::set_var("GLOSSA_PPR_ENGINE", "mmap");
+        let c1 = g.csr().unwrap().expect("built under engine=mmap");
+        let c2 = g.csr().unwrap().expect("reused on the same sig"); // on-disk mmap, same sig
+        assert_eq!(c1.len(), c2.len());
+        assert_eq!(c1.len(), 3, "3 nodes → 3 CSR rows");
+
+        std::env::remove_var("GLOSSA_PPR_ENGINE");
+        assert!(
+            g.csr().unwrap().is_none(),
+            "engine=in_memory (the default) → no CSR"
         );
     }
 }
