@@ -173,6 +173,8 @@ fn main() -> anyhow::Result<()> {
                         function_name: None,
                         feedback_score_metric: None,
                         feedback_bool_metric: None,
+                        // Legacy `kb-eval run` CLI opens per question (no shared handle wired here).
+                        shared: None,
                     })
                 }
                 BackendKind::Cli => {

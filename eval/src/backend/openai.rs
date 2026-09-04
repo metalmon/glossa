@@ -378,6 +378,12 @@ pub struct OpenAiBackend {
     /// TensorZero feedback metric name for the boolean correctness flag (only consulted when
     /// `api == Tensorzero`; see `crate::lab::Endpoint::feedback_bool_metric`).
     pub feedback_bool_metric: Option<String>,
+    /// Run-wide shared retrieval snapshot. When `Some`, `answer_capturing` reuses this handle's
+    /// graph + index (the CSR/PPR matrix is built ONCE for the whole run) instead of opening per
+    /// question — the eval counterpart to the MCP server's shared handle, and the fix for the
+    /// per-question `GraphStore::open` that made RSS scale with the worker count. `None` reproduces
+    /// today's per-question open exactly. `run_eval` opens one and clones it into every worker.
+    pub shared: Option<std::sync::Arc<glossa::graph::handle::GraphHandle>>,
 }
 
 const MAX_ROUNDS: usize = 50;
@@ -411,10 +417,27 @@ impl OpenAiBackend {
         // non-empty, else None" — the same behavior `self.api_key.as_deref()` had (an empty-string
         // key is filtered out later by `chat_http` regardless, in both the old and new paths).
         let ep = self.endpoint_config();
-        let graph = if self.use_graph {
-            glossa::graph::store::GraphStore::open(work).ok()
-        } else {
-            None
+        // Retrieval state: reuse the run-wide shared `GraphHandle` when present (opened ONCE in
+        // `run_eval` and cloned into every worker — the graph/CSR matrix is built once, not per
+        // question), else open per question (today's behavior). `graph` stays `None` in the
+        // graph-OFF baseline arm regardless, so the A/B knob is unchanged.
+        let local_handle;
+        let (idx, graph): (
+            &glossa::index::store::DocIndex,
+            Option<&glossa::graph::store::GraphStore>,
+        ) = match &self.shared {
+            Some(h) => (&h.idx, if self.use_graph { Some(&h.graph) } else { None }),
+            None => {
+                local_handle = (
+                    glossa::index::store::DocIndex::open_or_create(work)?,
+                    if self.use_graph {
+                        glossa::graph::store::GraphStore::open(work).ok()
+                    } else {
+                        None
+                    },
+                );
+                (&local_handle.0, local_handle.1.as_ref())
+            }
         };
         // Selected by `self.api` (default `OpenAiChat`, unchanged for every existing caller) —
         // `transport_for` builds `TzTransport` when `api = "tensorzero"`, so the eval reader gets
@@ -423,9 +446,6 @@ impl OpenAiBackend {
         let tools = transport.tools_schema(graph.is_some());
 
         let trace = TraceLog::to_dir(work);
-        // Open the index once per question; the closure reuses it (cached reader) for every
-        // search/read in the agent loop instead of reopening per tool call.
-        let idx = glossa::index::store::DocIndex::open_or_create(work)?;
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
         let spec = glossa::tools::ChainSpec::from_ontology(
             &glossa::graph::ontology::Ontology::load_or_default(work),
@@ -439,8 +459,7 @@ impl OpenAiBackend {
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
         let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
         let exec = |name: &str, args: &Value| {
-            let (mut body, ids) =
-                execute_tool(name, args, work, &idx, graph.as_ref(), &spec, &trace);
+            let (mut body, ids) = execute_tool(name, args, work, idx, graph, &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
@@ -478,13 +497,7 @@ impl OpenAiBackend {
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
             crate::backend::glossa_tools::next_best_action(
-                name,
-                args,
-                work,
-                &idx,
-                graph.as_ref(),
-                &spec,
-                &trace,
+                name, args, work, idx, graph, &spec, &trace,
             )
         };
         // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the
@@ -553,6 +566,7 @@ impl OpenAiBackend {
             function_name: None,
             feedback_score_metric: None,
             feedback_bool_metric: None,
+            shared: None,
         }
     }
 
@@ -1033,6 +1047,30 @@ mod tests {
         ] {
             assert!(!is_transient_upstream(fatal), "should fail fast: {fatal}");
         }
+    }
+
+    #[test]
+    fn shared_handle_is_reused_not_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        // One run-wide handle, as `run_eval` opens it before the worker pool.
+        let h = std::sync::Arc::new(glossa::graph::handle::GraphHandle::open(dir.path()).unwrap());
+        // Two per-case backends built from the SAME Arc (as the worker closure does per question).
+        let a = OpenAiBackend {
+            shared: Some(h.clone()),
+            ..OpenAiBackend::for_test_with_prompt("x")
+        };
+        let b = OpenAiBackend {
+            shared: Some(h.clone()),
+            ..OpenAiBackend::for_test_with_prompt("x")
+        };
+        // Both reference the SAME handle instance — the graph/index/CSR is opened once for the whole
+        // run, not re-opened per backend/question.
+        assert!(std::sync::Arc::ptr_eq(
+            a.shared.as_ref().unwrap(),
+            b.shared.as_ref().unwrap()
+        ));
+        // With no shared handle the backend falls back to per-question open (today's behavior).
+        assert!(OpenAiBackend::for_test_with_prompt("x").shared.is_none());
     }
 
     #[test]

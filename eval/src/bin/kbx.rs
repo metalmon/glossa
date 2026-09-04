@@ -925,6 +925,20 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // the per-case path is byte-identical to before (the reader runs exactly once, via `answer`).
     let n_samples = if args.capture { args.samples.max(1) } else { 1 };
     let trajectories: Mutex<Vec<TrajectoryRecord>> = Mutex::new(Vec::new());
+    // Open the retrieval snapshot ONCE for the whole run and share it across every worker (the
+    // graph store, doc index, and CSR/PPR matrix are built once, not per question). Cloned into each
+    // per-case backend's `shared` field below. `GraphHandle` is Send+Sync, so concurrent workers read
+    // it safely (graph reads serialize on the store's connection mutex; the mmap CSR is lock-free).
+    // On an open failure, fall back to per-question opens (backend `shared: None`).
+    let shared_handle = match glossa::graph::handle::GraphHandle::open(&paths.root) {
+        Ok(h) => Some(std::sync::Arc::new(h)),
+        Err(e) => {
+            pb.println(format!(
+                "eval: shared graph handle open failed ({e}); opening per question"
+            ));
+            None
+        }
+    };
     let results = run_units_parallel(
         cases,
         jobs,
@@ -947,6 +961,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 function_name: lab.model.function_name.clone(),
                 feedback_score_metric: lab.model.feedback_score_metric.clone(),
                 feedback_bool_metric: lab.model.feedback_bool_metric.clone(),
+                // Run-wide shared snapshot (opened once above): reuse it instead of opening per
+                // question, so the matrix is built once for the whole run across all workers.
+                shared: shared_handle.clone(),
             };
 
             // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
