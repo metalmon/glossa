@@ -34,6 +34,7 @@ pub mod build;
 pub mod compose;
 pub mod csr;
 pub mod generalize;
+pub mod handle;
 pub mod io;
 pub mod lock;
 pub mod ops;

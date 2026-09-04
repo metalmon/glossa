@@ -60,6 +60,19 @@ pub struct GlossaServer {
     /// `serve_streamable_http`) must give each NEW session its own fresh tracker rather than
     /// sharing this `Arc` via `clone()` — see the factory closure's override there.
     pub signals: Arc<Mutex<crate::tools::retrieval_progress::ReaderSignals>>,
+    /// The shared retrieval snapshot ([`crate::graph::handle::GraphHandle`]): the graph store, doc
+    /// index, and pre-warmed CSR, built once and swapped on a corpus change (RCU). Every read tool
+    /// loads it lock-free instead of re-opening per call. An `Arc` around the `ArcSwapOption` is
+    /// essential: the streamable-http factory `clone()`s this whole struct per session (see
+    /// `main.rs::serve_streamable_http`), so ONLY an `Arc` cell is shared across all sessions — a
+    /// bare `ArcSwapOption` field would give each session its own, defeating the shared handle.
+    /// `empty()` at startup; built lazily on first `handle()` (keeps `new()` infallible).
+    cell: Arc<arc_swap::ArcSwapOption<crate::graph::handle::GraphHandle>>,
+    /// Single-flight guard for `refresh_handle`: a corpus change can fire from many concurrent read
+    /// handlers at once, and each rebuild opens the store + (under `mmap`) writes the CSR files. The
+    /// guard lets exactly one rebuild proceed at a time; the rest skip (the next change re-triggers),
+    /// so concurrent handlers never race on the CSR write.
+    refreshing: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -192,7 +205,40 @@ impl GlossaServer {
             signals: Arc::new(Mutex::new(
                 crate::tools::retrieval_progress::ReaderSignals::new(),
             )),
+            cell: Arc::new(arc_swap::ArcSwapOption::empty()),
+            refreshing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The shared retrieval snapshot, built on first use and cached. Every request loads the SAME
+    /// `Arc` lock-free; the bundled components self-freshen (see [`crate::graph::handle::GraphHandle`]),
+    /// so a held snapshot serves current data. Shared across streamable-http sessions because the
+    /// cell is an `Arc` cloned with the server.
+    fn handle(&self) -> anyhow::Result<Arc<crate::graph::handle::GraphHandle>> {
+        if let Some(h) = self.cell.load_full() {
+            return Ok(h);
+        }
+        let h = Arc::new(crate::graph::handle::GraphHandle::open(&self.root)?);
+        self.cell.store(Some(h.clone()));
+        Ok(h)
+    }
+
+    /// Rebuild the shared snapshot and swap it in (RCU) so its pre-warmed CSR reflects a corpus
+    /// change. Best-effort and single-flight (see `refreshing`): a rebuild error, or a concurrent
+    /// rebuild already in progress, leaves the current snapshot in place — reads stay correct via the
+    /// components' self-freshening regardless. In-flight readers keep their old `Arc`.
+    fn refresh_handle(&self) {
+        if self
+            .refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return; // another thread is already rebuilding; the next change re-triggers
+        }
+        if let Ok(h) = crate::graph::handle::GraphHandle::open(&self.root) {
+            self.cell.store(Some(Arc::new(h)));
+        }
+        self.refreshing.store(false, Ordering::Release);
     }
 
     /// Shared HTTP metrics handle — the streamable-http middleware records requests into it and
@@ -271,14 +317,6 @@ impl GlossaServer {
         }
     }
 
-    fn open_index_graph(
-        &self,
-    ) -> Result<(crate::index::store::DocIndex, Option<GraphStore>), McpError> {
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).ok();
-        Ok((idx, g))
-    }
-
     /// Return the list of enabled tools (for config generation — not test-only).
     pub fn tool_specs(&self) -> Vec<rmcp::model::Tool> {
         self.tool_router.list_all()
@@ -334,6 +372,10 @@ impl GlossaServer {
         self.last_change
             .store(crate::trace::now_ms(), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);
+        // A corpus change just landed — rebuild the shared snapshot so its pre-warmed CSR is current.
+        // Single-flight + best-effort; reads stay correct via component self-freshening even if this
+        // is skipped. Only fires when something actually changed (every mark_dirty call site does).
+        self.refresh_handle();
     }
 
     /// Debounce decision: run the generalize pass only when the graph is `dirty` AND no further
@@ -1143,10 +1185,10 @@ impl GlossaServer {
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
         let key = format!("search:{a:?}");
         let (body, hits) = crate::tools::search(
-            &idx,
+            &h.idx,
             &a.query,
             a.limit.unwrap_or(50),
             a.glob.as_deref(),
@@ -1166,15 +1208,15 @@ impl GlossaServer {
     async fn read(&self, Parameters(a): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         self.lazy_reindex_if_changed(&a.path);
-        let (idx, g) = self.open_index_graph()?;
+        let h = self.handle().map_err(internal)?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
         let key = format!("read:{a:?}");
         let ids = vec![a.path.clone()];
         Ok(read_common(
             &self.root,
-            &idx,
-            g.as_ref(),
+            &h.idx,
+            Some(&h.graph),
             &a.path,
             a.n as u64,
             page_image,
@@ -1193,14 +1235,13 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         self.lazy_reindex_if_changed(&a.path);
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).ok();
+        let h = self.handle().map_err(internal)?;
         let max = a
             .max_bytes
             .unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
         let out = crate::tools::get_source_file(
-            &idx,
-            g.as_ref(),
+            &h.idx,
+            Some(&h.graph),
             &a.path,
             a.n.map(u64::from),
             max,
@@ -1225,14 +1266,13 @@ impl GlossaServer {
         Parameters(a): Parameters<GlossaryArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
         let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
         let stale = crate::tools::StaleChecker::new(self.root.clone());
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
-            &idx,
-            &g,
+            &h.idx,
+            &h.graph,
             &a.name,
             Some(a.query.as_str()).filter(|s| !s.is_empty()),
             &spec,
@@ -1254,13 +1294,12 @@ impl GlossaServer {
         Parameters(a): Parameters<RelatedArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
         let stale = crate::tools::StaleChecker::new(self.root.clone());
         let key = format!("related:{a:?}");
         let body = crate::tools::related(
-            &idx,
-            &g,
+            &h.idx,
+            &h.graph,
             a.node.as_deref(),
             a.path.as_deref(),
             a.n,
@@ -1282,14 +1321,13 @@ impl GlossaServer {
         Parameters(a): Parameters<NeighborsArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
         let direction = a.direction.as_deref().unwrap_or("both");
         let stale = crate::tools::StaleChecker::new(self.root.clone());
         let key = format!("neighbors:{a:?}");
         let body = crate::tools::neighbors(
-            &idx,
-            &g,
+            &h.idx,
+            &h.graph,
             a.node.as_deref(),
             a.path.as_deref(),
             a.n,
@@ -1314,13 +1352,12 @@ impl GlossaServer {
         Parameters(a): Parameters<ReachArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
         let key = format!("reach:{a:?}");
         let body = crate::tools::reach(
-            &idx,
-            &g,
+            &h.idx,
+            &h.graph,
             &ont,
             a.from.as_deref(),
             a.from_path.as_deref(),
@@ -1411,7 +1448,8 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<NameArg>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let h = self.handle().map_err(internal)?;
+        let g = &h.graph;
         let ids = g.resolve(&a.name).map_err(internal)?;
         // `GraphStore::resolve` returns bare ids with no path info, so scope is applied here in
         // the handler (after resolve returns) rather than in the store fn — see task brief.
@@ -1422,7 +1460,7 @@ impl GlossaServer {
             .filter(|id| {
                 crate::tools::in_scope(
                     scope_glob.as_ref(),
-                    crate::tools::owning_doc(&g, id).as_deref(),
+                    crate::tools::owning_doc(g, id).as_deref(),
                 )
             })
             .collect();

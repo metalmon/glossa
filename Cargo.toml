@@ -49,6 +49,7 @@ quick-xml = "0.41"
 sqlparser = "0.53"
 memmap2 = "0.9"
 fst = "0.4"
+arc-swap = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

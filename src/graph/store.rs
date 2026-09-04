@@ -249,12 +249,23 @@ pub struct GraphStore {
     /// signature with `w_sim` folded in, so it survives the process and self-heals on a delete /
     /// in-place edit / re-index / `w_sim` change that a count would miss.
     ppr_transition: Mutex<PprTransitionCache>,
-    /// Cached out-of-core CSR transition (the `mmap` engine), keyed by the same content signature as
-    /// `ppr_transition` (`cache_sig(transition_sig, w_sim, w_spine)`). Held as an `Arc` so a
-    /// `GraphHandle` swap (Task 5) hands readers a stable snapshot. Empty until the first `csr()` call
-    /// under `engine = mmap`; stays empty forever under `in_memory` (that path never touches it).
-    csr: Mutex<Option<(u64, std::sync::Arc<crate::graph::csr::CsrTransition>)>>,
+    /// Cached out-of-core CSR transition (the `mmap` engine). Keyed by the SAME cheap signature as
+    /// `ppr_transition` — `(DB file signature, w_sim bits, w_spine bits)` — so a held instance (a
+    /// shared `GraphHandle`) serves `csr()` in O(1) on the hot path: a file stat + weight read, not
+    /// an O(nodes+edges) content-signature scan. The expensive content signature (which keys the
+    /// on-disk `.csr`) is computed only on a cheap-key miss. Held as an `Arc` so a `GraphHandle` swap
+    /// hands readers a stable snapshot. Empty until the first `csr()` under `engine = mmap`; stays
+    /// empty forever under `in_memory` (that path returns early and never touches it).
+    csr: Mutex<CsrCache>,
 }
+
+/// Cache slot for the out-of-core CSR transition: `((DB file signature, w_sim bits, w_spine bits),
+/// csr)` — the SAME cheap key as [`PprTransitionCache`], so `csr()` has an O(1) hot path. A named
+/// alias so the field type stays clippy-clean (`type_complexity`).
+type CsrCache = Option<(
+    (DbFileSig, u32, u32),
+    std::sync::Arc<crate::graph::csr::CsrTransition>,
+)>;
 
 /// Cache slot for the PPR transition matrix: `((DB file signature, w_sim bits, w_spine bits),
 /// matrix)`. A named alias so the field type stays readable and clippy-clean (`type_complexity`) —
@@ -395,19 +406,24 @@ impl GraphStore {
         if self.resolve_engine() != crate::graph::ontology::Engine::Mmap {
             return Ok(None);
         }
+        // Hot path: the same cheap key as `ppr_transition` — if neither the DB files nor the resolved
+        // weights changed, the mmap'd CSR is still valid without an O(nodes+edges) scan.
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
+        let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
+        if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
+            if *k == key {
+                return Ok(Some(c.clone()));
+            }
+        }
+        // Cold, or the DB / weights changed: now the content signature (which keys the on-disk `.csr`)
+        // is worth computing. Open the on-disk CSR if its stamped sig matches (survives the process),
+        // else build it from the in-memory transition (which itself loads-or-builds + persists the
+        // JSON), then open.
         let csig = {
             let c = self.conn.lock().unwrap();
             crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim, w_spine)
         };
-        if let Some((s, c)) = self.csr.lock().unwrap().as_ref() {
-            if *s == csig {
-                return Ok(Some(c.clone()));
-            }
-        }
-        // Miss: open the on-disk CSR if its stamped sig matches (survives the process), else build it
-        // from the in-memory transition (which itself loads-or-builds + persists the JSON), then open.
         let csr = match CsrTransition::open(&self.gdir, csig)? {
             Some(c) => c,
             None => {
@@ -418,7 +434,7 @@ impl GraphStore {
             }
         };
         let arc = std::sync::Arc::new(csr);
-        *self.csr.lock().unwrap() = Some((csig, arc.clone()));
+        *self.csr.lock().unwrap() = Some((key, arc.clone()));
         Ok(Some(arc))
     }
 
