@@ -26,18 +26,18 @@ use std::sync::Arc;
 pub struct GraphHandle {
     pub graph: GraphStore,
     pub idx: DocIndex,
-    /// The out-of-core CSR transition, pre-warmed at build time. `None` under `engine = in_memory`
-    /// (the default), where no CSR is built. Authoritative accessor is `graph.csr()`.
-    pub csr: Option<Arc<CsrTransition>>,
+    /// The out-of-core CSR transition, pre-warmed at build time so the first request doesn't pay the
+    /// build. Authoritative (self-invalidating) accessor is `graph.csr()`.
+    pub csr: Arc<CsrTransition>,
 }
 
 impl GraphHandle {
-    /// Open all components for `root` and pre-warm the CSR (a no-op under `engine = in_memory`, where
-    /// `csr` is `None`). Called once at startup (lazily, on first use) and again on a freshness swap.
+    /// Open all components for `root` and pre-warm the CSR (mmaps it, building once on a miss).
+    /// Called once at startup (lazily, on first use) and again on a freshness swap.
     pub fn open(root: &Path) -> anyhow::Result<GraphHandle> {
         let idx = DocIndex::open_or_create(root)?;
         let graph = GraphStore::open(root)?;
-        let csr = graph.csr()?; // None under in_memory; under mmap this mmaps (building once on a miss)
+        let csr = graph.csr()?;
         Ok(GraphHandle { graph, idx, csr })
     }
 }

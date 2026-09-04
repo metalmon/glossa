@@ -123,7 +123,6 @@ pub const TRANSITION_CACHE_VERSION: u32 = 2;
 /// `confidence <= 0` default to 1.0, so pre-confidence graphs are unchanged.
 pub struct Transition {
     ids: Vec<String>,            // idx -> node id
-    idx: HashMap<String, usize>, // node id -> idx
     adj: Vec<Vec<(usize, f32)>>, // undirected weighted adjacency (neighbor idx, tier weight)
 }
 
@@ -134,26 +133,17 @@ impl Transition {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
-    fn index_of(&self, id: &str) -> Option<usize> {
-        self.idx.get(id).copied()
-    }
-    /// Node ids in walk order (for persistence).
+    /// Node ids in walk order (for persistence + CSR build).
     pub fn ids(&self) -> &[String] {
         &self.ids
     }
-    /// Undirected weighted adjacency in walk order (for persistence).
+    /// Undirected weighted adjacency in walk order (for persistence + CSR build).
     pub fn adj(&self) -> &[Vec<(usize, f32)>] {
         &self.adj
     }
-    /// Reassemble from persisted `(ids, adj)`; the id->index map is derived, not stored.
+    /// Reassemble from persisted `(ids, adj)`.
     pub fn from_parts(ids: Vec<String>, adj: Vec<Vec<(usize, f32)>>) -> Transition {
-        let idx = ids
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, s)| (s, i))
-            .collect();
-        Transition { ids, idx, adj }
+        Transition { ids, adj }
     }
 }
 
@@ -199,78 +189,7 @@ pub fn build_transition(g: &GraphStore) -> anyhow::Result<Transition> {
             }
         }
     }
-    Ok(Transition { ids, idx, adj })
-}
-
-/// Random walk with restart to a stationary distribution. `seeds` maps node id -> unnormalized mass
-/// and is normalized to the restart vector `p`. `alpha` is the restart probability. Returns
-/// (node id, stationary score) sorted descending, skipping zero-mass nodes. Dangling nodes (no
-/// edges) teleport their mass back to `p` so total mass is conserved every iteration.
-pub fn ppr(
-    trans: &Transition,
-    seeds: &HashMap<String, f32>,
-    alpha: f32,
-    max_iter: usize,
-    eps: f32,
-) -> Vec<(String, f32)> {
-    let n = trans.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    // Restart vector p: normalized seed mass.
-    let mut p = vec![0.0f32; n];
-    let mut sum = 0.0f32;
-    for (id, &m) in seeds {
-        if m > 0.0 {
-            if let Some(i) = trans.index_of(id) {
-                p[i] += m;
-                sum += m;
-            }
-        }
-    }
-    if sum <= 0.0 {
-        return Vec::new(); // no seed landed on a real node
-    }
-    for v in p.iter_mut() {
-        *v /= sum;
-    }
-
-    let mut r = p.clone();
-    for _ in 0..max_iter {
-        let mut next = vec![0.0f32; n];
-        let mut dangling = 0.0f32;
-        for (i, &ri) in r.iter().enumerate() {
-            let wdeg: f32 = trans.adj[i].iter().map(|(_, w)| *w).sum();
-            if wdeg <= 0.0 {
-                dangling += ri;
-            } else {
-                for &(j, w) in &trans.adj[i] {
-                    next[j] += ri * w / wdeg;
-                }
-            }
-        }
-        // r' = (1-alpha)*(M r) + [alpha + (1-alpha)*dangling]*p  — teleport keeps sum(r)=1.
-        let teleport = alpha + (1.0 - alpha) * dangling;
-        let mut delta = 0.0f32;
-        for i in 0..n {
-            let v = (1.0 - alpha) * next[i] + teleport * p[i];
-            delta += (v - r[i]).abs();
-            next[i] = v;
-        }
-        r = next;
-        if delta < eps {
-            break;
-        }
-    }
-
-    let mut out: Vec<(String, f32)> = r
-        .iter()
-        .enumerate()
-        .filter(|(_, &v)| v > 0.0)
-        .map(|(i, &v)| (trans.ids[i].clone(), v))
-        .collect();
-    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    out
+    Ok(Transition { ids, adj })
 }
 
 /// Hard cap on forward-push node expansions — a bounded work budget so a pathological residual
@@ -471,6 +390,17 @@ mod tests {
     fn rank_of(out: &[(String, f32)], id: &str) -> Option<usize> {
         out.iter().position(|(i, _)| i == id)
     }
+    /// Rank via the production engine: persist the in-memory `Transition` as a CSR, then run
+    /// forward-push over it (the same path `compose_ppr` takes). `k` is generous so every reachable
+    /// node is returned for the property assertions. Seeds are excluded from the output by `ppr_push`.
+    fn push(t: &Transition, seeds: &HashMap<String, f32>) -> Vec<(String, f32)> {
+        let d = tempfile::tempdir().unwrap();
+        crate::graph::csr::CsrTransition::build(t.ids(), t.adj(), d.path(), 1).unwrap();
+        let csr = crate::graph::csr::CsrTransition::open(d.path(), 1)
+            .unwrap()
+            .expect("just-built CSR opens");
+        ppr_push(&csr, seeds, 0.15, 1e-6, 100)
+    }
 
     #[test]
     fn connected_terminal_outranks_a_disconnected_node() {
@@ -484,7 +414,7 @@ mod tests {
         link(&g, "seed", "bridge");
         link(&g, "bridge", "terminal");
         let t = build_transition(&g).unwrap();
-        let out = ppr(&t, &seed(&[("seed", 1.0)]), 0.15, 50, 1e-6);
+        let out = push(&t, &seed(&[("seed", 1.0)]));
         assert!(
             rank_of(&out, "terminal").is_some(),
             "terminal reached: {out:?}"
@@ -513,7 +443,7 @@ mod tests {
         link(&g, "seed", "answer");
         link(&g, "hub", "answer");
         let t = build_transition(&g).unwrap();
-        let out = ppr(&t, &seed(&[("seed", 1.0)]), 0.15, 50, 1e-6);
+        let out = push(&t, &seed(&[("seed", 1.0)]));
         let ra = rank_of(&out, "answer").unwrap();
         let rn = rank_of(&out, "noise0").unwrap();
         assert!(ra < rn, "answer outranks a hub leaf: {out:?}");
@@ -531,28 +461,10 @@ mod tests {
         link(&g, "s2", "both");
         link(&g, "s1", "one");
         let t = build_transition(&g).unwrap();
-        let out = ppr(&t, &seed(&[("s1", 1.0), ("s2", 1.0)]), 0.15, 50, 1e-6);
+        let out = push(&t, &seed(&[("s1", 1.0), ("s2", 1.0)]));
         assert!(
             rank_of(&out, "both").unwrap() < rank_of(&out, "one").unwrap(),
             "intersection node ranks above the single-seed neighbor: {out:?}"
-        );
-    }
-
-    #[test]
-    fn stationary_distribution_is_normalized() {
-        let d = tempfile::tempdir().unwrap();
-        let g = GraphStore::open(d.path()).unwrap();
-        for x in ["a", "b", "c"] {
-            node(&g, x);
-        }
-        link(&g, "a", "b");
-        link(&g, "b", "c");
-        let t = build_transition(&g).unwrap();
-        let out = ppr(&t, &seed(&[("a", 1.0)]), 0.15, 100, 1e-9);
-        let total: f32 = out.iter().map(|(_, v)| v).sum();
-        assert!(
-            (total - 1.0).abs() < 1e-3,
-            "mass conserved to ~1.0, got {total}"
         );
     }
 
@@ -562,7 +474,7 @@ mod tests {
         let g = GraphStore::open(d.path()).unwrap();
         node(&g, "a");
         let t = build_transition(&g).unwrap();
-        assert!(ppr(&t, &seed(&[("nonexistent", 1.0)]), 0.15, 50, 1e-6).is_empty());
+        assert!(push(&t, &seed(&[("nonexistent", 1.0)])).is_empty());
     }
 
     #[test]
@@ -728,7 +640,7 @@ mod tests {
         })
         .unwrap();
         let t = build_transition(&g).unwrap();
-        let out = ppr(&t, &seed(&[("seed", 1.0)]), 0.15, 50, 1e-6);
+        let out = push(&t, &seed(&[("seed", 1.0)]));
         assert!(
             rank_of(&out, "terminal") < rank_of(&out, "sibling"),
             "reasoning terminal must outrank the SIMILAR-clustered sibling: {out:?}"

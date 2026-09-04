@@ -385,34 +385,14 @@ impl GraphStore {
         Ok(arc)
     }
 
-    /// Resolve the PPR engine: env `GLOSSA_PPR_ENGINE` > `[retrieval].engine` in the sibling
-    /// `ontology.toml` > the default `InMemory`. Mirrors `ppr::sim_weight`'s precedence so a sweep can
-    /// flip the engine without editing the corpus.
-    fn resolve_engine(&self) -> crate::graph::ontology::Engine {
-        use crate::graph::ontology::Engine;
-        if let Some(e) = std::env::var("GLOSSA_PPR_ENGINE")
-            .ok()
-            .and_then(|s| Engine::parse(&s))
-        {
-            return e;
-        }
-        self.gdir
-            .parent()
-            .map(|root| Ontology::load_or_default(root).ppr_engine())
-            .unwrap_or_default()
-    }
-
-    /// The out-of-core CSR transition for the current graph, or `None` when the engine is not `mmap`
-    /// (the byte-compatible `in_memory` path never builds a CSR). Keyed by the same content signature
-    /// as [`ppr_transition`](Self::ppr_transition): served from the in-memory `Arc` cache on a sig
-    /// hit; else `mmap`'d from `.glossa/ppr_transition.csr` when its stamped sig matches; else built
-    /// once from the in-memory `Transition` (the existing O(N+E) path), then mmap'd. Load is O(1) —
-    /// the OS pages in only the rows a query touches — so RSS is independent of corpus size.
-    pub fn csr(&self) -> anyhow::Result<Option<std::sync::Arc<crate::graph::csr::CsrTransition>>> {
+    /// The out-of-core CSR transition for the current graph — the sole PPR retrieval structure.
+    /// Keyed by the same content signature as [`ppr_transition`](Self::ppr_transition): served from
+    /// the in-memory `Arc` cache on a sig hit; else `mmap`'d from `.glossa/ppr_transition.<sig>.csr`
+    /// when its stamped sig matches; else built once from the in-memory `Transition` (a one-time
+    /// O(N+E) pass), then mmap'd. Load is O(1) — the OS pages in only the rows a query touches — so
+    /// RSS is independent of corpus size.
+    pub fn csr(&self) -> anyhow::Result<std::sync::Arc<crate::graph::csr::CsrTransition>> {
         use crate::graph::csr::CsrTransition;
-        if self.resolve_engine() != crate::graph::ontology::Engine::Mmap {
-            return Ok(None);
-        }
         // Hot path: the same cheap key as `ppr_transition` — if neither the DB files nor the resolved
         // weights changed, the mmap'd CSR is still valid without an O(nodes+edges) scan.
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
@@ -420,7 +400,7 @@ impl GraphStore {
         let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
         if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
             if *k == key {
-                return Ok(Some(c.clone()));
+                return Ok(c.clone());
             }
         }
         // Miss: serialize the open-or-BUILD below so two concurrent readers that both miss right after
@@ -432,7 +412,7 @@ impl GraphStore {
         // Re-check under the build lock: another thread may have just built for this exact key.
         if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
             if *k == key {
-                return Ok(Some(c.clone()));
+                return Ok(c.clone());
             }
         }
         // Cold, or the DB / weights changed: now the content signature (which keys the on-disk `.csr`)
@@ -449,7 +429,7 @@ impl GraphStore {
         };
         let arc = std::sync::Arc::new(csr);
         *self.csr.lock().unwrap() = Some((key, arc.clone()));
-        Ok(Some(arc))
+        Ok(arc)
     }
 
     /// Build (or adopt a just-published) CSR for `csig` under a CROSS-PROCESS advisory lock, so
@@ -2948,17 +2928,10 @@ mod tests {
         link(&g, "a", "b");
         link(&g, "b", "c");
 
-        std::env::set_var("GLOSSA_PPR_ENGINE", "mmap");
-        let c1 = g.csr().unwrap().expect("built under engine=mmap");
-        let c2 = g.csr().unwrap().expect("reused on the same sig"); // on-disk mmap, same sig
+        let c1 = g.csr().unwrap(); // builds the CSR (mmap is the sole engine)
+        let c2 = g.csr().unwrap(); // same sig → served from cache / on-disk mmap
         assert_eq!(c1.len(), c2.len());
         assert_eq!(c1.len(), 3, "3 nodes → 3 CSR rows");
-
-        std::env::remove_var("GLOSSA_PPR_ENGINE");
-        assert!(
-            g.csr().unwrap().is_none(),
-            "engine=in_memory (the default) → no CSR"
-        );
     }
 
     #[test]

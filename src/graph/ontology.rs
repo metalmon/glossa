@@ -61,34 +61,6 @@ struct RawRetrieval {
     /// against its Grounding/descriptive edges. See `graph::ppr::spine_weight`.
     #[serde(default)]
     spine_weight: Option<f32>,
-    /// PPR storage/query engine: `"in_memory"` (heap power-iteration, the byte-compatible default) or
-    /// `"mmap"` (out-of-core forward-push over the memory-mapped CSR). Unset / unrecognized → the
-    /// engine default `in_memory`. Env `GLOSSA_PPR_ENGINE` overrides this. See [`Engine`].
-    #[serde(default)]
-    engine: Option<String>,
-}
-
-/// PPR retrieval engine. `InMemory` = the heap-resident transition + global power-iteration (the
-/// historical, byte-compatible path); `Mmap` = the out-of-core memory-mapped CSR + forward-push
-/// local PPR (RSS ⊥ corpus size). Resolution precedence (in `GraphStore`): env `GLOSSA_PPR_ENGINE`
-/// > `[retrieval].engine` in `ontology.toml` > the default `InMemory`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Engine {
-    #[default]
-    InMemory,
-    Mmap,
-}
-
-impl Engine {
-    /// Parse a config/env string (case- and separator-insensitive). Returns `None` for anything
-    /// unrecognized, so the caller falls back to the default rather than failing.
-    pub fn parse(s: &str) -> Option<Engine> {
-        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-            "in_memory" | "inmemory" => Some(Engine::InMemory),
-            "mmap" => Some(Engine::Mmap),
-            _ => None,
-        }
-    }
 }
 
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
@@ -301,9 +273,6 @@ pub struct Ontology {
     /// finite ≥ 0. `None` when unset → PPR uses the engine default (1.0). See
     /// [`Ontology::ppr_spine_weight`].
     ppr_spine_weight: Option<f32>,
-    /// Per-corpus PPR engine from `[retrieval].engine` (`in_memory` default when unset/unrecognized).
-    /// Env `GLOSSA_PPR_ENGINE` takes precedence at resolution time. See [`Ontology::ppr_engine`].
-    ppr_engine: Engine,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -430,12 +399,6 @@ impl Ontology {
                 .retrieval
                 .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
-            ppr_engine: raw
-                .retrieval
-                .engine
-                .as_deref()
-                .and_then(Engine::parse)
-                .unwrap_or_default(),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -600,12 +563,6 @@ impl Ontology {
     /// default (1.0, a no-op). See [`Ontology::relation_role`] for which edges count as spine.
     pub fn ppr_spine_weight(&self) -> Option<f32> {
         self.ppr_spine_weight
-    }
-
-    /// Per-corpus PPR engine from `[retrieval].engine` (`InMemory` when unset/unrecognized). The
-    /// resolver in `GraphStore` lets env `GLOSSA_PPR_ENGINE` override this. See [`Engine`].
-    pub fn ppr_engine(&self) -> Engine {
-        self.ppr_engine
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
