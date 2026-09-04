@@ -114,6 +114,18 @@ timeout_secs = 120
 fanout_max = 3          # predecessors synthesized per backward step (reason)
 max_rounds = 30         # agent-loop rounds per unit (reason / build / distil)
 chunks_per_round = 3    # sections read per round (build / distil)
+# reasoning_exclude = ["Vendor SDK Manual", "CheatSheet"]  # docs NEVER mined into the reasoning
+                                 # graph (Symptom->Cause->Resolution). Put GENERIC vendor references
+                                 # here: their API/architecture/reference sections must not become junk
+                                 # "Resolution" nodes that pollute `glossary` — they stay reachable via
+                                 # grep/search. Substring match on the corpus-relative doc path (same as
+                                 # `kb graph prune --source`). Honored by build/reason/distil (build is
+                                 # the sole doc-miner; reason/distil inherit its terminals). Per-run
+                                 # override: `kbx build --exclude "<substr>"`.
+# reasoning_only = ["Troubleshooting", "User Guide"]  # ALLOWLIST (inverse of reasoning_exclude): when
+                                 # set, mine ONLY docs whose path contains one of these. Use when the
+                                 # support docs are few and listing them is shorter than excluding every
+                                 # reference doc. `exclude` wins over `only`. Per-run: `--only "<substr>"`.
 jobs_build = 3          # worker-pool size for `kbx build`'s extract/judge stages
 jobs_reason = 3         # worker-pool size for `kbx reason`'s seed workers
 jobs_train = 3          # worker-pool size for `kbx train`'s read-only rollouts
