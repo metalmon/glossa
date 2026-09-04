@@ -163,6 +163,15 @@ impl DocIndex {
     pub fn doc_file(&self, rel: &str) -> PathBuf {
         self.root.join(rel)
     }
+
+    /// Refresh this long-lived reader to the latest committed segments, immediately (cheap: it swaps
+    /// the searcher generation, O(segments) — no reopen, no mmap of new files here). The reader's
+    /// `OnCommitWithDelay` policy already reloads on its own after a short delay; calling this makes a
+    /// just-completed reindex visible to a SHARED reader (e.g. a server's `GraphHandle`) on the very
+    /// next query instead of within that delay. Best-effort — a reload error is not fatal to a read.
+    pub fn reload(&self) {
+        let _ = self.reader.reload();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

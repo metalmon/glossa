@@ -66,13 +66,15 @@ pub struct GlossaServer {
     /// essential: the streamable-http factory `clone()`s this whole struct per session (see
     /// `main.rs::serve_streamable_http`), so ONLY an `Arc` cell is shared across all sessions — a
     /// bare `ArcSwapOption` field would give each session its own, defeating the shared handle.
-    /// `empty()` at startup; built lazily on first `handle()` (keeps `new()` infallible).
+    /// `empty()` at startup; built lazily on first `handle()` (keeps `new()` infallible). The handle
+    /// self-freshens (live SQLite reads; self-invalidating PPR/CSR caches; auto-reloading tantivy
+    /// reader), so it is built once and never proactively rebuilt on the request path.
     cell: Arc<arc_swap::ArcSwapOption<crate::graph::handle::GraphHandle>>,
-    /// Single-flight guard for `refresh_handle`: a corpus change can fire from many concurrent read
-    /// handlers at once, and each rebuild opens the store + (under `mmap`) writes the CSR files. The
-    /// guard lets exactly one rebuild proceed at a time; the rest skip (the next change re-triggers),
-    /// so concurrent handlers never race on the CSR write.
-    refreshing: Arc<AtomicBool>,
+    /// Serializes the ONE-TIME lazy build of `cell` (double-checked in `handle()`), so a burst of
+    /// concurrent first requests builds a single handle instead of each opening the store/index (and,
+    /// under `engine = mmap`, racing on the CSR file writes). Uncontended after the first build — the
+    /// hot path is a lock-free `cell.load_full()` and never touches this mutex.
+    build_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -206,7 +208,7 @@ impl GlossaServer {
                 crate::tools::retrieval_progress::ReaderSignals::new(),
             )),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
-            refreshing: Arc::new(AtomicBool::new(false)),
+            build_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -218,27 +220,16 @@ impl GlossaServer {
         if let Some(h) = self.cell.load_full() {
             return Ok(h);
         }
+        // Cold: serialize the one-time build so concurrent first requests don't each open the
+        // store/index (or, under mmap, race on the CSR file writes). Double-checked: re-read the cell
+        // under the lock in case another thread built it while we waited.
+        let _guard = self.build_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(h) = self.cell.load_full() {
+            return Ok(h);
+        }
         let h = Arc::new(crate::graph::handle::GraphHandle::open(&self.root)?);
         self.cell.store(Some(h.clone()));
         Ok(h)
-    }
-
-    /// Rebuild the shared snapshot and swap it in (RCU) so its pre-warmed CSR reflects a corpus
-    /// change. Best-effort and single-flight (see `refreshing`): a rebuild error, or a concurrent
-    /// rebuild already in progress, leaves the current snapshot in place — reads stay correct via the
-    /// components' self-freshening regardless. In-flight readers keep their old `Arc`.
-    fn refresh_handle(&self) {
-        if self
-            .refreshing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return; // another thread is already rebuilding; the next change re-triggers
-        }
-        if let Ok(h) = crate::graph::handle::GraphHandle::open(&self.root) {
-            self.cell.store(Some(Arc::new(h)));
-        }
-        self.refreshing.store(false, Ordering::Release);
     }
 
     /// Shared HTTP metrics handle — the streamable-http middleware records requests into it and
@@ -372,10 +363,15 @@ impl GlossaServer {
         self.last_change
             .store(crate::trace::now_ms(), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);
-        // A corpus change just landed — rebuild the shared snapshot so its pre-warmed CSR is current.
-        // Single-flight + best-effort; reads stay correct via component self-freshening even if this
-        // is skipped. Only fires when something actually changed (every mark_dirty call site does).
-        self.refresh_handle();
+        // A corpus change just landed. The shared handle self-freshens for correctness — the graph
+        // store's SQLite reads are live (WAL) and its PPR/CSR caches self-invalidate on the DB file
+        // signature — so we do NOT rebuild the handle here (that would run heavy open + a possible
+        // O(N+E) CSR build inline on this async task). We only nudge the shared tantivy reader to the
+        // latest commit so a just-reindexed doc is visible on the very next query rather than after
+        // its auto-reload delay. Cheap and best-effort.
+        if let Some(h) = self.cell.load_full() {
+            h.idx.reload();
+        }
     }
 
     /// Debounce decision: run the generalize pass only when the graph is `dirty` AND no further
