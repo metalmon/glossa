@@ -32,6 +32,7 @@ pub const STRUCTURAL_NODES: &[&str] = &["Document", "Section", "Term", "Topic"];
 pub mod agent;
 pub mod build;
 pub mod compose;
+pub mod csr;
 pub mod generalize;
 pub mod io;
 pub mod lock;
