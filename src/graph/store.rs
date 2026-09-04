@@ -1120,6 +1120,46 @@ impl GraphStore {
         Ok(edges_deleted + nodes_deleted)
     }
 
+    /// Ids of nodes of `node_type` whose GROUNDING — a `MENTIONS` edge to a node whose `source_path`
+    /// contains `source_substr` — matches. Backs `graph prune --type T --source PAT`, for cleaning a
+    /// semantic layer wrongly mined from a specific document (e.g. a generic vendor reference whose
+    /// API/concept sections were reified as Resolutions). Substring match (`LIKE %pat%`), case per
+    /// SQLite's Unicode `LIKE`. Delete the returned ids with [`delete_nodes`](Self::delete_nodes).
+    /// All node ids of `node_type` (used by `graph prune --dry-run` to count a whole-type wipe).
+    pub fn ids_of_type(&self, node_type: &str) -> anyhow::Result<Vec<String>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare("SELECT id FROM nodes WHERE node_type = ?1")
+            .context("prepare ids_of_type")?;
+        let ids = stmt
+            .query_map(rusqlite::params![node_type], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .context("collect ids_of_type")?;
+        Ok(ids)
+    }
+
+    pub fn ids_of_type_grounded_in(
+        &self,
+        node_type: &str,
+        source_substr: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c
+            .prepare(
+                "SELECT DISTINCT n.id FROM nodes n \
+                 JOIN edges e ON e.efrom = n.id AND e.edge_type = 'MENTIONS' \
+                 JOIN nodes s ON s.id = e.eto \
+                 WHERE n.node_type = ?1 AND s.source_path LIKE ?2",
+            )
+            .context("prepare ids_of_type_grounded_in")?;
+        let pat = format!("%{source_substr}%");
+        let ids = stmt
+            .query_map(rusqlite::params![node_type, pat], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .context("collect ids_of_type_grounded_in")?;
+        Ok(ids)
+    }
+
     fn all_edges_c(c: &Connection) -> anyhow::Result<Vec<Edge>> {
         let mut stmt = c
             .prepare(

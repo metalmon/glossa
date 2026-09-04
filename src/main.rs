@@ -484,6 +484,13 @@ enum GraphAction {
         /// node type to delete, e.g. Symptom (repeatable)
         #[arg(short = 't', long = "type", required = true)]
         node_type: Vec<String>,
+        /// only delete nodes GROUNDED in a document whose path contains this substring (e.g. a
+        /// generic vendor reference like "CODESYS Control V3"). Without it, the whole type is wiped.
+        #[arg(long = "source")]
+        source: Option<String>,
+        /// list what would be deleted without touching the graph
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Compile a document's `.csp` limit tables (notebook notes) into the constraint graph.
     #[cfg(feature = "constraint")]
@@ -1744,15 +1751,57 @@ fn main() -> anyhow::Result<()> {
                 );
                 Ok(())
             }
-            GraphAction::Prune { path, node_type } => {
+            GraphAction::Prune {
+                path,
+                node_type,
+                source,
+                dry_run,
+            } => {
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let mut total = 0;
                 for t in &node_type {
-                    let n = g.delete_by_type(t)?;
-                    println!("graph prune: removed {n} entries of type {t}");
-                    total += n;
+                    match &source {
+                        // Source-scoped: delete only the nodes of this type grounded in a matching doc.
+                        Some(src) => {
+                            let ids = g.ids_of_type_grounded_in(t, src)?;
+                            if dry_run {
+                                println!(
+                                    "graph prune (dry-run): {} {t} grounded in *{src}* would be removed:",
+                                    ids.len()
+                                );
+                                for id in &ids {
+                                    let label =
+                                        g.get_node(id)?.map(|n| n.label).unwrap_or_default();
+                                    println!("  {id}  {label}");
+                                }
+                            } else {
+                                let n = g.delete_nodes(&ids)?;
+                                println!(
+                                    "graph prune: removed {n} entries ({} {t} nodes grounded in *{src}*)",
+                                    ids.len()
+                                );
+                                total += n;
+                            }
+                        }
+                        // Whole-type wipe (original behavior).
+                        None => {
+                            if dry_run {
+                                let ids = g.ids_of_type(t)?;
+                                println!(
+                                    "graph prune (dry-run): all {} {t} nodes would be removed",
+                                    ids.len()
+                                );
+                            } else {
+                                let n = g.delete_by_type(t)?;
+                                println!("graph prune: removed {n} entries of type {t}");
+                                total += n;
+                            }
+                        }
+                    }
                 }
-                println!("graph prune: {total} total entries removed");
+                if !dry_run {
+                    println!("graph prune: {total} total entries removed");
+                }
                 Ok(())
             }
             #[cfg(feature = "constraint")]
