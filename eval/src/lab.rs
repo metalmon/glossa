@@ -198,9 +198,10 @@ pub struct LabConfig {
     pub tuning: Tuning,
 }
 
-/// Per-workspace overrides for the reason/build/distil agent-loop tuning knobs — `fanout_max`
-/// (reason's predecessor branching cap), `max_rounds` (agent-loop round cap, shared by reason/
-/// build/distil), `chunks_per_round` (sections read per coverage round, build/distil), and the
+/// Per-workspace overrides for the agent-loop tuning knobs — `fanout_max`
+/// (reason's predecessor branching cap), `max_rounds` (agent-loop round cap, honored by reason/
+/// build/distil AND the eval reader), `chunks_per_round` (sections read per coverage round,
+/// build/distil), and the
 /// four per-stage `jobs_*` worker-pool sizes (`jobs_build`/`jobs_reason`/`jobs_train`/
 /// `jobs_distil`). Every field is optional: an absent `[tuning]` section (or an absent field
 /// within it) means "no override here", so [`resolve`] falls through to the CLI flag (if any) and

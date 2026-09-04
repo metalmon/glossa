@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use kb_eval::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, token_summary, OpenAiBackend, StatusTicker,
+    DEFAULT_MAX_ROUNDS,
 };
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
@@ -964,6 +965,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // Run-wide shared snapshot (opened once above): reuse it instead of opening per
                 // question, so the matrix is built once for the whole run across all workers.
                 shared: shared_handle.clone(),
+                // Bound the eval reader by the operator's [tuning] max_rounds (was hardcoded 50);
+                // unset -> the engine default.
+                max_rounds: lab.tuning.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             };
 
             // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader

@@ -175,6 +175,8 @@ fn main() -> anyhow::Result<()> {
                         feedback_bool_metric: None,
                         // Legacy `kb-eval run` CLI opens per question (no shared handle wired here).
                         shared: None,
+                        // Legacy CLI has no lab config -> the default round cap.
+                        max_rounds: backend::openai::DEFAULT_MAX_ROUNDS,
                     })
                 }
                 BackendKind::Cli => {

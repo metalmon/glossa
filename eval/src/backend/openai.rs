@@ -384,9 +384,16 @@ pub struct OpenAiBackend {
     /// per-question `GraphStore::open` that made RSS scale with the worker count. `None` reproduces
     /// today's per-question open exactly. `run_eval` opens one and clones it into every worker.
     pub shared: Option<std::sync::Arc<glossa::graph::handle::GraphHandle>>,
+    /// Agent-loop round cap for THIS reader. `run_eval` sets it from `lab.toml`'s `[tuning]
+    /// max_rounds` (so an operator's config actually bounds the eval reader, not just reason/build);
+    /// callers without a lab config use [`DEFAULT_MAX_ROUNDS`].
+    pub max_rounds: usize,
 }
 
-const MAX_ROUNDS: usize = 50;
+/// Fallback agent-loop round cap for the eval reader when `lab.toml`'s `[tuning] max_rounds` is
+/// unset. `run_eval` passes the configured value through `OpenAiBackend.max_rounds`; this is only the
+/// default for callers without a lab config (the legacy CLI and tests).
+pub const DEFAULT_MAX_ROUNDS: usize = 50;
 
 impl AgentBackend for OpenAiBackend {
     fn needs_corpus(&self) -> bool {
@@ -520,7 +527,7 @@ impl OpenAiBackend {
             Some(&tools),
             exec,
             nba,
-            MAX_ROUNDS,
+            self.max_rounds,
             user_sim,
             capture,
         )?;
@@ -567,6 +574,7 @@ impl OpenAiBackend {
             feedback_score_metric: None,
             feedback_bool_metric: None,
             shared: None,
+            max_rounds: DEFAULT_MAX_ROUNDS,
         }
     }
 
