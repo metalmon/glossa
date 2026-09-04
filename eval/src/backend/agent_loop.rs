@@ -182,7 +182,7 @@ fn call_with_context_retry(
     transport: &dyn ChatTransport,
     ep: &Endpoint,
     system: Option<&str>,
-    messages: &mut Vec<Value>,
+    messages: &mut [Value],
     tools: Option<&Value>,
     temperature: Option<f64>,
 ) -> anyhow::Result<TurnReply> {
