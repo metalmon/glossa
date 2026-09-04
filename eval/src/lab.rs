@@ -211,6 +211,13 @@ pub struct LabConfig {
 pub struct Tuning {
     #[serde(default)]
     pub fanout_max: Option<usize>,
+    /// Reasoning-scope denylist for graph construction: documents whose corpus-relative path
+    /// CONTAINS any of these substrings are NEVER mined into the reasoning graph by `kbx build`
+    /// (and so not elaborated by `reason`/`distil`). Put generic vendor references here (e.g. a
+    /// CODESYS SDK manual) — they stay reachable via grep/search but must not be reified as
+    /// Resolutions, which pollutes glossary. Substring match, mirroring `kb graph prune --source`.
+    #[serde(default)]
+    pub reasoning_exclude: Vec<String>,
     #[serde(default)]
     pub max_rounds: Option<usize>,
     #[serde(default)]

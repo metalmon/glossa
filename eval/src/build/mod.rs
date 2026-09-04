@@ -239,6 +239,23 @@ fn clear_checkpoint(run_dir: &Path) -> Result<()> {
 /// `bridge.md`; Candidates and Finalize need neither. This means `--stage finalize` or
 /// `--stage candidates` runs on an indexed corpus with no `.glossa/kbx/` prompt files present at
 /// all — only Extract/Judge (which call a model) require a scaffolded workspace.
+/// Reasoning-scope denylist: drop every doc whose corpus-relative path CONTAINS any `exclude`
+/// substring, so generic-reference docs (a vendor SDK manual) are never mined into the reasoning
+/// graph. Returns `(kept_docs, dropped_count)`. Empty `exclude` is a no-op. Substring match mirrors
+/// `kb graph prune --source`, so the same pattern cleans an old graph and scopes a fresh build.
+pub(crate) fn apply_reasoning_scope(docs: Vec<String>, exclude: &[String]) -> (Vec<String>, usize) {
+    if exclude.is_empty() {
+        return (docs, 0);
+    }
+    let before = docs.len();
+    let kept: Vec<String> = docs
+        .into_iter()
+        .filter(|d| !exclude.iter().any(|p| d.contains(p)))
+        .collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
 pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
     let ontology = Ontology::load_or_default(&paths.root);
 
@@ -291,6 +308,19 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             let g = GraphStore::open(&paths.root).context("open graph store to enumerate docs")?;
             enumerate_docs(&g)?
         };
+
+        // Reasoning-scope denylist: drop generic-reference docs BEFORE extraction so they never
+        // become reasoning nodes (the CODESYS-SDK-as-junk-Resolutions problem). Substring match on
+        // the corpus-relative path, matching `kb graph prune --source`. `build` is the sole creator
+        // of grounded terminals from docs, so excluding here also scopes `reason`/`distil`.
+        let dropped;
+        (docs, dropped) = apply_reasoning_scope(docs, &lab.tuning.reasoning_exclude);
+        if dropped > 0 {
+            eprintln!(
+                "kbx build: reasoning-scope excluded {dropped} document(s) matching {:?}",
+                lab.tuning.reasoning_exclude
+            );
+        }
 
         // Incremental gate: compute the new/changed delta against the reasoning graph already
         // built, narrow `docs` to the FINAL extract list (NEW ∪ CHANGED, or every enumerated doc
@@ -736,6 +766,25 @@ mod tests {
             plan_extract(&delta, false, &all_docs),
             vec!["b.md".to_string(), "c.md".to_string()]
         );
+    }
+
+    #[test]
+    fn reasoning_scope_drops_only_excluded_substrings() {
+        let docs = vec![
+            "PLC/product-manual.pdf".to_string(),
+            "Runtime/Codesys/CODESYS Control V3 Manual.pdf".to_string(),
+            "Runtime/Codesys/CodesysCheatSheet.pdf".to_string(),
+            "IVK/device-guide.pdf".to_string(),
+        ];
+        let (kept, dropped) = apply_reasoning_scope(
+            docs.clone(),
+            &["CODESYS Control V3".into(), "CheatSheet".into()],
+        );
+        assert_eq!(dropped, 2);
+        assert_eq!(kept, vec!["PLC/product-manual.pdf", "IVK/device-guide.pdf"]);
+        // Empty denylist is a no-op (every doc kept).
+        let (kept2, dropped2) = apply_reasoning_scope(docs.clone(), &[]);
+        assert_eq!((kept2.len(), dropped2), (docs.len(), 0));
     }
 
     /// `--force` bypasses the delta entirely: every enumerated doc, even ones the delta doesn't
