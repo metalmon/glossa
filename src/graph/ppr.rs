@@ -292,10 +292,57 @@ pub fn ppr_push(
     eps: f32,
     k: usize,
 ) -> Vec<(String, f32)> {
+    use std::collections::HashSet;
+    if k == 0 {
+        return Vec::new();
+    }
+    let Some((p, seed_idx, _pops)) = push_estimate(csr, seeds, alpha, eps) else {
+        return Vec::new();
+    };
+    let seed_idx: HashSet<u32> = seed_idx;
+    let mut ranked: Vec<(u32, f32)> = p
+        .into_iter()
+        .filter(|(i, _)| !seed_idx.contains(i))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(k);
+    ranked
+        .into_iter()
+        .filter_map(|(i, s)| csr.id_of(i).map(|id| (id.to_string(), s)))
+        .collect()
+}
+
+/// The forward-push working-SET size for `seeds`: the number of node expansions (`pops`) the local
+/// push performs — i.e. how many nodes it touches. This is the quantity that must stay bounded by
+/// LOCALITY, not corpus size, and is exactly what the flat-RSS scale test asserts (a 20× larger
+/// corpus must not 20× the touch count). Same parameters and push as [`ppr_push`]; returns 0 when no
+/// seed resolves. Instrumentation for the scale gate — not on any serving path.
+pub fn ppr_push_touched(
+    csr: &crate::graph::csr::CsrTransition,
+    seeds: &HashMap<String, f32>,
+    alpha: f32,
+    eps: f32,
+) -> usize {
+    push_estimate(csr, seeds, alpha, eps)
+        .map(|(_, _, pops)| pops)
+        .unwrap_or(0)
+}
+
+/// Shared forward-push core behind [`ppr_push`] and [`ppr_push_touched`]. Runs the Andersen–Chung–Lang
+/// push and returns `(p, seed_idx, pops)`: the PPR estimate `p`, the resolved seed indices (excluded
+/// from ranking), and the number of node expansions (the working-set size). `None` when the seeds
+/// carry no positive mass or none resolves against the CSR.
+#[allow(clippy::type_complexity)]
+fn push_estimate(
+    csr: &crate::graph::csr::CsrTransition,
+    seeds: &HashMap<String, f32>,
+    alpha: f32,
+    eps: f32,
+) -> Option<(HashMap<u32, f32>, std::collections::HashSet<u32>, usize)> {
     use std::collections::{HashSet, VecDeque};
     let total: f32 = seeds.values().copied().filter(|w| *w > 0.0).sum();
-    if total <= 0.0 || k == 0 {
-        return Vec::new();
+    if total <= 0.0 {
+        return None;
     }
     // Residual mass over node indices, seeded from the normalized (resolvable) seed weights.
     let mut r: HashMap<u32, f32> = HashMap::new();
@@ -307,7 +354,7 @@ pub fn ppr_push(
         }
     }
     if r.is_empty() {
-        return Vec::new();
+        return None;
     }
     let wdeg = |i: u32| -> f32 { csr.neighbors(i).map(|(_, w)| w).sum() };
     let mut p: HashMap<u32, f32> = HashMap::new();
@@ -346,16 +393,7 @@ pub fn ppr_push(
             }
         }
     }
-    let mut ranked: Vec<(u32, f32)> = p
-        .into_iter()
-        .filter(|(i, _)| !seed_idx.contains(i))
-        .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(k);
-    ranked
-        .into_iter()
-        .filter_map(|(i, s)| csr.id_of(i).map(|id| (id.to_string(), s)))
-        .collect()
+    Some((p, seed_idx, pops))
 }
 
 #[cfg(test)]

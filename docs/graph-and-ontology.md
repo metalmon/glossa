@@ -134,13 +134,13 @@ former is queried by `--as-of`.
 
 ### Retrieval tuning
 
-An optional `[retrieval]` table holds per-corpus retrieval-time knobs. Today it
-carries one:
+An optional `[retrieval]` table holds per-corpus retrieval-time knobs:
 
 ```toml
 [retrieval]
 sim_weight = 0.1
 spine_weight = 1.0
+engine = "in_memory"   # or "mmap" for out-of-core retrieval on large corpora
 ```
 
 **`sim_weight`** is the weight a mechanical `SIMILAR` edge (derived by `graph
@@ -185,6 +185,24 @@ Precedence and caching match `sim_weight`: **env `GLOSSA_PPR_SPINE_WEIGHT` →
 `[retrieval].spine_weight` → default `1.0`**, and the resolved value is folded
 into the transition cache so a change rebuilds the matrix automatically. A clean
 A/B is a pure env flip: `GLOSSA_PPR_SPINE_WEIGHT=1` vs `=2` on the same corpus.
+
+**`engine`** selects how the Personalized-PageRank retrieval is stored and run:
+
+- **`in_memory`** (default) loads the whole transition matrix into the heap and
+  runs a global power-iteration. Simple and exact; its memory grows with the
+  corpus, so a large base (tens of thousands of documents) can exhaust RAM.
+- **`mmap`** stores the transition as a memory-mapped binary CSR and answers with
+  **forward-push local PPR**: it expands only the seed's local neighborhood, so a
+  request's working set — and steady-state memory — scales with *what a query
+  touches*, not with corpus size. This is the setting for high-load servers over
+  large corpora (one process, many concurrent clients, a flat memory ceiling).
+
+Both engines apply the same `sim_weight`/`spine_weight` tiers and return the same
+kind of ranking; `mmap` is an ε-approximation tuned for top-k retrieval. The CSR
+is a derived cache, rebuilt automatically when the graph or the weights change.
+Precedence mirrors the weight knobs: **env `GLOSSA_PPR_ENGINE` →
+`[retrieval].engine` → default `in_memory`**, so a corpus can opt in per-deployment
+or a sweep can flip it with one environment variable.
 
 ## Graph doctor
 
