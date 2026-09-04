@@ -273,10 +273,130 @@ pub fn ppr(
     out
 }
 
+/// Hard cap on forward-push node expansions — a bounded work budget so a pathological residual
+/// spread can't run unbounded (mirrors `traverse::REACH_MAX_VISITED`'s intent). The local push
+/// normally settles far below this; the cap only guards a degenerate graph.
+const PUSH_MAX_POPS: usize = 10_000;
+
+/// Andersen–Chung–Lang forward-push local PPR over an out-of-core [`csr::CsrTransition`](crate::graph::csr::CsrTransition).
+/// Only nodes whose residual exceeds `eps * weighted_degree` are ever expanded, so the working set
+/// scales with the seed's LOCAL cluster, not the corpus size — the memory-independent-of-N property.
+/// `alpha` = restart probability; `eps` = residual threshold (smaller = closer to exact, more work).
+/// Returns the top-`k` `(node_id, score)` by PPR mass, excluding the seed nodes themselves.
+/// ε-approximate (correct for top-k retrieval — we want the seed neighborhood ranking, not exact
+/// global PageRank). Byte-for-byte independent of the in-memory `ppr` above (kept as the A/B baseline).
+pub fn ppr_push(
+    csr: &crate::graph::csr::CsrTransition,
+    seeds: &HashMap<String, f32>,
+    alpha: f32,
+    eps: f32,
+    k: usize,
+) -> Vec<(String, f32)> {
+    use std::collections::{HashSet, VecDeque};
+    let total: f32 = seeds.values().copied().filter(|w| *w > 0.0).sum();
+    if total <= 0.0 || k == 0 {
+        return Vec::new();
+    }
+    // Residual mass over node indices, seeded from the normalized (resolvable) seed weights.
+    let mut r: HashMap<u32, f32> = HashMap::new();
+    let mut seed_idx: HashSet<u32> = HashSet::new();
+    for (id, w) in seeds.iter().filter(|(_, w)| **w > 0.0) {
+        if let Some(i) = csr.idx_of(id) {
+            *r.entry(i).or_default() += *w / total;
+            seed_idx.insert(i);
+        }
+    }
+    if r.is_empty() {
+        return Vec::new();
+    }
+    let wdeg = |i: u32| -> f32 { csr.neighbors(i).map(|(_, w)| w).sum() };
+    let mut p: HashMap<u32, f32> = HashMap::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut queued: HashSet<u32> = HashSet::new();
+    for (&i, &ri) in r.iter() {
+        if ri > eps * wdeg(i) {
+            queue.push_back(i);
+            queued.insert(i);
+        }
+    }
+    let mut pops = 0usize;
+    while let Some(u) = queue.pop_front() {
+        queued.remove(&u);
+        pops += 1;
+        if pops > PUSH_MAX_POPS {
+            break;
+        }
+        let ru = r.insert(u, 0.0).unwrap_or(0.0);
+        if ru <= 0.0 {
+            continue;
+        }
+        *p.entry(u).or_default() += alpha * ru;
+        let mass = (1.0 - alpha) * ru;
+        let neighbors: Vec<(u32, f32)> = csr.neighbors(u).collect();
+        let du: f32 = neighbors.iter().map(|(_, w)| *w).sum();
+        if du <= 0.0 {
+            continue;
+        }
+        for (v, w) in neighbors {
+            let rv = r.entry(v).or_default();
+            *rv += mass * w / du;
+            if *rv > eps * wdeg(v) && !queued.contains(&v) {
+                queue.push_back(v);
+                queued.insert(v);
+            }
+        }
+    }
+    let mut ranked: Vec<(u32, f32)> = p
+        .into_iter()
+        .filter(|(i, _)| !seed_idx.contains(i))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(k);
+    ranked
+        .into_iter()
+        .filter_map(|(i, s)| csr.id_of(i).map(|id| (id.to_string(), s)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
+
+    #[test]
+    fn ppr_push_ranks_local_neighborhood_and_is_bounded() {
+        // Line graph a-b-c-d-e, seed at a. Forward-push ranks nearer nodes higher and never needs
+        // the whole graph (locality). k=3 → top 3, seed excluded.
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let w = 1.0f32;
+        let adj = vec![
+            vec![(1usize, w)],
+            vec![(0, w), (2, w)],
+            vec![(1, w), (3, w)],
+            vec![(2, w), (4, w)],
+            vec![(3, w)],
+        ];
+        crate::graph::csr::CsrTransition::build(&ids, &adj, dir.path(), 1).unwrap();
+        let csr = crate::graph::csr::CsrTransition::open(dir.path(), 1)
+            .unwrap()
+            .unwrap();
+        let seeds = HashMap::from([("a".to_string(), 1.0f32)]);
+        let top = ppr_push(&csr, &seeds, 0.15, 1e-4, 3);
+        let order: Vec<&str> = top.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            &order[..2],
+            &["b", "c"],
+            "closer nodes rank higher; got {order:?}"
+        );
+        assert!(
+            top.windows(2).all(|w| w[0].1 >= w[1].1),
+            "scores monotone-decreasing: {top:?}"
+        );
+    }
 
     fn prov() -> Provenance {
         Provenance {
