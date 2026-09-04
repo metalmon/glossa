@@ -236,10 +236,6 @@ pub fn compose_ppr(
     query: &str,
     k: usize,
 ) -> anyhow::Result<Vec<Candidate>> {
-    let trans = g.ppr_transition()?;
-    if trans.is_empty() {
-        return Ok(vec![]);
-    }
     // Seed the restart vector: whole-question lexical hits get mass decreasing by BM25 rank; the
     // anchor entity the reader looked up gets a strong boost. No NER, no relation names.
     let mut seeds: HashMap<String, f32> = HashMap::new();
@@ -249,17 +245,34 @@ pub fn compose_ppr(
     for id in g.resolve(name)?.into_iter().take(5) {
         *seeds.entry(id).or_default() += 2.0;
     }
-    let ranked = ppr::ppr(&trans, &seeds, 0.15, 30, 1e-6);
-    // (`trans` is Arc<Transition>; &trans deref-coerces to &Transition)
+    if seeds.is_empty() {
+        return Ok(vec![]);
+    }
+    // Rank by connectivity. `engine = mmap` → out-of-core forward-push over the memory-mapped CSR
+    // (working set ∝ the seed's local cluster, RSS ⊥ corpus size); else the historical in-memory
+    // global power-iteration. Fetch a headroom multiple of `k` so the structural/seed filter below
+    // still has `k` reasoning nodes to surface. Both return `(id, score)` in descending score order.
+    let want = k.saturating_mul(3).max(k + 32);
+    let ranked: Vec<(String, f32)> = if let Some(csr) = g.csr()? {
+        if csr.is_empty() {
+            return Ok(vec![]);
+        }
+        ppr::ppr_push(&csr, &seeds, 0.15, 1e-6, want)
+    } else {
+        let trans = g.ppr_transition()?;
+        if trans.is_empty() {
+            return Ok(vec![]);
+        }
+        // (`trans` is Arc<Transition>; &trans deref-coerces to &Transition)
+        ppr::ppr(&trans, &seeds, 0.15, 30, 1e-6)
+    };
     if ranked.is_empty() {
         return Ok(vec![]);
     }
-    // id -> (node_type, label), one pass; avoids a DB hit per ranked node.
-    let meta: HashMap<String, (String, String)> = g
-        .all_nodes()?
-        .into_iter()
-        .map(|n| (n.id, (n.node_type, n.label)))
-        .collect();
+    // id -> (node_type, label) for ONLY the ranked ids — O(k), not O(all nodes). Replaces the former
+    // full `all_nodes()` scan; engine-agnostic (a plain batched SELECT), so both paths share it.
+    let ranked_ids: Vec<&str> = ranked.iter().map(|(id, _)| id.as_str()).collect();
+    let meta = g.node_metas(&ranked_ids)?;
     let structural: HashSet<&str> = crate::graph::STRUCTURAL_NODES.iter().copied().collect();
     let seed_ids: HashSet<&String> = seeds.keys().collect();
     let mut out = Vec::new();

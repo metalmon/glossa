@@ -1425,6 +1425,39 @@ impl GraphStore {
         Self::all_nodes_c(&c)
     }
 
+    /// Batch `(node_type, label)` for only the given ids — one `SELECT ... WHERE id IN (…)` per chunk
+    /// (chunked under SQLite's 999-bound-parameter limit). O(k) in the number of ids, NOT O(all
+    /// nodes): the out-of-core replacement for `all_nodes()` when a caller only needs to label a
+    /// bounded top-k (see `compose_ppr`). Missing ids are simply absent from the returned map.
+    pub fn node_metas(
+        &self,
+        ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, (String, String)>> {
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let c = self.conn.lock().unwrap();
+        for chunk in ids.chunks(900) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql =
+                format!("SELECT id, node_type, label FROM nodes WHERE id IN ({placeholders})");
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, nt, label) = row?;
+                out.insert(id, (nt, label));
+            }
+        }
+        Ok(out)
+    }
+
     /// Return the id of the first node (any type) whose normalized label matches.
     pub fn find_by_label(&self, label: &str) -> anyhow::Result<Option<String>> {
         let c = self.conn.lock().unwrap();
@@ -2845,5 +2878,21 @@ mod tests {
             g.csr().unwrap().is_none(),
             "engine=in_memory (the default) → no CSR"
         );
+    }
+
+    #[test]
+    fn node_metas_returns_only_requested() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        fact(&g, "a", "A", &[]);
+        fact(&g, "b", "B", &[]);
+        fact(&g, "c", "C", &[]);
+        let m = g.node_metas(&["a", "c"]).unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(m.contains_key("a") && m.contains_key("c") && !m.contains_key("b"));
+        assert_eq!(m.get("a").unwrap(), &("Fact".to_string(), "A".to_string()));
+        // Absent ids are silently dropped, not errors.
+        assert!(g.node_metas(&["nope"]).unwrap().is_empty());
+        assert!(g.node_metas(&[]).unwrap().is_empty());
     }
 }
