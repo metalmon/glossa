@@ -856,6 +856,29 @@ pub fn glossary_with_query(
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
 ) -> String {
+    // Log the FULL rendered body (what the reader actually sees), not just an id count — otherwise a
+    // trace is a black box and a mislabeled/mis-grounded chain terminal is invisible. Bodies are
+    // already bounded by the entry/depth caps inside. Wrapper captures every return path of _inner.
+    let body = glossary_with_query_inner(idx, g, name, query, spec, as_of, stale, scope);
+    trace.log(
+        "glossary",
+        json!({ "name": name, "query": query }),
+        json!({ "body": body }),
+    );
+    body
+}
+
+#[allow(clippy::too_many_arguments)]
+fn glossary_with_query_inner(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    name: &str,
+    query: Option<&str>,
+    spec: &ChainSpec,
+    as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
+    scope: Option<&str>,
+) -> String {
     let at = match as_of
         .map(crate::graph::temporal::normalize_point)
         .transpose()
@@ -869,11 +892,6 @@ pub fn glossary_with_query(
     };
     match g.resolve(name) {
         Ok(ids) => {
-            trace.log(
-                "glossary",
-                json!({ "name": name, "query": query }),
-                json!({ "ids": ids.len() }),
-            );
             if ids.is_empty() {
                 return "(no matches)".to_string();
             }
@@ -1201,7 +1219,6 @@ pub fn related(
             ));
         }
     }
-    let similar_count = lines.len();
     if let Ok(Some(meta)) = g.node_meta(&id) {
         if let Some(comm) = meta.community {
             if let Ok(siblings) = g.community_siblings(comm, &id, COMMUNITY_TOP_LIMIT) {
@@ -1218,17 +1235,15 @@ pub fn related(
             }
         }
     }
-    trace.log(
-        "related",
-        json!({"id": id}),
-        json!({"similar": similar_count, "community": lines.len() - similar_count}),
-    );
     let body = if lines.is_empty() {
         "(no related cases)".to_string()
     } else {
         lines.join("\n")
     };
-    prepend_note(note, body)
+    let out = prepend_note(note, body);
+    // Log the rendered body (what the reader sees), not just counts — see glossary wrapper.
+    trace.log("related", json!({"id": id}), json!({ "body": out }));
+    out
 }
 
 /// One structural-neighbor line: `<EDGE_TYPE> <arrow>  <endpoint><meta><read-anchor>`.
@@ -1319,17 +1334,19 @@ pub fn neighbors(
             }
         }
     }
-    trace.log(
-        "neighbors",
-        json!({"id": id, "direction": direction}),
-        json!({"edges": lines.len()}),
-    );
     let body = if lines.is_empty() {
         "(no structural edges)".to_string()
     } else {
         lines.join("\n")
     };
-    prepend_note(note, body)
+    let out = prepend_note(note, body);
+    // Log the rendered body (what the reader sees), not just an edge count — see glossary wrapper.
+    trace.log(
+        "neighbors",
+        json!({"id": id, "direction": direction}),
+        json!({ "body": out }),
+    );
+    out
 }
 
 /// Default bridge budget when `bridge=true`: one cross-document hop covers almost all real
@@ -1430,12 +1447,14 @@ pub fn reach(
                         .is_some_and(|h| in_scope(Some(m), owning_doc(g, &h.node).as_deref()))
                 });
             }
+            let rendered = render_reach_result(idx, g, &from, to.as_deref(), relation, depth, &res);
+            // Log the rendered body (what the reader sees), not just counts — see glossary wrapper.
             trace.log(
                 "reach",
                 json!({"from": from, "to": to, "relation": relation, "bridge": bridge}),
-                json!({"targets": res.targets.len(), "paths": res.paths.len()}),
+                json!({ "body": rendered }),
             );
-            render_reach_result(idx, g, &from, to.as_deref(), relation, depth, &res)
+            rendered
         }
         Err(e) => format!("reach error: {e}"),
     };
