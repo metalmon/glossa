@@ -40,6 +40,20 @@ pub struct ReachResult {
     pub targets: Vec<String>,
 }
 
+/// Trust score of a hop-chain for ranking `reach` discovery results: the PRODUCT of its hop
+/// confidences. A chaining `Edge` hop (and the `None` first hop) is authored/certain → contributes
+/// 1.0; a cross-document `Bridge` hop contributes its own `confidence` (< 1.0), so each fuzzy bridge
+/// multiplies the chain's score down. An all-chaining path (empty product) scores 1.0 — the most
+/// trustworthy. Range `(0.0, 1.0]`.
+fn path_confidence(path: &[Hop]) -> f32 {
+    path.iter()
+        .filter_map(|h| match &h.via {
+            Some(HopVia::Bridge { confidence, .. }) => Some(*confidence),
+            _ => None,
+        })
+        .product()
+}
+
 /// Split a relation/edge-type name into lowercased alphanumeric tokens (on `_`, spaces, and other
 /// non-alphanumeric separators): `LOCATED_IN` → `["located", "in"]`.
 fn tokens(s: &str) -> Vec<String> {
@@ -352,7 +366,26 @@ pub fn reach(
         }
     }
 
+    // Rank the multi-answer discovery case (verify early-returned a single path) so the reader,
+    // which reads the top paths first, doesn't have to guess which chain is the answer.
+    let (paths, targets) = rank_paths(paths, targets);
     Ok(ReachResult { paths, targets })
+}
+
+/// Order index-aligned discovery `(paths, targets)` best-first: float the most TRUSTWORTHY and most
+/// DIRECT chain to the top. Sort key = `path_confidence` DESC (pure-chaining = 1.0 ranks above any
+/// bridged chain; each fuzzy bridge multiplies it down), then depth ASC (shorter breaks a tie). The
+/// pairs are sorted together so `paths[i]` still ends at `targets[i]`. Pure ordering — no traversal,
+/// so `reach`'s `REACH_MAX_VISITED` budget is unaffected.
+fn rank_paths(paths: Vec<Vec<Hop>>, targets: Vec<String>) -> (Vec<Vec<Hop>>, Vec<String>) {
+    let mut ranked: Vec<(Vec<Hop>, String)> = paths.into_iter().zip(targets).collect();
+    ranked.sort_by(|a, b| {
+        path_confidence(&b.0)
+            .partial_cmp(&path_confidence(&a.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.len().cmp(&b.0.len()))
+    });
+    ranked.into_iter().unzip()
 }
 
 pub fn neighbors(
@@ -385,6 +418,67 @@ pub fn neighbors(
 mod tests {
     use super::*;
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
+
+    // ---- reach() ranking (path_confidence / rank_paths) ----
+
+    fn start_hop(n: &str) -> Hop {
+        Hop {
+            node: n.into(),
+            via: None,
+        }
+    }
+    fn chain_hop(n: &str) -> Hop {
+        Hop {
+            node: n.into(),
+            via: Some(HopVia::Edge {
+                edge_type: "REL".into(),
+                forward: true,
+            }),
+        }
+    }
+    fn bridge_hop(n: &str, conf: f32) -> Hop {
+        Hop {
+            node: n.into(),
+            via: Some(HopVia::Bridge {
+                term: "t".into(),
+                confidence: conf,
+            }),
+        }
+    }
+
+    #[test]
+    fn path_confidence_multiplies_bridges_chaining_is_one() {
+        // Pure chaining (incl. the None first hop) -> certain, 1.0.
+        assert_eq!(
+            path_confidence(&[start_hop("a"), chain_hop("b"), chain_hop("c")]),
+            1.0
+        );
+        // One bridge -> its confidence.
+        assert!((path_confidence(&[start_hop("a"), bridge_hop("b", 0.4)]) - 0.4).abs() < 1e-6);
+        // Two bridges -> product.
+        assert!(
+            (path_confidence(&[start_hop("a"), bridge_hop("b", 0.4), bridge_hop("c", 0.5)]) - 0.2)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn rank_paths_confidence_dominates_then_depth() {
+        let a = vec![start_hop("s"), chain_hop("x"), chain_hop("A")]; // conf 1.0, len 3
+        let b = vec![start_hop("s"), bridge_hop("B", 0.4)]; // conf 0.4, len 2
+        let c = vec![start_hop("s"), chain_hop("C")]; // conf 1.0, len 2
+        let (paths, targets) = rank_paths(
+            vec![a, b, c],
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        // Confidence desc (pure-chaining above the fuzzy bridge), then depth asc (C before A).
+        assert_eq!(targets, vec!["C", "A", "B"]);
+        // paths stay aligned with targets.
+        assert_eq!(paths[0].last().unwrap().node, "C");
+        assert_eq!(paths[1].last().unwrap().node, "A");
+        assert_eq!(paths[2].last().unwrap().node, "B");
+    }
 
     fn prov() -> Provenance {
         Provenance {
