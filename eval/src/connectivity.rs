@@ -17,14 +17,39 @@ pub struct HopConn {
 
 const RANK_WINDOW: usize = 200;
 
+/// Extract every run of ASCII digits in `s`, parsed as `u32` — the integer tokens of a page/range
+/// string like `"p.224"` or `"5-10"`.
+fn digit_tokens(s: &str) -> Vec<u32> {
+    s.split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<u32>().ok())
+        .collect()
+}
+
+/// True when a Section's `range` string covers `target` page. Exact match against any integer
+/// token in `range`; when `range` yields exactly two tokens (a "5-10"-style span) also accept
+/// `target` falling inclusively between them. A plain substring check would false-positive (page
+/// "1" matching a range of "10"), so this compares parsed integers, never raw digit strings.
+fn range_matches_page(range: &str, target: u32) -> bool {
+    let nums = digit_tokens(range);
+    if nums.contains(&target) {
+        return true;
+    }
+    if let [a, b] = nums[..] {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        return target >= lo && target <= hi;
+    }
+    false
+}
+
 /// Map "<doc>#p.<N>" -> the reasoning nodes that MENTIONS a Section grounded at that doc+page.
 fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
     let (doc, page) = match source.split_once('#') {
         Some((d, frag)) => {
-            let page: String = frag.chars().filter(|c| c.is_ascii_digit()).collect();
-            (d.to_string(), page)
+            let digits: String = frag.chars().filter(|c| c.is_ascii_digit()).collect();
+            (d.to_string(), digits.parse::<u32>().ok())
         }
-        None => (source.to_string(), String::new()),
+        None => (source.to_string(), None),
     };
     let base = std::path::Path::new(&doc)
         .file_name()
@@ -46,8 +71,10 @@ fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
         if sp_base != base {
             continue;
         }
-        if !page.is_empty() && !rng.contains(&page) {
-            continue;
+        if let Some(target) = page {
+            if !range_matches_page(&rng, target) {
+                continue;
+            }
         }
         // reasoning nodes that MENTIONS this section
         let mut mentioners: Vec<String> = g
@@ -145,6 +172,24 @@ mod tests {
             confidence: 1.0,
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn page_match_is_exact_not_substring() {
+        // Page "1" must NOT match a section ranged "p.10" (a raw substring check would false-
+        // positive here since "1" is a substring of "10").
+        assert!(!range_matches_page("p.10", 1));
+        // The real page still matches exactly.
+        assert!(range_matches_page("p.10", 10));
+        assert!(range_matches_page("p.5", 5));
+        assert!(!range_matches_page("p.5", 50));
+        // A "5-10"-style span matches any page inside it, inclusive of the endpoints.
+        assert!(range_matches_page("5-10", 7));
+        assert!(range_matches_page("5-10", 5));
+        assert!(range_matches_page("5-10", 10));
+        assert!(!range_matches_page("5-10", 11));
+        // No digits at all -> no match.
+        assert!(!range_matches_page("appendix", 1));
     }
 
     #[test]
