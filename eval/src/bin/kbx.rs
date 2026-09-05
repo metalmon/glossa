@@ -495,6 +495,17 @@ enum DatasetCmd {
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
+    /// Reclassify originally-answerable cases whose question the runtime coverage-abstention gate
+    /// would block (deterministic-abstention-gate C3a) as explicit `unanswerable` cases: `answerable`
+    /// flips to `false`, `hop_type` becomes `unanswerable`, and `gated`/`orig_hop:<t>` tags record
+    /// the change (idempotent — a case already tagged `gated` is skipped on a re-run). Only acts
+    /// when the corpus ontology's `[abstention] policy = "safety_first"`; otherwise a no-op notice
+    /// is printed and the file is left untouched. Backs `file` up to `<file>.bak` first and writes
+    /// a `coverage-gaps.md` report (id + question + absent terms) under `<corpus>/.glossa/kbx/`.
+    GateMark {
+        /// Dataset TOML to reclassify in place.
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -1512,7 +1523,72 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
             }
             Ok(())
         }
+        DatasetCmd::GateMark { file } => run_dataset_gate_mark(file),
     }
+}
+
+/// `kbx dataset gate-mark <file>` end-to-end (see [`DatasetCmd::GateMark`]). Auto-resolves the
+/// corpus root from `file`'s ancestors (the same walk `dataset stat` already uses at its
+/// answer-reachability block, since `file` — not a `--path` flag — is the only input here); acts
+/// only when that corpus's ontology opts into `[abstention] policy = "safety_first"` (same gate
+/// `mcp::GlossaServer::abstention_gate` checks for the runtime path). `coverage_k` defaults to 1,
+/// mirroring that same runtime default.
+fn run_dataset_gate_mark(file: PathBuf) -> Result<()> {
+    let corpus_root = file
+        .ancestors()
+        .find(|a| a.join(".glossa").is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let ontology = glossa::graph::ontology::Ontology::load_or_default(&corpus_root);
+    if ontology.abstention_policy().as_deref() != Some("safety_first") {
+        println!(
+            "dataset gate-mark: no-op (abstention_policy is not \"safety_first\" for corpus at {}) — file left untouched",
+            corpus_root.display()
+        );
+        return Ok(());
+    }
+    let k = ontology.coverage_k().unwrap_or(1) as usize;
+    let handle = glossa::graph::handle::GraphHandle::open(&corpus_root)
+        .with_context(|| format!("opening graph at {}", corpus_root.display()))?;
+
+    let mut cases = dataset_ops::load_cases(&file)?;
+    let marks = dataset_ops::gate_mark(&mut cases, &handle.graph, &handle.idx, k);
+
+    let bak = dataset_ops::backup_path(&file);
+    std::fs::copy(&file, &bak)
+        .with_context(|| format!("backing up {} to {}", file.display(), bak.display()))?;
+    dataset_ops::write_cases(&file, &cases)?;
+
+    let gaps_path = corpus_root.join(".glossa").join("kbx").join("coverage-gaps.md");
+    if let Some(parent) = gaps_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let by_id: std::collections::HashMap<&str, &str> = cases
+        .iter()
+        .map(|c| (c.id.as_str(), c.question.as_str()))
+        .collect();
+    let mut gaps_md = String::from("# Coverage gaps\n\nCases reclassified as unanswerable by `kbx dataset gate-mark` (coverage-abstention gate blocked their question).\n\n");
+    for m in &marks {
+        let q = by_id.get(m.id.as_str()).copied().unwrap_or("");
+        gaps_md.push_str(&format!(
+            "- `{}`: {}\n  - absent: {}\n\n",
+            m.id,
+            q,
+            m.absent_terms.join(", ")
+        ));
+    }
+    std::fs::write(&gaps_path, gaps_md)
+        .with_context(|| format!("writing {}", gaps_path.display()))?;
+
+    println!(
+        "dataset gate-mark: {} case(s) reclassified as unanswerable (backed up {} -> {}); gaps written to {}",
+        marks.len(),
+        file.display(),
+        bak.display(),
+        gaps_path.display()
+    );
+    Ok(())
 }
 
 /// Truncate `s` to at most `max` chars, appending an ellipsis when cut — keeps `sample`'s answer

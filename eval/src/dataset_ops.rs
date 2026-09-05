@@ -10,6 +10,9 @@
 use crate::dataset::Question;
 use crate::dataset_toml::parse_dataset_toml;
 use anyhow::{Context, Result};
+use glossa::graph::store::GraphStore;
+use glossa::index::store::DocIndex;
+use glossa::tools::abstention::{coverage_uncovered, covered};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::Serialize;
@@ -387,6 +390,59 @@ pub fn sample_cases(cases: &[Case], n: usize, seed: u64) -> Vec<Case> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------------------------
+// gate-mark
+// ---------------------------------------------------------------------------------------------
+
+/// One coverage gap found by [`gate_mark`]: the reclassified case's `id`, the question's absent
+/// distinctive terms (per [`coverage_uncovered`]), and the `hop_type` it had before reclassification
+/// (so a later un-gate pass can restore it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GapMark {
+    pub id: String,
+    pub absent_terms: Vec<String>,
+    pub original_hop_type: String,
+}
+
+/// Reclassify originally-answerable cases whose question is gate-blocked as explicit unanswerable
+/// cases: `gate-blocked` means the runtime coverage-abstention gate's own threshold fires — at
+/// least `k` of the question's distinctive terms are uncovered (`coverage_uncovered(question,
+/// covered, k).len() >= k`; `covered` wraps [`glossa::tools::abstention::covered`] over `g`/`idx`).
+/// For each such case: `answerable` flips to `false`, `hop_type` becomes `"unanswerable"`, and a
+/// `"gated"` tag plus an `"orig_hop:<original hop_type>"` tag are appended (the latter preserves
+/// what to restore `hop_type` to, even when it was empty — `"orig_hop:"` still records that). A
+/// `GapMark` is pushed for each reclassified case, most useful for a `coverage-gaps.md` report.
+///
+/// Already-unanswerable cases are left untouched — they are not a coverage gap to record, they're
+/// already-declared-unanswerable. A case already tagged `"gated"` is skipped so repeated runs over
+/// the same file are idempotent (no double-marking, no stacked `orig_hop:` tags). Pure: no IO: `g`
+/// and `idx` are read-only lookups threaded through to `covered`; the caller owns opening them and
+/// writing the mutated `cases` back out.
+pub fn gate_mark(cases: &mut [Case], g: &GraphStore, idx: &DocIndex, k: usize) -> Vec<GapMark> {
+    let mut marks = Vec::new();
+    for c in cases.iter_mut() {
+        if !c.answerable || c.tags.iter().any(|t| t == "gated") {
+            continue;
+        }
+        let uncovered = coverage_uncovered(&c.question, &|t: &str| covered(t, idx, g), k);
+        if uncovered.len() < k {
+            continue;
+        }
+        let original_hop_type = c.hop_type.clone();
+        let absent_terms: Vec<String> = uncovered.into_iter().map(|a| a.term).collect();
+        c.answerable = false;
+        c.hop_type = "unanswerable".to_string();
+        c.tags.push("gated".to_string());
+        c.tags.push(format!("orig_hop:{original_hop_type}"));
+        marks.push(GapMark {
+            id: c.id.clone(),
+            absent_terms,
+            original_hop_type,
+        });
+    }
+    marks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +650,90 @@ mod tests {
         assert_eq!(s.blank, 0);
         assert_eq!(s.needs_graph.get("yes"), Some(&1));
         assert_eq!(s.needs_graph.get("(unset)"), Some(&2));
+    }
+
+    /// A minimal on-disk `GraphStore`+`DocIndex` fixture where only "profibus" is covered (indexed
+    /// via a BM25 chunk) — mirrors `src/tools/abstention.rs`'s own `covered_by_bm25_hit` fixture,
+    /// the existing pattern for constructing these two stores in-memory-equivalent for a test.
+    fn covered_profibus_fixture() -> (tempfile::TempDir, DocIndex, GraphStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[glossa::model::Chunk {
+            doc_path: "profibus.pdf".into(),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "profibus maxTsdr timeout".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        (dir, idx, g)
+    }
+
+    #[test]
+    fn gate_mark_reclassifies_uncovered_answerable_and_preserves_original() {
+        let (_dir, idx, g) = covered_profibus_fixture();
+        // one answerable multihop case whose question has an uncovered distinctive term -> becomes
+        // gated (tag "gated" added, answerable flipped to false for judge, orig hop_type recorded).
+        let mut gated_case = case("c1", "What is Zylophon?", "some answer");
+        gated_case.hop_type = "multihop".into();
+        // one answerable case fully covered ("profibus" is indexed) -> untouched.
+        let mut covered_case = case("c2", "What is profibus?", "ans2");
+        covered_case.hop_type = "lexical".into();
+        let mut cases = vec![gated_case, covered_case];
+
+        let marks = gate_mark(&mut cases, &g, &idx, 1);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].id, "c1");
+        assert_eq!(marks[0].original_hop_type, "multihop");
+        assert!(marks[0]
+            .absent_terms
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("Zylophon")));
+
+        let gated = cases.iter().find(|c| c.id == marks[0].id).unwrap();
+        assert!(gated.tags.iter().any(|t| t == "gated"));
+        assert!(!gated.answerable);
+        assert_eq!(gated.hop_type, "unanswerable");
+        assert!(
+            gated.tags.iter().any(|t| t.starts_with("orig_hop:")),
+            "original hop_type preserved"
+        );
+        assert!(gated.tags.iter().any(|t| t == "orig_hop:multihop"));
+
+        let untouched = cases.iter().find(|c| c.id == "c2").unwrap();
+        assert!(untouched.answerable, "fully-covered case stays answerable");
+        assert_eq!(untouched.hop_type, "lexical");
+        assert!(!untouched.tags.iter().any(|t| t == "gated"));
+    }
+
+    #[test]
+    fn gate_mark_is_idempotent_and_skips_already_unanswerable() {
+        let (_dir, idx, g) = covered_profibus_fixture();
+        let mut already_gated = case("c1", "What is Zylophon?", "some answer");
+        already_gated.hop_type = "unanswerable".into();
+        already_gated.answerable = false;
+        already_gated.tags = vec!["gated".into(), "orig_hop:multihop".into()];
+        let mut already_unanswerable = case("c2", "What is Zylophon too?", "ans");
+        already_unanswerable.answerable = false;
+        let mut cases = vec![already_gated, already_unanswerable];
+
+        let marks = gate_mark(&mut cases, &g, &idx, 1);
+        assert!(
+            marks.is_empty(),
+            "already-gated and already-unanswerable cases produce no new marks"
+        );
+        // No double-marking / stacked orig_hop tags on the already-gated case.
+        let c1 = cases.iter().find(|c| c.id == "c1").unwrap();
+        assert_eq!(
+            c1.tags.iter().filter(|t| *t == "gated").count(),
+            1,
+            "gated tag not duplicated"
+        );
+        assert_eq!(
+            c1.tags.iter().filter(|t| t.starts_with("orig_hop:")).count(),
+            1,
+            "orig_hop tag not stacked"
+        );
     }
 
     #[test]
