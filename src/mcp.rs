@@ -60,6 +60,15 @@ pub struct GlossaServer {
     /// `serve_streamable_http`) must give each NEW session its own fresh tracker rather than
     /// sharing this `Arc` via `clone()` — see the factory closure's override there.
     pub signals: Arc<Mutex<crate::tools::retrieval_progress::ReaderSignals>>,
+    /// Per-SESSION record of `(doc, loc)` locations this session has actually `read` — the trust
+    /// anchor for the Editor `check_answer` tool's Tier-2 verbatim+citation check (deterministic-
+    /// abstention-gate, C2): [`crate::tools::abstention::verify_spans`] only trusts a quote fetched
+    /// from a location this set contains. Populated by `read`/`read_common` on every successful
+    /// chunk read (see `parse_read_success_header`). Same sharing story as `signals` above: `new()`
+    /// gives the one stdio session its own set; the streamable-http factory (`main.rs`,
+    /// `serve_streamable_http`) must likewise give each NEW session a fresh one rather than sharing
+    /// this `Arc` via `clone()`.
+    pub read_log: Arc<Mutex<std::collections::HashSet<(String, String)>>>,
     /// The shared retrieval snapshot ([`crate::graph::handle::GraphHandle`]): the graph store, doc
     /// index, and pre-warmed CSR, built once and swapped on a corpus change (RCU). Every read tool
     /// loads it lock-free instead of re-opening per call. An `Arc` around the `ArcSwapOption` is
@@ -101,6 +110,9 @@ const EDITOR_TOOLS: &[&str] = &[
     "graph_generalize",
     "graph_stats",
     "graph_doctor",
+    // Tier-2 best-effort verbatim+citation check (deterministic-abstention-gate, C2) — Editor
+    // authoring-only, not called by the eval reader, so no eval-crate routing sites need updating.
+    "check_answer",
     // Read-only, but withheld from Reader: low-level or rarely-reached navigation the weak reader
     // never calls in practice (measured over many runs: resolve 0%, constraint_solve 0%, neighbors
     // ~2%, related ~2-8% and correlating with wrong answers), so it is clutter that muddies tool
@@ -213,6 +225,7 @@ impl GlossaServer {
             signals: Arc::new(Mutex::new(
                 crate::tools::retrieval_progress::ReaderSignals::new(),
             )),
+            read_log: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
             profile,
@@ -656,6 +669,30 @@ pub(crate) struct ReadArgs {
         description = "PDF only: return a raster of page `n` as JPEG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text. Requires the server to be started with --vision."
     )]
     page_image: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CheckSpanArg {
+    #[schemars(description = "document path the quote is claimed to come from, exactly as read() showed it")]
+    doc: String,
+    #[schemars(
+        description = "the chunk/page location within `doc` — the n in a `path#n` reference (e.g. \"5\") — that was actually read()"
+    )]
+    loc: String,
+    #[schemars(description = "the exact text claimed to be verbatim at doc#loc")]
+    quote: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CheckAnswerArgs {
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_vec_loose"
+    )]
+    #[schemars(
+        description = "citations to verify: each {doc, loc, quote} must have been read() this session, with `quote` appearing verbatim (whitespace-normalized) at that location"
+    )]
+    spans: Vec<CheckSpanArg>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1183,6 +1220,22 @@ impl GraphUpdateArgs {
     }
 }
 
+/// Parse a successful `read` chunk reply's leading `── {doc}#{loc} ──` header back into the
+/// `(doc, loc)` pair it was served for — the SAME normalization the `check_answer` fetch/verify
+/// path keys on, so the two join. `None` for any non-chunk reply (error text, `page_image`'s
+/// one-line reply, an omnivorous graph-node read) — those aren't populated into `read_log`.
+fn parse_read_success_header(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix("── ")?;
+    let end = rest.find(" ──")?;
+    let token = &rest[..end];
+    let pos = token.rfind('#')?;
+    let loc = &token[pos + 1..];
+    if loc.is_empty() || !loc.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((token[..pos].to_string(), loc.to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn read_common(
     root: &std::path::Path,
@@ -1193,9 +1246,13 @@ fn read_common(
     page_image: bool,
     include_images: bool,
     trace: &crate::trace::TraceLog,
+    read_log: &Mutex<std::collections::HashSet<(String, String)>>,
     wrap_text: impl FnOnce(String) -> String,
 ) -> CallToolResult {
     let mut out = crate::tools::read(root, idx, g, path, n, page_image, trace);
+    if let Some(key) = parse_read_success_header(&out.text) {
+        read_log.lock().unwrap().insert(key);
+    }
     out.text = wrap_text(out.text);
     let mut content = Vec::new();
     // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
@@ -1276,8 +1333,57 @@ impl GlossaServer {
             page_image,
             include_images,
             &self.trace,
+            &self.read_log,
             |body| self.apply_signals("read", &key, ids, body),
         ))
+    }
+
+    #[tool(
+        description = "Editor-only best-effort check: for each {doc, loc, quote} span, verify the quote was actually seen — `doc`/`loc` must match a location this session already called `read` on, AND `quote` must appear verbatim (whitespace-normalized) in that location's text. Use this before finalizing an authored answer's citations, to catch a fabricated quote or a citation to a location never actually read. Returns {ok, verdicts}: `ok` is true only if every span verifies; each verdict line is OK / NOT VERBATIM (read, but the quote doesn't match) / NOT READ (doc#loc was never read this session). This is a best-effort authoring aid, not a retrieval tool — it does not fetch or search anything new."
+    )]
+    async fn check_answer(
+        &self,
+        Parameters(a): Parameters<CheckAnswerArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let h = self.handle().map_err(internal)?;
+        let read_log = self.read_log.lock().unwrap().clone();
+        let root = self.root.clone();
+        let fetch = |doc: &str, loc: &str| -> Option<String> {
+            let n: u64 = loc.parse().ok()?;
+            let out = crate::tools::read(
+                &root,
+                &h.idx,
+                Some(&h.graph),
+                doc,
+                n,
+                false,
+                &crate::trace::TraceLog::disabled(),
+            );
+            Some(out.text)
+        };
+        let spans: Vec<crate::tools::abstention::Span> = a
+            .spans
+            .into_iter()
+            .map(|s| crate::tools::abstention::Span {
+                doc: s.doc,
+                loc: s.loc,
+                quote: s.quote,
+            })
+            .collect();
+        let verdicts = crate::tools::abstention::verify_spans(&spans, &read_log, &fetch);
+        let ok = verdicts
+            .iter()
+            .all(|v| matches!(v, crate::tools::abstention::SpanVerdict::Ok));
+        let mut body = format!("ok: {ok}\n");
+        for (s, v) in spans.iter().zip(verdicts.iter()) {
+            let tag = match v {
+                crate::tools::abstention::SpanVerdict::Ok => "OK",
+                crate::tools::abstention::SpanVerdict::NotVerbatim => "NOT VERBATIM",
+                crate::tools::abstention::SpanVerdict::NotInReadLog => "NOT READ",
+            };
+            body.push_str(&format!("{tag}  {}#{} — \"{}\"\n", s.doc, s.loc, s.quote));
+        }
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -2352,6 +2458,68 @@ mod tests {
         assert!(
             format!("{out:?}").contains("a.md"),
             "in-place edit picked up after reading the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_answer_verifies_a_read_span_and_flags_a_fabricated_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nthe value is 42 tbit\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        // check_answer is Editor-only — not in the Reader profile's route set.
+        let reader = GlossaServer::new(
+            dir.path().to_path_buf(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        );
+        assert!(
+            !reader.tool_router.has_route("check_answer"),
+            "check_answer must be withheld from the Reader profile"
+        );
+        assert!(
+            srv.tool_router.has_route("check_answer"),
+            "check_answer must be available to the Editor profile"
+        );
+        // Read the doc first — only a location this session actually read joins the check.
+        let _ = srv
+            .read(Parameters(ReadArgs {
+                path: "a.md".into(),
+                n: 1,
+                page_image: None,
+                include_images: None,
+            }))
+            .await
+            .unwrap();
+        let out = srv
+            .check_answer(Parameters(CheckAnswerArgs {
+                spans: vec![
+                    CheckSpanArg {
+                        doc: "a.md".into(),
+                        loc: "1".into(),
+                        quote: "value is 42".into(),
+                    },
+                    CheckSpanArg {
+                        doc: "a.md".into(),
+                        loc: "1".into(),
+                        quote: "a fabricated quote never in the doc".into(),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        let text = format!("{out:?}");
+        assert!(text.contains("ok: false"), "one span is fabricated: {text}");
+        assert!(text.contains("OK"), "the real span must verify: {text}");
+        assert!(
+            text.contains("NOT VERBATIM"),
+            "the fabricated span must be flagged: {text}"
         );
     }
 

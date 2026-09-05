@@ -1,6 +1,7 @@
 //! Loose coercions for LLM tool-call JSON (bools as strings, etc.).
 
 use serde::de::{self, Deserializer, Visitor};
+use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
@@ -270,6 +271,33 @@ where
     Ok(cleaned.filter(|v: &Vec<String>| !v.is_empty()))
 }
 
+/// Accept a list of structured items (each deserialized via its own `Deserialize` impl) as a
+/// native JSON array, a single item as shorthand for a one-element list, or (some MCP clients
+/// stringify structured params) the whole array/object encoded as a JSON string. Missing/null
+/// deserializes to an empty `Vec` via `#[serde(default)]` on the field (this fn only runs when
+/// the key is present).
+pub fn deserialize_vec_loose<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Value::deserialize(deserializer)?;
+    let v = match v {
+        Value::String(s) => serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)),
+        other => other,
+    };
+    match v {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|it| serde_json::from_value(it).map_err(de::Error::custom))
+            .collect(),
+        single => serde_json::from_value(single)
+            .map(|t: T| vec![t])
+            .map_err(de::Error::custom),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +403,41 @@ mod tests {
         assert_eq!(absent.valid_from, None);
         let null: T = serde_json::from_str(r#"{"valid_from":null}"#).unwrap();
         assert_eq!(null.valid_from, None);
+    }
+
+    #[test]
+    fn vec_loose_accepts_array_single_object_and_stringified_array() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct Item {
+            doc: String,
+            loc: String,
+        }
+        #[derive(Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "deserialize_vec_loose")]
+            items: Vec<Item>,
+        }
+        // Native array — the normal shape.
+        let arr: T =
+            serde_json::from_str(r#"{"items":[{"doc":"a","loc":"1"},{"doc":"b","loc":"2"}]}"#)
+                .unwrap();
+        assert_eq!(
+            arr.items,
+            vec![
+                Item { doc: "a".into(), loc: "1".into() },
+                Item { doc: "b".into(), loc: "2".into() },
+            ]
+        );
+        // A single object, not wrapped in an array — shorthand for a one-element list.
+        let one: T = serde_json::from_str(r#"{"items":{"doc":"a","loc":"1"}}"#).unwrap();
+        assert_eq!(one.items, vec![Item { doc: "a".into(), loc: "1".into() }]);
+        // The known client bug this whole module exists for: a structured param sent as a
+        // JSON-encoded STRING instead of a native array.
+        let stringified: T =
+            serde_json::from_str(r#"{"items":"[{\"doc\":\"a\",\"loc\":\"1\"}]"}"#).unwrap();
+        assert_eq!(stringified.items, vec![Item { doc: "a".into(), loc: "1".into() }]);
+        // Absent key → empty (handled by #[serde(default)] on the field, not this fn).
+        let none: T = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(none.items, Vec::<Item>::new());
     }
 }

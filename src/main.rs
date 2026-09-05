@@ -696,13 +696,15 @@ async fn serve_streamable_http(
     let http = server.http_metrics();
     let service = StreamableHttpService::new(
         move || {
-            // A fresh session must NOT share the anti-loop tracker with any other session — the
-            // rest of `server`'s Arc fields (index caches, http metrics, etc.) stay shared by
-            // design, only `signals` gets swapped for a brand-new tracker per session.
+            // A fresh session must NOT share the anti-loop tracker (or the check_answer read-log)
+            // with any other session — the rest of `server`'s Arc fields (index caches, http
+            // metrics, etc.) stay shared by design, only `signals`/`read_log` get swapped for
+            // brand-new per-session state.
             let mut s = server.clone();
             s.signals = std::sync::Arc::new(std::sync::Mutex::new(
                 glossa::tools::retrieval_progress::ReaderSignals::new(),
             ));
+            s.read_log = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
             Ok(s)
         },
         std::sync::Arc::new(LocalSessionManager::default()),

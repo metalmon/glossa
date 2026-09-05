@@ -1,6 +1,7 @@
 use crate::graph::store::GraphStore;
 use crate::index::store::DocIndex;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 pub struct AbsentTerm { pub term: String }
 
@@ -87,6 +88,65 @@ pub fn gate(
     }
 }
 
+/// A citation an Editor-authored answer claims: `quote` verbatim from `doc` at `loc` (the same
+/// document path / chunk-or-page location a `read(path#n)` call resolves).
+#[derive(Debug, Clone)]
+pub struct Span {
+    pub doc: String,
+    pub loc: String,
+    pub quote: String,
+}
+
+/// Outcome of checking one [`Span`] against the session's read-log + corpus text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanVerdict {
+    /// `{doc,loc}` was read this session AND `quote` is verbatim (whitespace-normalized) there.
+    Ok,
+    /// `{doc,loc}` was read this session, but `quote` does not appear there verbatim.
+    NotVerbatim,
+    /// `{doc,loc}` was never read this session — the check can't even fetch a trusted text to
+    /// compare against. Takes precedence over `NotVerbatim` (checked first, before any fetch).
+    NotInReadLog,
+}
+
+/// Whitespace-normalize for a verbatim substring check: collapse all runs of whitespace to a
+/// single space and trim the ends, so line wraps / extra spaces in either the quote or the
+/// fetched corpus text don't cause a false `NotVerbatim`.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Tier-2 best-effort verbatim+citation check (deterministic-abstention-gate, C2): for each
+/// `Span`, `Ok` iff its `{doc,loc}` is a member of `read_log` (the caller's per-session record of
+/// what was actually read — see `mcp::GlossaServer::read_log`) AND `quote` is a whitespace-
+/// normalized substring of `fetch(doc,loc)`. `read_log` membership is checked FIRST — a span that
+/// is both un-read and non-verbatim reports `NotInReadLog`, not `NotVerbatim` — because a fetch
+/// on an unread location either can't be trusted (nothing established the model actually saw it)
+/// or may not even be attemptable. Best-effort only: `fetch` returning `None` (fetch failed even
+/// though logged as read, e.g. corpus changed since) is reported `NotVerbatim` rather than a
+/// separate variant — this is Editor-authoring tooling, not a hard gate, so collapsing that rare
+/// edge into the closer of the two existing verdicts keeps the type small.
+pub fn verify_spans(
+    spans: &[Span],
+    read_log: &HashSet<(String, String)>,
+    fetch: &dyn Fn(&str, &str) -> Option<String>,
+) -> Vec<SpanVerdict> {
+    spans
+        .iter()
+        .map(|s| {
+            if !read_log.contains(&(s.doc.clone(), s.loc.clone())) {
+                return SpanVerdict::NotInReadLog;
+            }
+            match fetch(&s.doc, &s.loc) {
+                Some(text) if normalize_ws(&text).contains(&normalize_ws(&s.quote)) => {
+                    SpanVerdict::Ok
+                }
+                _ => SpanVerdict::NotVerbatim,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +228,19 @@ mod tests {
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         assert!(!covered("квазар9000", &i, &g));
+    }
+
+    #[test]
+    fn verify_spans_ok_only_when_read_and_verbatim() {
+        let mut log = std::collections::HashSet::new();
+        log.insert(("man.pdf".into(), "p.5".into()));
+        let fetch = |d: &str, l: &str| (d == "man.pdf" && l == "p.5").then(|| "the value is 42 tbit".to_string());
+        let ok = verify_spans(&[Span{doc:"man.pdf".into(),loc:"p.5".into(),quote:"value is 42".into()}], &log, &fetch);
+        assert!(matches!(ok[0], SpanVerdict::Ok));
+        let nv = verify_spans(&[Span{doc:"man.pdf".into(),loc:"p.5".into(),quote:"value is 99".into()}], &log, &fetch);
+        assert!(matches!(nv[0], SpanVerdict::NotVerbatim));
+        let nl = verify_spans(&[Span{doc:"other.pdf".into(),loc:"p.1".into(),quote:"x".into()}], &log, &fetch);
+        assert!(matches!(nl[0], SpanVerdict::NotInReadLog));
     }
 
     #[test]
