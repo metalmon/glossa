@@ -1431,7 +1431,7 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 s.answerable,
                 pct(s.answerable),
                 s.unanswerable,
-                s.unanswerable - s.gated,
+                s.unanswerable.saturating_sub(s.gated),
                 s.gated
             );
             if !s.gated_ids.is_empty() {
