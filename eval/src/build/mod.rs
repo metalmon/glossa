@@ -328,10 +328,8 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // become reasoning nodes (the CODESYS-SDK-as-junk-Resolutions problem). Substring match on
         // the corpus-relative path, matching `kb graph prune --source`. `build` is the sole creator
         // of grounded terminals from docs, so excluding here also scopes `reason`/`distil`.
-        // Primary source is `ontology.toml`'s `[abstention]` table (the runtime source of truth —
-        // a production deployment has no `kbx/` workspace to read `lab.toml` from); `lab.toml`
-        // `[tuning]` is a deprecated fallback used only when the ontology declares nothing, plus
-        // any one-off `--exclude`/`--only` CLI flags.
+        // Home is `lab.toml` `[tuning]` (build-time scope; a corpus `ontology.toml` `[abstention]`
+        // list overrides it when declared), plus any one-off `--exclude`/`--only` CLI flags.
         let (scope_exclude, scope_only) = crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
         let exclude: Vec<String> = scope_exclude.iter().chain(&opts.exclude).cloned().collect();
         let only: Vec<String> = scope_only.iter().chain(&opts.only).cloned().collect();

@@ -310,37 +310,26 @@ pub fn resolve<T>(cli: Option<T>, lab: Option<T>, default: T) -> T {
     cli.or(lab).unwrap_or(default)
 }
 
-/// Resolve the reasoning-scope denylist/allowlist: the corpus `ontology.toml`'s `[abstention]`
-/// table (`reasoning_exclude`/`reasoning_only`) is the PRIMARY source — it's the runtime source of
-/// truth, since a production deployment has no `kbx/` workspace to read `lab.toml` from. This
-/// crate's own `[tuning] reasoning_exclude`/`reasoning_only` copy is a DEPRECATED fallback, used
-/// only when the ontology declares nothing, with a one-line deprecation warning on stderr. Neither
-/// source is merged with the other — the ontology, when it declares anything, fully replaces the
-/// `lab.toml` copy for that list (this migration is additive: `lab.toml` keeps its keys, they just
-/// stop being read once the ontology declares the corresponding list).
+/// Resolve the reasoning-scope denylist/allowlist for graph CONSTRUCTION (`kbx build`/`reason`/
+/// `distil`). This scope is build-time only — it decides which docs get mined into the reasoning
+/// graph, NOT what runtime retrieval returns — so its home is this crate's `lab.toml` `[tuning]`
+/// (`reasoning_exclude`/`reasoning_only`). A corpus `ontology.toml` `[abstention]` list, when it
+/// declares one, OVERRIDES the `lab.toml` copy for that list (the two are never merged); absent,
+/// `lab.toml` is used. Contrast the abstention GATE (`policy`/`coverage_k`/`enforcement`), which
+/// lives in the ontology because the MCP runtime reads it — see `resolve_abstention_policy`.
 pub fn resolve_reasoning_scope(
     tuning: &Tuning,
     ontology: &glossa::graph::ontology::Ontology,
 ) -> (Vec<String>, Vec<String>) {
     let exclude = if !ontology.reasoning_exclude().is_empty() {
         ontology.reasoning_exclude().to_vec()
-    } else if !tuning.reasoning_exclude.is_empty() {
-        eprintln!(
-            "kbx: lab.toml [tuning] reasoning_exclude is deprecated — move it to ontology.toml's [abstention] reasoning_exclude"
-        );
-        tuning.reasoning_exclude.clone()
     } else {
-        Vec::new()
+        tuning.reasoning_exclude.clone()
     };
     let only = if !ontology.reasoning_only().is_empty() {
         ontology.reasoning_only().to_vec()
-    } else if !tuning.reasoning_only.is_empty() {
-        eprintln!(
-            "kbx: lab.toml [tuning] reasoning_only is deprecated — move it to ontology.toml's [abstention] reasoning_only"
-        );
-        tuning.reasoning_only.clone()
     } else {
-        Vec::new()
+        tuning.reasoning_only.clone()
     };
     (exclude, only)
 }
