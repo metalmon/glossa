@@ -241,24 +241,12 @@ pub fn ppr_push(
     eps: f32,
     k: usize,
 ) -> Vec<(String, f32)> {
-    use std::collections::HashSet;
     if k == 0 {
         return Vec::new();
     }
-    let Some((p, seed_idx, _pops)) = push_estimate(csr, seeds, alpha, eps) else {
-        return Vec::new();
-    };
-    let seed_idx: HashSet<u32> = seed_idx;
-    let mut ranked: Vec<(u32, f32)> = p
-        .into_iter()
-        .filter(|(i, _)| !seed_idx.contains(i))
-        .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(k);
-    ranked
-        .into_iter()
-        .filter_map(|(i, s)| csr.id_of(i).map(|id| (id.to_string(), s)))
-        .collect()
+    let mut result = ppr_push_scored(csr, seeds, alpha, eps);
+    result.truncate(k);
+    result
 }
 
 /// The forward-push working-SET size for `seeds`: the number of node expansions (`pops`) the local
