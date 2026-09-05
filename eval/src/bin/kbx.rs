@@ -1429,6 +1429,24 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 "answer chars: min {} / median {} / max {}",
                 s.a_len.min, s.a_len.median, s.a_len.max
             );
+            // Auto-resolve the corpus from the dataset file path and, if a graph is present, print
+            // the answer-reachability block. Standalone dataset (no .glossa above) -> pure-file
+            // stat only, so output is unchanged.
+            if let Some(root) = file.ancestors().find(|a| a.join(".glossa").is_dir()) {
+                if let Ok(g) = glossa::graph::store::GraphStore::open(root) {
+                    let report = kb_eval::connectivity::answer_reachability(&g, &cases)?;
+                    println!(
+                        "\nanswer-reachability (single-seed question->answer rank, top {}):",
+                        200
+                    );
+                    for (hop, c) in &report {
+                        println!(
+                            "  {hop:10} n={} skipped={} median={:?} p90={:?} hit@5={:.2} hit@20={:.2} unreachable={}",
+                            c.n, c.skipped, c.median_rank, c.p90_rank, c.hit5, c.hit20, c.unreachable
+                        );
+                    }
+                }
+            }
             Ok(())
         }
         DatasetCmd::Merge { from, into } => {

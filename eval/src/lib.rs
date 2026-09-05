@@ -10,6 +10,7 @@ pub mod constraint_gepa_sop;
 pub mod constraint_score;
 #[cfg(feature = "constraint")]
 pub mod constraint_synthetic;
+pub mod connectivity;
 pub mod corpus;
 pub mod dataset;
 pub mod dataset_ops;
