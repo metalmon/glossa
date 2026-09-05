@@ -38,11 +38,16 @@ pub const STRUCTURAL_NODES: &[&str] = &["Document", "Section", "Term", "Topic"];
 /// `tools::abstention::covered`).
 ///
 /// This helper takes no [`ontology::Ontology`], so it approximates `RelationRole::Chaining`
-/// rather than reading it precisely: [`MENTIONS`] and the generalize-layer `SIMILAR` cross-link
-/// are the two fixed Grounding-role edge types this codebase uses outside the ontology (mirroring
-/// `Ontology::relation_role`'s built-in defaults for them); every other edge type is walked as a
-/// chaining hop, matching the ontology's fail-open "unrecognized role reads as Chaining" default.
-/// A corpus that declares an EXTRA Grounding-role relation beyond those two is only approximated
+/// rather than reading it precisely: it skips the FIXED edge types the engine forces to
+/// `RelationRole::Grounding` regardless of what any ontology declares —
+/// [`ontology::CORE_EDGES`] (`CONTAINS`/`MENTIONS`/`CO_OCCURS`/`NEXT`/`PREV`) plus
+/// [`ontology::SOFT_EDGES`] (`SIMILAR`) — and walks every OTHER edge type as a chaining hop. This
+/// must NOT be narrowed to an allowlist of "known" chaining relation names (e.g. `CAUSED_BY`/
+/// `RESOLVED_BY`/`LEADS_TO`): a real ontology declares its own domain chaining relations, and this
+/// fn has no `Ontology` to read them from — the fixed Grounding denylist above IS the ontology's
+/// own fail-open default ("unrecognized role reads as Chaining"), so skipping exactly that set
+/// (not just `MENTIONS`/`SIMILAR`) is what keeps this correct across every preset. A corpus that
+/// declares an EXTRA Grounding-role relation beyond `CORE_EDGES ∪ SOFT_EDGES` is only approximated
 /// here (that edge is walked as if it were chaining) — acceptable for an abstention SIGNAL, not a
 /// hard security boundary.
 pub fn grounded_or_chains_to_grounded(g: &store::GraphStore, id: &str) -> anyhow::Result<bool> {
@@ -65,6 +70,11 @@ pub fn grounded_or_chains_to_grounded(g: &store::GraphStore, id: &str) -> anyhow
         }
         Ok(false)
     }
+    // The FIXED Grounding-role set (never a reasoning hop, regardless of ontology) — see the doc
+    // comment above for why this must be the full set, not just MENTIONS/SIMILAR.
+    fn is_grounding_edge(edge_type: &str) -> bool {
+        ontology::CORE_EDGES.contains(&edge_type) || ontology::SOFT_EDGES.contains(&edge_type)
+    }
 
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -75,7 +85,7 @@ pub fn grounded_or_chains_to_grounded(g: &store::GraphStore, id: &str) -> anyhow
             return Ok(true);
         }
         for e in g.outgoing(&cur)? {
-            if e.edge_type == MENTIONS || e.edge_type == "SIMILAR" {
+            if is_grounding_edge(&e.edge_type) {
                 continue;
             }
             if visited.insert(e.to.clone()) {
@@ -142,6 +152,47 @@ mod grounded_or_chains_to_grounded_tests {
         assert!(
             grounded_or_chains_to_grounded(&g, "sym:a").unwrap(),
             "query-side node one chaining hop from a grounded terminal must count"
+        );
+    }
+
+    #[test]
+    fn node_linked_only_via_co_occurs_to_a_grounded_node_is_false() {
+        // CO_OCCURS is a CORE_EDGES Grounding relation (mention-frequency link), never a reasoning
+        // hop. An ungrounded node reachable from a grounded one ONLY via CO_OCCURS must not count
+        // as "chains to grounded" — that would let an off-topic term game the coverage gate via any
+        // entity that merely co-occurs with something in the corpus.
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sec:a", "Section", "Intro")).unwrap();
+        g.put_node(&node("ent:grounded", "Entity", "Grounded entity"))
+            .unwrap();
+        g.put_node(&node("ent:ungrounded", "Entity", "Unrelated entity"))
+            .unwrap();
+        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a")).unwrap();
+        g.put_edge(&edge("ent:ungrounded", "CO_OCCURS", "ent:grounded"))
+            .unwrap();
+        assert!(
+            !grounded_or_chains_to_grounded(&g, "ent:ungrounded").unwrap(),
+            "CO_OCCURS must not be walked as a chaining hop"
+        );
+    }
+
+    #[test]
+    fn node_linked_only_via_contains_to_a_grounded_node_is_false() {
+        // CONTAINS (doc/section structure) is likewise a CORE_EDGES Grounding relation.
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sec:a", "Section", "Intro")).unwrap();
+        g.put_node(&node("ent:grounded", "Entity", "Grounded entity"))
+            .unwrap();
+        g.put_node(&node("ent:ungrounded", "Entity", "Unrelated entity"))
+            .unwrap();
+        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a")).unwrap();
+        g.put_edge(&edge("ent:ungrounded", "CONTAINS", "ent:grounded"))
+            .unwrap();
+        assert!(
+            !grounded_or_chains_to_grounded(&g, "ent:ungrounded").unwrap(),
+            "CONTAINS must not be walked as a chaining hop"
         );
     }
 

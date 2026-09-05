@@ -2,11 +2,15 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 const CORE_NODES: &[&str] = crate::graph::STRUCTURAL_NODES;
-const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
+/// The FIXED edge types forced to `RelationRole::Grounding` regardless of what the ontology says
+/// (see `relation_role`) — never a reasoning hop. `pub(crate)` so `graph::grounded_or_chains_to_grounded`
+/// (an Ontology-free per-node BFS) can skip exactly this set instead of hardcoding its own copy.
+pub(crate) const CORE_EDGES: &[&str] = &["CONTAINS", "MENTIONS", "CO_OCCURS", "NEXT", "PREV"];
 /// Derived SOFT edges the `generalize` pass writes (dense/noisy similarity links). Like CORE_EDGES
 /// they are never a reasoning hop — forced to `Grounding` so `traverse::reach` skips them (the
 /// viewer already excludes them from traversal). Undeclared soft edges must not flood the walk.
-const SOFT_EDGES: &[&str] = &["SIMILAR"];
+/// `pub(crate)` for the same reason as `CORE_EDGES` above.
+pub(crate) const SOFT_EDGES: &[&str] = &["SIMILAR"];
 
 /// What a relation does for the reasoning traverse, declared as ontology DATA (never hardcoded
 /// per edge_type in engine code — see [[graph-cross-doc-bridge]]): `Chaining` relations advance

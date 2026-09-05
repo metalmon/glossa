@@ -371,6 +371,26 @@ impl GlossaServer {
         }
     }
 
+    /// Apply the retrieval-signal marker to `body` via [`Self::apply_signals`] — UNLESS the
+    /// coverage-abstention gate already replaced it with the sentinel (`Filter` tier, body
+    /// starting with [`crate::tools::abstention::SENTINEL`]), in which case `body` is returned
+    /// as-is. Without this guard a signals marker (e.g. a plateau/repeat note) gets appended BELOW
+    /// the sentinel, implying results followed the abstention when none did. Signal/Off bodies are
+    /// never the sentinel (the gate only ever swaps the body out under `Filter`), so they always
+    /// go through `apply_signals` as before.
+    fn apply_signals_unless_filtered(
+        &self,
+        tool: &str,
+        key: &str,
+        ids: Vec<String>,
+        body: String,
+    ) -> String {
+        if body.starts_with(crate::tools::abstention::SENTINEL) {
+            return body;
+        }
+        self.apply_signals(tool, key, ids, body)
+    }
+
     /// Synchronous, sublinear freshness before serving a read: gate a full scan behind the cheap
     /// directory-mtime signature, index under the cross-process lock if the tree changed, then serve.
     /// Best-effort — indexing errors never fail the tool. Runs on the blocking pool so the async
@@ -1231,7 +1251,7 @@ impl GlossaServer {
             k,
         );
         let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
-        let body = self.apply_signals("search", &key, ids, body);
+        let body = self.apply_signals_unless_filtered("search", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1320,7 +1340,7 @@ impl GlossaServer {
             k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("glossary", &key, ids, body);
+        let body = self.apply_signals_unless_filtered("glossary", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1413,7 +1433,7 @@ impl GlossaServer {
             k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("reach", &key, ids, body);
+        let body = self.apply_signals_unless_filtered("reach", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -2840,6 +2860,34 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "lock free → generalize ran, node_meta written"
+        );
+    }
+
+    #[test]
+    fn apply_signals_unless_filtered_passes_sentinel_through_untouched() {
+        let root = std::path::PathBuf::from(".");
+        let srv = GlossaServer::new(root, Profile::Reader, false, ServerFlags::default());
+        let ids = vec!["a.md#1".to_string()];
+
+        // Prime the tracker: a real body, first call under key "k".
+        let first = srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
+        assert_eq!(first, "real hit");
+
+        // An identical repeat (same tool+key) DOES get the tracker's marker treatment — the
+        // Signal/Off path (never the sentinel) must still see signals as before this fix.
+        let repeat = srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
+        assert_ne!(
+            repeat, "real hit",
+            "an exact repeat must still get the tracker's marker"
+        );
+
+        // A Filter-tier sentinel body — even under what would otherwise be a repeat key — passes
+        // through untouched: no marker gets appended below it.
+        let sentinel_body = format!("{} — absent: foo", crate::tools::abstention::SENTINEL);
+        let out = srv.apply_signals_unless_filtered("search", "k", ids, sentinel_body.clone());
+        assert_eq!(
+            out, sentinel_body,
+            "sentinel body must pass through untouched, no marker appended below it"
         );
     }
 
