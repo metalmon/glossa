@@ -9,13 +9,6 @@ use crate::graph::ppr;
 use crate::graph::store::GraphStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-const STOP: &[&str] = &[
-    "the", "a", "an", "of", "in", "on", "to", "is", "was", "were", "are", "for", "and", "or",
-    "that", "which", "who", "what", "when", "where", "by", "with", "at", "as", "from", "into",
-    "does", "did", "do", "part", "named", "after", "held", "over", "it", "its", "his", "her",
-    "their", "he", "she",
-];
-
 fn normalize(s: &str) -> String {
     let mut out = String::new();
     let mut prev_sp = false;
@@ -34,7 +27,7 @@ fn normalize(s: &str) -> String {
 fn tokens(s: &str) -> Vec<String> {
     normalize(s)
         .split(' ')
-        .filter(|w| w.len() > 1 && !STOP.contains(w))
+        .filter(|w| w.len() > 1)
         .map(|w| w.to_string())
         .collect()
 }
