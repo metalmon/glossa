@@ -694,9 +694,14 @@ impl AgentBackend for TensorZeroBackend {
         let graph = glossa::graph::store::GraphStore::open(work).ok();
         // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/related render
         // the reasoning chain identically to the MCP surface.
-        let spec = glossa::tools::ChainSpec::from_ontology(
-            &glossa::graph::ontology::Ontology::load_or_default(work),
-        );
+        let ont = glossa::graph::ontology::Ontology::load_or_default(work);
+        let spec = glossa::tools::ChainSpec::from_ontology(&ont);
+        // C1 wiring: same coverage-abstention gate as the OpenAI-transport reader (see
+        // `openai::answer_capturing`'s twin comment) — `TensorZeroBackend` carries no `lab`/
+        // `tuning` field either, so this reads the ontology's `[abstention]` directly.
+        let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
+        let enforcement = crate::backend::glossa_tools::reader_enforcement(policy);
+        let k = ont.coverage_k().unwrap_or(1) as usize;
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
             let r = crate::backend::glossa_tools::exec(
@@ -707,6 +712,8 @@ impl AgentBackend for TensorZeroBackend {
                 graph.as_ref(),
                 &spec,
                 &trace,
+                enforcement,
+                k,
             );
             prof!("[prof] tool {name} {}ms", t.elapsed().as_millis());
             r

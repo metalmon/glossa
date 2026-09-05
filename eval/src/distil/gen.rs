@@ -511,7 +511,17 @@ pub fn generate_one(
             // Distil's exploratory read never feeds vision input — discard, mirroring the reader
             // and reason paths (only `kbx build --vision` populates this).
             let (body, ids, _images) =
-                glossa_tools::exec(name, args, root, &idx, Some(&g), &spec, &trace);
+                glossa_tools::exec(
+                    name,
+                    args,
+                    root,
+                    &idx,
+                    Some(&g),
+                    &spec,
+                    &trace,
+                    glossa::tools::abstention::Enforcement::Off,
+                    0,
+                );
             (body, ids, Vec::new())
         }
     };

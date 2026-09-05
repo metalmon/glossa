@@ -454,9 +454,17 @@ impl OpenAiBackend {
 
         let trace = TraceLog::to_dir(work);
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
-        let spec = glossa::tools::ChainSpec::from_ontology(
-            &glossa::graph::ontology::Ontology::load_or_default(work),
-        );
+        let ont = glossa::graph::ontology::Ontology::load_or_default(work);
+        let spec = glossa::tools::ChainSpec::from_ontology(&ont);
+        // C1 wiring: the eval reader stands in for the MCP Reader profile, so it enforces the SAME
+        // coverage-abstention gate — `Filter` under the corpus's `safety_first` policy, `Off`
+        // otherwise (byte-identical to every pre-Task-7 run). `OpenAiBackend` carries no `lab`/
+        // `tuning` field, so this reads the ontology's `[abstention]` directly rather than through
+        // `resolve_abstention_policy` (which also consults a deprecated `lab.toml [tuning]` copy —
+        // unreachable here). Resolved ONCE per question, not re-derived per tool call.
+        let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
+        let enforcement = crate::backend::glossa_tools::reader_enforcement(policy);
+        let k = ont.coverage_k().unwrap_or(1) as usize;
         // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): this wrapper only
         // acts on its PLATEAU kind — a NEUTRAL "gain has plateaued" observation applied via the
         // signal's own render (drop the redundant body on a drained plateau, or append the marker
@@ -466,7 +474,8 @@ impl OpenAiBackend {
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
         let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
         let exec = |name: &str, args: &Value| {
-            let (mut body, ids) = execute_tool(name, args, work, idx, graph, &spec, &trace);
+            let (mut body, ids) =
+                execute_tool(name, args, work, idx, graph, &spec, &trace, enforcement, k);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
@@ -983,6 +992,7 @@ where
 /// special-cased here to the `path` argument instead. `run_agent_loop` uses these to detect an
 /// unproductive streak — many varied calls (including varied graph navigation) that surface
 /// nothing new — without falsely tripping on a reader that IS making real graph progress.
+#[allow(clippy::too_many_arguments)]
 fn execute_tool(
     name: &str,
     args: &Value,
@@ -991,14 +1001,17 @@ fn execute_tool(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
+    enforcement: glossa::tools::abstention::Enforcement,
+    k: usize,
 ) -> (String, Vec<String>) {
     // No registry-membership pre-check here: `registry()` is the ADVERTISING source (what
     // `tools_schema` puts in front of the model); execution dispatches whatever
     // `glossa_tools::exec` supports, which is a superset (it also serves non-agent-facing
     // callers, e.g. related/neighbors for MCP's Editor/Full profiles). `exec` already returns
     // its own "unknown tool" body for names it genuinely doesn't handle, so it is the sole gate.
-    let (body, ids, _images) =
-        crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
+    let (body, ids, _images) = crate::backend::glossa_tools::exec(
+        name, args, root, idx, graph, spec, trace, enforcement, k,
+    );
     let ids = if name == "read" {
         // Mirror glossa_tools::exec's own raw_arguments fallback so a stringified args object
         // still yields the path.
@@ -1581,7 +1594,17 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids) = execute_tool(
+                name,
+                args,
+                dir.path(),
+                &idx,
+                Some(&g),
+                &spec,
+                &trace,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
+            );
             (body, ids, Vec::new())
         };
 
@@ -1627,7 +1650,17 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids) = execute_tool(
+                name,
+                args,
+                dir.path(),
+                &idx,
+                Some(&g),
+                &spec,
+                &trace,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
+            );
             (body, ids, Vec::new())
         };
 
@@ -1744,7 +1777,17 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids) = execute_tool(
+                name,
+                args,
+                dir.path(),
+                &idx,
+                Some(&g),
+                &spec,
+                &trace,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
+            );
             (body, ids, Vec::new())
         };
 
@@ -1789,7 +1832,17 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids) = execute_tool(
+                name,
+                args,
+                dir.path(),
+                &idx,
+                Some(&g),
+                &spec,
+                &trace,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
+            );
             (body, ids, Vec::new())
         };
 

@@ -557,6 +557,8 @@ fn make_exec(
                 Some(&g),
                 &spec_kb,
                 &trace_kb,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
             ),
             "note" | "ls" | "del" => (
                 exec_notebook(&agent_g_dir, &idx_kb, name, args),
@@ -2404,6 +2406,8 @@ fn main() -> Result<()> {
                     Some(&g),
                     &spec_kb,
                     &trace_kb,
+                    glossa::tools::abstention::Enforcement::Off,
+                    0,
                 ),
                 "note" | "ls" | "del" => {
                     let idx_agent = DocIndex::open_or_create(&agent_g_dir_clone).unwrap();

@@ -418,7 +418,17 @@ fn enrich_one_chain(
             }
         } else {
             let (body, ids, _images) =
-                glossa_tools::exec(name, args, root, idx, Some(g), spec, &trace);
+                glossa_tools::exec(
+                    name,
+                    args,
+                    root,
+                    idx,
+                    Some(g),
+                    spec,
+                    &trace,
+                    glossa::tools::abstention::Enforcement::Off,
+                    0,
+                );
             (body, ids, Vec::new())
         }
     };
