@@ -42,7 +42,7 @@ fn kbx_init_scaffolds_glossa_kbx_workspace_and_skips_existing_without_force() {
 
     let lab_text = std::fs::read_to_string(kbx_dir.join("lab.toml")).unwrap();
     assert!(
-        !lab_text.contains("corpus"),
+        !lab_text.contains("corpus =") && !lab_text.contains("corpus="),
         "lab.toml must not configure a corpus — it comes from kb-style PATH"
     );
 

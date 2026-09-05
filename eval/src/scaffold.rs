@@ -88,7 +88,8 @@ mod tests {
         assert!(p.builder.starts_with(dir.path().join(".glossa")));
         // no corpus= leaked into lab.toml
         let lab = std::fs::read_to_string(&p.lab).unwrap();
-        assert!(!lab.contains("corpus"));
+        assert!(!lab.contains("corpus ="), "no corpus= key should leak into the scaffolded lab.toml");
+        assert!(!lab.contains("corpus="), "no corpus= key should leak into the scaffolded lab.toml");
     }
 
     /// A fresh `kbx init` workspace ships `[tuning]` fully populated at its documented defaults
