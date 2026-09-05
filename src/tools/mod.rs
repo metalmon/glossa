@@ -1,6 +1,7 @@
 //! Single source of truth for the agent tools' model-facing output. Both the MCP server
 //! (src/mcp.rs) and the kb-eval harness call these so prod and eval render identically.
 
+pub mod abstention;
 pub mod registry;
 pub mod retrieval_progress;
 
