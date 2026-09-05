@@ -236,16 +236,17 @@ pub fn compose_ppr(
     query: &str,
     k: usize,
 ) -> anyhow::Result<Vec<Candidate>> {
-    // Seed the restart vector: whole-question lexical hits get mass decreasing by BM25 rank; the
-    // anchor entity the reader looked up gets a strong boost. No NER, no relation names.
-    let mut seeds: HashMap<String, f32> = HashMap::new();
+    // Two SEPARATE seed maps (today's code summed them into one). The query gets BM25-rank mass;
+    // the anchor `name` — the reader's second endpoint — gets a strong boost.
+    let mut query_seeds: HashMap<String, f32> = HashMap::new();
     for (rank, id) in g.resolve(query)?.into_iter().take(20).enumerate() {
-        *seeds.entry(id).or_default() += 1.0 / (1.0 + rank as f32);
+        *query_seeds.entry(id).or_default() += 1.0 / (1.0 + rank as f32);
     }
+    let mut name_seeds: HashMap<String, f32> = HashMap::new();
     for id in g.resolve(name)?.into_iter().take(5) {
-        *seeds.entry(id).or_default() += 2.0;
+        *name_seeds.entry(id).or_default() += 2.0;
     }
-    if seeds.is_empty() {
+    if query_seeds.is_empty() && name_seeds.is_empty() {
         return Ok(vec![]);
     }
     // Rank by connectivity via out-of-core forward-push over the memory-mapped CSR: the working set
@@ -253,21 +254,47 @@ pub fn compose_ppr(
     // engine — the old in-memory global power-iteration was retired for its O(N+E) heap/CPU load).
     // Fetch a headroom multiple of `k` so the structural/seed filter below still has `k` reasoning
     // nodes to surface. Returns `(id, score)` in descending score order.
-    let want = k.saturating_mul(3).max(k + 32);
     let csr = g.csr()?;
     if csr.is_empty() {
         return Ok(vec![]);
     }
-    let ranked = ppr::ppr_push(&csr, &seeds, 0.15, 1e-6, want);
+    let want = k.saturating_mul(3).max(k + 32);
+    let summed_single = |extra_want: usize| -> Vec<(String, f32)> {
+        let mut seeds = query_seeds.clone();
+        for (id, m) in &name_seeds {
+            *seeds.entry(id.clone()).or_default() += *m;
+        }
+        ppr::ppr_push(&csr, &seeds, 0.15, 1e-6, extra_want)
+    };
+    let ranked: Vec<(String, f32)> =
+        if ppr::bridge_mode(g.gdir()) == ppr::BridgeMode::Geomean && !name_seeds.is_empty() {
+            // Meeting-in-the-middle: geomean over the intersection of the two local supports ranks
+            // the node BETWEEN the endpoints highest.
+            let pa = ppr::ppr_push_scored(&csr, &query_seeds, 0.15, 1e-6);
+            let pb = ppr::ppr_push_scored(&csr, &name_seeds, 0.15, 1e-6);
+            let pb_map: HashMap<&str, f32> = pb.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let mut geo: Vec<(String, f32)> = pa
+                .iter()
+                .filter_map(|(id, sa)| pb_map.get(id.as_str()).map(|sb| (id.clone(), (sa * sb).sqrt())))
+                .collect();
+            geo.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            if geo.is_empty() {
+                summed_single(want) // disjoint supports: never regress to empty
+            } else {
+                geo
+            }
+        } else {
+            summed_single(want) // OFF (default): today's summed single push, byte-identical
+        };
     if ranked.is_empty() {
         return Ok(vec![]);
     }
     // id -> (node_type, label) for ONLY the ranked ids — O(k), not O(all nodes). Replaces the former
     // full `all_nodes()` scan (a plain batched SELECT).
+    let seed_ids: HashSet<String> = query_seeds.keys().chain(name_seeds.keys()).cloned().collect();
     let ranked_ids: Vec<&str> = ranked.iter().map(|(id, _)| id.as_str()).collect();
     let meta = g.node_metas(&ranked_ids)?;
     let structural: HashSet<&str> = crate::graph::STRUCTURAL_NODES.iter().copied().collect();
-    let seed_ids: HashSet<&String> = seeds.keys().collect();
     let mut out = Vec::new();
     for (id, score) in ranked {
         if out.len() >= k {
@@ -594,5 +621,88 @@ mod tests {
             "answer fact ranked first: {:?}",
             out.iter().map(|c| &c.label).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn compose_ppr_geomean_ranks_the_between_node_above_endpoint_neighbors() {
+        std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        // A —bridge X— B ; A and B each also have a private neighbor (a2/b2) that X must outrank
+        // in the product. Labels are the EXACT query/name terms ("Alpha"/"Beta") so `resolve`'s
+        // exact label-norm fast path is used (bypassing BM25 fuzzy, which would otherwise also
+        // lexically pull in the other nodes below and make them seeds too — seeds are excluded
+        // from a push's own output, which would hide the very nodes this test is ranking).
+        // Connectivity is wired explicitly via `link` (shared mentions/aliases alone create no
+        // graph edge — only `put_edge` does).
+        //
+        // The exact label-norm lookup returns ALL nodes sharing that normalized label — so four
+        // extra "Alpha"-labeled decoys, each linked ONLY into a2 (via the extra hop "amid", which
+        // also deepens how far a2 sits from B), become extra query seeds that flood a2 with
+        // one-hop mass no query seed gives x. Under a single SUMMED push (today's code, and the
+        // OFF path) that raw flood outweighs a2's weak name-side reach and makes a2 outrank x —
+        // the regression this test is meant to catch. Under GEOMEAN, a2's huge query-side mass is
+        // multiplied by its small, multi-hop-attenuated name-side mass, while x — one hop from
+        // BOTH endpoints — wins the product even though it never had the query flood. (Verified
+        // empirically: this exact fixture ranks a2 > x under a plain combined-seed single push,
+        // and x > a2 under the geomean-of-intersection combine.)
+        fact(&g, "a", "Alpha", &["Alpha"]);
+        for i in 0..4 {
+            let id = format!("adecoy{i}");
+            fact(&g, &id, "Alpha", &[]);
+            link(&g, &id, "a2");
+        }
+        fact(&g, "x", "Bridge middle", &[]);
+        fact(&g, "b", "Beta", &["Beta"]);
+        fact(&g, "amid", "amid", &[]);
+        fact(&g, "a2", "Alpha private neighbor", &[]);
+        fact(&g, "b2", "Beta private neighbor", &[]);
+        link(&g, "a", "x");
+        link(&g, "x", "b");
+        link(&g, "a", "amid");
+        link(&g, "amid", "a2");
+        link(&g, "b", "b2");
+        // query resolves to A ("Alpha"), name is the second endpoint ("Beta").
+        let out = compose_ppr(&g, "Beta", "Alpha", 5).unwrap();
+        let ids: Vec<&str> = out.iter().map(|c| c.id.as_str()).collect();
+        let px = ids.iter().position(|i| *i == "x").expect("bridge surfaced");
+        // The between-node outranks the endpoint-private neighbors.
+        assert!(px < ids.iter().position(|i| *i == "a2").unwrap_or(usize::MAX));
+        assert!(px < ids.iter().position(|i| *i == "b2").unwrap_or(usize::MAX));
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
+    }
+
+    #[test]
+    fn compose_ppr_geomean_empty_name_matches_single_seed() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        fact(&g, "a", "Alpha", &["Alpha"]);
+        fact(&g, "x", "next", &["Alpha", "Beta"]);
+        fact(&g, "b", "Beta", &["Beta"]);
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
+        let off = compose_ppr(&g, "", "Alpha", 5).unwrap();
+        std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
+        let geo = compose_ppr(&g, "", "Alpha", 5).unwrap();
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
+        let ids = |v: &[Candidate]| v.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&off), ids(&geo), "empty name → geomean falls back to single, identical");
+    }
+
+    #[test]
+    fn compose_ppr_geomean_disjoint_supports_falls_back_not_empty() {
+        std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        // Two disconnected components: query near one, name near the other → empty intersection.
+        // "a2" is a linked private neighbor of "a" so the alpha-side component has a reachable
+        // non-seed node — without it, both the geomean intersection AND its summed-single
+        // fallback would be empty (nothing to fall back TO), making the assertion vacuous.
+        fact(&g, "a", "Alpha", &["Alpha"]);
+        fact(&g, "a2", "Alpha side", &[]);
+        fact(&g, "z", "Zeta", &["Zeta"]);
+        link(&g, "a", "a2");
+        let out = compose_ppr(&g, "Zeta", "Alpha", 5).unwrap();
+        assert!(!out.is_empty(), "disjoint supports fall back to summed single push, not empty");
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
     }
 }

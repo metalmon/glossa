@@ -83,10 +83,7 @@ pub(crate) fn spine_weight(gdir: &Path) -> f32 {
     1.0
 }
 
-// TODO(dual-seed-ppr-bridge): consumed by `compose_ppr` in a follow-up task; allow(dead_code)
-// suppresses the interim "never used" warning until that call site lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum BridgeMode {
     Off,
     Geomean,
@@ -96,7 +93,6 @@ pub(crate) enum BridgeMode {
 /// `GLOSSA_PPR_BRIDGE` env > `[retrieval].bridge` in `ontology.toml` > default `Off`. Unlike
 /// `w_sim`/`w_spine`, this does NOT change the transition matrix, so it is NOT folded into
 /// `cache_sig` — it only alters query-time seeding/combination.
-#[allow(dead_code)]
 pub(crate) fn bridge_mode(gdir: &Path) -> BridgeMode {
     let parse = |s: &str| match s.trim().to_ascii_lowercase().as_str() {
         "geomean" => Some(BridgeMode::Geomean),
