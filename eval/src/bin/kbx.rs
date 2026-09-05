@@ -872,7 +872,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
     // Abstention policy (FP-vs-FN operating point): balanced (default) or safety_first. Only affects
     // how the judge scores a decline on an ANSWERABLE question (safety_first credits it `partial`).
-    let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
+    // Primary source is the corpus `ontology.toml`'s `[abstention] policy` (the runtime source of
+    // truth); `lab.toml`'s `[tuning] abstention_policy` is a deprecated fallback (see
+    // `lab::resolve_abstention_policy`).
+    let ontology = glossa::graph::ontology::Ontology::load_or_default(&kbx_paths.root);
+    let policy =
+        AbstentionPolicy::from_opt(lab::resolve_abstention_policy(&lab.tuning, &ontology).as_deref());
     let credit_abstention = policy.credit_abstention();
     if n_unanswerable > 0 {
         if use_judge {

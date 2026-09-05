@@ -67,6 +67,36 @@ struct RawRetrieval {
     bridge: Option<String>,
 }
 
+/// The `[abstention]` overlay: runtime abstention-gate + reasoning-scope config. Kept in the
+/// ontology (the only per-corpus config file the LIVE runtime reads — a production deployment has
+/// no `kbx/` workspace) so the deterministic abstention gate has a config source outside the eval
+/// toolchain. All keys optional; an unset key falls back to the caller's own default (the `kbx`
+/// eval toolchain still falls back further to its `lab.toml [tuning]` copies — see
+/// `Ontology::abstention_policy`/`reasoning_exclude`/`reasoning_only`).
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawAbstention {
+    /// FP-vs-FN operating point: "balanced" (default) | "safety_first". See
+    /// `Ontology::abstention_policy`.
+    #[serde(default)]
+    policy: Option<String>,
+    /// Minimum reasoning-chain coverage (hop count reached) required before the gate answers
+    /// instead of declining. See `Ontology::coverage_k`.
+    #[serde(default)]
+    coverage_k: Option<u32>,
+    /// How the gate acts on an under-coverage question: "filter" | "signal" | "off". See
+    /// `Ontology::enforcement`.
+    #[serde(default)]
+    enforcement: Option<String>,
+    /// Reasoning-scope denylist: documents whose corpus-relative path CONTAINS any of these
+    /// substrings are never mined into the reasoning graph. See `Ontology::reasoning_exclude`.
+    #[serde(default)]
+    reasoning_exclude: Vec<String>,
+    /// Reasoning-scope allowlist (inverse of `reasoning_exclude`). See
+    /// `Ontology::reasoning_only`.
+    #[serde(default)]
+    reasoning_only: Vec<String>,
+}
+
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
 /// (e.g. anchor `Symptom`, relations `[CAUSED_BY, RESOLVED_BY]`). A node survives hygiene if it
 /// lies on a COMPLETE instance of ANY declared spine — so distinct case shapes (causal
@@ -242,6 +272,8 @@ struct RawOntology {
     #[serde(default)]
     retrieval: RawRetrieval,
     #[serde(default)]
+    abstention: RawAbstention,
+    #[serde(default)]
     reasoning: RawReasoning,
     #[serde(default)]
     constraint_types: BTreeMap<String, RawConstraintType>,
@@ -280,6 +312,22 @@ pub struct Ontology {
     /// Per-corpus dual-seed PPR mode from `[retrieval].bridge`. `None` when unset → engine default
     /// Off. See [`Ontology::ppr_bridge_mode`].
     ppr_bridge: Option<String>,
+    /// Per-corpus abstention policy from `[abstention].policy` ("balanced"|"safety_first").
+    /// `None` when unset — the `kbx` eval toolchain falls back to its `lab.toml [tuning]` copy.
+    /// See [`Ontology::abstention_policy`].
+    abstention_policy: Option<String>,
+    /// Per-corpus minimum reasoning-chain coverage from `[abstention].coverage_k`. `None` when
+    /// unset. See [`Ontology::coverage_k`].
+    coverage_k: Option<u32>,
+    /// Per-corpus abstention-gate enforcement mode from `[abstention].enforcement`
+    /// ("filter"|"signal"|"off"). `None` when unset. See [`Ontology::enforcement`].
+    enforcement: Option<String>,
+    /// Reasoning-scope denylist from `[abstention].reasoning_exclude`. Empty when unset. See
+    /// [`Ontology::reasoning_exclude`].
+    reasoning_exclude: Vec<String>,
+    /// Reasoning-scope allowlist from `[abstention].reasoning_only`. Empty when unset. See
+    /// [`Ontology::reasoning_only`].
+    reasoning_only: Vec<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -407,6 +455,11 @@ impl Ontology {
                 .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
             ppr_bridge: raw.retrieval.bridge,
+            abstention_policy: raw.abstention.policy,
+            coverage_k: raw.abstention.coverage_k,
+            enforcement: raw.abstention.enforcement,
+            reasoning_exclude: raw.abstention.reasoning_exclude,
+            reasoning_only: raw.abstention.reasoning_only,
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -577,6 +630,41 @@ impl Ontology {
     /// the ontology declares none — in which case PPR applies its engine default (Off).
     pub fn ppr_bridge_mode(&self) -> Option<String> {
         self.ppr_bridge.clone()
+    }
+
+    /// Per-corpus abstention policy from `[abstention].policy` ("balanced"|"safety_first"), or
+    /// `None` when the ontology declares none. This is the runtime source of truth: the live
+    /// runtime (no `kbx/` workspace) reads only this; the `kbx` eval toolchain reads this FIRST
+    /// and falls back to its `lab.toml [tuning] abstention_policy` copy when unset.
+    pub fn abstention_policy(&self) -> Option<String> {
+        self.abstention_policy.clone()
+    }
+
+    /// Minimum reasoning-chain coverage (hop count reached) required before the abstention gate
+    /// answers instead of declining, from `[abstention].coverage_k`, or `None` when unset.
+    pub fn coverage_k(&self) -> Option<u32> {
+        self.coverage_k
+    }
+
+    /// How the abstention gate acts on an under-coverage question ("filter"|"signal"|"off"), from
+    /// `[abstention].enforcement`, or `None` when unset.
+    pub fn enforcement(&self) -> Option<String> {
+        self.enforcement.clone()
+    }
+
+    /// Reasoning-scope denylist from `[abstention].reasoning_exclude` — documents whose
+    /// corpus-relative path CONTAINS any of these substrings are never mined into the reasoning
+    /// graph. Empty when the ontology declares none; the `kbx` eval toolchain merges this with its
+    /// `lab.toml [tuning] reasoning_exclude` copy (deprecated) and any one-off `--exclude` flag.
+    pub fn reasoning_exclude(&self) -> &[String] {
+        &self.reasoning_exclude
+    }
+
+    /// Reasoning-scope allowlist from `[abstention].reasoning_only` (inverse of
+    /// `reasoning_exclude`). Empty when the ontology declares none; see `reasoning_exclude` for
+    /// the eval toolchain's fallback/merge behavior.
+    pub fn reasoning_only(&self) -> &[String] {
+        &self.reasoning_only
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
@@ -1125,5 +1213,23 @@ props = []
         assert!(ont.requires_validity("Record"));
         assert!(!ont.requires_validity("Note"));
         assert!(!ont.requires_validity("Absent")); // undeclared → false, no panic
+    }
+
+    #[test]
+    fn ontology_reads_abstention_and_scope() {
+        let d = tempfile::tempdir().unwrap();
+        // `load_or_default` reads `<root>/.glossa/ontology.toml` (see `load_or_default_reads_file_else_default`
+        // above) — the brief's literal snippet wrote to `d.path().join("ontology.toml")` directly, which
+        // `load_or_default` never reads; corrected here to the `.glossa/` location every other test in this
+        // file uses, so the test actually exercises the loader instead of silently falling back to defaults.
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+        std::fs::write(d.path().join(".glossa").join("ontology.toml"),
+            "[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\nenforcement = \"signal\"\nreasoning_exclude = [\"Vendor SDK\"]\nreasoning_only = [\"Troubleshooting\"]\n").unwrap();
+        let o = crate::graph::ontology::Ontology::load_or_default(d.path());
+        assert_eq!(o.abstention_policy().as_deref(), Some("safety_first"));
+        assert_eq!(o.coverage_k(), Some(2));
+        assert_eq!(o.enforcement().as_deref(), Some("signal"));
+        assert_eq!(o.reasoning_exclude(), ["Vendor SDK"]);
+        assert_eq!(o.reasoning_only(), ["Troubleshooting"]);
     }
 }

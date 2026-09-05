@@ -582,23 +582,13 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         crate::build::enumerate_docs(&g)?
     };
     docs = select_docs(docs, args.doc.as_deref());
-    // Same reasoning-scope as build: config denylist/allowlist + one-off --exclude/--only, so
-    // densify never enriches a generic-reference doc that build was scoped to skip.
+    // Same reasoning-scope as build: ontology `[abstention]` (primary) / lab.toml `[tuning]`
+    // (deprecated fallback) denylist/allowlist + one-off --exclude/--only, so densify never
+    // enriches a generic-reference doc that build was scoped to skip.
     {
-        let exclude: Vec<String> = lab
-            .tuning
-            .reasoning_exclude
-            .iter()
-            .chain(&args.exclude)
-            .cloned()
-            .collect();
-        let only: Vec<String> = lab
-            .tuning
-            .reasoning_only
-            .iter()
-            .chain(&args.only)
-            .cloned()
-            .collect();
+        let (scope_exclude, scope_only) = crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
+        let exclude: Vec<String> = scope_exclude.iter().chain(&args.exclude).cloned().collect();
+        let only: Vec<String> = scope_only.iter().chain(&args.only).cloned().collect();
         let dropped;
         (docs, dropped) = crate::build::apply_reasoning_scope(docs, &exclude, &only);
         if dropped > 0 {
