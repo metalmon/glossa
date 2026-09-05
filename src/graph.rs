@@ -29,6 +29,139 @@ pub const LEADS_TO: &str = "LEADS_TO";
 /// `read` of one is a document read, not a reasoning-node read). Everything else is a reasoning
 /// node. The ontology may add domain entity types, but these structural ones are a system contract.
 pub const STRUCTURAL_NODES: &[&str] = &["Document", "Section", "Term", "Topic"];
+
+/// True when `id` is itself grounded — a `Section`/`Document` node, or a reasoning node with a
+/// live [`MENTIONS`] edge to one (mirrors `tools::owning_doc`'s grounding definition) — or reaches
+/// such a grounded terminal by walking forward along non-grounding ("chaining") edges. Cycle-
+/// guarded (visited set). A lightweight, live, per-node BFS over the store — NOT a whole-graph
+/// scan — so it is cheap enough to call once per coverage-check candidate (see
+/// `tools::abstention::covered`).
+///
+/// This helper takes no [`ontology::Ontology`], so it approximates `RelationRole::Chaining`
+/// rather than reading it precisely: [`MENTIONS`] and the generalize-layer `SIMILAR` cross-link
+/// are the two fixed Grounding-role edge types this codebase uses outside the ontology (mirroring
+/// `Ontology::relation_role`'s built-in defaults for them); every other edge type is walked as a
+/// chaining hop, matching the ontology's fail-open "unrecognized role reads as Chaining" default.
+/// A corpus that declares an EXTRA Grounding-role relation beyond those two is only approximated
+/// here (that edge is walked as if it were chaining) — acceptable for an abstention SIGNAL, not a
+/// hard security boundary.
+pub fn grounded_or_chains_to_grounded(g: &store::GraphStore, id: &str) -> anyhow::Result<bool> {
+    fn is_grounded(g: &store::GraphStore, id: &str) -> anyhow::Result<bool> {
+        let Some(node) = g.get_node(id)? else {
+            return Ok(false);
+        };
+        if matches!(node.node_type.as_str(), "Section" | "Document") {
+            return Ok(true);
+        }
+        for e in g.outgoing(id)? {
+            if e.edge_type != MENTIONS {
+                continue;
+            }
+            if let Some(t) = g.get_node(&e.to)? {
+                if matches!(t.node_type.as_str(), "Section" | "Document") {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    visited.insert(id.to_string());
+    queue.push_back(id.to_string());
+    while let Some(cur) = queue.pop_front() {
+        if is_grounded(g, &cur)? {
+            return Ok(true);
+        }
+        for e in g.outgoing(&cur)? {
+            if e.edge_type == MENTIONS || e.edge_type == "SIMILAR" {
+                continue;
+            }
+            if visited.insert(e.to.clone()) {
+                queue.push_back(e.to);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod grounded_or_chains_to_grounded_tests {
+    use super::*;
+    use crate::graph::store::{Edge, GraphStore, Node, Provenance};
+
+    fn prov() -> Provenance {
+        Provenance {
+            source_path: "d.pdf".into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.8,
+            created_at: 1,
+        }
+    }
+    fn node(id: &str, ty: &str, label: &str) -> Node {
+        Node {
+            id: id.into(),
+            node_type: ty.into(),
+            label: label.into(),
+            aliases: Vec::new(),
+            prov: prov(),
+        }
+    }
+    fn edge(from: &str, rel: &str, to: &str) -> Edge {
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            edge_type: rel.into(),
+            prov: prov(),
+        }
+    }
+
+    #[test]
+    fn node_directly_grounded_via_mentions() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sec:a", "Section", "Intro")).unwrap();
+        g.put_node(&node("fact:a", "Fact", "Some fact")).unwrap();
+        g.put_edge(&edge("fact:a", MENTIONS, "sec:a")).unwrap();
+        assert!(grounded_or_chains_to_grounded(&g, "fact:a").unwrap());
+    }
+
+    #[test]
+    fn node_reaches_grounded_terminal_via_chaining_edge() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sec:a", "Section", "Intro")).unwrap();
+        g.put_node(&node("sym:a", "Symptom", "Bus dropout")).unwrap();
+        g.put_node(&node("res:a", "Resolution", "Raise timeout"))
+            .unwrap();
+        g.put_edge(&edge("sym:a", "RESOLVED_BY", "res:a")).unwrap();
+        g.put_edge(&edge("res:a", MENTIONS, "sec:a")).unwrap();
+        assert!(
+            grounded_or_chains_to_grounded(&g, "sym:a").unwrap(),
+            "query-side node one chaining hop from a grounded terminal must count"
+        );
+    }
+
+    #[test]
+    fn node_with_no_grounded_terminal_is_false() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("sym:orphan", "Symptom", "Unrelated symptom"))
+            .unwrap();
+        assert!(!grounded_or_chains_to_grounded(&g, "sym:orphan").unwrap());
+    }
+
+    #[test]
+    fn unknown_id_is_false() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        assert!(!grounded_or_chains_to_grounded(&g, "no:such:id").unwrap());
+    }
+}
+
 pub mod agent;
 pub mod build;
 pub mod compose;

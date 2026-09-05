@@ -219,7 +219,21 @@ pub fn run_search(
     trace: &TraceLog,
     scope: Option<&str>,
 ) -> (String, Vec<String>) {
-    let (body, hits) = glossa::tools::search(idx, query, limit, glob, file_type, trace, scope);
+    // No graph passed here (eval's tool dispatch keeps `search` graph-free, matching MCP's shape
+    // before the coverage gate) — `Enforcement::Off` skips the gate entirely, byte-identical to
+    // before this parameter existed.
+    let (body, hits) = glossa::tools::search(
+        idx,
+        query,
+        limit,
+        glob,
+        file_type,
+        trace,
+        scope,
+        None,
+        glossa::tools::abstention::Enforcement::Off,
+        0,
+    );
     (body, hits.iter().map(|h| h.location.clone()).collect())
 }
 
@@ -380,6 +394,8 @@ pub fn exec(
                     as_of.as_deref(),
                     None,
                     None,
+                    glossa::tools::abstention::Enforcement::Off,
+                    0,
                 ),
                 None => "(graph unavailable)".to_string(),
             };
@@ -499,6 +515,7 @@ pub fn exec(
                     glossa::tools::reach(
                         idx, g, &ont, from, from_path, from_n, relation, to, to_path, to_n,
                         max_depth, bridge, trace, None,
+                        glossa::tools::abstention::Enforcement::Off, 0,
                     )
                 }
                 None => "(graph unavailable)".to_string(),

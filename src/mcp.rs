@@ -75,6 +75,12 @@ pub struct GlossaServer {
     /// under `engine = mmap`, racing on the CSR file writes). Uncontended after the first build — the
     /// hot path is a lock-free `cell.load_full()` and never touches this mutex.
     build_lock: Arc<Mutex<()>>,
+    /// The tool-visibility profile this server was constructed with. Besides gating `tool_router`
+    /// routes at construction (see `new()`), it is read at CALL time by [`Self::abstention_gate`]
+    /// to pick the coverage-abstention `Enforcement` default for `search`/`glossary`/`reach`:
+    /// `Reader` -> `Filter`, `Editor`/`Full` -> `Signal` (a corpus ontology `enforcement` setting
+    /// overrides this default when present).
+    profile: Profile,
 }
 
 #[derive(Default)]
@@ -209,7 +215,34 @@ impl GlossaServer {
             )),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
+            profile,
         }
+    }
+
+    /// Resolve the coverage-abstention `Enforcement` tier + `k` for this call. `Off` (with `k`
+    /// meaningless) unless the corpus ontology opts in via `abstention_policy = "safety_first"`.
+    /// When it does, the tier defaults from `self.profile` (`Reader` -> `Filter` — the profile a
+    /// weak/untrusted agent runs under, so an uncovered question hard-abstains; `Editor`/`Full` ->
+    /// `Signal` — a trusted operator sees results with a low-coverage note, never a hard cut), but
+    /// the ontology's own `enforcement` setting (`"filter"`/`"signal"`/`"off"`) OVERRIDES that
+    /// default when present — an unrecognized value falls back to the profile default rather than
+    /// erroring. `k` comes from the ontology's `coverage_k`, defaulting to 1.
+    fn abstention_gate(&self, ont: &Ontology) -> (crate::tools::abstention::Enforcement, u32) {
+        use crate::tools::abstention::Enforcement;
+        if ont.abstention_policy().as_deref() != Some("safety_first") {
+            return (Enforcement::Off, 0);
+        }
+        let default_tier = match self.profile {
+            Profile::Reader => Enforcement::Filter,
+            Profile::Editor | Profile::Full => Enforcement::Signal,
+        };
+        let tier = match ont.enforcement().as_deref() {
+            Some("filter") => Enforcement::Filter,
+            Some("signal") => Enforcement::Signal,
+            Some("off") => Enforcement::Off,
+            _ => default_tier,
+        };
+        (tier, ont.coverage_k().unwrap_or(1))
     }
 
     /// The shared retrieval snapshot, built on first use and cached. Every request loads the SAME
@@ -1182,6 +1215,8 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
+        let ont = Ontology::load_or_default(&self.root);
+        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("search:{a:?}");
         let (body, hits) = crate::tools::search(
             &h.idx,
@@ -1191,6 +1226,9 @@ impl GlossaServer {
             a.file_type.as_deref(),
             &self.trace,
             a.scope.as_deref(),
+            Some(&h.graph),
+            enforcement,
+            k,
         );
         let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
         let body = self.apply_signals("search", &key, ids, body);
@@ -1263,8 +1301,10 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
+        let ont = Ontology::load_or_default(&self.root);
+        let spec = crate::tools::ChainSpec::from_ontology(&ont);
         let stale = crate::tools::StaleChecker::new(self.root.clone());
+        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
             &h.idx,
@@ -1276,6 +1316,8 @@ impl GlossaServer {
             a.as_of.as_deref(),
             Some(&stale),
             a.scope.as_deref(),
+            enforcement,
+            k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
         let body = self.apply_signals("glossary", &key, ids, body);
@@ -1350,6 +1392,7 @@ impl GlossaServer {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
+        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("reach:{a:?}");
         let body = crate::tools::reach(
             &h.idx,
@@ -1366,6 +1409,8 @@ impl GlossaServer {
             a.bridge.unwrap_or(true),
             &self.trace,
             a.scope.as_deref(),
+            enforcement,
+            k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
         let body = self.apply_signals("reach", &key, ids, body);

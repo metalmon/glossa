@@ -1360,6 +1360,8 @@ fn main() -> anyhow::Result<()> {
                         as_of.as_deref(),
                         Some(&stale),
                         scope.as_deref(),
+                        glossa::tools::abstention::Enforcement::Off,
+                        0,
                     )
                 );
                 Ok(())
@@ -1633,6 +1635,8 @@ fn main() -> anyhow::Result<()> {
                         !no_bridge,
                         &trace,
                         scope.as_deref(),
+                        glossa::tools::abstention::Enforcement::Off,
+                        0,
                     )
                 );
                 Ok(())

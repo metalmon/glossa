@@ -78,6 +78,12 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
 /// (when `Some`) is the friendly "restrict to one document" filter (bare path or glob, via
 /// `DocIndex::search_filtered`'s `scope` param) — a SEPARATE, ANDed filter alongside the existing
 /// raw ripgrep `glob`, not a replacement for it.
+///
+/// `g` + `enforcement` + `k` are the coverage-abstention gate (`abstention::gate`, applied to the
+/// rendered body only — the returned `hits` are unaffected): `enforcement == Off` (every non-MCP
+/// caller and existing test) or `g == None` (no graph available to check grounding against) skip
+/// the gate entirely, byte-identical to before this parameter existed.
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     idx: &DocIndex,
     query: &str,
@@ -86,6 +92,9 @@ pub fn search(
     file_type: Option<&str>,
     trace: &TraceLog,
     scope: Option<&str>,
+    g: Option<&crate::graph::store::GraphStore>,
+    enforcement: abstention::Enforcement,
+    k: u32,
 ) -> (String, Vec<RankedHit>) {
     match idx.search_filtered(query, limit.max(1), glob, file_type, scope) {
         Ok(hits) => {
@@ -101,6 +110,12 @@ pub fn search(
                     .map(|h| h.display_line())
                     .collect::<Vec<_>>()
                     .join("\n")
+            };
+            let body = match g {
+                Some(g) if enforcement != abstention::Enforcement::Off => {
+                    abstention::gate(query, body, idx, g, enforcement, k)
+                }
+                _ => body,
             };
             (body, hits)
         }
@@ -829,7 +844,8 @@ fn chain_lines(
 /// document ([`owning_doc`]) doesn't match; an unattributable entry is dropped too.
 #[allow(clippy::too_many_arguments)]
 /// Back-compat wrapper: `glossary` without a ranking query. Composed candidates fall back to
-/// ranking by the entity name.
+/// ranking by the entity name. `enforcement`/`k`: pass [`abstention::Enforcement::Off`] (and any
+/// `k`) to keep today's behaviour byte-identical — every existing non-MCP caller/test does this.
 pub fn glossary(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -839,12 +855,28 @@ pub fn glossary(
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
+    enforcement: abstention::Enforcement,
+    k: u32,
 ) -> String {
-    glossary_with_query(idx, g, name, None, spec, trace, as_of, stale, scope)
+    glossary_with_query(
+        idx,
+        g,
+        name,
+        None,
+        spec,
+        trace,
+        as_of,
+        stale,
+        scope,
+        enforcement,
+        k,
+    )
 }
 
 /// Look an entity up. `query` (when the caller has it — e.g. the full question) ranks the composed
 /// neighbourhood by the question's own terms, not just the entity name; `None` ranks by the name.
+/// The SAME `query` (falling back to `name` when `None`) is the "question" the coverage-abstention
+/// gate (`enforcement`/`k`; see [`abstention::gate`]) checks — `Enforcement::Off` skips it entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn glossary_with_query(
     idx: &DocIndex,
@@ -856,11 +888,18 @@ pub fn glossary_with_query(
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
+    enforcement: abstention::Enforcement,
+    k: u32,
 ) -> String {
     // Log the FULL rendered body (what the reader actually sees), not just an id count — otherwise a
     // trace is a black box and a mislabeled/mis-grounded chain terminal is invisible. Bodies are
     // already bounded by the entry/depth caps inside. Wrapper captures every return path of _inner.
     let body = glossary_with_query_inner(idx, g, name, query, spec, as_of, stale, scope);
+    let body = if enforcement == abstention::Enforcement::Off {
+        body
+    } else {
+        abstention::gate(query.unwrap_or(name), body, idx, g, enforcement, k)
+    };
     trace.log(
         "glossary",
         json!({ "name": name, "query": query }),
@@ -1380,6 +1419,10 @@ const DEFAULT_REACH_BRIDGE_BUDGET: usize = 1;
 /// discovered/verified hop-chain whose TERMINAL node's owning document ([`owning_doc`]) doesn't
 /// match, before rendering — this reproduces `grep`'s doc-scoping for cross-document reasoning
 /// without adding a per-hop gate (out of scope for this primitive; see module docs).
+/// `enforcement`/`k`: the coverage-abstention gate ([`abstention::gate`]), checked against
+/// `from_node`/`from_path` (whichever text the caller supplied) as the "question" — `reach` has no
+/// separate free-text field, so the same name/path that resolved `from` stands in for it.
+/// `Enforcement::Off` (every non-MCP caller and existing test) skips the gate entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn reach(
     idx: &DocIndex,
@@ -1396,6 +1439,8 @@ pub fn reach(
     bridge: bool,
     trace: &TraceLog,
     scope: Option<&str>,
+    enforcement: abstention::Enforcement,
+    k: u32,
 ) -> String {
     let scope_glob = match compile_scope(scope) {
         Ok(s) => s,
@@ -1458,6 +1503,12 @@ pub fn reach(
             rendered
         }
         Err(e) => format!("reach error: {e}"),
+    };
+    let body = if enforcement == abstention::Enforcement::Off {
+        body
+    } else {
+        let question = from_node.or(from_path).unwrap_or("");
+        abstention::gate(question, body, idx, g, enforcement, k)
     };
     prepend_note(note, body)
 }
@@ -2373,6 +2424,8 @@ mod tests {
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(out.contains("[Symptom]"), "{out}");
         // as_of after the validity window: the node is filtered out entirely.
@@ -2385,6 +2438,8 @@ mod tests {
             Some("2024-01-01"),
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert_eq!(out, "(no matches)", "{out}");
         // as_of inside the window: still visible.
@@ -2397,6 +2452,8 @@ mod tests {
             Some("2022-06-01"),
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(out.contains("[Symptom]"), "{out}");
     }
@@ -2450,6 +2507,8 @@ mod tests {
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         // entry node + the whole chain to the resolution, surfaced by a SINGLE call
         assert!(
@@ -2484,7 +2543,18 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None, None, None);
+        let out = glossary(
+            &i,
+            &g,
+            "Bus link dropout",
+            &empty,
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -2547,6 +2617,8 @@ mod tests {
             None,
             Some(&stale),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(out.contains("⚠ stale"), "expected stale marker: {out}");
 
@@ -2559,6 +2631,8 @@ mod tests {
             None,
             Some(&stale),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(!out.contains("⚠ stale"), "unexpected stale marker: {out}");
 
@@ -2572,11 +2646,112 @@ mod tests {
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             !out.contains("⚠ stale"),
             "stale check must be opt-in: {out}"
         );
+    }
+
+    #[test]
+    fn glossary_filter_mode_abstains_when_question_uncovered() {
+        // "profibus" is covered (indexed, BM25); "неведомыйквазар" is not (not indexed, no graph
+        // node). k=1: one uncovered distinctive term is already enough to trigger the gate.
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("manual.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "profibus maxTsdr timeout configuration".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        let out = glossary_with_query(
+            &i,
+            &g,
+            "profibus",
+            Some("profibus неведомыйквазар"),
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Filter,
+            1,
+        );
+        assert!(
+            out.contains("нет информации"),
+            "filter mode returns the sentinel: {out}"
+        );
+
+        // Signal mode annotates instead of cutting: the results (or lack thereof) stay, plus a note.
+        let out2 = glossary_with_query(
+            &i,
+            &g,
+            "profibus",
+            Some("profibus неведомыйквазар"),
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Signal,
+            1,
+        );
+        assert!(
+            out2.contains("coverage") && out2.contains("неведомыйквазар"),
+            "signal annotates, keeps results: {out2}"
+        );
+    }
+
+    #[test]
+    fn glossary_covered_question_is_unchanged_by_enforcement() {
+        // Every distinctive term of the question is covered (indexed) — the gate must not fire,
+        // so Filter's output is byte-identical to Off's.
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("manual.pdf"),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "profibus maxTsdr timeout configuration".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let t = TraceLog::disabled();
+
+        let off = glossary_with_query(
+            &i,
+            &g,
+            "profibus",
+            Some("profibus"),
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
+        let filtered = glossary_with_query(
+            &i,
+            &g,
+            "profibus",
+            Some("profibus"),
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Filter,
+            1,
+        );
+        assert_eq!(off, filtered, "a fully-covered question must not be gated");
     }
 
     #[test]
@@ -2925,6 +3100,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             false,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(out.contains("--REFERENCES-->"), "got: {out}");
         // first line is the `from` node, no arrow prefix
@@ -2945,6 +3122,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             false,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             reverse.contains("<--CONSTRAINED_BY--"),
@@ -2966,6 +3145,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             false,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(none.starts_with("no grounded path"), "got: {none}");
 
@@ -2985,6 +3166,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             false,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(clamped.contains("--REFERENCES-->"));
     }
@@ -3052,6 +3235,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             true,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             out.contains("Target"),
@@ -3085,6 +3270,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             false,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             !no_bridge.contains("Target"),
@@ -3126,6 +3313,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             true,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(hit.contains("Target"), "got: {hit}");
         assert!(
@@ -3149,6 +3338,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             true,
             &TraceLog::disabled(),
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             miss.starts_with("no grounded path"),
@@ -3297,10 +3488,32 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn search_renders_numbered_or_empty() {
         let (_d, i) = idx();
         let t = TraceLog::disabled();
-        let (body, hits) = search(&i, "timeout", 10, None, None, &t, None);
+        let (body, hits) = search(
+            &i,
+            "timeout",
+            10,
+            None,
+            None,
+            &t,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert_eq!(hits.len(), 1);
         assert!(body.starts_with("MODULE.pdf#7") && body.contains("timeout"));
-        let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t, None);
+        let (empty, _) = search(
+            &i,
+            "nonexistentzzz",
+            10,
+            None,
+            None,
+            &t,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert_eq!(empty, "(no results)");
     }
 
@@ -3326,11 +3539,33 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
 
         // No scope: unchanged baseline — both documents hit.
-        let (_all_body, all_hits) = search(&i, "timeout", 10, None, None, &t, None);
+        let (_all_body, all_hits) = search(
+            &i,
+            "timeout",
+            10,
+            None,
+            None,
+            &t,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert_eq!(all_hits.len(), 2);
 
         // scope=docA.md: only that document's hit remains.
-        let (scoped_body, scoped_hits) = search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
+        let (scoped_body, scoped_hits) = search(
+            &i,
+            "timeout",
+            10,
+            None,
+            None,
+            &t,
+            Some("docA.md"),
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
     }
@@ -3739,6 +3974,8 @@ strict = true
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             result.contains("org:acme"),
@@ -3753,7 +3990,9 @@ strict = true
                 &t,
                 None,
                 None,
-                None
+                None,
+                abstention::Enforcement::Off,
+                0,
             ),
             "(no matches)"
         );
@@ -3780,6 +4019,8 @@ strict = true
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             after.contains("org:acme"),
@@ -3837,6 +4078,8 @@ strict = true
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(out.contains("sym:loss"), "shows the matched node id: {out}");
         assert!(
@@ -3880,6 +4123,8 @@ strict = true
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(result.contains("#1"), "section rendered with ord: {result}");
         assert!(result.contains("Intro"), "section label present: {result}");
@@ -3893,7 +4138,9 @@ strict = true
                 &t,
                 None,
                 None,
-                None
+                None,
+                abstention::Enforcement::Off,
+                0,
             ),
             "(no matches)"
         );
@@ -3924,7 +4171,18 @@ strict = true
         g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id))
             .unwrap();
 
-        let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None, None);
+        let out = glossary(
+            &idx,
+            &g,
+            "Sun",
+            &ChainSpec::default(),
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert!(
             out.contains("3rd century BC"),
             "fact grounded to the matched section must surface, not just the stub: {out}"
@@ -3972,7 +4230,18 @@ strict = true
         let spec = ChainSpec {
             spine_rels: vec!["LEADS_TO".to_string()],
         };
-        let out = glossary(&idx, &g, "Sun", &spec, &t, None, None, None);
+        let out = glossary(
+            &idx,
+            &g,
+            "Sun",
+            &spec,
+            &t,
+            None,
+            None,
+            None,
+            abstention::Enforcement::Off,
+            0,
+        );
         assert!(
             out.contains("3rd century BC"),
             "glossary must expand the LEADS_TO neighbour of a section-grounded fact so the next \
@@ -4209,6 +4478,8 @@ strict = true
             None,
             None,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(all.contains("fact:a") && all.contains("fact:b"), "{all}");
 
@@ -4222,6 +4493,8 @@ strict = true
             None,
             None,
             Some("docA.md"),
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(scoped.contains("fact:a"), "{scoped}");
         assert!(!scoped.contains("fact:b"), "{scoped}");
@@ -4270,6 +4543,8 @@ strict = true
             false,
             &t,
             None,
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(
             all.contains("reach_target_a") && all.contains("reach_target_b"),
@@ -4292,6 +4567,8 @@ strict = true
             false,
             &t,
             Some("docA.md"),
+            abstention::Enforcement::Off,
+            0,
         );
         assert!(scoped.contains("reach_target_a"), "{scoped}");
         assert!(!scoped.contains("reach_target_b"), "{scoped}");
