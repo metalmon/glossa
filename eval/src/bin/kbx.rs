@@ -1434,16 +1434,25 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
             // stat only, so output is unchanged.
             if let Some(root) = file.ancestors().find(|a| a.join(".glossa").is_dir()) {
                 if let Ok(g) = glossa::graph::store::GraphStore::open(root) {
-                    let report = kb_eval::connectivity::answer_reachability(&g, &cases)?;
-                    println!(
-                        "\nanswer-reachability (single-seed question->answer rank, top {}):",
-                        200
-                    );
-                    for (hop, c) in &report {
-                        println!(
-                            "  {hop:10} n={} skipped={} median={:?} p90={:?} hit@5={:.2} hit@20={:.2} unreachable={}",
-                            c.n, c.skipped, c.median_rank, c.p90_rank, c.hit5, c.hit20, c.unreachable
-                        );
+                    // Best-effort: a present-but-malformed graph must not fail `stat`, which
+                    // otherwise never touches the graph at all — warn and fall back to the
+                    // pure-file stats already printed above.
+                    match kb_eval::connectivity::answer_reachability(&g, &cases) {
+                        Ok(report) => {
+                            println!(
+                                "\nanswer-reachability (single-seed question->answer rank, top {}):",
+                                200
+                            );
+                            for (hop, c) in &report {
+                                println!(
+                                    "  {hop:10} n={} skipped={} median={:?} p90={:?} hit@5={:.2} hit@20={:.2} unreachable={}",
+                                    c.n, c.skipped, c.median_rank, c.p90_rank, c.hit5, c.hit20, c.unreachable
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("answer-reachability skipped: {e}");
+                        }
                     }
                 }
             }

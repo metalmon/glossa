@@ -41,3 +41,17 @@ pub mod ops;
 pub mod query;
 pub mod temporal;
 pub mod traverse;
+
+/// Test-only guard serializing tests that mutate the process-global `GLOSSA_PPR_*` env vars
+/// (`GLOSSA_PPR_SIM_WEIGHT`, `GLOSSA_PPR_SPINE_WEIGHT`, `GLOSSA_PPR_BRIDGE`) read by
+/// `ppr::sim_weight`/`ppr::spine_weight`/`ppr::bridge_mode`. Process env is shared across the
+/// whole test binary (spans both `graph::ppr` and `graph::compose`), so concurrent tests
+/// setting/clearing the same var race under parallel test execution. Every test that reads or
+/// mutates one of these vars must hold this lock for its full body:
+/// `let _guard = crate::graph::test_env_lock::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());`
+/// (`unwrap_or_else` recovers from poisoning so one panicking test doesn't cascade-fail siblings).
+#[cfg(test)]
+pub(crate) mod test_env_lock {
+    use std::sync::Mutex;
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
