@@ -247,6 +247,32 @@ pub fn ppr_push_touched(
         .unwrap_or(0)
 }
 
+/// Full local support of a forward-push PPR: every non-seed node the push touched, with its PPR
+/// mass, in descending order. Same push as [`ppr_push`] but WITHOUT the top-k truncation — the
+/// dual-seed geomean caller needs each seed's whole local neighborhood so the two supports overlap.
+/// Empty when no seed resolves.
+pub fn ppr_push_scored(
+    csr: &crate::graph::csr::CsrTransition,
+    seeds: &HashMap<String, f32>,
+    alpha: f32,
+    eps: f32,
+) -> Vec<(String, f32)> {
+    use std::collections::HashSet;
+    let Some((p, seed_idx, _pops)) = push_estimate(csr, seeds, alpha, eps) else {
+        return Vec::new();
+    };
+    let seed_idx: HashSet<u32> = seed_idx;
+    let mut ranked: Vec<(u32, f32)> = p
+        .into_iter()
+        .filter(|(i, _)| !seed_idx.contains(i))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+        .into_iter()
+        .filter_map(|(i, s)| csr.id_of(i).map(|id| (id.to_string(), s)))
+        .collect()
+}
+
 /// Shared forward-push core behind [`ppr_push`] and [`ppr_push_touched`]. Runs the Andersen–Chung–Lang
 /// push and returns `(p, seed_idx, pops)`: the PPR estimate `p`, the resolved seed indices (excluded
 /// from ranking), and the number of node expansions (the working-set size). `None` when the seeds
@@ -666,5 +692,38 @@ mod tests {
         let t = build_transition(&g).unwrap();
         let ai = t.ids().iter().position(|s| s == "a").unwrap();
         assert_eq!(t.adj()[ai][0].1, 0.5); // 1.0 (tier) * 0.5 (confidence)
+    }
+
+    #[test]
+    fn ppr_push_scored_returns_full_support_superset_of_topk() {
+        // Reuse the exact CSR construction from `ppr_push_ranks_local_neighborhood_and_is_bounded`
+        // (ppr.rs:324): build the small GraphStore, `let csr = g.csr().unwrap();`, same single seed.
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let w = 1.0f32;
+        let adj = vec![
+            vec![(1usize, w)],
+            vec![(0, w), (2, w)],
+            vec![(1, w), (3, w)],
+            vec![(2, w), (4, w)],
+            vec![(3, w)],
+        ];
+        crate::graph::csr::CsrTransition::build(&ids, &adj, dir.path(), 1).unwrap();
+        let csr = crate::graph::csr::CsrTransition::open(dir.path(), 1)
+            .unwrap()
+            .unwrap();
+        let seeds: std::collections::HashMap<String, f32> =
+            [("a".to_string(), 1.0)].into_iter().collect();
+        let full = ppr_push_scored(&csr, &seeds, 0.15, 1e-6);
+        let topk = ppr_push(&csr, &seeds, 0.15, 1e-6, 3);
+        assert!(full.len() >= topk.len(), "full support is a superset of top-k");
+        // The top-3 prefix of the full (already sorted desc) equals ppr_push's top-3.
+        let full_prefix: Vec<&String> = full.iter().take(3).map(|(id, _)| id).collect();
+        let topk_ids: Vec<&String> = topk.iter().map(|(id, _)| id).collect();
+        assert_eq!(full_prefix, topk_ids, "same ranking head");
+        assert!(!full.iter().any(|(id, _)| id == "a"), "seed excluded");
     }
 }
