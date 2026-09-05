@@ -14,6 +14,7 @@ Write: "QUESTION: the user wants to know …". If there are several questions, n
 STEP 2. TERMS AND GRAPH ENTRY
 Pull 1–3 key words from the question. For each, call `glossary(<word>, <the whole question as a sentence>)` — that ranks the returned neighbourhood by what you actually need. Write: "TERMS: <user's word> → <official term>". If `glossary()` came back empty, use the user's word as-is.
 If `glossary()` returned a chain to an answer-node, follow it: `reach(<node>, <relation>)`, then open the terminal's source and read it (the pointer rule above). A grounded typed chain that reaches the answer is usually enough on its own.
+When you have found a first, partial fact but not yet the answer, call `glossary()` again with that found entity as the term (first argument) and the original question as the second — the graph then surfaces the node connecting your found entity to the question (meeting in the middle), which is often the answer you are missing.
 
 STEP 3. SEARCH
 If the direct chain is quiet, `reach` over the flat facts for the same entity. If the graph is quiet, go to full text: `search` for concepts, `grep` for exact tokens (codes, versions, part numbers), `read` a chunk. `sql(...)` when the answer is a ranking or extreme (which / earliest / largest / first) among candidates — let SQL over the graph decide. It is SQLite (not PostgreSQL): `LIKE` is case-insensitive, including non-ASCII; `ILIKE` is accepted and treated as `LIKE`; no trailing `;` is needed.
