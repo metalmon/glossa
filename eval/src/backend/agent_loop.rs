@@ -182,7 +182,7 @@ fn call_with_context_retry(
     transport: &dyn ChatTransport,
     ep: &Endpoint,
     system: Option<&str>,
-    messages: &mut [Value],
+    messages: &mut Vec<Value>,
     tools: Option<&Value>,
     temperature: Option<f64>,
 ) -> anyhow::Result<TurnReply> {
@@ -191,17 +191,72 @@ fn call_with_context_retry(
         match resilient_call(transport, ep, system, messages, tools, temperature) {
             Ok(reply) => return Ok(reply),
             Err(e) => {
-                if round < MAX_CONTEXT_RETRIES
-                    && is_context_overflow(&e)
-                    && middle_out_truncate(messages, round)
-                {
-                    round += 1;
-                    continue;
+                if is_context_overflow(&e) {
+                    if std::env::var("KB_EVAL_DEBUG_TRUNC").is_ok() {
+                        let chars: usize = messages
+                            .iter()
+                            .map(|m| {
+                                m.get("content").and_then(Value::as_str).map(str::len).unwrap_or(0)
+                                    + m.get("reasoning_content")
+                                        .and_then(Value::as_str)
+                                        .map(str::len)
+                                        .unwrap_or(0)
+                            })
+                            .sum();
+                        let tools = messages
+                            .iter()
+                            .filter(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+                            .count();
+                        eprintln!(
+                            "[TRUNC] round={round} msgs={} tool_msgs={tools} content_chars={chars} (~tok {})",
+                            messages.len(),
+                            chars / 3
+                        );
+                    }
+                    // 1) Escalating middle-out: stub old/oversized tool bodies in place.
+                    if round < MAX_CONTEXT_RETRIES && middle_out_truncate(messages, round) {
+                        round += 1;
+                        continue;
+                    }
+                    // 2) Convergence fallback: drop the OLDEST complete round entirely. Repeats on
+                    //    continued overflow until only the leading question + most-recent round
+                    //    remain, so a transcript that stubbing alone can't shrink (many rounds of
+                    //    assistant narration + tool calls) still converges instead of erroring.
+                    if drop_oldest_round(messages) {
+                        continue;
+                    }
                 }
                 return Err(e);
             }
         }
     }
+}
+
+/// Convergence fallback for context overflow that stubbing tool bodies (see [`middle_out_truncate`])
+/// cannot fix: remove the OLDEST complete round — the earliest assistant turn that made tool calls,
+/// through to just before the next such turn (i.e. that turn plus the tool results answering it) —
+/// while preserving the leading user question and the MOST RECENT round, and keeping the
+/// assistant↔tool_call pairing valid. Returns `false` when fewer than two tool-calling rounds remain
+/// (nothing safe left to drop), so the caller then propagates the error.
+fn drop_oldest_round(messages: &mut Vec<Value>) -> bool {
+    let is_asst_call = |m: &Value| {
+        m.get("role").and_then(Value::as_str) == Some("assistant")
+            && m.get("tool_calls")
+                .and_then(Value::as_array)
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+    };
+    let calls: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_asst_call(m))
+        .map(|(i, _)| i)
+        .collect();
+    if calls.len() < 2 {
+        return false; // keep the most-recent round intact
+    }
+    messages.drain(calls[0]..calls[1]); // oldest assistant-call turn + its tool results
+    true
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row
@@ -930,6 +985,37 @@ mod tests {
 
     fn tool_msg(id: &str, body: &str) -> Value {
         json!({ "role": "tool", "tool_call_id": id, "content": body })
+    }
+
+    fn asst_call(id: &str) -> Value {
+        json!({ "role": "assistant", "tool_calls": [{ "id": id, "type": "function" }] })
+    }
+
+    #[test]
+    fn drop_oldest_round_removes_first_round_preserves_question_and_pairing() {
+        let mut msgs = vec![
+            json!({ "role": "user", "content": "the question" }),
+            asst_call("a"),
+            tool_msg("a", "result A"),
+            asst_call("b"),
+            tool_msg("b", "result B"),
+            asst_call("c"),
+            tool_msg("c", "result C"),
+        ];
+        // Drops the oldest round (assistant "a" + tool "a"); question + rounds b,c remain.
+        assert!(drop_oldest_round(&mut msgs));
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0]["content"], "the question", "leading question preserved");
+        assert!(
+            !msgs.iter().any(|m| m.get("tool_call_id").and_then(Value::as_str) == Some("a")),
+            "oldest round's tool result dropped with its assistant turn (pairing kept)"
+        );
+        // Repeats: drops round b.
+        assert!(drop_oldest_round(&mut msgs));
+        assert_eq!(msgs.len(), 3);
+        // Only one tool-calling round (c) left → nothing safe to drop.
+        assert!(!drop_oldest_round(&mut msgs));
+        assert_eq!(msgs.len(), 3);
     }
 
     #[test]
