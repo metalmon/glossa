@@ -673,12 +673,15 @@ pub(crate) struct ReadArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CheckSpanArg {
+    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
     #[schemars(description = "document path the quote is claimed to come from, exactly as read() showed it")]
     doc: String,
+    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
     #[schemars(
         description = "the chunk/page location within `doc` — the n in a `path#n` reference (e.g. \"5\") — that was actually read()"
     )]
     loc: String,
+    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
     #[schemars(description = "the exact text claimed to be verbatim at doc#loc")]
     quote: String,
 }

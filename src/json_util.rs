@@ -242,6 +242,24 @@ where
     deserializer.deserialize_any(OptStringVisitor)
 }
 
+/// Required-`String` variant of [`deserialize_opt_string_loose`]: accepts a JSON string, number,
+/// or bool (stringified) the same way; rejects null (and, via that fn's `Visitor`, arrays/objects)
+/// with a clear error rather than serde's default type-mismatch message.
+/// Use with `#[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]` on a
+/// non-optional field (absent → serde's normal "missing field" error, same as
+/// [`deserialize_u32_loose`]).
+pub fn deserialize_string_loose<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match deserialize_opt_string_loose(deserializer)? {
+        Some(s) => Ok(s),
+        None => Err(de::Error::custom(
+            "expected a string, number, or bool, got null",
+        )),
+    }
+}
+
 /// Accept a string list as a JSON array, a single string, or a comma-separated string — some MCP
 /// clients cannot send arrays. Empty/whitespace entries are dropped; an all-empty result is `None`.
 pub fn deserialize_opt_vec_string_loose<'de, D>(
@@ -403,6 +421,26 @@ mod tests {
         assert_eq!(absent.valid_from, None);
         let null: T = serde_json::from_str(r#"{"valid_from":null}"#).unwrap();
         assert_eq!(null.valid_from, None);
+    }
+
+    #[test]
+    fn string_loose_accepts_bare_number_and_string_rejects_null() {
+        #[derive(Deserialize)]
+        struct T {
+            #[serde(deserialize_with = "deserialize_string_loose")]
+            loc: String,
+        }
+        // The bug this fix targets: a model sends a bare JSON number for a location field
+        // that's really a stringified chunk ordinal.
+        let n: T = serde_json::from_str(r#"{"loc":5}"#).unwrap();
+        assert_eq!(n.loc, "5");
+        let s: T = serde_json::from_str(r#"{"loc":"p.5"}"#).unwrap();
+        assert_eq!(s.loc, "p.5");
+        let b: T = serde_json::from_str(r#"{"loc":true}"#).unwrap();
+        assert_eq!(b.loc, "true");
+        // Required field: null and absent are still rejected, not silently defaulted.
+        assert!(serde_json::from_str::<T>(r#"{"loc":null}"#).is_err());
+        assert!(serde_json::from_str::<T>(r#"{}"#).is_err());
     }
 
     #[test]
