@@ -83,6 +83,40 @@ pub(crate) fn spine_weight(gdir: &Path) -> f32 {
     1.0
 }
 
+// TODO(dual-seed-ppr-bridge): consumed by `compose_ppr` in a follow-up task; allow(dead_code)
+// suppresses the interim "never used" warning until that call site lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum BridgeMode {
+    Off,
+    Geomean,
+}
+
+/// Dual-seed combination mode for `compose_ppr`. Resolution mirrors [`spine_weight`]:
+/// `GLOSSA_PPR_BRIDGE` env > `[retrieval].bridge` in `ontology.toml` > default `Off`. Unlike
+/// `w_sim`/`w_spine`, this does NOT change the transition matrix, so it is NOT folded into
+/// `cache_sig` — it only alters query-time seeding/combination.
+#[allow(dead_code)]
+pub(crate) fn bridge_mode(gdir: &Path) -> BridgeMode {
+    let parse = |s: &str| match s.trim().to_ascii_lowercase().as_str() {
+        "geomean" => Some(BridgeMode::Geomean),
+        "off" => Some(BridgeMode::Off),
+        _ => None,
+    };
+    if let Some(m) = std::env::var("GLOSSA_PPR_BRIDGE").ok().as_deref().and_then(parse) {
+        return m;
+    }
+    if let Some(m) = gdir
+        .parent()
+        .and_then(|root| crate::graph::ontology::Ontology::load_or_default(root).ppr_bridge_mode())
+        .as_deref()
+        .and_then(parse)
+    {
+        return m;
+    }
+    BridgeMode::Off
+}
+
 /// Fold `w_sim` AND `w_spine` into the transition cache's content signature. The persisted transition
 /// matrix bakes in both weights (edge weights = tier * confidence, tier scaled by whichever tier the
 /// edge is in), so a cache built at one weight pair MUST NOT be reused at another — otherwise changing
@@ -585,6 +619,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spine_weight(&gdir), 1.0);
+    }
+
+    #[test]
+    fn bridge_mode_resolves_env_over_ontology_over_default() {
+        let d = tempfile::tempdir().unwrap();
+        let gdir = d.path().join(".glossa");
+        std::fs::create_dir_all(&gdir).unwrap();
+        // Default with no ontology: Off.
+        assert_eq!(bridge_mode(&gdir), BridgeMode::Off);
+        // Per-corpus [retrieval].bridge is read.
+        std::fs::write(d.path().join(".glossa/ontology.toml"), "[retrieval]\nbridge = \"geomean\"\n").unwrap();
+        assert_eq!(bridge_mode(&gdir), BridgeMode::Geomean);
+        // Env overrides ontology.
+        std::env::set_var("GLOSSA_PPR_BRIDGE", "off");
+        assert_eq!(bridge_mode(&gdir), BridgeMode::Off);
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
     }
 
     #[test]

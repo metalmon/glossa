@@ -61,6 +61,10 @@ struct RawRetrieval {
     /// against its Grounding/descriptive edges. See `graph::ppr::spine_weight`.
     #[serde(default)]
     spine_weight: Option<f32>,
+    /// Dual-seed combination mode for `compose_ppr` from `[retrieval].bridge`: "off" | "geomean".
+    /// See `graph::ppr::bridge_mode`.
+    #[serde(default)]
+    bridge: Option<String>,
 }
 
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
@@ -273,6 +277,9 @@ pub struct Ontology {
     /// finite ≥ 0. `None` when unset → PPR uses the engine default (1.0). See
     /// [`Ontology::ppr_spine_weight`].
     ppr_spine_weight: Option<f32>,
+    /// Per-corpus dual-seed PPR mode from `[retrieval].bridge`. `None` when unset → engine default
+    /// Off. See [`Ontology::ppr_bridge_mode`].
+    ppr_bridge: Option<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -399,6 +406,7 @@ impl Ontology {
                 .retrieval
                 .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
+            ppr_bridge: raw.retrieval.bridge,
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -563,6 +571,12 @@ impl Ontology {
     /// default (1.0, a no-op). See [`Ontology::relation_role`] for which edges count as spine.
     pub fn ppr_spine_weight(&self) -> Option<f32> {
         self.ppr_spine_weight
+    }
+
+    /// Per-corpus dual-seed PPR mode from `[retrieval].bridge` ("off" | "geomean"), or `None` when
+    /// the ontology declares none — in which case PPR applies its engine default (Off).
+    pub fn ppr_bridge_mode(&self) -> Option<String> {
+        self.ppr_bridge.clone()
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
