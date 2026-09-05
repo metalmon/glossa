@@ -56,8 +56,12 @@ fn local_moving(level: &Level) -> Vec<usize> {
         return comm; // no edges: every node is its own community
     }
     // Σ_tot per community: total incident weight of the community (indexed in node-label space).
+    // Grows past `n` as nodes isolate into fresh singleton communities.
     let mut sigma_tot: Vec<f64> = level.k.clone();
+    let mut next_comm = n; // id allocator for freshly-isolated singleton communities
+    const ISOLATE: usize = usize::MAX; // sentinel: "move to a new empty community" (gain 0)
 
+    let mut converged = false;
     for _ in 0..MAX_PASSES {
         let mut moved = false;
         for i in 0..n {
@@ -75,12 +79,17 @@ fn local_moving(level: &Level) -> Vec<usize> {
                 *kin.entry(comm[j]).or_insert(0.0) += w;
             }
 
-            // Baseline is the current community; a candidate must strictly beat it (by EPS) to win,
-            // so ties keep the current community, and among non-current ties the lowest id wins
-            // (BTreeMap iterates in ascending community-id order).
-            let mut best_comm = ci;
-            let mut best_gain =
-                kin.get(&ci).copied().unwrap_or(0.0) / m - sigma_tot[ci] * ki / (2.0 * m * m);
+            // Baseline is the better of {rejoin ci, isolate}: isolating into a new empty community
+            // has gain 0, so if rejoining ci is worse than that (its gain < 0), the node should leave
+            // rather than stay trapped in a community it no longer belongs to. Prefer ci on a tie
+            // (rejoin gain >= 0), keeping churn down; a neighbour must strictly beat the baseline by
+            // EPS to win, and among neighbour ties the lowest id wins (BTreeMap ascending order).
+            let rejoin = kin.get(&ci).copied().unwrap_or(0.0) / m - sigma_tot[ci] * ki / (2.0 * m * m);
+            let (mut best_comm, mut best_gain) = if rejoin >= -EPS {
+                (ci, rejoin)
+            } else {
+                (ISOLATE, 0.0)
+            };
             for (&c, &kin_c) in &kin {
                 if c == ci {
                     continue;
@@ -92,6 +101,11 @@ fn local_moving(level: &Level) -> Vec<usize> {
                 }
             }
 
+            if best_comm == ISOLATE {
+                best_comm = next_comm; // allocate a fresh singleton community
+                next_comm += 1;
+                sigma_tot.push(0.0);
+            }
             sigma_tot[best_comm] += ki;
             if best_comm != ci {
                 comm[i] = best_comm;
@@ -99,9 +113,14 @@ fn local_moving(level: &Level) -> Vec<usize> {
             }
         }
         if !moved {
+            converged = true;
             break;
         }
     }
+    debug_assert!(
+        converged,
+        "louvain local_moving did not converge within MAX_PASSES"
+    );
     comm
 }
 
@@ -183,6 +202,7 @@ pub fn detect_communities(node_ids: &[String], edges: &[Triple]) -> HashMap<Stri
     // Maps each original node index to its node index in the current (aggregated) level.
     let mut orig_level: Vec<usize> = (0..n).collect();
 
+    let mut level_converged = false;
     for _ in 0..MAX_LEVELS {
         let comm = local_moving(&level);
         let (dense, num_comm) = densify(&comm);
@@ -190,10 +210,15 @@ pub fn detect_communities(node_ids: &[String], edges: &[Triple]) -> HashMap<Stri
             *c = dense[*c];
         }
         if num_comm >= level.n {
+            level_converged = true;
             break; // no community merged this level; converged
         }
         level = aggregate(&level, &dense, num_comm);
     }
+    debug_assert!(
+        level_converged,
+        "louvain aggregation did not converge within MAX_LEVELS"
+    );
 
     // Final relabel: dense 0-based ids in ascending order of each community's smallest member index.
     let mut final_label: BTreeMap<usize, usize> = BTreeMap::new();
@@ -238,6 +263,12 @@ mod tests {
         assert_eq!(comm["a"], comm["b"]);
         assert_eq!(comm["b"], comm["c"]);
     }
+
+    // NOTE (Minor 1, isolate option): local_moving now offers a node the "isolate into a fresh
+    // singleton" move (gain 0) so it is never trapped in a community it no longer benefits from.
+    // Its effect is marginal by nature — a pendant node's modularity gain is ~0 either way — so a
+    // reliable black-box "forces isolation" fixture on a toy graph is not constructible; the change
+    // is covered by no-regression (the tests here + determinism) plus the debug_assert on convergence.
 
     #[test]
     fn louvain_shatters_a_similar_flooded_hub() {
