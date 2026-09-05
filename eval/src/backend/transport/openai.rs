@@ -25,26 +25,12 @@ use std::time::Duration;
 /// the Anthropic/Responses transports.
 pub(crate) const DEFAULT_MIN_P: f64 = 0.1;
 
-/// Cap on completion length per call. Bounds a runaway generation (a degenerate loop can otherwise
-/// spew thousands of tokens before the server stops) while staying generous enough not to clip a
-/// legitimate multi-node `graph_upsert` batch or a normal reader answer. Overridable via
-/// `KB_EVAL_MAX_TOKENS`.
-pub(crate) const DEFAULT_MAX_TOKENS: u64 = 16384;
-
 /// Resolve the agent-loop `min_p` floor (env `KB_EVAL_MIN_P` > [`DEFAULT_MIN_P`]).
 pub(crate) fn agent_min_p() -> f64 {
     std::env::var("KB_EVAL_MIN_P")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MIN_P)
-}
-
-/// Resolve the per-call completion cap (env `KB_EVAL_MAX_TOKENS` > [`DEFAULT_MAX_TOKENS`]).
-pub(crate) fn agent_max_tokens() -> u64 {
-    std::env::var("KB_EVAL_MAX_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 pub struct OpenAiTransport;
@@ -80,7 +66,7 @@ impl ChatTransport for OpenAiTransport {
             "model": ep.model,
             "messages": full_messages,
             "min_p": agent_min_p(),
-            "max_tokens": agent_max_tokens(),
+            "max_tokens": super::agent_max_tokens(),
         });
         // Include `temperature` only when set — `None` omits it so the provider default applies.
         if let Some(t) = temperature {
@@ -357,7 +343,7 @@ pub(crate) fn reply_from_response(full: &Value) -> anyhow::Result<TurnReply> {
 /// lives provider-neutrally in [`crate::backend::resample::call_with_resample`], driven by the
 /// agent loop for EVERY stage (reader included). Builds the agent-loop request body: `temperature`
 /// (env `KB_EVAL_TEMP`, default `0.8` — this stage is stochastic and averaged over N runs), `min_p`
-/// ([`agent_min_p`]), `max_tokens` ([`agent_max_tokens`]), and the passed `tools`. `url` is the
+/// ([`agent_min_p`]), `max_tokens` ([`super::agent_max_tokens`]), and the passed `tools`. `url` is the
 /// FULL chat-completions URL, POSTed verbatim.
 ///
 /// Used by the closure-based callers still on the `ClosureTransport` shim (`build::extract`,
@@ -383,7 +369,7 @@ pub(crate) fn agent_chat_full(
         "tools": tools,
         "temperature": temperature,
         "min_p": agent_min_p(),
-        "max_tokens": agent_max_tokens(),
+        "max_tokens": super::agent_max_tokens(),
     });
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
     // with descriptions) sent to the endpoint, to prove what the model actually receives.

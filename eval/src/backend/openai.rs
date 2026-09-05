@@ -631,7 +631,7 @@ pub(crate) fn chat_once(
     // One-shot (e.g. the file-prompt judge): NO `tools` field at all — a strict provider (the
     // MiMo/OpenCode Zen endpoint this backend targets) rejects an empty `tools: []` array.
     // NOTE: no `min_p` here either — it's a non-OpenAI extension a strict provider may 400 on.
-    let max_tokens: u64 = crate::backend::transport::openai::agent_max_tokens();
+    let max_tokens: u64 = crate::backend::transport::agent_max_tokens();
     let mut body = json!({
         "model": model,
         "messages": messages,

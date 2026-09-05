@@ -18,10 +18,6 @@ use anyhow::anyhow;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-/// Default `max_output_tokens` for a turn when the caller doesn't need a different cap —
-/// Responses' analog of Chat Completions' `max_tokens` / Anthropic's `max_tokens`.
-const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4096;
-
 pub struct ResponsesTransport;
 
 impl ChatTransport for ResponsesTransport {
@@ -43,7 +39,7 @@ impl ChatTransport for ResponsesTransport {
         let mut body = json!({
             "model": ep.model,
             "input": messages,
-            "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            "max_output_tokens": super::agent_max_tokens(),
         });
         // Include `temperature` only when set — `None` omits it so the provider default applies.
         if let Some(t) = temperature {
@@ -558,7 +554,7 @@ mod tests {
         let body0: Value = serde_json::from_str(body0_str).expect("request body must be JSON");
         assert_eq!(body0["instructions"], "you are a test system");
         assert_eq!(body0["model"], "gpt-responses-test");
-        assert_eq!(body0["max_output_tokens"], json!(DEFAULT_MAX_OUTPUT_TOKENS));
+        assert_eq!(body0["max_output_tokens"], json!(super::super::agent_max_tokens()));
         assert!(body0["input"].is_array(), "expected a flat input array");
         let req_tools = body0["tools"].as_array().expect("tools must be an array");
         assert!(

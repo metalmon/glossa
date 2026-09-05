@@ -14,10 +14,6 @@ use std::time::Duration;
 /// Hardcoded for now; would become configurable if a future API revision needs opting into.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Default `max_tokens` for a turn when the caller doesn't need a different cap. Anthropic
-/// REQUIRES this field (no server-side default), unlike OpenAI's Chat Completions.
-const DEFAULT_MAX_TOKENS: u64 = 4096;
-
 pub struct AnthropicTransport;
 
 impl ChatTransport for AnthropicTransport {
@@ -37,7 +33,7 @@ impl ChatTransport for AnthropicTransport {
         // OpenAI Chat Completions where `OpenAiTransport::call` folds it into `messages`.
         let mut body = json!({
             "model": ep.model,
-            "max_tokens": DEFAULT_MAX_TOKENS,
+            "max_tokens": super::agent_max_tokens(),
             "messages": messages,
         });
         // Include `temperature` only when set — `None` omits it so the provider default applies.
@@ -534,7 +530,7 @@ mod tests {
         let body0_str = req0.split_once("\r\n\r\n").map_or("", |x| x.1);
         let body0: Value = serde_json::from_str(body0_str).expect("request body must be JSON");
         assert_eq!(body0["system"], "you are a test system");
-        assert_eq!(body0["max_tokens"], json!(DEFAULT_MAX_TOKENS));
+        assert_eq!(body0["max_tokens"], json!(super::super::agent_max_tokens()));
         assert_eq!(body0["model"], "claude-3-test");
         let req_tools = body0["tools"].as_array().expect("tools must be an array");
         assert!(

@@ -14,6 +14,24 @@ pub mod openai;
 pub mod responses;
 pub mod tensorzero;
 
+/// Per-turn completion cap shared by EVERY transport (OpenAI Chat's `max_tokens`, Anthropic's
+/// `max_tokens`, Responses' `max_output_tokens`), so they never drift out of sync as they did
+/// before this constant existed (OpenAI 16384, Anthropic/Responses 4096 — the OpenAI value alone
+/// was large enough to overflow a 65536-context model once combined with a large prompt). Chosen
+/// to fit a 65536-context model alongside a large prompt. Overridable via `KB_EVAL_MAX_TOKENS`
+/// (see [`agent_max_tokens`]).
+pub(crate) const DEFAULT_MAX_TOKENS: u64 = 12288;
+
+/// Resolve the per-turn completion cap every transport sends (env `KB_EVAL_MAX_TOKENS` overrides
+/// [`DEFAULT_MAX_TOKENS`]). The single shared resolver for OpenAI/Anthropic/Responses — no
+/// transport keeps its own copy, so one override affects all three identically.
+pub(crate) fn agent_max_tokens() -> u64 {
+    std::env::var("KB_EVAL_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+}
+
 /// One tool call the model asked to run, in a shape neutral to the wire format that produced it
 /// (OpenAI's `tool_calls[].function`, Anthropic's `content[].type=="tool_use"`, …).
 #[derive(Debug, Clone)]
