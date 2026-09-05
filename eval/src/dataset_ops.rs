@@ -147,7 +147,15 @@ pub struct Stat {
     pub untyped: usize,
     /// answerable (default true when absent) vs explicit false.
     pub answerable: usize,
+    /// Total non-answerable count (manual unanswerable cases + gated cases — a gated case is
+    /// already `answerable=false`, so this does NOT double count on top of `gated`).
     pub unanswerable: usize,
+    /// Subset of `unanswerable` reclassified by `kbx dataset gate-mark` (carries tag `gated`):
+    /// originally-answerable cases the runtime coverage-abstention gate blocked. `unanswerable -
+    /// gated` is the manually-authored unanswerable count.
+    pub gated: usize,
+    /// Ids of the `gated` cases, for the coverage-gap list.
+    pub gated_ids: Vec<String>,
     /// needs_graph value -> count (empty value keyed as "(unset)").
     pub needs_graph: BTreeMap<String, usize>,
     /// alias coverage.
@@ -182,6 +190,10 @@ pub fn compute_stat(cases: &[Case]) -> Stat {
             s.answerable += 1;
         } else {
             s.unanswerable += 1;
+        }
+        if c.tags.iter().any(|t| t == "gated") {
+            s.gated += 1;
+            s.gated_ids.push(c.id.clone());
         }
         let ng = if c.needs_graph.is_empty() {
             "(unset)".to_string()
@@ -635,21 +647,39 @@ mod tests {
                 c
             },
             case("c", "  q one? ", "Ans"), // normalized-dup question AND dup answer, untyped
+            {
+                // A gate_mark'd case: answerable=false + tag "gated" (as gate_mark leaves it).
+                let mut c = case("d", "Q four?", "Ans four");
+                c.hop_type = "unanswerable".into();
+                c.answerable = false;
+                c.tags = vec!["gated".into(), "orig_hop:lexical".into()];
+                c
+            },
         ];
         let s = compute_stat(&cases);
-        assert_eq!(s.total, 3);
+        assert_eq!(s.total, 4);
         assert_eq!(s.lexical, 1);
         assert_eq!(s.multihop, 1);
-        assert_eq!(s.untyped, 1);
+        assert_eq!(s.untyped, 2, "c is untyped, d's hop_type is \"unanswerable\" (also untyped)");
         assert_eq!(s.answerable, 2);
-        assert_eq!(s.unanswerable, 1);
+        assert_eq!(
+            s.unanswerable, 2,
+            "b (manual) + d (gated) -- gated is a subset, not double-counted on top"
+        );
+        assert_eq!(s.gated, 1, "only d carries the gated tag");
+        assert_eq!(s.gated_ids, vec!["d".to_string()]);
+        assert_eq!(
+            s.unanswerable - s.gated,
+            1,
+            "manual-unanswerable count = unanswerable - gated"
+        );
         assert_eq!(s.with_aliases, 1);
-        assert_eq!(s.without_aliases, 2);
+        assert_eq!(s.without_aliases, 3);
         assert_eq!(s.dup_questions, 1, "c duplicates a's normalized question");
         assert_eq!(s.dup_answers, 1, "c duplicates a's answer");
         assert_eq!(s.blank, 0);
         assert_eq!(s.needs_graph.get("yes"), Some(&1));
-        assert_eq!(s.needs_graph.get("(unset)"), Some(&2));
+        assert_eq!(s.needs_graph.get("(unset)"), Some(&3));
     }
 
     /// A minimal on-disk `GraphStore`+`DocIndex` fixture where only "profibus" is covered (indexed

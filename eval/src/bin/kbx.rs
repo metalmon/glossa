@@ -25,7 +25,8 @@ use kb_eval::lab::{self, AbstentionPolicy, LabConfig};
 use kb_eval::parallel::run_units_parallel;
 use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{
-    confusion_text, lexical_text, load_cases, summary_text, write_answers_csv, write_case,
+    confusion_text, gate_false_abstain_text, lexical_text, load_cases, summary_text,
+    write_answers_csv, write_case,
     write_run, AnswerRow, CaseResult, RunMeta,
 };
 use kb_eval::scaffold::scaffold_init;
@@ -1200,6 +1201,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 needs_graph: q.needs_graph.clone(),
                 errored,
                 answerable: q.answerable,
+                gated: q.tags.iter().any(|t| t == "gated"),
+                orig_hop_type: q
+                    .tags
+                    .iter()
+                    .find_map(|t| t.strip_prefix("orig_hop:").map(str::to_string))
+                    .unwrap_or_else(|| q.hop_type.clone()),
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
@@ -1263,6 +1270,10 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         let conf = confusion_text(&all_results);
         if !conf.is_empty() {
             println!("{conf}");
+        }
+        let false_abstain = gate_false_abstain_text(&all_results);
+        if !false_abstain.is_empty() {
+            println!("{false_abstain}");
         }
         println!("{}", lexical_text(&all_results));
     }
@@ -1416,11 +1427,16 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 pct(s.untyped)
             );
             println!(
-                "answerable: {} ({:.0}%), unanswerable: {}",
+                "answerable: {} ({:.0}%), unanswerable: {} (manual {}, gated {})",
                 s.answerable,
                 pct(s.answerable),
-                s.unanswerable
+                s.unanswerable,
+                s.unanswerable - s.gated,
+                s.gated
             );
+            if !s.gated_ids.is_empty() {
+                println!("gated (coverage-gap) ids: {}", s.gated_ids.join(", "));
+            }
             let ng = s
                 .needs_graph
                 .iter()
