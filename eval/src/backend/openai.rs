@@ -457,14 +457,10 @@ impl OpenAiBackend {
         let ont = glossa::graph::ontology::Ontology::load_or_default(work);
         let spec = glossa::tools::ChainSpec::from_ontology(&ont);
         // C1 wiring: the eval reader stands in for the MCP Reader profile, so it enforces the SAME
-        // coverage-abstention gate — `Filter` under the corpus's `safety_first` policy, `Off`
-        // otherwise (byte-identical to every pre-Task-7 run). `OpenAiBackend` carries no `lab`/
-        // `tuning` field, so this reads the ontology's `[abstention]` directly rather than through
-        // `resolve_abstention_policy` (which also consults a deprecated `lab.toml [tuning]` copy —
-        // unreachable here). Resolved ONCE per question, not re-derived per tool call.
-        let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
-        let enforcement = crate::backend::glossa_tools::reader_enforcement(policy);
-        let k = ont.coverage_k().unwrap_or(1) as usize;
+        // coverage-abstention gate `mcp::GlossaServer::abstention_gate` resolves for `Profile::Reader`
+        // (see `glossa_tools::resolve_reader_gate`'s doc comment for the full mirror + the one
+        // reviewed divergence). Resolved ONCE per question, not re-derived per tool call.
+        let (enforcement, k) = crate::backend::glossa_tools::resolve_reader_gate(&ont);
         // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): this wrapper only
         // acts on its PLATEAU kind — a NEUTRAL "gain has plateaued" observation applied via the
         // signal's own render (drop the redundant body on a drained plateau, or append the marker
@@ -513,7 +509,7 @@ impl OpenAiBackend {
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
             crate::backend::glossa_tools::next_best_action(
-                name, args, work, idx, graph, &spec, &trace,
+                name, args, work, idx, graph, &spec, &trace, enforcement, k,
             )
         };
         // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the

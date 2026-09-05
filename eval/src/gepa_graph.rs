@@ -365,7 +365,15 @@ fn rollout_one(
     ];
     let nba = |name: &str, args: &Value| {
         crate::backend::glossa_tools::next_best_action(
-            name, args, &cfg.work, idx, graph, spec, &trace,
+            name,
+            args,
+            &cfg.work,
+            idx,
+            graph,
+            spec,
+            &trace,
+            glossa::tools::abstention::Enforcement::Off,
+            0,
         )
     };
     // Simulated-user dialogue gate (opt-in): built only when BOTH the `[user_sim]` endpoint and its

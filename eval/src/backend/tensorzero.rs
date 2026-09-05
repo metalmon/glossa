@@ -697,11 +697,8 @@ impl AgentBackend for TensorZeroBackend {
         let ont = glossa::graph::ontology::Ontology::load_or_default(work);
         let spec = glossa::tools::ChainSpec::from_ontology(&ont);
         // C1 wiring: same coverage-abstention gate as the OpenAI-transport reader (see
-        // `openai::answer_capturing`'s twin comment) — `TensorZeroBackend` carries no `lab`/
-        // `tuning` field either, so this reads the ontology's `[abstention]` directly.
-        let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
-        let enforcement = crate::backend::glossa_tools::reader_enforcement(policy);
-        let k = ont.coverage_k().unwrap_or(1) as usize;
+        // `openai::answer_capturing`'s twin comment and `glossa_tools::resolve_reader_gate`'s doc).
+        let (enforcement, k) = crate::backend::glossa_tools::resolve_reader_gate(&ont);
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
             let r = crate::backend::glossa_tools::exec(

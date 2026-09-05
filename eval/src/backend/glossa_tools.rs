@@ -290,19 +290,37 @@ pub fn run_grep(
     )
 }
 
-/// Resolve the eval reader's coverage-abstention [`glossa::tools::abstention::Enforcement`] tier
-/// from the run's [`crate::lab::AbstentionPolicy`]: `Filter` under `SafetyFirst` — the eval reader
-/// stands in for the MCP Reader profile, which gates at `Filter` under `safety_first` — else `Off`
-/// (every other policy reproduces today's ungated behavior byte-for-byte). Resolved ONCE per run by
-/// the caller (`answer_capturing`/`tensorzero::answer`) and threaded down through every `exec` call,
-/// not re-derived per tool call.
-pub fn reader_enforcement(
-    policy: crate::lab::AbstentionPolicy,
-) -> glossa::tools::abstention::Enforcement {
-    match policy {
-        crate::lab::AbstentionPolicy::SafetyFirst => glossa::tools::abstention::Enforcement::Filter,
-        _ => glossa::tools::abstention::Enforcement::Off,
+/// Resolve the eval reader's coverage-abstention `(Enforcement, k)` from the corpus ontology,
+/// mirroring `mcp::GlossaServer::abstention_gate` (`src/mcp.rs`) for the READER profile — the eval
+/// reader stands in for MCP's Reader profile, so it must gate the same way. Policy detection goes
+/// through [`crate::lab::AbstentionPolicy::from_opt`] (NOT a literal `"safety_first"` string
+/// compare like `abstention_gate` uses) so the eval gate stays consistent with eval SCORING, which
+/// also normalizes through `AbstentionPolicy` (both accept the `"safety-first"`/`"safety"`
+/// aliases `abstention_gate` doesn't) — an intentional, reviewed divergence, not a bug.
+///
+/// - Any policy other than `SafetyFirst` -> `(Off, 0)`: every non-gated run is byte-identical.
+/// - `SafetyFirst` -> default tier `Filter` (the Reader profile's default in `abstention_gate`),
+///   overridden by the ontology's own `[abstention] enforcement` when set to a recognized value
+///   (`"filter"`/`"signal"`/`"off"`); an unset or unrecognized value falls back to `Filter`.
+/// - `k` = `ont.coverage_k()`, defaulting to 1.
+///
+/// Resolved ONCE per question by the caller (`answer_capturing`/`tensorzero::answer`) and threaded
+/// down through every `exec`/`next_best_action` call, not re-derived per tool call.
+pub fn resolve_reader_gate(
+    ont: &glossa::graph::ontology::Ontology,
+) -> (glossa::tools::abstention::Enforcement, usize) {
+    use glossa::tools::abstention::Enforcement;
+    let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
+    if policy != crate::lab::AbstentionPolicy::SafetyFirst {
+        return (Enforcement::Off, 0);
     }
+    let tier = match ont.enforcement().as_deref() {
+        Some("filter") => Enforcement::Filter,
+        Some("signal") => Enforcement::Signal,
+        Some("off") => Enforcement::Off,
+        _ => Enforcement::Filter,
+    };
+    (tier, ont.coverage_k().unwrap_or(1) as usize)
 }
 
 /// Dispatch a tool by name. Returns (result string for the model, ids surfaced for the
@@ -625,6 +643,10 @@ pub fn unproductive_steer(_name: &str) -> String {
 /// NOT just call), returning their non-empty results fused — concrete alternatives instead of the
 /// same dead result. Bounded fan-out; no query reformulation yet (that is the systemic version).
 /// Falls back to [`repeat_nudge`] when no text intent exists or nothing complementary comes back.
+/// `enforcement`/`k` are threaded through to the internal fan-out `exec` calls so this bypass path
+/// is gated identically to the primary reader path — passing `Enforcement::Off, 0` reproduces the
+/// pre-gate behavior byte-for-byte for every caller that isn't the live reader (train rollouts,
+/// tests).
 #[allow(clippy::too_many_arguments)]
 pub fn next_best_action(
     name: &str,
@@ -634,6 +656,8 @@ pub fn next_best_action(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
+    enforcement: glossa::tools::abstention::Enforcement,
+    k: usize,
 ) -> String {
     let Some(term) = repeated_term(name, args) else {
         return repeat_nudge(name, args);
@@ -666,17 +690,7 @@ pub fn next_best_action(
     );
     let mut any = false;
     for (tool, a) in &candidates {
-        let (body, _, _) = exec(
-            tool,
-            a,
-            root,
-            idx,
-            graph,
-            spec,
-            trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
-        );
+        let (body, _, _) = exec(tool, a, root, idx, graph, spec, trace, enforcement, k);
         let body = body.trim();
         if body.is_empty() || looks_empty(body) {
             continue;
@@ -1337,5 +1351,40 @@ mod tests {
             off.contains("widget") && !off.starts_with(glossa::tools::abstention::SENTINEL),
             "Off must leave the real search hit untouched: {off}"
         );
+    }
+
+    /// Fix round 1, Finding 2: `resolve_reader_gate` must mirror `mcp::GlossaServer::abstention_gate`
+    /// for the Reader profile — non-`safety_first` stays `Off`; `safety_first` defaults to `Filter`
+    /// but the ontology's own `[abstention] enforcement` overrides that default when set to a
+    /// recognized value; `k` comes from `coverage_k`, defaulting to 1.
+    #[test]
+    fn resolve_reader_gate_mirrors_mcp_reader_profile() {
+        use glossa::graph::ontology::Ontology;
+        use glossa::tools::abstention::Enforcement;
+
+        // (a) no [abstention] section at all -> every non-safety_first corpus stays fully ungated.
+        let default_ont = Ontology::parse("").unwrap();
+        assert_eq!(resolve_reader_gate(&default_ont), (Enforcement::Off, 0));
+
+        // (b) safety_first with no enforcement override -> Filter (the Reader default), k=1.
+        let safety_default = Ontology::parse("[abstention]\npolicy = \"safety_first\"\n").unwrap();
+        assert_eq!(resolve_reader_gate(&safety_default), (Enforcement::Filter, 1));
+
+        // (c) safety_first + enforcement="signal" -> the ontology override wins over the Filter default.
+        let signal =
+            Ontology::parse("[abstention]\npolicy = \"safety_first\"\nenforcement = \"signal\"\n")
+                .unwrap();
+        assert_eq!(resolve_reader_gate(&signal).0, Enforcement::Signal);
+
+        // (d) safety_first + enforcement="off" -> the override can also fully disable the gate.
+        let off =
+            Ontology::parse("[abstention]\npolicy = \"safety_first\"\nenforcement = \"off\"\n")
+                .unwrap();
+        assert_eq!(resolve_reader_gate(&off).0, Enforcement::Off);
+
+        // (e) safety_first + coverage_k=2 -> k reflects the ontology's own value, not the default of 1.
+        let k2 = Ontology::parse("[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\n")
+            .unwrap();
+        assert_eq!(resolve_reader_gate(&k2).1, 2);
     }
 }
