@@ -5,16 +5,18 @@ use std::collections::HashSet;
 
 pub struct AbsentTerm { pub term: String }
 
-const STOP: &[&str] = &["который","которая","которые","нужно","можно","будет","этот","этих",
-    "такой","такие","через","после","перед","около","между","например","вопрос","когда","чтобы"];
-
+/// Distinctive question terms with no corpus coverage. A term is any alphabetic token of length
+/// >= 5 (dedup'd, case-insensitive); it is UNCOVERED when `covered` returns false. No stopword
+/// list: the index tokenizer (see `index::multilang`) stems but does NOT strip stopwords, so a
+/// frequent word is itself searchable and `covered` reports it present — self-calibrating on the
+/// corpus rather than on a hardcoded, language-specific word list.
 pub fn coverage_uncovered(question: &str, covered: &dyn Fn(&str) -> bool, _k: usize) -> Vec<AbsentTerm> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for tok in question.split(|c: char| !c.is_alphabetic()) {
         if tok.chars().count() < 5 { continue; }
         let low = tok.to_lowercase();
-        if STOP.contains(&low.as_str()) || !seen.insert(low.clone()) { continue; }
+        if !seen.insert(low.clone()) { continue; }
         if !covered(tok) { out.push(AbsentTerm { term: tok.to_string() }); }
     }
     out
@@ -154,13 +156,13 @@ mod tests {
     #[test]
     fn coverage_flags_only_uncovered_distinctive_terms() {
         // "covered" = present in this fake corpus set (case-insensitive substring of any entry)
-        let corpus = ["настройка profibus maxtsdr", "модули ивк"];
+        let corpus = ["configure profibus maxtsdr", "io modules"];
         let covered = |t: &str| corpus.iter().any(|c| c.contains(&t.to_lowercase()));
-        let absent = coverage_uncovered("как настроить maxTsdr для неведомыйтермин", &covered, 1);
+        let absent = coverage_uncovered("how to configure maxTsdr for zzqunknownterm", &covered, 1);
         let terms: Vec<&str> = absent.iter().map(|a| a.term.as_str()).collect();
-        assert!(terms.iter().any(|t| t.eq_ignore_ascii_case("неведомыйтермин")));
+        assert!(terms.iter().any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
         assert!(!terms.iter().any(|t| t.eq_ignore_ascii_case("maxTsdr")), "covered term not flagged");
-        assert!(!terms.iter().any(|t| t.chars().count() < 5), "short/stopwords excluded");
+        assert!(!terms.iter().any(|t| t.chars().count() < 5), "short terms excluded");
     }
 
     fn prov() -> crate::graph::store::Provenance {
@@ -227,7 +229,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
-        assert!(!covered("квазар9000", &i, &g));
+        assert!(!covered("zzqunknownterm", &i, &g));
     }
 
     #[test]
@@ -248,7 +250,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
-        let out = gate("неведомыйтермин", "body".into(), &i, &g, Enforcement::Off, 1);
+        let out = gate("zzqunknownterm", "body".into(), &i, &g, Enforcement::Off, 1);
         assert_eq!(out, "body");
     }
 }
