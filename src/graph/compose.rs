@@ -278,6 +278,7 @@ pub fn compose_ppr(
                 .filter_map(|(id, sa)| pb_map.get(id.as_str()).map(|sb| (id.clone(), (sa * sb).sqrt())))
                 .collect();
             geo.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            geo.truncate(want); // match the summed path's headroom cap before node_metas
             if geo.is_empty() {
                 summed_single(want) // disjoint supports: never regress to empty
             } else {
@@ -624,52 +625,57 @@ mod tests {
     }
 
     #[test]
-    fn compose_ppr_geomean_ranks_the_between_node_above_endpoint_neighbors() {
-        std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
+    fn compose_ppr_geomean_excludes_query_only_node_and_surfaces_the_bridge() {
+        // STRUCTURAL discriminator (not mass-tuned): geomean keeps only nodes reachable from BOTH
+        // seed pushes. `qonly` sits in a component structurally DISCONNECTED from "b" — reachable
+        // only via extra query-side seeds ("qdecoyN", which resolve to "Alpha" through `resolve`'s
+        // exact label-norm fast path — it returns ALL nodes sharing that normalized label). It
+        // never has a path to "b", so `b`'s forward-push can NEVER touch it: absent from that
+        // local support, not merely small. That absence is unconditional — true for any decoy
+        // count or any future alpha/eps retune — unlike ranking two present-in-both nodes against
+        // each other by raw magnitude (which IS numerically tunable, and the prior version of this
+        // test learned that the hard way).
+        //
+        // Under a single SUMMED push (today's code, the OFF path), qonly's concentrated query-side
+        // mass makes it a real, visible contender — it surfaces in the output. Under GEOMEAN, the
+        // same node is structurally excluded from the intersection, and the real bridge `x`
+        // (reachable from BOTH endpoints) surfaces instead.
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
-        // A —bridge X— B ; A and B each also have a private neighbor (a2/b2) that X must outrank
-        // in the product. Labels are the EXACT query/name terms ("Alpha"/"Beta") so `resolve`'s
-        // exact label-norm fast path is used (bypassing BM25 fuzzy, which would otherwise also
-        // lexically pull in the other nodes below and make them seeds too — seeds are excluded
-        // from a push's own output, which would hide the very nodes this test is ranking).
-        // Connectivity is wired explicitly via `link` (shared mentions/aliases alone create no
-        // graph edge — only `put_edge` does).
-        //
-        // The exact label-norm lookup returns ALL nodes sharing that normalized label — so four
-        // extra "Alpha"-labeled decoys, each linked ONLY into a2 (via the extra hop "amid", which
-        // also deepens how far a2 sits from B), become extra query seeds that flood a2 with
-        // one-hop mass no query seed gives x. Under a single SUMMED push (today's code, and the
-        // OFF path) that raw flood outweighs a2's weak name-side reach and makes a2 outrank x —
-        // the regression this test is meant to catch. Under GEOMEAN, a2's huge query-side mass is
-        // multiplied by its small, multi-hop-attenuated name-side mass, while x — one hop from
-        // BOTH endpoints — wins the product even though it never had the query flood. (Verified
-        // empirically: this exact fixture ranks a2 > x under a plain combined-seed single push,
-        // and x > a2 under the geomean-of-intersection combine.)
+        // The real bridge: a -- x -- b, plus b2 (a private neighbor of b, for realism/noise).
         fact(&g, "a", "Alpha", &["Alpha"]);
-        for i in 0..4 {
-            let id = format!("adecoy{i}");
-            fact(&g, &id, "Alpha", &[]);
-            link(&g, &id, "a2");
-        }
         fact(&g, "x", "Bridge middle", &[]);
         fact(&g, "b", "Beta", &["Beta"]);
-        fact(&g, "amid", "amid", &[]);
-        fact(&g, "a2", "Alpha private neighbor", &[]);
         fact(&g, "b2", "Beta private neighbor", &[]);
         link(&g, "a", "x");
         link(&g, "x", "b");
-        link(&g, "a", "amid");
-        link(&g, "amid", "a2");
         link(&g, "b", "b2");
-        // query resolves to A ("Alpha"), name is the second endpoint ("Beta").
-        let out = compose_ppr(&g, "Beta", "Alpha", 5).unwrap();
-        let ids: Vec<&str> = out.iter().map(|c| c.id.as_str()).collect();
-        let px = ids.iter().position(|i| *i == "x").expect("bridge surfaced");
-        // The between-node outranks the endpoint-private neighbors.
-        assert!(px < ids.iter().position(|i| *i == "a2").unwrap_or(usize::MAX));
-        assert!(px < ids.iter().position(|i| *i == "b2").unwrap_or(usize::MAX));
+        // qonly's component: no edge anywhere back to a/x/b/b2.
+        fact(&g, "qonly", "Query-only reachable node", &[]);
+        for i in 0..3 {
+            let id = format!("qdecoy{i}");
+            fact(&g, &id, "Alpha", &[]);
+            link(&g, &id, "qonly");
+        }
         std::env::remove_var("GLOSSA_PPR_BRIDGE");
+        let off = compose_ppr(&g, "Beta", "Alpha", 10).unwrap();
+        std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
+        let geo = compose_ppr(&g, "Beta", "Alpha", 10).unwrap();
+        std::env::remove_var("GLOSSA_PPR_BRIDGE");
+        let off_ids: Vec<&str> = off.iter().map(|c| c.id.as_str()).collect();
+        let geo_ids: Vec<&str> = geo.iter().map(|c| c.id.as_str()).collect();
+        assert!(
+            off_ids.contains(&"qonly"),
+            "OFF surfaces the query-only node (a real contender, not a strawman): {off_ids:?}"
+        );
+        assert!(
+            !geo_ids.contains(&"qonly"),
+            "GEOMEAN structurally excludes the query-only node: {geo_ids:?}"
+        );
+        assert!(
+            geo_ids.contains(&"x"),
+            "GEOMEAN surfaces the real bridge instead: {geo_ids:?}"
+        );
     }
 
     #[test]
