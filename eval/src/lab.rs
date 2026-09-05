@@ -730,4 +730,139 @@ mod tests {
         assert_eq!(lab2.model.feedback_score_metric(), "my_score");
         assert_eq!(lab2.model.feedback_bool_metric(), "my_bool");
     }
+
+    /// Test `resolve_reasoning_scope` precedence:
+    /// 1. Ontology provides value → ontology wins
+    /// 2. Ontology empty/None, lab.toml (Tuning) provides it → lab.toml used
+    /// 3. Neither provides it → empty lists (documented default)
+    #[test]
+    fn resolve_reasoning_scope_precedence_ontology_over_tuning() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 1: Ontology provides reasoning_exclude → ontology value wins
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[abstention]\nreasoning_exclude = [\"Vendor SDK\"]\nreasoning_only = [\"Support\"]\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning {
+            reasoning_exclude: vec!["LabValue".to_string()],
+            reasoning_only: vec!["LabOnly".to_string()],
+            ..Default::default()
+        };
+
+        let (exclude, only) = resolve_reasoning_scope(&tuning, &ontology);
+        assert_eq!(exclude, vec!["Vendor SDK"]);
+        assert_eq!(only, vec!["Support"]);
+    }
+
+    #[test]
+    fn resolve_reasoning_scope_fallback_to_tuning_when_ontology_empty() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 2: Ontology empty (no [abstention] or empty lists),
+        // Tuning provides value → tuning value is used
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[meta]\ndomain = \"test\"\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning {
+            reasoning_exclude: vec!["LabExclude".to_string()],
+            reasoning_only: vec!["LabOnly".to_string()],
+            ..Default::default()
+        };
+
+        let (exclude, only) = resolve_reasoning_scope(&tuning, &ontology);
+        assert_eq!(exclude, vec!["LabExclude"]);
+        assert_eq!(only, vec!["LabOnly"]);
+    }
+
+    #[test]
+    fn resolve_reasoning_scope_empty_when_neither_provides_value() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 3: Neither ontology nor Tuning provides value → empty lists (default)
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[meta]\ndomain = \"test\"\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning::default();
+
+        let (exclude, only) = resolve_reasoning_scope(&tuning, &ontology);
+        assert_eq!(exclude, Vec::<String>::new());
+        assert_eq!(only, Vec::<String>::new());
+    }
+
+    /// Test `resolve_abstention_policy` precedence:
+    /// 1. Ontology provides value → ontology wins
+    /// 2. Ontology empty/None, lab.toml (Tuning) provides it → lab.toml used
+    /// 3. Neither provides it → None (documented default)
+    #[test]
+    fn resolve_abstention_policy_precedence_ontology_over_tuning() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 1: Ontology provides policy → ontology value wins
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[abstention]\npolicy = \"safety_first\"\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning {
+            abstention_policy: Some("balanced".to_string()),
+            ..Default::default()
+        };
+
+        let policy = resolve_abstention_policy(&tuning, &ontology);
+        assert_eq!(policy, Some("safety_first".to_string()));
+    }
+
+    #[test]
+    fn resolve_abstention_policy_fallback_to_tuning_when_ontology_empty() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 2: Ontology empty (no [abstention] or no policy),
+        // Tuning provides value → tuning value is used
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[meta]\ndomain = \"test\"\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning {
+            abstention_policy: Some("safety_first".to_string()),
+            ..Default::default()
+        };
+
+        let policy = resolve_abstention_policy(&tuning, &ontology);
+        assert_eq!(policy, Some("safety_first".to_string()));
+    }
+
+    #[test]
+    fn resolve_abstention_policy_none_when_neither_provides_value() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
+
+        // Case 3: Neither ontology nor Tuning provides value → None (default)
+        std::fs::write(
+            d.path().join(".glossa").join("ontology.toml"),
+            "[meta]\ndomain = \"test\"\n",
+        )
+        .unwrap();
+        let ontology = glossa::graph::ontology::Ontology::load_or_default(d.path());
+        let tuning = Tuning::default();
+
+        let policy = resolve_abstention_policy(&tuning, &ontology);
+        assert_eq!(policy, None);
+    }
 }
