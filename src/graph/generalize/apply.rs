@@ -244,7 +244,7 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
         .map(|e| (e.from, e.edge_type, e.to))
         .filter(|(f, _t, to)| is_reasoning(f) && is_reasoning(to))
         .collect();
-    let comm = community::connected_components(&r_ids, &r_edges);
+    let comm = community::detect_communities(&r_ids, &r_edges);
     let deg = centrality::degree(&r_ids, &r_edges);
     let pr = centrality::pagerank(&r_ids, &r_edges, 0.85, 30);
     let meta: Vec<(String, NodeMeta)> = r_ids

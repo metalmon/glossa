@@ -1,49 +1,207 @@
-//! #6 — Community detection via undirected connected components (union-find).
-//! The simplest, fully-deterministic member of the family; Louvain / label-propagation can later
-//! replace the body behind the same `node_id -> community_id` output.
+//! #6 — Community detection via a deterministic, tier-weighted Louvain modularity optimiser.
+//! Replaces the earlier union-find connected-components detector (which collapsed almost every
+//! reasoning node into ONE community, making the `reach` bridge-disambiguation gate vacuous) behind
+//! the SAME `node_id -> community_id` contract.
+//!
+//! Determinism: nodes are indexed in sorted+deduped order, iterated in ascending index order, ties
+//! are broken by keeping the current community else the lowest community id, and community labels
+//! are renumbered by ascending smallest-member-index. No RNG, and no decision depends on `HashMap`
+//! iteration order.
 
 use super::Triple;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-fn find(parent: &mut [usize], x: usize) -> usize {
-    let mut r = x;
-    while parent[r] != r {
-        r = parent[r];
+/// Epsilon guarding the modularity-gain tie comparison so IEEE float noise cannot flip a tie.
+const EPS: f64 = 1e-12;
+/// Guard on local-moving passes within one Louvain level.
+const MAX_PASSES: usize = 100;
+/// Guard on the number of aggregation levels.
+const MAX_LEVELS: usize = 100;
+
+/// Edge weight derived from the `edge_type` (middle element of the `Triple`).
+fn tier_weight(edge_type: &str) -> f64 {
+    match edge_type {
+        "SIMILAR" => 0.1,
+        "RESOLVED_BY" | "CAUSED_BY" | "LEADS_TO" => 2.0,
+        _ => 1.0,
     }
-    // path compression
-    let mut c = x;
-    while parent[c] != r {
-        let next = parent[c];
-        parent[c] = r;
-        c = next;
-    }
-    r
 }
 
-/// Assign each node a dense 0-based community id by undirected connected components. Isolated nodes
-/// each get their own id. Deterministic: component ids are assigned in sorted node order. Edges
-/// referencing unknown ids are ignored.
-pub fn connected_components(node_ids: &[String], edges: &[Triple]) -> HashMap<String, usize> {
-    let mut ids: Vec<&String> = node_ids.iter().collect();
-    ids.sort();
-    ids.dedup();
-    let index: HashMap<&String, usize> = ids.iter().enumerate().map(|(i, s)| (*s, i)).collect();
-    let mut parent: Vec<usize> = (0..ids.len()).collect();
-    for (f, _t, to) in edges {
-        if let (Some(&a), Some(&b)) = (index.get(f), index.get(to)) {
-            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-            if ra != rb {
-                parent[ra] = rb;
+/// A single Louvain level: a weighted undirected graph. Self-loops (produced by aggregation) are
+/// stored as `2*L` so that a plain sum over an adjacency row yields the weighted degree with the
+/// conventional "self-loop counts twice" rule.
+struct Level {
+    n: usize,
+    adj: Vec<BTreeMap<usize, f64>>,
+    k: Vec<f64>,
+    m: f64,
+}
+
+impl Level {
+    fn from_adj(adj: Vec<BTreeMap<usize, f64>>) -> Self {
+        let n = adj.len();
+        let k: Vec<f64> = adj.iter().map(|row| row.values().sum()).collect();
+        let m = 0.5 * k.iter().sum::<f64>();
+        Level { n, adj, k, m }
+    }
+}
+
+/// Phase 1 (local moving): assign each node to a community label (in `0..n`), moving nodes to the
+/// neighbouring community with the largest modularity gain until a full pass makes no move.
+fn local_moving(level: &Level) -> Vec<usize> {
+    let n = level.n;
+    let mut comm: Vec<usize> = (0..n).collect();
+    let m = level.m;
+    if m <= 0.0 {
+        return comm; // no edges: every node is its own community
+    }
+    // Σ_tot per community: total incident weight of the community (indexed in node-label space).
+    let mut sigma_tot: Vec<f64> = level.k.clone();
+
+    for _ in 0..MAX_PASSES {
+        let mut moved = false;
+        for i in 0..n {
+            let ci = comm[i];
+            let ki = level.k[i];
+            // Remove i from its current community before scoring candidates.
+            sigma_tot[ci] -= ki;
+
+            // k_{i,in} per neighbouring community (deterministic ascending-id iteration).
+            let mut kin: BTreeMap<usize, f64> = BTreeMap::new();
+            for (&j, &w) in &level.adj[i] {
+                if j == i {
+                    continue; // self-loop: not a link to another node
+                }
+                *kin.entry(comm[j]).or_insert(0.0) += w;
+            }
+
+            // Baseline is the current community; a candidate must strictly beat it (by EPS) to win,
+            // so ties keep the current community, and among non-current ties the lowest id wins
+            // (BTreeMap iterates in ascending community-id order).
+            let mut best_comm = ci;
+            let mut best_gain =
+                kin.get(&ci).copied().unwrap_or(0.0) / m - sigma_tot[ci] * ki / (2.0 * m * m);
+            for (&c, &kin_c) in &kin {
+                if c == ci {
+                    continue;
+                }
+                let gain = kin_c / m - sigma_tot[c] * ki / (2.0 * m * m);
+                if gain > best_gain + EPS {
+                    best_gain = gain;
+                    best_comm = c;
+                }
+            }
+
+            sigma_tot[best_comm] += ki;
+            if best_comm != ci {
+                comm[i] = best_comm;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    comm
+}
+
+/// Renumber arbitrary community labels to dense 0-based ids in order of first appearance when
+/// scanning nodes in ascending index order. Returns `(dense_labels, num_communities)`.
+fn densify(comm: &[usize]) -> (Vec<usize>, usize) {
+    let mut label_map: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut dense = vec![0usize; comm.len()];
+    for (i, &c) in comm.iter().enumerate() {
+        let next = label_map.len();
+        dense[i] = *label_map.entry(c).or_insert(next);
+    }
+    (dense, label_map.len())
+}
+
+/// Phase 2 (aggregation): collapse each dense community into a super-node. Intra-community weight
+/// becomes the super-node's self-loop (stored as `2*L`); inter-community weight is summed.
+fn aggregate(level: &Level, dense: &[usize], num_comm: usize) -> Level {
+    let mut intra = vec![0.0f64; num_comm];
+    let mut inter: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for i in 0..level.n {
+        let cu = dense[i];
+        for (&j, &w) in &level.adj[i] {
+            if j < i {
+                continue; // each undirected edge processed once
+            }
+            if j == i {
+                intra[cu] += w / 2.0; // stored self-loop is 2*L
+            } else {
+                let cv = dense[j];
+                if cu == cv {
+                    intra[cu] += w;
+                } else {
+                    let key = if cu < cv { (cu, cv) } else { (cv, cu) };
+                    *inter.entry(key).or_insert(0.0) += w;
+                }
             }
         }
     }
-    let mut root_to_comm: HashMap<usize, usize> = HashMap::new();
+    let mut adj: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); num_comm];
+    for (cu, &wi) in intra.iter().enumerate() {
+        if wi > 0.0 {
+            adj[cu].insert(cu, 2.0 * wi);
+        }
+    }
+    for ((cu, cv), w) in inter {
+        *adj[cu].entry(cv).or_insert(0.0) += w;
+        *adj[cv].entry(cu).or_insert(0.0) += w;
+    }
+    Level::from_adj(adj)
+}
+
+/// Assign each node a dense 0-based community id via deterministic tier-weighted Louvain modularity.
+/// Edge weight is derived from the edge type; parallel/undirected edges are aggregated by sum;
+/// self-loops and edges referencing unknown ids are ignored; isolated nodes get their own community.
+/// Community labels are assigned in ascending order of each community's smallest member index, so
+/// identical input yields byte-identical output across runs.
+pub fn detect_communities(node_ids: &[String], edges: &[Triple]) -> HashMap<String, usize> {
+    let mut ids: Vec<&String> = node_ids.iter().collect();
+    ids.sort();
+    ids.dedup();
+    let n = ids.len();
+    let index: HashMap<&String, usize> = ids.iter().enumerate().map(|(i, s)| (*s, i)).collect();
+
+    // Base weighted undirected adjacency (parallel edges summed; self-loops / unknown ids dropped).
+    let mut adj: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
+    for (f, ty, to) in edges {
+        if let (Some(&a), Some(&b)) = (index.get(f), index.get(to)) {
+            if a == b {
+                continue; // self-loop ignored
+            }
+            let w = tier_weight(ty);
+            *adj[a].entry(b).or_insert(0.0) += w;
+            *adj[b].entry(a).or_insert(0.0) += w;
+        }
+    }
+
+    let mut level = Level::from_adj(adj);
+    // Maps each original node index to its node index in the current (aggregated) level.
+    let mut orig_level: Vec<usize> = (0..n).collect();
+
+    for _ in 0..MAX_LEVELS {
+        let comm = local_moving(&level);
+        let (dense, num_comm) = densify(&comm);
+        for c in orig_level.iter_mut() {
+            *c = dense[*c];
+        }
+        if num_comm >= level.n {
+            break; // no community merged this level; converged
+        }
+        level = aggregate(&level, &dense, num_comm);
+    }
+
+    // Final relabel: dense 0-based ids in ascending order of each community's smallest member index.
+    let mut final_label: BTreeMap<usize, usize> = BTreeMap::new();
     let mut out = HashMap::new();
     for (i, s) in ids.iter().enumerate() {
-        let r = find(&mut parent, i);
-        let next = root_to_comm.len();
-        let comm = *root_to_comm.entry(r).or_insert(next);
-        out.insert((*s).clone(), comm);
+        let next = final_label.len();
+        let fc = *final_label.entry(orig_level[i]).or_insert(next);
+        out.insert((*s).clone(), fc);
     }
     out
 }
@@ -51,6 +209,8 @@ pub fn connected_components(node_ids: &[String], edges: &[Triple]) -> HashMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
     fn s(x: &str) -> String {
         x.into()
     }
@@ -62,7 +222,7 @@ mod tests {
     fn two_clusters_get_distinct_ids_isolated_its_own() {
         let nodes = vec![s("a"), s("b"), s("c"), s("d"), s("lonely")];
         let edges = vec![t("a", "b"), t("c", "d")];
-        let comm = connected_components(&nodes, &edges);
+        let comm = detect_communities(&nodes, &edges);
         assert_eq!(comm["a"], comm["b"]);
         assert_eq!(comm["c"], comm["d"]);
         assert_ne!(comm["a"], comm["c"]);
@@ -74,8 +234,93 @@ mod tests {
     fn transitive_chain_is_one_component() {
         let nodes = vec![s("a"), s("b"), s("c")];
         let edges = vec![t("a", "b"), t("b", "c")];
-        let comm = connected_components(&nodes, &edges);
+        let comm = detect_communities(&nodes, &edges);
         assert_eq!(comm["a"], comm["b"]);
         assert_eq!(comm["b"], comm["c"]);
+    }
+
+    #[test]
+    fn louvain_shatters_a_similar_flooded_hub() {
+        // Two tight spine-linked (RESOLVED_BY) triangles, bridged only by a single weak SIMILAR
+        // edge, plus a dense SIMILAR star (hub -> N leaves). Union-find would merge the triangles
+        // through the SIMILAR bridge; tier-weighted Louvain must keep them apart.
+        let mut nodes = vec![
+            s("A1"),
+            s("A2"),
+            s("A3"),
+            s("B1"),
+            s("B2"),
+            s("B3"),
+            s("hub"),
+        ];
+        for i in 0..6 {
+            nodes.push(s(&format!("leaf{i}")));
+        }
+        let spine = |a: &str, b: &str| -> Triple { (a.into(), "RESOLVED_BY".into(), b.into()) };
+        let sim = |a: &str, b: &str| -> Triple { (a.into(), "SIMILAR".into(), b.into()) };
+        let mut edges = vec![
+            spine("A1", "A2"),
+            spine("A2", "A3"),
+            spine("A3", "A1"),
+            spine("B1", "B2"),
+            spine("B2", "B3"),
+            spine("B3", "B1"),
+            sim("A1", "B1"), // the lone weak bridge
+        ];
+        for i in 0..6 {
+            edges.push(sim("hub", &format!("leaf{i}")));
+        }
+
+        let comm = detect_communities(&nodes, &edges);
+        // Each triangle collapses into a single community.
+        assert_eq!(comm["A1"], comm["A2"]);
+        assert_eq!(comm["A2"], comm["A3"]);
+        assert_eq!(comm["B1"], comm["B2"]);
+        assert_eq!(comm["B2"], comm["B3"]);
+        // The weak SIMILAR bridge does NOT merge the two triangles.
+        assert_ne!(comm["A1"], comm["B1"]);
+    }
+
+    #[test]
+    fn louvain_is_deterministic() {
+        let mut nodes = Vec::new();
+        for i in 0..20 {
+            nodes.push(s(&format!("n{i}")));
+        }
+        let sim = |a: String, b: String| -> Triple { (a, "SIMILAR".into(), b) };
+        let spine = |a: String, b: String| -> Triple { (a, "CAUSED_BY".into(), b) };
+        let mut edges = Vec::new();
+        // Two dense spine cliques.
+        for i in 0..5 {
+            for j in (i + 1)..5 {
+                edges.push(spine(format!("n{i}"), format!("n{j}")));
+            }
+        }
+        for i in 5..10 {
+            for j in (i + 1)..10 {
+                edges.push(spine(format!("n{i}"), format!("n{j}")));
+            }
+        }
+        // Sparse SIMILAR ring noise touching every node.
+        for i in 0..20 {
+            edges.push(sim(format!("n{i}"), format!("n{}", (i + 7) % 20)));
+        }
+
+        let a = detect_communities(&nodes, &edges);
+        let b = detect_communities(&nodes, &edges);
+        assert_eq!(a, b);
+        // Sanity: the tier weights actually produce structure (more than one community).
+        let distinct: BTreeSet<usize> = a.values().copied().collect();
+        assert!(distinct.len() >= 2);
+    }
+
+    #[test]
+    fn isolated_node_gets_own_community() {
+        let nodes = vec![s("a"), s("b"), s("island")];
+        let edges = vec![(s("a"), "RESOLVED_BY".into(), s("b"))];
+        let comm = detect_communities(&nodes, &edges);
+        assert_eq!(comm["a"], comm["b"]);
+        assert_ne!(comm["island"], comm["a"]);
+        assert_ne!(comm["island"], comm["b"]);
     }
 }
