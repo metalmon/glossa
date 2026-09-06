@@ -110,10 +110,11 @@ pub fn registry() -> Vec<ToolDescriptor> {
             name: "check_question",
             description: DESC_CHECK_QUESTION,
             params_schema: schema_of::<CheckQuestionArgs>(),
-            // `question_verdict` (`tools::abstention`) requires a live `GraphStore` (entity
-            // resolution grounds a term even when BM25 misses it) — same gating as
-            // glossary/reach/sql: advertised only when the corpus has a reasoning graph.
-            graph_gated: true,
+            // NOT graph-gated: `covered` (`tools::abstention`) tries BM25 FIRST and only falls back
+            // to graph entity-resolution, so coverage still works on a graph-free corpus. The reader
+            // is told (answer.md) to call this FIRST on every question, and the MCP surface never
+            // withholds it, so it must be advertised regardless of whether a reasoning graph exists.
+            graph_gated: false,
         },
     ]
 }
