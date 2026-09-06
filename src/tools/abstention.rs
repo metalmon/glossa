@@ -7,11 +7,11 @@ pub struct AbsentTerm {
     pub term: String,
 }
 
-/// Distinctive question terms with no corpus coverage. A term is any alphabetic token of length
-/// >= 5 (dedup'd, case-insensitive); it is UNCOVERED when `covered` returns false. No stopword
-/// list: the index tokenizer (see `index::multilang`) stems but does NOT strip stopwords, so a
-/// frequent word is itself searchable and `covered` reports it present — self-calibrating on the
-/// corpus rather than on a hardcoded, language-specific word list.
+/// Distinctive question terms with no corpus coverage. A term is any alphabetic token of at least
+/// 5 characters (dedup'd, case-insensitive); it is UNCOVERED when `covered` returns false. No
+/// stopword list: the index tokenizer (see `index::multilang`) stems but does NOT strip stopwords,
+/// so a frequent word is itself searchable and `covered` reports it present — self-calibrating on
+/// the corpus rather than on a hardcoded, language-specific word list.
 pub fn coverage_uncovered(
     question: &str,
     covered: &dyn Fn(&str) -> bool,
