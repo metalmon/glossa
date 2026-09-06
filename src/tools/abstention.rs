@@ -6,16 +6,13 @@ pub struct AbsentTerm {
     pub term: String,
 }
 
-/// Distinctive question terms with no corpus coverage. A term is any alphabetic token of at least
-/// 5 characters (dedup'd, case-insensitive); it is UNCOVERED when `covered` returns false. No
-/// stopword list: the index tokenizer (see `index::multilang`) stems but does NOT strip stopwords,
-/// so a frequent word is itself searchable and `covered` reports it present — self-calibrating on
-/// the corpus rather than on a hardcoded, language-specific word list.
-pub fn coverage_uncovered(
-    question: &str,
-    covered: &dyn Fn(&str) -> bool,
-    _k: usize,
-) -> Vec<AbsentTerm> {
+/// The distinctive terms of a question: any alphabetic token of at least 5 characters, deduped
+/// case-insensitively, in first-occurrence order. No stopword list: the index tokenizer (see
+/// `index::multilang`) stems but does NOT strip stopwords, so a frequent word is itself searchable
+/// and `covered` reports it present — self-calibrating on the corpus rather than on a hardcoded,
+/// language-specific word list. Exposed (not just used internally by `coverage_uncovered`) for
+/// callers — the `check_question` editor report — that need the whole term list, covered or not.
+pub fn distinctive_terms(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for tok in question.split(|c: char| !c.is_alphabetic()) {
@@ -23,16 +20,25 @@ pub fn coverage_uncovered(
             continue;
         }
         let low = tok.to_lowercase();
-        if !seen.insert(low.clone()) {
-            continue;
-        }
-        if !covered(tok) {
-            out.push(AbsentTerm {
-                term: tok.to_string(),
-            });
+        if seen.insert(low) {
+            out.push(tok.to_string());
         }
     }
     out
+}
+
+/// Distinctive question terms (see [`distinctive_terms`]) with no corpus coverage — UNCOVERED when
+/// `covered` returns false.
+pub fn coverage_uncovered(
+    question: &str,
+    covered: &dyn Fn(&str) -> bool,
+    _k: usize,
+) -> Vec<AbsentTerm> {
+    distinctive_terms(question)
+        .into_iter()
+        .filter(|t| !covered(t))
+        .map(|term| AbsentTerm { term })
+        .collect()
 }
 
 /// How hard the coverage-abstention gate bites, resolved by the caller (MCP layer: from
@@ -68,6 +74,49 @@ pub fn covered(term: &str, idx: &DocIndex, g: &GraphStore) -> bool {
                 .any(|id| crate::graph::grounded_or_chains_to_grounded(g, id).unwrap_or(false))
         })
         .unwrap_or(false)
+}
+
+/// Whole-question abstention verdict — coarser than [`AbsentTerm`]/[`coverage_uncovered`]: it
+/// gates on the AGGREGATE (does this question clear the `k`-uncovered-terms bar at all), not on
+/// which individual terms are missing. Produced by [`question_verdict`]; rendered by the MCP
+/// `check_question` tool, which the reader is expected to call FIRST, before committing to answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QVerdict {
+    /// Enough distinctive terms are covered (or the gate is `Off`) — proceed normally.
+    InScope,
+    /// `Filter` tier and the question has `k` or more uncovered distinctive terms — decline rather
+    /// than guess.
+    NotAnswerable,
+    /// `Signal` tier and the question has `k` or more uncovered distinctive terms — proceed, but
+    /// name what's missing so the caller can reformulate or hedge.
+    Coverage { absent: Vec<String> },
+}
+
+/// Compute the question-level verdict: `Off` is always `InScope` (the gate never bites). Otherwise
+/// distinctive terms are checked via [`coverage_uncovered`]/[`covered`]; fewer than `k` uncovered
+/// terms is still `InScope`. At `k` or more uncovered, `Filter` returns `NotAnswerable` and `Signal`
+/// returns `Coverage` with the absent terms — `Signal` never withholds, only annotates.
+pub fn question_verdict(
+    query: &str,
+    idx: &DocIndex,
+    g: &GraphStore,
+    enforcement: Enforcement,
+    k: usize,
+) -> QVerdict {
+    if enforcement == Enforcement::Off {
+        return QVerdict::InScope;
+    }
+    let uncovered = coverage_uncovered(query, &|t| covered(t, idx, g), k);
+    if uncovered.len() < k {
+        return QVerdict::InScope;
+    }
+    match enforcement {
+        Enforcement::Filter => QVerdict::NotAnswerable,
+        Enforcement::Signal => QVerdict::Coverage {
+            absent: uncovered.into_iter().map(|a| a.term).collect(),
+        },
+        Enforcement::Off => unreachable!("handled above"),
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +213,56 @@ mod tests {
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         assert!(!covered("zzqunknownterm", &i, &g));
+    }
+
+    #[test]
+    fn question_verdict_off_is_always_in_scope() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let v = question_verdict("zzqunknownterm mystery", &i, &g, Enforcement::Off, 1);
+        assert_eq!(v, QVerdict::InScope, "Off never gates, regardless of coverage");
+    }
+
+    #[test]
+    fn question_verdict_in_scope_when_covered_under_either_tier() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[crate::model::Chunk {
+            doc_path: "profibus.pdf".into(),
+            location: "p.1".into(),
+            file_type: "pdf".into(),
+            text: "profibus maxTsdr timeout".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        for tier in [Enforcement::Filter, Enforcement::Signal] {
+            let v = question_verdict("profibus maxTsdr timeout", &i, &g, tier, 1);
+            assert_eq!(v, QVerdict::InScope, "covered question stays in-scope under {tier:?}");
+        }
+    }
+
+    #[test]
+    fn question_verdict_filter_declines_when_uncovered_reaches_k() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let v = question_verdict("zzqunknownterm mystery", &i, &g, Enforcement::Filter, 1);
+        assert_eq!(v, QVerdict::NotAnswerable);
+    }
+
+    #[test]
+    fn question_verdict_signal_reports_absent_terms_when_uncovered_reaches_k() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let v = question_verdict("zzqunknownterm mystery", &i, &g, Enforcement::Signal, 1);
+        match v {
+            QVerdict::Coverage { absent } => {
+                assert!(absent.iter().any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
+                assert!(absent.iter().any(|t| t.eq_ignore_ascii_case("mystery")));
+            }
+            other => panic!("expected Coverage, got {other:?}"),
+        }
     }
 }
