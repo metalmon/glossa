@@ -165,15 +165,20 @@ pub struct Stat {
     pub untyped: usize,
     /// answerable (default true when absent) vs explicit false.
     pub answerable: usize,
-    /// Total non-answerable count (manual unanswerable cases + gated cases — a gated case is
-    /// already `answerable=false`, so this does NOT double count on top of `gated`).
+    /// Total non-answerable count (manually-authored `answerable=false` cases; orthogonal to
+    /// `abstention` — a case can be `answerable=true` yet still carry `abstention=true`).
     pub unanswerable: usize,
-    /// Subset of `unanswerable` reclassified by `kbx dataset gate-mark` (carries tag `gated`):
-    /// originally-answerable cases the runtime coverage-abstention gate blocked. `unanswerable -
-    /// gated` is the manually-authored unanswerable count.
-    pub gated: usize,
-    /// Ids of the `gated` cases, for the coverage-gap list.
-    pub gated_ids: Vec<String>,
+    /// Count of cases with `abstention=true` (set by `kbx dataset gate-mark`'s coverage-abstention
+    /// model pass), regardless of `answerable`.
+    pub abstention_flagged: usize,
+    /// Crossbreak of `abstention_flagged`: `answerable && abstention` — an originally-answerable
+    /// case the coverage gate would incorrectly abstain on. The dataset-quality signal to watch:
+    /// a non-zero count here means the gate's `k` threshold (or the corpus's coverage) needs
+    /// tuning, since a real question is being blocked.
+    pub false_abstain: usize,
+    /// Crossbreak of `abstention_flagged`: `!answerable && abstention` — an already-unanswerable
+    /// case the gate ALSO correctly flags, confirming the gate agrees with the manual label.
+    pub flagged_unanswerable: usize,
     /// needs_graph value -> count (empty value keyed as "(unset)").
     pub needs_graph: BTreeMap<String, usize>,
     /// alias coverage.
@@ -209,9 +214,13 @@ pub fn compute_stat(cases: &[Case]) -> Stat {
         } else {
             s.unanswerable += 1;
         }
-        if c.tags.iter().any(|t| t == "gated") {
-            s.gated += 1;
-            s.gated_ids.push(c.id.clone());
+        if c.abstention {
+            s.abstention_flagged += 1;
+            if c.answerable {
+                s.false_abstain += 1;
+            } else {
+                s.flagged_unanswerable += 1;
+            }
         }
         let ng = if c.needs_graph.is_empty() {
             "(unset)".to_string()
@@ -421,56 +430,40 @@ pub fn sample_cases(cases: &[Case], n: usize, seed: u64) -> Vec<Case> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// gate-mark
+// gate-mark (coverage-abstention model pass)
 // ---------------------------------------------------------------------------------------------
 
-/// One coverage gap found by [`gate_mark`]: the reclassified case's `id`, the question's absent
-/// distinctive terms (per [`coverage_uncovered`]), and the `hop_type` it had before reclassification
-/// (so a later un-gate pass can restore it).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GapMark {
-    pub id: String,
-    pub absent_terms: Vec<String>,
-    pub original_hop_type: String,
+/// Set `abstention` on every case from its (already-distilled) query's coverage: `abstention =
+/// true` when at least `k` of the query's distinctive terms are uncovered by the corpus
+/// (`coverage_uncovered(query, covered, k).len() >= k`; `covered` wraps
+/// [`glossa::tools::abstention::covered`] over `g`/`idx` — the SAME threshold the runtime
+/// coverage-abstention gate itself fires on). The query judged is `case.distilled_query` when
+/// present, else the raw `case.question` — this function assumes the caller already populated
+/// `distilled_query` via [`distill_question`] (or left it `None` for a question that doesn't need
+/// distilling); it does not call the model itself.
+///
+/// Touches ONLY `abstention` — `hop_type`, `answerable`, `question`, and `distilled_query` are
+/// left byte-identical, unlike the old destructive `gate_mark` this replaces (which used to flip
+/// `answerable`/`hop_type` and stamp `gated`/`orig_hop:` tags). `abstention` is an orthogonal
+/// signal: whether the runtime gate would abstain, independent of whether the case is manually
+/// marked answerable. Pure: no IO — `g`/`idx` are read-only lookups threaded through to `covered`;
+/// the caller owns opening them and writing the mutated `cases` back out.
+pub fn mark_abstention(cases: &mut [Case], g: &GraphStore, idx: &DocIndex, k: usize) {
+    for c in cases.iter_mut() {
+        let query = c.distilled_query.as_deref().unwrap_or(&c.question);
+        let uncovered = coverage_uncovered(query, &|t: &str| covered(t, idx, g), k);
+        c.abstention = uncovered.len() >= k;
+    }
 }
 
-/// Reclassify originally-answerable cases whose question is gate-blocked as explicit unanswerable
-/// cases: `gate-blocked` means the runtime coverage-abstention gate's own threshold fires — at
-/// least `k` of the question's distinctive terms are uncovered (`coverage_uncovered(question,
-/// covered, k).len() >= k`; `covered` wraps [`glossa::tools::abstention::covered`] over `g`/`idx`).
-/// For each such case: `answerable` flips to `false`, `hop_type` becomes `"unanswerable"`, and a
-/// `"gated"` tag plus an `"orig_hop:<original hop_type>"` tag are appended (the latter preserves
-/// what to restore `hop_type` to, even when it was empty — `"orig_hop:"` still records that). A
-/// `GapMark` is pushed for each reclassified case, most useful for a `coverage-gaps.md` report.
-///
-/// Already-unanswerable cases are left untouched — they are not a coverage gap to record, they're
-/// already-declared-unanswerable. A case already tagged `"gated"` is skipped so repeated runs over
-/// the same file are idempotent (no double-marking, no stacked `orig_hop:` tags). Pure: no IO: `g`
-/// and `idx` are read-only lookups threaded through to `covered`; the caller owns opening them and
-/// writing the mutated `cases` back out.
-pub fn gate_mark(cases: &mut [Case], g: &GraphStore, idx: &DocIndex, k: usize) -> Vec<GapMark> {
-    let mut marks = Vec::new();
-    for c in cases.iter_mut() {
-        if !c.answerable || c.tags.iter().any(|t| t == "gated") {
-            continue;
-        }
-        let uncovered = coverage_uncovered(&c.question, &|t: &str| covered(t, idx, g), k);
-        if uncovered.len() < k {
-            continue;
-        }
-        let original_hop_type = c.hop_type.clone();
-        let absent_terms: Vec<String> = uncovered.into_iter().map(|a| a.term).collect();
-        c.answerable = false;
-        c.hop_type = "unanswerable".to_string();
-        c.tags.push("gated".to_string());
-        c.tags.push(format!("orig_hop:{original_hop_type}"));
-        marks.push(GapMark {
-            id: c.id.clone(),
-            absent_terms,
-            original_hop_type,
-        });
-    }
-    marks
+/// The absent (uncovered) distinctive terms for `query`, per the same [`coverage_uncovered`] call
+/// [`mark_abstention`] makes — reused by `kbx dataset gate-mark`'s `coverage-gaps.md` report so it
+/// doesn't need to re-derive the closure/threshold logic at the CLI layer.
+pub fn absent_terms(query: &str, g: &GraphStore, idx: &DocIndex, k: usize) -> Vec<String> {
+    coverage_uncovered(query, &|t: &str| covered(t, idx, g), k)
+        .into_iter()
+        .map(|a| a.term)
+        .collect()
 }
 
 /// Build the two seed messages for one `distill_question` call: `prompt_tmpl` (the behavior-guide
@@ -520,6 +513,31 @@ pub fn distill_question(
         .context("question-distill endpoint request failed")?;
     let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
     Ok(content.trim().to_string())
+}
+
+/// Embedded default `question_distill.md` — the same behavior-guide text `kbx init` would
+/// scaffold, baked in so `kbx dataset gate-mark` works even on a workspace that predates this
+/// prompt file (no rebuild needed to ship the default; mirrors `scaffold.rs`'s `include_str!`
+/// pattern for `builder.md`/`judge.md`/etc.).
+const DEFAULT_QUESTION_DISTILL_MD: &str = include_str!("../templates/question_distill.md");
+
+/// Load the `question_distill.md` behavior-guide text for `distill_question`'s system prompt: a
+/// workspace override at `<corpus_root>/.glossa/kbx/question_distill.md` when present (so an
+/// operator can tune the distillation instructions without a rebuild, exactly like `builder.md`),
+/// else [`DEFAULT_QUESTION_DISTILL_MD`]. Unlike `builder.md` (which `kbx init` always scaffolds
+/// and `run_build` requires present), this prompt has no dedicated `KbxPaths` field yet, so the
+/// override path is resolved directly here rather than through `workspace::KbxPaths`.
+pub fn load_question_distill_tmpl(corpus_root: &Path) -> Result<String> {
+    let override_path = corpus_root
+        .join(".glossa")
+        .join("kbx")
+        .join("question_distill.md");
+    if override_path.is_file() {
+        std::fs::read_to_string(&override_path)
+            .with_context(|| format!("reading {}", override_path.display()))
+    } else {
+        Ok(DEFAULT_QUESTION_DISTILL_MD.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -764,41 +782,45 @@ mod tests {
             },
             case("c", "  q one? ", "Ans"), // normalized-dup question AND dup answer, untyped
             {
-                // A gate_mark'd case: answerable=false + tag "gated" (as gate_mark leaves it).
+                // A gate-mark'd case that agrees with its manual unanswerable label.
                 let mut c = case("d", "Q four?", "Ans four");
                 c.hop_type = "unanswerable".into();
                 c.answerable = false;
-                c.tags = vec!["gated".into(), "orig_hop:lexical".into()];
+                c.abstention = true;
+                c
+            },
+            {
+                // A gate-mark'd FALSE ABSTAIN: manually answerable, but the coverage gate would
+                // block it -- the dataset-quality signal `false_abstain` exists to surface.
+                let mut c = case("e", "Q five?", "Ans five");
+                c.hop_type = "lexical".into();
+                c.abstention = true;
                 c
             },
         ];
         let s = compute_stat(&cases);
-        assert_eq!(s.total, 4);
-        assert_eq!(s.lexical, 1);
+        assert_eq!(s.total, 5);
+        assert_eq!(s.lexical, 2, "a and e");
         assert_eq!(s.multihop, 1);
         assert_eq!(
             s.untyped, 2,
             "c is untyped, d's hop_type is \"unanswerable\" (also untyped)"
         );
-        assert_eq!(s.answerable, 2);
+        assert_eq!(s.answerable, 3, "a, c, e");
+        assert_eq!(s.unanswerable, 2, "b (manual) + d (manual)");
+        assert_eq!(s.abstention_flagged, 2, "d and e both carry abstention=true");
+        assert_eq!(s.false_abstain, 1, "e: answerable=true but abstention=true");
         assert_eq!(
-            s.unanswerable, 2,
-            "b (manual) + d (gated) -- gated is a subset, not double-counted on top"
-        );
-        assert_eq!(s.gated, 1, "only d carries the gated tag");
-        assert_eq!(s.gated_ids, vec!["d".to_string()]);
-        assert_eq!(
-            s.unanswerable - s.gated,
-            1,
-            "manual-unanswerable count = unanswerable - gated"
+            s.flagged_unanswerable, 1,
+            "d: answerable=false and abstention=true"
         );
         assert_eq!(s.with_aliases, 1);
-        assert_eq!(s.without_aliases, 3);
+        assert_eq!(s.without_aliases, 4);
         assert_eq!(s.dup_questions, 1, "c duplicates a's normalized question");
         assert_eq!(s.dup_answers, 1, "c duplicates a's answer");
         assert_eq!(s.blank, 0);
         assert_eq!(s.needs_graph.get("yes"), Some(&1));
-        assert_eq!(s.needs_graph.get("(unset)"), Some(&3));
+        assert_eq!(s.needs_graph.get("(unset)"), Some(&4));
     }
 
     /// A minimal on-disk `GraphStore`+`DocIndex` fixture where only "profibus" is covered (indexed
@@ -819,73 +841,48 @@ mod tests {
     }
 
     #[test]
-    fn gate_mark_reclassifies_uncovered_answerable_and_preserves_original() {
+    fn mark_abstention_flags_uncovered_and_clears_covered_touching_only_abstention() {
         let (_dir, idx, g) = covered_profibus_fixture();
-        // one answerable multihop case whose question has an uncovered distinctive term -> becomes
-        // gated (tag "gated" added, answerable flipped to false for judge, orig hop_type recorded).
-        let mut gated_case = case("c1", "What is Zylophon?", "some answer");
-        gated_case.hop_type = "multihop".into();
-        // one answerable case fully covered ("profibus" is indexed) -> untouched.
-        let mut covered_case = case("c2", "What is profibus?", "ans2");
+        // A case whose DISTILLED query has an uncovered distinctive term -> abstention=true. The
+        // raw `question` is deliberately covered ("profibus") so this also proves the distilled
+        // query -- not the raw question -- is what's judged.
+        let mut uncovered_case = case("c1", "profibus ticket", "some answer");
+        uncovered_case.hop_type = "multihop".into();
+        uncovered_case.answerable = true;
+        uncovered_case.distilled_query = Some("What is Zylophon?".into());
+        // A case whose distilled query is fully covered ("profibus" is indexed) -> abstention
+        // stays false.
+        let mut covered_case = case("c2", "raw q", "ans2");
         covered_case.hop_type = "lexical".into();
-        let mut cases = vec![gated_case, covered_case];
+        covered_case.distilled_query = Some("What is profibus?".into());
+        let mut cases = vec![uncovered_case, covered_case];
 
-        let marks = gate_mark(&mut cases, &g, &idx, 1);
-        assert_eq!(marks.len(), 1);
-        assert_eq!(marks[0].id, "c1");
-        assert_eq!(marks[0].original_hop_type, "multihop");
-        assert!(marks[0]
-            .absent_terms
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case("Zylophon")));
+        mark_abstention(&mut cases, &g, &idx, 1);
 
-        let gated = cases.iter().find(|c| c.id == marks[0].id).unwrap();
-        assert!(gated.tags.iter().any(|t| t == "gated"));
-        assert!(!gated.answerable);
-        assert_eq!(gated.hop_type, "unanswerable");
-        assert!(
-            gated.tags.iter().any(|t| t.starts_with("orig_hop:")),
-            "original hop_type preserved"
-        );
-        assert!(gated.tags.iter().any(|t| t == "orig_hop:multihop"));
+        let c1 = cases.iter().find(|c| c.id == "c1").unwrap();
+        assert!(c1.abstention, "uncovered distilled term -> abstention=true");
+        // Only `abstention` changed -- hop_type/answerable/question/distilled_query untouched.
+        assert_eq!(c1.hop_type, "multihop");
+        assert!(c1.answerable);
+        assert_eq!(c1.question, "profibus ticket");
+        assert_eq!(c1.distilled_query.as_deref(), Some("What is Zylophon?"));
 
-        let untouched = cases.iter().find(|c| c.id == "c2").unwrap();
-        assert!(untouched.answerable, "fully-covered case stays answerable");
-        assert_eq!(untouched.hop_type, "lexical");
-        assert!(!untouched.tags.iter().any(|t| t == "gated"));
+        let c2 = cases.iter().find(|c| c.id == "c2").unwrap();
+        assert!(!c2.abstention, "fully-covered distilled query -> abstention=false");
+        assert_eq!(c2.hop_type, "lexical");
+        assert!(c2.answerable);
+        assert_eq!(c2.question, "raw q");
+        assert_eq!(c2.distilled_query.as_deref(), Some("What is profibus?"));
     }
 
     #[test]
-    fn gate_mark_is_idempotent_and_skips_already_unanswerable() {
+    fn mark_abstention_falls_back_to_question_when_no_distilled_query() {
         let (_dir, idx, g) = covered_profibus_fixture();
-        let mut already_gated = case("c1", "What is Zylophon?", "some answer");
-        already_gated.hop_type = "unanswerable".into();
-        already_gated.answerable = false;
-        already_gated.tags = vec!["gated".into(), "orig_hop:multihop".into()];
-        let mut already_unanswerable = case("c2", "What is Zylophon too?", "ans");
-        already_unanswerable.answerable = false;
-        let mut cases = vec![already_gated, already_unanswerable];
-
-        let marks = gate_mark(&mut cases, &g, &idx, 1);
-        assert!(
-            marks.is_empty(),
-            "already-gated and already-unanswerable cases produce no new marks"
-        );
-        // No double-marking / stacked orig_hop tags on the already-gated case.
-        let c1 = cases.iter().find(|c| c.id == "c1").unwrap();
-        assert_eq!(
-            c1.tags.iter().filter(|t| *t == "gated").count(),
-            1,
-            "gated tag not duplicated"
-        );
-        assert_eq!(
-            c1.tags
-                .iter()
-                .filter(|t| t.starts_with("orig_hop:"))
-                .count(),
-            1,
-            "orig_hop tag not stacked"
-        );
+        // No `distilled_query` set -> the raw `question` is judged directly.
+        let mut cases = vec![case("c1", "What is Zylophon?", "ans")];
+        mark_abstention(&mut cases, &g, &idx, 1);
+        assert!(cases[0].abstention, "raw question's uncovered term flags it");
+        assert!(cases[0].distilled_query.is_none(), "still untouched");
     }
 
     #[test]
