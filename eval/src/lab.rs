@@ -288,9 +288,8 @@ impl AbstentionPolicy {
     /// parse to `On` / `Off` for back-compat.
     pub fn from_opt(s: Option<&str>) -> Self {
         match s.map(|v| v.trim().to_lowercase()).as_deref() {
-            Some("on") | Some("true") | Some("safety_first") | Some("safety-first") | Some("safety") => {
-                Self::On
-            }
+            Some("on") | Some("true") | Some("safety_first") | Some("safety-first")
+            | Some("safety") => Self::On,
             _ => Self::Off,
         }
     }

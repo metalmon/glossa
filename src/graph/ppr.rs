@@ -99,7 +99,11 @@ pub(crate) fn bridge_mode(gdir: &Path) -> BridgeMode {
         "off" => Some(BridgeMode::Off),
         _ => None,
     };
-    if let Some(m) = std::env::var("GLOSSA_PPR_BRIDGE").ok().as_deref().and_then(parse) {
+    if let Some(m) = std::env::var("GLOSSA_PPR_BRIDGE")
+        .ok()
+        .as_deref()
+        .and_then(parse)
+    {
         return m;
     }
     if let Some(m) = gdir
@@ -624,7 +628,11 @@ mod tests {
         // Default with no ontology: Off.
         assert_eq!(bridge_mode(&gdir), BridgeMode::Off);
         // Per-corpus [retrieval].bridge is read.
-        std::fs::write(d.path().join(".glossa/ontology.toml"), "[retrieval]\nbridge = \"geomean\"\n").unwrap();
+        std::fs::write(
+            d.path().join(".glossa/ontology.toml"),
+            "[retrieval]\nbridge = \"geomean\"\n",
+        )
+        .unwrap();
         assert_eq!(bridge_mode(&gdir), BridgeMode::Geomean);
         // Env overrides ontology.
         std::env::set_var("GLOSSA_PPR_BRIDGE", "off");
@@ -767,7 +775,10 @@ mod tests {
             [("a".to_string(), 1.0)].into_iter().collect();
         let full = ppr_push_scored(&csr, &seeds, 0.15, 1e-6);
         let topk = ppr_push(&csr, &seeds, 0.15, 1e-6, 3);
-        assert!(full.len() >= topk.len(), "full support is a superset of top-k");
+        assert!(
+            full.len() >= topk.len(),
+            "full support is a superset of top-k"
+        );
         // The top-3 prefix of the full (already sorted desc) equals ppr_push's top-3.
         let full_prefix: Vec<&String> = full.iter().take(3).map(|(id, _)| id).collect();
         let topk_ids: Vec<&String> = topk.iter().map(|(id, _)| id).collect();

@@ -554,7 +554,10 @@ mod tests {
         let body0: Value = serde_json::from_str(body0_str).expect("request body must be JSON");
         assert_eq!(body0["instructions"], "you are a test system");
         assert_eq!(body0["model"], "gpt-responses-test");
-        assert_eq!(body0["max_output_tokens"], json!(super::super::agent_max_tokens()));
+        assert_eq!(
+            body0["max_output_tokens"],
+            json!(super::super::agent_max_tokens())
+        );
         assert!(body0["input"].is_array(), "expected a flat input array");
         let req_tools = body0["tools"].as_array().expect("tools must be an array");
         assert!(
