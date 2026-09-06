@@ -1,7 +1,6 @@
 //! Loose coercions for LLM tool-call JSON (bools as strings, etc.).
 
 use serde::de::{self, Deserializer, Visitor};
-use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
@@ -242,24 +241,6 @@ where
     deserializer.deserialize_any(OptStringVisitor)
 }
 
-/// Required-`String` variant of [`deserialize_opt_string_loose`]: accepts a JSON string, number,
-/// or bool (stringified) the same way; rejects null (and, via that fn's `Visitor`, arrays/objects)
-/// with a clear error rather than serde's default type-mismatch message.
-/// Use with `#[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]` on a
-/// non-optional field (absent → serde's normal "missing field" error, same as
-/// [`deserialize_u32_loose`]).
-pub fn deserialize_string_loose<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match deserialize_opt_string_loose(deserializer)? {
-        Some(s) => Ok(s),
-        None => Err(de::Error::custom(
-            "expected a string, number, or bool, got null",
-        )),
-    }
-}
-
 /// Accept a string list as a JSON array, a single string, or a comma-separated string — some MCP
 /// clients cannot send arrays. Empty/whitespace entries are dropped; an all-empty result is `None`.
 pub fn deserialize_opt_vec_string_loose<'de, D>(
@@ -287,33 +268,6 @@ where
             .collect::<Vec<_>>()
     });
     Ok(cleaned.filter(|v: &Vec<String>| !v.is_empty()))
-}
-
-/// Accept a list of structured items (each deserialized via its own `Deserialize` impl) as a
-/// native JSON array, a single item as shorthand for a one-element list, or (some MCP clients
-/// stringify structured params) the whole array/object encoded as a JSON string. Missing/null
-/// deserializes to an empty `Vec` via `#[serde(default)]` on the field (this fn only runs when
-/// the key is present).
-pub fn deserialize_vec_loose<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    let v = Value::deserialize(deserializer)?;
-    let v = match v {
-        Value::String(s) => serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)),
-        other => other,
-    };
-    match v {
-        Value::Null => Ok(Vec::new()),
-        Value::Array(items) => items
-            .into_iter()
-            .map(|it| serde_json::from_value(it).map_err(de::Error::custom))
-            .collect(),
-        single => serde_json::from_value(single)
-            .map(|t: T| vec![t])
-            .map_err(de::Error::custom),
-    }
 }
 
 #[cfg(test)]
@@ -421,79 +375,5 @@ mod tests {
         assert_eq!(absent.valid_from, None);
         let null: T = serde_json::from_str(r#"{"valid_from":null}"#).unwrap();
         assert_eq!(null.valid_from, None);
-    }
-
-    #[test]
-    fn string_loose_accepts_bare_number_and_string_rejects_null() {
-        #[derive(Deserialize)]
-        struct T {
-            #[serde(deserialize_with = "deserialize_string_loose")]
-            loc: String,
-        }
-        // The bug this fix targets: a model sends a bare JSON number for a location field
-        // that's really a stringified chunk ordinal.
-        let n: T = serde_json::from_str(r#"{"loc":5}"#).unwrap();
-        assert_eq!(n.loc, "5");
-        let s: T = serde_json::from_str(r#"{"loc":"p.5"}"#).unwrap();
-        assert_eq!(s.loc, "p.5");
-        let b: T = serde_json::from_str(r#"{"loc":true}"#).unwrap();
-        assert_eq!(b.loc, "true");
-        // Required field: null and absent are still rejected, not silently defaulted.
-        assert!(serde_json::from_str::<T>(r#"{"loc":null}"#).is_err());
-        assert!(serde_json::from_str::<T>(r#"{}"#).is_err());
-    }
-
-    #[test]
-    fn vec_loose_accepts_array_single_object_and_stringified_array() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        struct Item {
-            doc: String,
-            loc: String,
-        }
-        #[derive(Deserialize)]
-        struct T {
-            #[serde(default, deserialize_with = "deserialize_vec_loose")]
-            items: Vec<Item>,
-        }
-        // Native array — the normal shape.
-        let arr: T =
-            serde_json::from_str(r#"{"items":[{"doc":"a","loc":"1"},{"doc":"b","loc":"2"}]}"#)
-                .unwrap();
-        assert_eq!(
-            arr.items,
-            vec![
-                Item {
-                    doc: "a".into(),
-                    loc: "1".into()
-                },
-                Item {
-                    doc: "b".into(),
-                    loc: "2".into()
-                },
-            ]
-        );
-        // A single object, not wrapped in an array — shorthand for a one-element list.
-        let one: T = serde_json::from_str(r#"{"items":{"doc":"a","loc":"1"}}"#).unwrap();
-        assert_eq!(
-            one.items,
-            vec![Item {
-                doc: "a".into(),
-                loc: "1".into()
-            }]
-        );
-        // The known client bug this whole module exists for: a structured param sent as a
-        // JSON-encoded STRING instead of a native array.
-        let stringified: T =
-            serde_json::from_str(r#"{"items":"[{\"doc\":\"a\",\"loc\":\"1\"}]"}"#).unwrap();
-        assert_eq!(
-            stringified.items,
-            vec![Item {
-                doc: "a".into(),
-                loc: "1".into()
-            }]
-        );
-        // Absent key → empty (handled by #[serde(default)] on the field, not this fn).
-        let none: T = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(none.items, Vec::<Item>::new());
     }
 }

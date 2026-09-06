@@ -454,8 +454,9 @@ impl OpenAiBackend {
 
         let trace = TraceLog::to_dir(work);
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
-        let ont = glossa::graph::ontology::Ontology::load_or_default(work);
-        let spec = glossa::tools::ChainSpec::from_ontology(&ont);
+        let spec = glossa::tools::ChainSpec::from_ontology(
+            &glossa::graph::ontology::Ontology::load_or_default(work),
+        );
         // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): this wrapper only
         // acts on its PLATEAU kind — a NEUTRAL "gain has plateaued" observation applied via the
         // signal's own render (drop the redundant body on a drained plateau, or append the marker
@@ -579,11 +580,8 @@ impl OpenAiBackend {
 
     /// Build the `Endpoint` this backend's `[model]` config resolves to — the SAME construction
     /// `answer_capturing` uses for `transport_for`, factored out so [`post_feedback`] can hand it
-    /// to a freshly-built transport without re-running the reader. `pub(crate)` (rather than
-    /// private) so a one-off single-shot caller outside this module — e.g. `dataset_ops::
-    /// distill_question` — can build the same endpoint and override just `temperature` for a
-    /// deterministic call, without duplicating this field list.
-    pub(crate) fn endpoint_config(&self) -> crate::lab::Endpoint {
+    /// to a freshly-built transport without re-running the reader.
+    fn endpoint_config(&self) -> crate::lab::Endpoint {
         crate::lab::Endpoint {
             endpoint: self.endpoint.clone(),
             model: self.model.clone(),
@@ -985,7 +983,6 @@ where
 /// special-cased here to the `path` argument instead. `run_agent_loop` uses these to detect an
 /// unproductive streak — many varied calls (including varied graph navigation) that surface
 /// nothing new — without falsely tripping on a reader that IS making real graph progress.
-#[allow(clippy::too_many_arguments)]
 fn execute_tool(
     name: &str,
     args: &Value,

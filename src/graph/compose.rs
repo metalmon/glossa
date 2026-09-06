@@ -9,6 +9,13 @@ use crate::graph::ppr;
 use crate::graph::store::GraphStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const STOP: &[&str] = &[
+    "the", "a", "an", "of", "in", "on", "to", "is", "was", "were", "are", "for", "and", "or",
+    "that", "which", "who", "what", "when", "where", "by", "with", "at", "as", "from", "into",
+    "does", "did", "do", "part", "named", "after", "held", "over", "it", "its", "his", "her",
+    "their", "he", "she",
+];
+
 fn normalize(s: &str) -> String {
     let mut out = String::new();
     let mut prev_sp = false;
@@ -27,7 +34,7 @@ fn normalize(s: &str) -> String {
 fn tokens(s: &str) -> Vec<String> {
     normalize(s)
         .split(' ')
-        .filter(|w| w.len() > 1)
+        .filter(|w| w.len() > 1 && !STOP.contains(w))
         .map(|w| w.to_string())
         .collect()
 }
@@ -268,11 +275,7 @@ pub fn compose_ppr(
             let pb_map: HashMap<&str, f32> = pb.iter().map(|(id, s)| (id.as_str(), *s)).collect();
             let mut geo: Vec<(String, f32)> = pa
                 .iter()
-                .filter_map(|(id, sa)| {
-                    pb_map
-                        .get(id.as_str())
-                        .map(|sb| (id.clone(), (sa * sb).sqrt()))
-                })
+                .filter_map(|(id, sa)| pb_map.get(id.as_str()).map(|sb| (id.clone(), (sa * sb).sqrt())))
                 .collect();
             geo.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             geo.truncate(want); // match the summed path's headroom cap before node_metas
@@ -289,11 +292,7 @@ pub fn compose_ppr(
     }
     // id -> (node_type, label) for ONLY the ranked ids — O(k), not O(all nodes). Replaces the former
     // full `all_nodes()` scan (a plain batched SELECT).
-    let seed_ids: HashSet<String> = query_seeds
-        .keys()
-        .chain(name_seeds.keys())
-        .cloned()
-        .collect();
+    let seed_ids: HashSet<String> = query_seeds.keys().chain(name_seeds.keys()).cloned().collect();
     let ranked_ids: Vec<&str> = ranked.iter().map(|(id, _)| id.as_str()).collect();
     let meta = g.node_metas(&ranked_ids)?;
     let structural: HashSet<&str> = crate::graph::STRUCTURAL_NODES.iter().copied().collect();
@@ -698,11 +697,7 @@ mod tests {
         let geo = compose_ppr(&g, "", "Alpha", 5).unwrap();
         std::env::remove_var("GLOSSA_PPR_BRIDGE");
         let ids = |v: &[Candidate]| v.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-        assert_eq!(
-            ids(&off),
-            ids(&geo),
-            "empty name → geomean falls back to single, identical"
-        );
+        assert_eq!(ids(&off), ids(&geo), "empty name → geomean falls back to single, identical");
     }
 
     #[test]
@@ -722,10 +717,7 @@ mod tests {
         fact(&g, "z", "Zeta", &["Zeta"]);
         link(&g, "a", "a2");
         let out = compose_ppr(&g, "Zeta", "Alpha", 5).unwrap();
-        assert!(
-            !out.is_empty(),
-            "disjoint supports fall back to summed single push, not empty"
-        );
+        assert!(!out.is_empty(), "disjoint supports fall back to summed single push, not empty");
         std::env::remove_var("GLOSSA_PPR_BRIDGE");
     }
 }

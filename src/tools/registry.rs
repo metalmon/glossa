@@ -7,8 +7,7 @@
 //! to the OpenAI-function core `{ "type": "object", "properties": {…}, "required": […] }`.
 
 use crate::mcp::{
-    CheckQuestionArgs, GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs,
-    SearchArgs,
+    GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs,
 };
 
 pub const DESC_SEARCH: &str = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.";
@@ -24,8 +23,6 @@ pub const DESC_GREP: &str = "Find an exact string in the text — a code, identi
 pub const DESC_GLOB: &str = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text).";
 
 pub const DESC_SQL: &str = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed.";
-
-pub const DESC_CHECK_QUESTION: &str = "Check whether `query` is covered by this knowledge base BEFORE answering it — call this FIRST, with your distilled question. Reader: returns a short in-scope OK, a hard decline (the question is not answerable from this corpus — say so, do not guess), or a low-coverage hint naming the unmatched terms (reformulate and retry). Editor/full: always returns a full per-term coverage report regardless of any gate — which distinctive terms of the query ARE covered (and the graph node/document each grounds to) and which are absent, so you know where the graph or corpus still needs building out.";
 
 /// A single agent tool declaration: name, model-facing description, JSON-Schema for its
 /// arguments (OpenAI-function core shape), and whether it requires the reasoning graph.
@@ -106,16 +103,6 @@ pub fn registry() -> Vec<ToolDescriptor> {
             params_schema: schema_of::<GraphQueryArgs>(),
             graph_gated: true,
         },
-        ToolDescriptor {
-            name: "check_question",
-            description: DESC_CHECK_QUESTION,
-            params_schema: schema_of::<CheckQuestionArgs>(),
-            // NOT graph-gated: `covered` (`tools::abstention`) tries BM25 FIRST and only falls back
-            // to graph entity-resolution, so coverage still works on a graph-free corpus. The reader
-            // is told (answer.md) to call this FIRST on every question, and the MCP surface never
-            // withholds it, so it must be advertised regardless of whether a reasoning graph exists.
-            graph_gated: false,
-        },
     ]
 }
 
@@ -127,16 +114,7 @@ mod tests {
     fn registry_lists_core_tools_with_schemas() {
         let r = registry();
         let names: Vec<_> = r.iter().map(|d| d.name).collect();
-        for t in [
-            "search",
-            "read",
-            "grep",
-            "glob",
-            "glossary",
-            "reach",
-            "sql",
-            "check_question",
-        ] {
+        for t in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
             assert!(names.contains(&t), "registry missing {t}");
         }
         // withheld from the Reader profile: measured clutter (related/neighbors)
@@ -145,17 +123,12 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            8,
-            "registry must contain exactly the Reader profile's 8 tools"
+            7,
+            "registry must contain exactly the Reader profile's 7 tools"
         );
         // graph tools gated; retrieval tools not
         let g = |n| r.iter().find(|d| d.name == n).unwrap();
-        assert!(
-            g("glossary").graph_gated
-                && g("reach").graph_gated
-                && g("sql").graph_gated
-                && g("check_question").graph_gated
-        );
+        assert!(g("glossary").graph_gated && g("reach").graph_gated && g("sql").graph_gated);
         assert!(
             !g("search").graph_gated
                 && !g("read").graph_gated

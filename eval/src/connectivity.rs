@@ -119,9 +119,7 @@ pub fn answer_reachability(
         let ans_set: std::collections::HashSet<&str> = ans.iter().map(|s| s.as_str()).collect();
         // single-seed: question only (dataset stat has no reader term)
         let ranked = glossa::graph::compose::compose_ppr(g, "", &c.question, RANK_WINDOW)?;
-        let rank = ranked
-            .iter()
-            .position(|cand| ans_set.contains(cand.id.as_str()));
+        let rank = ranked.iter().position(|cand| ans_set.contains(cand.id.as_str()));
         ranks.entry(bucket).or_default().push(rank);
     }
     let mut out = BTreeMap::new();
@@ -257,8 +255,6 @@ mod tests {
             needs_graph: String::new(),
             source: vec!["man.pdf#p.5".into()],
             answerable: true,
-            abstention: false,
-            distilled_query: None,
         }];
         let report = answer_reachability(&g, &cases).unwrap();
         let mh = report.get("multihop").expect("multihop bucket");
@@ -283,8 +279,6 @@ mod tests {
             needs_graph: String::new(),
             source: vec![],
             answerable: false,
-            abstention: false,
-            distilled_query: None,
         }];
         let report = answer_reachability(&g, &cases).unwrap();
         assert!(report.values().all(|h| h.n == 0), "no evaluable cases");

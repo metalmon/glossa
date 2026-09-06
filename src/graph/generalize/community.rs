@@ -84,8 +84,7 @@ fn local_moving(level: &Level) -> Vec<usize> {
             // rather than stay trapped in a community it no longer belongs to. Prefer ci on a tie
             // (rejoin gain >= 0), keeping churn down; a neighbour must strictly beat the baseline by
             // EPS to win, and among neighbour ties the lowest id wins (BTreeMap ascending order).
-            let rejoin =
-                kin.get(&ci).copied().unwrap_or(0.0) / m - sigma_tot[ci] * ki / (2.0 * m * m);
+            let rejoin = kin.get(&ci).copied().unwrap_or(0.0) / m - sigma_tot[ci] * ki / (2.0 * m * m);
             let (mut best_comm, mut best_gain) = if rejoin >= -EPS {
                 (ci, rejoin)
             } else {

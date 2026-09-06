@@ -37,13 +37,6 @@ struct RawCase {
     /// metric.
     #[serde(default = "crate::dataset::default_true")]
     answerable: bool,
-    /// Whether the case is a deliberate ABSTENTION test -- orthogonal to `answerable`/`hop_type`/
-    /// `question` (never conflated with them). Absent defaults to `false`.
-    #[serde(default)]
-    abstention: bool,
-    /// Optional distilled/canonicalized restatement of `question`. Absent defaults to `None`.
-    #[serde(default)]
-    distilled_query: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,8 +67,6 @@ pub fn parse_dataset_toml(text: &str) -> anyhow::Result<Vec<Question>> {
             needs_graph: c.needs_graph,
             source: c.source,
             answerable: c.answerable,
-            abstention: c.abstention,
-            distilled_query: c.distilled_query,
         })
         .collect())
 }
@@ -162,33 +153,5 @@ answerable=false
         assert!(cs[0].answerable);
         // Explicit `answerable = false` is parsed through.
         assert!(!cs[1].answerable);
-    }
-
-    #[test]
-    fn abstention_and_distilled_query_default_and_parse() {
-        let t = r#"
-[[case]]
-id="q1"
-question="Q one?"
-answer="short"
-abstention=true
-distilled_query="configure profibus maxTsdr"
-
-[[case]]
-id="q2"
-question="Q two?"
-answer="short"
-"#;
-        let cs = parse_dataset_toml(t).unwrap();
-        assert_eq!(cs.len(), 2);
-        // Both keys present -> both read back correctly.
-        assert!(cs[0].abstention);
-        assert_eq!(
-            cs[0].distilled_query.as_deref(),
-            Some("configure profibus maxTsdr")
-        );
-        // Neither key present -> defaults (orthogonal to answerable/hop_type/question).
-        assert!(!cs[1].abstention);
-        assert!(cs[1].distilled_query.is_none());
     }
 }

@@ -694,8 +694,9 @@ impl AgentBackend for TensorZeroBackend {
         let graph = glossa::graph::store::GraphStore::open(work).ok();
         // Ontology-driven chain spec (spine relations + MENTIONS) so glossary/related render
         // the reasoning chain identically to the MCP surface.
-        let ont = glossa::graph::ontology::Ontology::load_or_default(work);
-        let spec = glossa::tools::ChainSpec::from_ontology(&ont);
+        let spec = glossa::tools::ChainSpec::from_ontology(
+            &glossa::graph::ontology::Ontology::load_or_default(work),
+        );
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
             let r = crate::backend::glossa_tools::exec(

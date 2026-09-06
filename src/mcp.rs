@@ -75,13 +75,6 @@ pub struct GlossaServer {
     /// under `engine = mmap`, racing on the CSR file writes). Uncontended after the first build — the
     /// hot path is a lock-free `cell.load_full()` and never touches this mutex.
     build_lock: Arc<Mutex<()>>,
-    /// The tool-visibility profile this server was constructed with. Gates `tool_router` routes at
-    /// construction (see `new()`); also read at CALL time by [`Self::abstention_gate`] to pick the
-    /// coverage-abstention `Enforcement` default (`Reader` -> `Filter`, `Editor`/`Full` -> `Signal`,
-    /// a corpus ontology `enforcement` setting overriding this default when present); also read
-    /// directly by the `check_question` tool to choose its rendering (reader gate/hint vs the
-    /// editor's always-on full coverage report).
-    profile: Profile,
 }
 
 #[derive(Default)]
@@ -216,90 +209,7 @@ impl GlossaServer {
             )),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
-            profile,
         }
-    }
-
-    /// Resolve the coverage-abstention `Enforcement` tier + `k` for this call. `Off` (with `k`
-    /// meaningless) unless the corpus ontology opts in via `abstention_policy = "safety_first"`.
-    /// When it does, the tier defaults from `self.profile` (`Reader` -> `Filter` — the profile a
-    /// weak/untrusted agent runs under, so an uncovered question hard-abstains; `Editor`/`Full` ->
-    /// `Signal` — a trusted operator sees results with a low-coverage note, never a hard cut), but
-    /// the ontology's own `enforcement` setting (`"filter"`/`"signal"`/`"off"`) OVERRIDES that
-    /// default when present — an unrecognized value falls back to the profile default rather than
-    /// erroring. `k` comes from the ontology's `coverage_k`, defaulting to 1.
-    fn abstention_gate(&self, ont: &Ontology) -> (crate::tools::abstention::Enforcement, u32) {
-        use crate::tools::abstention::Enforcement;
-        if ont.abstention_policy().as_deref() != Some("safety_first") {
-            return (Enforcement::Off, 0);
-        }
-        let default_tier = match self.profile {
-            Profile::Reader => Enforcement::Filter,
-            Profile::Editor | Profile::Full => Enforcement::Signal,
-        };
-        let tier = match ont.enforcement().as_deref() {
-            Some("filter") => Enforcement::Filter,
-            Some("signal") => Enforcement::Signal,
-            Some("off") => Enforcement::Off,
-            _ => default_tier,
-        };
-        (tier, ont.coverage_k().unwrap_or(1))
-    }
-
-    /// The editor's ALWAYS-ON `check_question` rendering: a full per-term coverage report,
-    /// independent of `Enforcement` (an operator building out the graph needs to see every term,
-    /// not just whether the aggregate trips a gate). For each distinctive term of `query` (see
-    /// `abstention::distinctive_terms`), lists whether it is `covered` and, when it is, the
-    /// grounding graph node id and owning document it resolves to (via `GraphStore::resolve` +
-    /// `tools::owning_doc`) — a "build the graph here" pointer for whatever comes back uncovered.
-    fn coverage_report(
-        &self,
-        query: &str,
-        idx: &crate::index::store::DocIndex,
-        g: &GraphStore,
-    ) -> String {
-        use crate::tools::abstention::{covered, distinctive_terms};
-        let terms = distinctive_terms(query);
-        if terms.is_empty() {
-            return "coverage report: no distinctive terms in this query (all short/common words)"
-                .to_string();
-        }
-        let mut covered_lines = Vec::new();
-        let mut absent = Vec::new();
-        for term in &terms {
-            if !covered(term, idx, g) {
-                absent.push(term.clone());
-                continue;
-            }
-            let source = g
-                .resolve(term)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|id| crate::graph::grounded_or_chains_to_grounded(g, id).unwrap_or(false))
-                .map(|id| {
-                    let doc = crate::tools::owning_doc(g, &id).unwrap_or_default();
-                    format!("node {id} ({doc})")
-                })
-                .unwrap_or_else(|| "indexed (no graph node)".to_string());
-            covered_lines.push(format!("{term}: {source}"));
-        }
-        let mut out = format!("coverage report for: {query}\ncovered:\n");
-        if covered_lines.is_empty() {
-            out.push_str("  (none)\n");
-        } else {
-            for l in &covered_lines {
-                out.push_str(&format!("  - {l}\n"));
-            }
-        }
-        out.push_str("absent:\n");
-        if absent.is_empty() {
-            out.push_str("  (none)\n");
-        } else {
-            for t in &absent {
-                out.push_str(&format!("  - {t}\n"));
-            }
-        }
-        out
     }
 
     /// The shared retrieval snapshot, built on first use and cached. Every request loads the SAME
@@ -891,15 +801,6 @@ struct NameArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct CheckQuestionArgs {
-    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
-    #[schemars(
-        description = "your distilled question, as a complete sentence — checked against corpus coverage before you commit to answering it"
-    )]
-    query: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct GraphStatsArgs {
     #[serde(default)]
     #[schemars(
@@ -1362,8 +1263,7 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
-        let spec = crate::tools::ChainSpec::from_ontology(&ont);
+        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
         let stale = crate::tools::StaleChecker::new(self.root.clone());
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
@@ -1563,39 +1463,6 @@ impl GlossaServer {
         Ok(CallToolResult::success(vec![Content::text(
             filtered.join("\n"),
         )]))
-    }
-
-    // keep in sync with registry::DESC_CHECK_QUESTION (rmcp's #[tool(description=…)] rejects a
-    // non-literal path expr; the mcp_tool_list_matches_registry test enforces byte-equality).
-    #[tool(
-        description = "Check whether `query` is covered by this knowledge base BEFORE answering it — call this FIRST, with your distilled question. Reader: returns a short in-scope OK, a hard decline (the question is not answerable from this corpus — say so, do not guess), or a low-coverage hint naming the unmatched terms (reformulate and retry). Editor/full: always returns a full per-term coverage report regardless of any gate — which distinctive terms of the query ARE covered (and the graph node/document each grounds to) and which are absent, so you know where the graph or corpus still needs building out."
-    )]
-    async fn check_question(
-        &self,
-        Parameters(a): Parameters<CheckQuestionArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.freshen_now().await;
-        let h = self.handle().map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
-        let (enforcement, k) = self.abstention_gate(&ont);
-        let body = if self.profile == Profile::Reader {
-            use crate::tools::abstention::{question_verdict, QVerdict, SENTINEL};
-            match question_verdict(&a.query, &h.idx, &h.graph, enforcement, k as usize) {
-                QVerdict::NotAnswerable => {
-                    format!("{SENTINEL} — not answerable, decline")
-                }
-                QVerdict::Coverage { absent } => {
-                    format!(
-                        "coverage: low — absent: {} — reformulate",
-                        absent.join(", ")
-                    )
-                }
-                QVerdict::InScope => "in scope — proceed".to_string(),
-            }
-        } else {
-            self.coverage_report(&a.query, &h.idx, &h.graph)
-        };
-        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -3437,102 +3304,6 @@ mod tests {
         assert!(
             info.capabilities.prompts.is_some(),
             "get_info must advertise the prompts capability once enabled"
-        );
-    }
-
-    fn write_safety_first_ontology(root: &std::path::Path, enforcement: &str) {
-        std::fs::create_dir_all(root.join(".glossa")).unwrap();
-        std::fs::write(
-            root.join(".glossa").join("ontology.toml"),
-            format!(
-                "[abstention]\npolicy = \"safety_first\"\nenforcement = \"{enforcement}\"\ncoverage_k = 1\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn check_question_reader_filter_declines_on_uncovered_query() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nprofibus maxtsdr timeout\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        write_safety_first_ontology(dir.path(), "filter");
-        let srv = GlossaServer::new(
-            dir.path().to_path_buf(),
-            Profile::Reader,
-            false,
-            ServerFlags::default(),
-        );
-        let out = srv
-            .check_question(Parameters(CheckQuestionArgs {
-                query: "zzqunknownterm mystery".into(),
-            }))
-            .await
-            .unwrap();
-        let text = format!("{out:?}");
-        assert!(
-            text.contains("not answerable"),
-            "uncovered query under Filter must decline: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn check_question_reader_covered_query_is_in_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nprofibus maxtsdr timeout\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        write_safety_first_ontology(dir.path(), "filter");
-        let srv = GlossaServer::new(
-            dir.path().to_path_buf(),
-            Profile::Reader,
-            false,
-            ServerFlags::default(),
-        );
-        let out = srv
-            .check_question(Parameters(CheckQuestionArgs {
-                query: "profibus maxtsdr timeout".into(),
-            }))
-            .await
-            .unwrap();
-        let text = format!("{out:?}");
-        assert!(
-            text.contains("in scope"),
-            "covered query must be in scope: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn check_question_editor_always_returns_full_coverage_report() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nprofibus maxtsdr timeout\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        // No ontology.toml at all (default Off enforcement) — the editor report must still be the
-        // full per-term breakdown, independent of the gate.
-        let srv = GlossaServer::new(
-            dir.path().to_path_buf(),
-            Profile::Editor,
-            false,
-            ServerFlags::default(),
-        );
-        let out = srv
-            .check_question(Parameters(CheckQuestionArgs {
-                query: "profibus zzqunknownterm".into(),
-            }))
-            .await
-            .unwrap();
-        let text = format!("{out:?}");
-        assert!(
-            text.contains("covered:"),
-            "report must list covered: {text}"
-        );
-        assert!(text.contains("absent:"), "report must list absent: {text}");
-        assert!(
-            text.contains("profibus"),
-            "covered term must be named: {text}"
-        );
-        assert!(
-            text.contains("zzqunknownterm"),
-            "absent term must be named: {text}"
         );
     }
 }

@@ -271,46 +271,12 @@ pub fn run_grep(
     )
 }
 
-/// Resolve the eval reader's coverage-abstention `(Enforcement, k)` from the corpus ontology,
-/// mirroring `mcp::GlossaServer::abstention_gate` (`src/mcp.rs`) for the READER profile — the eval
-/// reader stands in for MCP's Reader profile, so it must gate the same way. Policy detection goes
-/// through [`crate::lab::AbstentionPolicy::from_opt`] (NOT a literal `"safety_first"` string
-/// compare like `abstention_gate` uses) so the eval gate stays consistent with eval SCORING, which
-/// also normalizes through `AbstentionPolicy` (both accept the `"safety-first"`/`"safety"`
-/// aliases `abstention_gate` doesn't) — an intentional, reviewed divergence, not a bug.
-///
-/// - Any policy other than `SafetyFirst` -> `(Off, 0)`: every non-gated run is byte-identical.
-/// - `SafetyFirst` -> default tier `Filter` (the Reader profile's default in `abstention_gate`),
-///   overridden by the ontology's own `[abstention] enforcement` when set to a recognized value
-///   (`"filter"`/`"signal"`/`"off"`); an unset or unrecognized value falls back to `Filter`.
-/// - `k` = `ont.coverage_k()`, defaulting to 1.
-///
-/// Resolved ONCE per question by the caller (`answer_capturing`/`tensorzero::answer`) and threaded
-/// down through every `exec`/`next_best_action` call, not re-derived per tool call.
-pub fn resolve_reader_gate(
-    ont: &glossa::graph::ontology::Ontology,
-) -> (glossa::tools::abstention::Enforcement, usize) {
-    use glossa::tools::abstention::Enforcement;
-    let policy = crate::lab::AbstentionPolicy::from_opt(ont.abstention_policy().as_deref());
-    if policy != crate::lab::AbstentionPolicy::SafetyFirst {
-        return (Enforcement::Off, 0);
-    }
-    let tier = match ont.enforcement().as_deref() {
-        Some("filter") => Enforcement::Filter,
-        Some("signal") => Enforcement::Signal,
-        Some("off") => Enforcement::Off,
-        _ => Enforcement::Filter,
-    };
-    (tier, ont.coverage_k().unwrap_or(1) as usize)
-}
-
 /// Dispatch a tool by name. Returns (result string for the model, ids surfaced for the
 /// unproductive-streak novelty tracker, images from read). The ids are search hit locations for
 /// `search`, and — for the graph tools (glossary/related/neighbors/reach/sql) —
 /// `path#ord` read-anchor ids scraped from the rendered body via [`extract_node_ids`]; `read`
 /// itself returns none here (its caller in `openai::execute_tool` uses the `path` arg instead).
 /// `root` is the corpus/notebook root, threaded through to `read` for notebook-file serving.
-#[allow(clippy::too_many_arguments)]
 pub fn exec(
     name: &str,
     args: &Value,
@@ -582,34 +548,6 @@ pub fn exec(
                     Ok(ids) => ids.join("\n"),
                     Err(e) => format!("resolve error: {e}"),
                 },
-                None => "(graph unavailable)".to_string(),
-            };
-            (body, Vec::new(), Vec::new())
-        }
-        "check_question" => {
-            // Reader-profile coverage-abstention gate, mirroring `mcp::GlossaServer::check_question`'s
-            // Reader-branch rendering (`src/mcp.rs`) — the eval reader stands in for MCP's Reader
-            // profile, so it renders the same three verdicts: a hard decline (SENTINEL) under
-            // Filter, a low-coverage reformulate hint under Signal, or a short in-scope OK.
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let body = match graph {
-                Some(g) => {
-                    let ont = glossa::graph::ontology::Ontology::load_or_default(root);
-                    let (enforcement, k) = resolve_reader_gate(&ont);
-                    use glossa::tools::abstention::{question_verdict, QVerdict, SENTINEL};
-                    match question_verdict(query, idx, g, enforcement, k) {
-                        QVerdict::NotAnswerable => {
-                            format!("{SENTINEL} — not answerable, decline")
-                        }
-                        QVerdict::Coverage { absent } => {
-                            format!(
-                                "coverage: low — absent: {} — reformulate",
-                                absent.join(", ")
-                            )
-                        }
-                        QVerdict::InScope => "in scope — proceed".to_string(),
-                    }
-                }
                 None => "(graph unavailable)".to_string(),
             };
             (body, Vec::new(), Vec::new())
@@ -1250,106 +1188,5 @@ mod tests {
         )
         .0;
         assert!(path_out.starts_with("unknown tool"), "got: {path_out}");
-    }
-
-    /// Fix round 1, Finding 2: `resolve_reader_gate` must mirror `mcp::GlossaServer::abstention_gate`
-    /// for the Reader profile — non-`safety_first` stays `Off`; `safety_first` defaults to `Filter`
-    /// but the ontology's own `[abstention] enforcement` overrides that default when set to a
-    /// recognized value; `k` comes from `coverage_k`, defaulting to 1.
-    #[test]
-    fn resolve_reader_gate_mirrors_mcp_reader_profile() {
-        use glossa::graph::ontology::Ontology;
-        use glossa::tools::abstention::Enforcement;
-
-        // (a) no [abstention] section at all -> every non-safety_first corpus stays fully ungated.
-        let default_ont = Ontology::parse("").unwrap();
-        assert_eq!(resolve_reader_gate(&default_ont), (Enforcement::Off, 0));
-
-        // (b) safety_first with no enforcement override -> Filter (the Reader default), k=1.
-        let safety_default = Ontology::parse("[abstention]\npolicy = \"safety_first\"\n").unwrap();
-        assert_eq!(
-            resolve_reader_gate(&safety_default),
-            (Enforcement::Filter, 1)
-        );
-
-        // (c) safety_first + enforcement="signal" -> the ontology override wins over the Filter default.
-        let signal =
-            Ontology::parse("[abstention]\npolicy = \"safety_first\"\nenforcement = \"signal\"\n")
-                .unwrap();
-        assert_eq!(resolve_reader_gate(&signal).0, Enforcement::Signal);
-
-        // (d) safety_first + enforcement="off" -> the override can also fully disable the gate.
-        let off =
-            Ontology::parse("[abstention]\npolicy = \"safety_first\"\nenforcement = \"off\"\n")
-                .unwrap();
-        assert_eq!(resolve_reader_gate(&off).0, Enforcement::Off);
-
-        // (e) safety_first + coverage_k=2 -> k reflects the ontology's own value, not the default of 1.
-        let k2 =
-            Ontology::parse("[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\n").unwrap();
-        assert_eq!(resolve_reader_gate(&k2).1, 2);
-    }
-
-    /// `check_question` dispatch mirrors `mcp::GlossaServer::check_question`'s Reader-profile
-    /// rendering (see `src/mcp.rs`'s `check_question_reader_filter_declines_on_uncovered_query` /
-    /// `check_question_reader_covered_query_is_in_scope`): under a `safety_first` + `filter`
-    /// ontology, an uncovered query declines with the SENTINEL text; a covered query is in scope.
-    #[test]
-    fn check_question_exec_declines_on_uncovered_query_under_safety_first() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nprofibus maxtsdr timeout\n").unwrap();
-        glossa::index::store::index_dir(dir.path(), true).unwrap();
-        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
-        std::fs::write(
-            dir.path().join(".glossa").join("ontology.toml"),
-            "[abstention]\npolicy = \"safety_first\"\nenforcement = \"filter\"\ncoverage_k = 1\n",
-        )
-        .unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
-        let trace = TraceLog::disabled();
-
-        let decline = exec(
-            "check_question",
-            &json!({"query": "zzqunknownterm mystery"}),
-            dir.path(),
-            &idx,
-            Some(&g),
-            &glossa::tools::ChainSpec::default(),
-            &trace,
-        )
-        .0;
-        assert!(
-            decline.contains("not answerable"),
-            "uncovered query under Filter must decline: {decline}"
-        );
-
-        let in_scope = exec(
-            "check_question",
-            &json!({"query": "profibus maxtsdr timeout"}),
-            dir.path(),
-            &idx,
-            Some(&g),
-            &glossa::tools::ChainSpec::default(),
-            &trace,
-        )
-        .0;
-        assert!(
-            in_scope.contains("in scope"),
-            "covered query must be in scope: {in_scope}"
-        );
-
-        // graph = None -> "(graph unavailable)", same fallback every other graph tool arm uses.
-        let no_graph = exec(
-            "check_question",
-            &json!({"query": "profibus maxtsdr timeout"}),
-            dir.path(),
-            &idx,
-            None,
-            &glossa::tools::ChainSpec::default(),
-            &trace,
-        )
-        .0;
-        assert_eq!(no_graph, "(graph unavailable)");
     }
 }

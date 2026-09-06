@@ -495,33 +495,6 @@ enum DatasetCmd {
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
-    /// Cached MODEL PASS: distill each case's raw `question` into a canonical `distilled_query`
-    /// (via `question_distill.md` + `lab.toml`'s `[model]` endpoint — the model call is CACHED,
-    /// only run when `distilled_query` is `None` or `--force`), then run the SAME deterministic
-    /// coverage-abstention gate the runtime uses over that distilled query and record the result
-    /// in the orthogonal `abstention` field. Unlike the old destructive `gate_mark`, `answerable`/
-    /// `hop_type`/`question` are NEVER touched. Only acts when the corpus ontology's `[abstention]
-    /// policy = "safety_first"`; otherwise a no-op notice is printed and the file is left
-    /// untouched. Backs `file` up to `<file>.bak` first and writes a `coverage-gaps.md` report
-    /// (id, question, distilled query, absent terms) under `<corpus>/.glossa/kbx/` for every
-    /// abstention-flagged case.
-    GateMark {
-        /// Dataset TOML to process in place.
-        file: PathBuf,
-        /// Re-distill every case's question even when `distilled_query` is already cached.
-        #[arg(long)]
-        force: bool,
-    },
-    /// ONE-TIME recovery for a dataset damaged by the OLD destructive `gate_mark` (the one
-    /// `GateMark` above replaced): for every case tagged `gated`, restores `hop_type` from its
-    /// `orig_hop:<t>` tag, sets `answerable = true` and `abstention = false`, and strips both the
-    /// `gated` and `orig_hop:*` tags. Cases without a `gated` tag — including genuinely
-    /// manually-marked-unanswerable cases — are left untouched. Backs `file` up to `<file>.bak`
-    /// first, then writes in place. Read-model-free: pure tag surgery, no corpus/graph needed.
-    ResetGate {
-        /// Dataset TOML to recover in place.
-        file: PathBuf,
-    },
 }
 
 fn main() -> Result<()> {
@@ -899,13 +872,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
     // Abstention policy (FP-vs-FN operating point): balanced (default) or safety_first. Only affects
     // how the judge scores a decline on an ANSWERABLE question (safety_first credits it `partial`).
-    // Primary source is the corpus `ontology.toml`'s `[abstention] policy` (the runtime source of
-    // truth); `lab.toml`'s `[tuning] abstention_policy` is a deprecated fallback (see
-    // `lab::resolve_abstention_policy`).
-    let ontology = glossa::graph::ontology::Ontology::load_or_default(&kbx_paths.root);
-    let policy = AbstentionPolicy::from_opt(
-        lab::resolve_abstention_policy(&lab.tuning, &ontology).as_deref(),
-    );
+    let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
     let credit_abstention = policy.credit_abstention();
     if n_unanswerable > 0 {
         if use_judge {
@@ -1433,15 +1400,10 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 pct(s.untyped)
             );
             println!(
-                "answerable: {} ({:.0}%), unanswerable: {} ({:.0}%)",
+                "answerable: {} ({:.0}%), unanswerable: {}",
                 s.answerable,
                 pct(s.answerable),
-                s.unanswerable,
-                pct(s.unanswerable)
-            );
-            println!(
-                "abstention-flagged: {} (false-abstain {}, on-unanswerable {})",
-                s.abstention_flagged, s.false_abstain, s.flagged_unanswerable
+                s.unanswerable
             );
             let ng = s
                 .needs_graph
@@ -1545,169 +1507,7 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
             }
             Ok(())
         }
-        DatasetCmd::GateMark { file, force } => run_dataset_gate_mark(file, force),
-        DatasetCmd::ResetGate { file } => {
-            let reset = dataset_ops::reset_gate_file(&file)?;
-            println!(
-                "reset-gate: restored {reset} case(s) (backed up {} -> {})",
-                file.display(),
-                dataset_ops::backup_path(&file).display()
-            );
-            Ok(())
-        }
     }
-}
-
-/// `kbx dataset gate-mark <file>` end-to-end (see [`DatasetCmd::GateMark`]). Auto-resolves the
-/// corpus root from `file`'s ancestors (the same walk `dataset stat` already uses at its
-/// answer-reachability block, since `file` — not a `--path` flag — is the only input here); acts
-/// only when that corpus's ontology opts into `[abstention] policy = "safety_first"` (same gate
-/// `mcp::GlossaServer::abstention_gate` checks for the runtime path). `coverage_k` defaults to 1,
-/// mirroring that same runtime default.
-///
-/// Two passes over `cases`: (1) a CACHED model pass — `question_distill.md` (workspace override
-/// else the embedded default, see [`dataset_ops::load_question_distill_tmpl`]) + `lab.toml`'s
-/// `[model]` endpoint distill each `question` into `distilled_query` via
-/// [`dataset_ops::distill_question`], skipped for a case that already has one unless `force`;
-/// (2) the pure, deterministic [`dataset_ops::mark_abstention`] coverage check over the
-/// (now-distilled) queries, which sets ONLY `abstention` — `answerable`/`hop_type`/`question` are
-/// never touched. An indicatif bar tracks the (model-call-bound) distill pass, hidden when
-/// stdout/stderr isn't a TTY, mirroring `kbx eval`'s own bar; per-case status goes through
-/// `pb.println` so it never garbles the live bar.
-fn run_dataset_gate_mark(file: PathBuf, force: bool) -> Result<()> {
-    let corpus_root = file
-        .ancestors()
-        .find(|a| a.join(".glossa").is_dir())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let ontology = glossa::graph::ontology::Ontology::load_or_default(&corpus_root);
-    if ontology.abstention_policy().as_deref() != Some("safety_first") {
-        println!(
-            "dataset gate-mark: no-op (abstention_policy is not \"safety_first\" for corpus at {}) — file left untouched",
-            corpus_root.display()
-        );
-        return Ok(());
-    }
-    let k = ontology.coverage_k().unwrap_or(1) as usize;
-    let handle = glossa::graph::handle::GraphHandle::open(&corpus_root)
-        .with_context(|| format!("opening graph at {}", corpus_root.display()))?;
-
-    let kbx_paths = KbxPaths::for_root(corpus_root.clone());
-    let lab = LabConfig::load_at(&kbx_paths.lab)
-        .with_context(|| format!("loading {}", kbx_paths.lab.display()))?;
-    let tmpl = dataset_ops::load_question_distill_tmpl(&corpus_root)
-        .context("loading question_distill.md")?;
-
-    let mut cases = dataset_ops::load_cases(&file)?;
-
-    // A single, minimal `OpenAiBackend`: `distill_question` only ever reads `endpoint_config()`
-    // off it (never `answer`/`build_messages`), so the graph/user-sim/shared-handle fields the
-    // eval reader needs are irrelevant here and left at their off/empty defaults.
-    let backend = OpenAiBackend {
-        endpoint: lab.model.endpoint.clone(),
-        model: lab.model.model.clone(),
-        api_key: lab.model.resolve_key(),
-        timeout: Duration::from_secs(lab.model.timeout_secs),
-        use_graph: false,
-        system_prompt: None,
-        temperature: lab.model.temperature,
-        user_sim: None,
-        user_sim_prompt: None,
-        rate_limit: lab.model.rate_limit.clone(),
-        fallback: lab.model.fallback.clone(),
-        api: lab.model.api,
-        function_name: lab.model.function_name.clone(),
-        feedback_score_metric: lab.model.feedback_score_metric.clone(),
-        feedback_bool_metric: lab.model.feedback_bool_metric.clone(),
-        shared: None,
-        max_rounds: DEFAULT_MAX_ROUNDS,
-    };
-
-    // indicatif draws to stderr by default; also check stdout, same non-interactive detection
-    // `run_eval`'s own bar uses.
-    let show_progress = std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    let pb = if show_progress {
-        let pb = ProgressBar::new(cases.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        pb.enable_steady_tick(Duration::from_millis(90));
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
-    reset_tokens();
-    reset_resamples();
-    pb.set_prefix("distilling");
-    let ticker = StatusTicker::start(&pb);
-
-    let mut distilled_count = 0usize;
-    for c in cases.iter_mut() {
-        if c.distilled_query.is_none() || force {
-            let distilled = dataset_ops::distill_question(&backend, &tmpl, &c.question)
-                .with_context(|| format!("distilling question for case {}", c.id))?;
-            pb.println(format!("{}: distilled -> {distilled}", c.id));
-            c.distilled_query = Some(distilled);
-            distilled_count += 1;
-        }
-        pb.inc(1);
-    }
-    drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
-    pb.finish_and_clear();
-
-    dataset_ops::mark_abstention(&mut cases, &handle.graph, &handle.idx, k);
-    let flagged: Vec<usize> = cases
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.abstention)
-        .map(|(i, _)| i)
-        .collect();
-
-    let bak = dataset_ops::backup_path(&file);
-    std::fs::copy(&file, &bak)
-        .with_context(|| format!("backing up {} to {}", file.display(), bak.display()))?;
-    dataset_ops::write_cases(&file, &cases)?;
-
-    let gaps_path = corpus_root
-        .join(".glossa")
-        .join("kbx")
-        .join("coverage-gaps.md");
-    if let Some(parent) = gaps_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut gaps_md = String::from(
-        "# Coverage gaps\n\nCases flagged `abstention=true` by `kbx dataset gate-mark`'s \
-         coverage-abstention model pass (distill + coverage check on the distilled query).\n\n",
-    );
-    for &i in &flagged {
-        let c = &cases[i];
-        let query = c.distilled_query.as_deref().unwrap_or(&c.question);
-        let absent = dataset_ops::absent_terms(query, &handle.graph, &handle.idx, k);
-        gaps_md.push_str(&format!(
-            "- `{}`: {}\n  - distilled: {}\n  - absent: {}\n\n",
-            c.id,
-            c.question,
-            c.distilled_query.as_deref().unwrap_or("(none)"),
-            absent.join(", ")
-        ));
-    }
-    std::fs::write(&gaps_path, gaps_md)
-        .with_context(|| format!("writing {}", gaps_path.display()))?;
-
-    println!(
-        "dataset gate-mark: {} case(s) distilled, {} case(s) flagged abstention=true (backed up {} -> {}); gaps written to {}",
-        distilled_count,
-        flagged.len(),
-        file.display(),
-        bak.display(),
-        gaps_path.display()
-    );
-    Ok(())
 }
 
 /// Truncate `s` to at most `max` chars, appending an ellipsis when cut — keeps `sample`'s answer

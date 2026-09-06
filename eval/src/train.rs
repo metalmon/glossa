@@ -182,14 +182,8 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         .with_context(|| format!("read dataset {}", dataset_path.display()))?;
     let dataset = crate::dataset_toml::parse_dataset_toml(&dataset_text)?;
     // Abstention policy (FP-vs-FN operating point). Decides BOTH whether out-of-corpus golds are
-    // optimized against and whether the apply-gate enforces a false-positive ceiling. Primary
-    // source is the corpus `ontology.toml`'s `[abstention] policy` (the runtime source of truth);
-    // `lab.toml`'s `[tuning] abstention_policy` is a deprecated fallback (see
-    // `crate::lab::resolve_abstention_policy`).
-    let ontology = glossa::graph::ontology::Ontology::load_or_default(&paths.root);
-    let policy = AbstentionPolicy::from_opt(
-        crate::lab::resolve_abstention_policy(&lab.tuning, &ontology).as_deref(),
-    );
+    // optimized against and whether the apply-gate enforces a false-positive ceiling.
+    let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
     // Under BALANCED (default), `answerable = false` (out-of-corpus) golds are filtered out before
     // they reach GEPA — the reader can't learn to answer what the corpus can't ground, so they'd only
     // cap the metric (today's behavior). Under SAFETY_FIRST they are KEPT: they are the abstention
