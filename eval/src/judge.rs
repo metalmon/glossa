@@ -303,10 +303,10 @@ mod tests {
 
     #[test]
     fn build_user_credit_abstention_adds_safe_miss_note_only_when_enabled() {
-        // Balanced (credit_abstention=false): no safe-miss note — a decline stays a miss (`wrong`).
+        // Off (credit_abstention=false): no safe-miss note — a decline stays a miss (`wrong`).
         let balanced = build_user("Q?", "G", "A", None, true, false);
         assert!(!balanced.contains("safe miss"));
-        // Safety-first (credit_abstention=true): the answerable prompt tells the judge to grade a
+        // On (credit_abstention=true): the answerable prompt tells the judge to grade a
         // decline as `partial`, not `wrong`.
         let safety = build_user("Q?", "G", "A", None, true, true);
         assert!(safety.contains("safe miss"));

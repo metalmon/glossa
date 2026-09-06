@@ -261,45 +261,50 @@ pub struct Tuning {
     #[serde(default)]
     pub gepa_rollout_samples: Option<usize>,
     /// Abstention policy — the FP-vs-FN operating point for scoring an out-of-corpus question and, in
-    /// training, for the apply-gate. `None`/`"balanced"` (default) = today's behavior: a decline on an
+    /// training, for the apply-gate. `None`/`"off"` (default) = today's behavior: a decline on an
     /// ANSWERABLE question grades `wrong` (a miss), and no false-positive ceiling gates GEPA.
-    /// `"safety_first"` = credit that decline as `partial` (a safe miss, not a fabrication) AND gate
-    /// GEPA on the false-positive (Wrong) rate so a candidate that hallucinates more than the seed is
-    /// rejected even if its mean score rose. The INVARIANT — on an UNANSWERABLE question a decline is
-    /// `correct` and a fabricated answer is `wrong` — holds under every policy. See
-    /// `judge::build_user` (credit_abstention) and `gepa_graph` (fp_gate).
+    /// `"on"` = credit that decline as `partial` (a safe miss, not a fabrication) AND gate GEPA on the
+    /// false-positive (Wrong) rate so a candidate that hallucinates more than the seed is rejected even
+    /// if its mean score rose. The INVARIANT — on an UNANSWERABLE question a decline is `correct` and a
+    /// fabricated answer is `wrong` — holds under every policy. See `judge::build_user`
+    /// (credit_abstention) and `gepa_graph` (fp_gate).
     #[serde(default)]
     pub abstention_policy: Option<String>,
 }
 
-/// The FP-vs-FN operating point, parsed from `[tuning] abstention_policy`. `Balanced` is the default
-/// and byte-compatible with pre-policy behavior; `SafetyFirst` credits a safe decline and gates GEPA
-/// on the false-positive rate. An unrecognized string falls back to `Balanced`.
+/// The FP-vs-FN operating point, parsed from `[tuning] abstention_policy`. `Off` is the default and
+/// byte-compatible with pre-policy behavior (a decline on an ANSWERABLE question grades `wrong`, and
+/// no false-positive ceiling gates GEPA). `On` credits a safe decline as `partial` AND gates GEPA on
+/// the false-positive rate. An unrecognized string falls back to `Off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbstentionPolicy {
-    Balanced,
-    SafetyFirst,
+    Off,
+    On,
 }
 
 impl AbstentionPolicy {
-    /// Parse the `[tuning] abstention_policy` string (case-insensitive). `None`/unknown -> `Balanced`.
+    /// Parse the `[tuning] abstention_policy` string (case-insensitive): `on`/`true` -> `On`; anything
+    /// else (`off`, `None`, unknown) -> `Off`. The legacy `safety_first` / `balanced` strings still
+    /// parse to `On` / `Off` for back-compat.
     pub fn from_opt(s: Option<&str>) -> Self {
         match s.map(|v| v.trim().to_lowercase()).as_deref() {
-            Some("safety_first") | Some("safety-first") | Some("safety") => Self::SafetyFirst,
-            _ => Self::Balanced,
+            Some("on") | Some("true") | Some("safety_first") | Some("safety-first") | Some("safety") => {
+                Self::On
+            }
+            _ => Self::Off,
         }
     }
 
     /// Whether a decline on an ANSWERABLE question is credited as `partial` (a safe miss) instead of
-    /// graded `wrong` — true only under `SafetyFirst`.
+    /// graded `wrong` — true only when `On`.
     pub fn credit_abstention(self) -> bool {
-        matches!(self, Self::SafetyFirst)
+        matches!(self, Self::On)
     }
 
-    /// Whether GEPA's apply-gate also enforces a false-positive (Wrong-rate) ceiling — true only under
-    /// `SafetyFirst`.
+    /// Whether GEPA's apply-gate also enforces a false-positive (Wrong-rate) ceiling — true only when
+    /// `On`.
     pub fn fp_gate(self) -> bool {
-        matches!(self, Self::SafetyFirst)
+        matches!(self, Self::On)
     }
 }
 
