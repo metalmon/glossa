@@ -586,6 +586,34 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "check_question" => {
+            // Reader-profile coverage-abstention gate, mirroring `mcp::GlossaServer::check_question`'s
+            // Reader-branch rendering (`src/mcp.rs`) — the eval reader stands in for MCP's Reader
+            // profile, so it renders the same three verdicts: a hard decline (SENTINEL) under
+            // Filter, a low-coverage reformulate hint under Signal, or a short in-scope OK.
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let body = match graph {
+                Some(g) => {
+                    let ont = glossa::graph::ontology::Ontology::load_or_default(root);
+                    let (enforcement, k) = resolve_reader_gate(&ont);
+                    use glossa::tools::abstention::{question_verdict, QVerdict, SENTINEL};
+                    match question_verdict(query, idx, g, enforcement, k) {
+                        QVerdict::NotAnswerable => {
+                            format!("{SENTINEL} — not answerable, decline")
+                        }
+                        QVerdict::Coverage { absent } => {
+                            format!(
+                                "coverage: low — absent: {} — reformulate",
+                                absent.join(", ")
+                            )
+                        }
+                        QVerdict::InScope => "in scope — proceed".to_string(),
+                    }
+                }
+                None => "(graph unavailable)".to_string(),
+            };
+            (body, Vec::new(), Vec::new())
+        }
         other => (format!("unknown tool: {other}"), Vec::new(), Vec::new()),
     }
 }
@@ -1260,5 +1288,68 @@ mod tests {
         let k2 =
             Ontology::parse("[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\n").unwrap();
         assert_eq!(resolve_reader_gate(&k2).1, 2);
+    }
+
+    /// `check_question` dispatch mirrors `mcp::GlossaServer::check_question`'s Reader-profile
+    /// rendering (see `src/mcp.rs`'s `check_question_reader_filter_declines_on_uncovered_query` /
+    /// `check_question_reader_covered_query_is_in_scope`): under a `safety_first` + `filter`
+    /// ontology, an uncovered query declines with the SENTINEL text; a covered query is in scope.
+    #[test]
+    fn check_question_exec_declines_on_uncovered_query_under_safety_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nprofibus maxtsdr timeout\n").unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+        std::fs::write(
+            dir.path().join(".glossa").join("ontology.toml"),
+            "[abstention]\npolicy = \"safety_first\"\nenforcement = \"filter\"\ncoverage_k = 1\n",
+        )
+        .unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+
+        let decline = exec(
+            "check_question",
+            &json!({"query": "zzqunknownterm mystery"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            decline.contains("not answerable"),
+            "uncovered query under Filter must decline: {decline}"
+        );
+
+        let in_scope = exec(
+            "check_question",
+            &json!({"query": "profibus maxtsdr timeout"}),
+            dir.path(),
+            &idx,
+            Some(&g),
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(
+            in_scope.contains("in scope"),
+            "covered query must be in scope: {in_scope}"
+        );
+
+        // graph = None -> "(graph unavailable)", same fallback every other graph tool arm uses.
+        let no_graph = exec(
+            "check_question",
+            &json!({"query": "profibus maxtsdr timeout"}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert_eq!(no_graph, "(graph unavailable)");
     }
 }

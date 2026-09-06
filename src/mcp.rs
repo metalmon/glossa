@@ -1565,6 +1565,8 @@ impl GlossaServer {
         )]))
     }
 
+    // keep in sync with registry::DESC_CHECK_QUESTION (rmcp's #[tool(description=…)] rejects a
+    // non-literal path expr; the mcp_tool_list_matches_registry test enforces byte-equality).
     #[tool(
         description = "Check whether `query` is covered by this knowledge base BEFORE answering it — call this FIRST, with your distilled question. Reader: returns a short in-scope OK, a hard decline (the question is not answerable from this corpus — say so, do not guess), or a low-coverage hint naming the unmatched terms (reformulate and retry). Editor/full: always returns a full per-term coverage report regardless of any gate — which distinctive terms of the query ARE covered (and the graph node/document each grounds to) and which are absent, so you know where the graph or corpus still needs building out."
     )]

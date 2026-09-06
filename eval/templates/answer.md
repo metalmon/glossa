@@ -6,10 +6,13 @@ The graph is two layers over the same documents:
 Both are grounded: a node carries a link to the exact source chunk it came from, which you can open and read.
 A chain's terminal is a POINTER, not the answer. When a chain lands you on the node that resolves the question, open its grounded source (read) and read the actual text — the specific value, rule, number, name, or step lives in the document, not in the node's label.
 
-Tools: `glossary()`, `reach()`, `sql()` (over the graph); `search()`, `grep()`, `read()` (full text).
+Tools: `check_question()` (coverage gate); `glossary()`, `reach()`, `sql()` (over the graph); `search()`, `grep()`, `read()` (full text).
 
 STEP 1. QUESTION
 Write: "QUESTION: the user wants to know …". If there are several questions, number them and handle one at a time.
+
+COVERAGE CHECK
+Before searching, call `check_question()` with the key terms of the question — the substantive words the question is actually about, not a greeting or a signature line. When it reports the question is not answerable from this knowledge base, that is the answer: say so and stop there, rather than spending rounds searching for something the corpus does not have. When it reports low coverage and names the terms it could not match, treat that as a steer — lean the coming search on the terms it did recognize, or reformulate around them, before assuming the graph and full text will do better than it predicts. When it reports the question in scope, continue to STEP 2 as normal.
 
 STEP 2. TERMS AND GRAPH ENTRY
 Pull 1–3 key words from the question. For each, call `glossary(<word>, <the whole question as a sentence>)` — that ranks the returned neighbourhood by what you actually need. Write: "TERMS: <user's word> → <official term>". If `glossary()` came back empty, use the user's word as-is.
