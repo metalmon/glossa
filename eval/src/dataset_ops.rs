@@ -7,6 +7,7 @@
 //! The logic here is pure and testable — no clap, no stdout formatting, no wall clock (sampling is
 //! seeded). `kbx.rs` stays thin: parse args -> call one function here -> print.
 
+use crate::backend::openai::OpenAiBackend;
 use crate::dataset::Question;
 use crate::dataset_toml::parse_dataset_toml;
 use anyhow::{Context, Result};
@@ -16,6 +17,7 @@ use glossa::tools::abstention::{coverage_uncovered, covered};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -471,6 +473,55 @@ pub fn gate_mark(cases: &mut [Case], g: &GraphStore, idx: &DocIndex, k: usize) -
     marks
 }
 
+/// Build the two seed messages for one `distill_question` call: `prompt_tmpl` (the behavior-guide
+/// instructions, e.g. `question_distill.md`) verbatim as the system message, `question` (the raw
+/// ticket text) verbatim as the user message — the same system+user split every other single-shot
+/// call site in this crate uses (`judge.rs`, `backend/user_sim.rs`, `distil/gen.rs`'s leak check).
+/// Pure and separately testable from the network call itself.
+fn distill_messages(prompt_tmpl: &str, question: &str) -> Vec<Value> {
+    vec![
+        json!({ "role": "system", "content": prompt_tmpl }),
+        json!({ "role": "user", "content": question }),
+    ]
+}
+
+/// Extract the canonical information need / key search terms from a raw support-ticket question
+/// (greeting, signature, and contact info stripped by the MODEL, not any hardcoded list) — one
+/// temp-0 completion via `backend`'s configured endpoint. `prompt_tmpl` is the loaded
+/// `question_distill.md` behavior-guide text (loading mechanism — workspace override vs embedded
+/// default — is the caller's concern, mirroring how `builder.md`/`reason.md`/etc. are loaded
+/// elsewhere in this crate); `question` is the raw ticket text, interpolated verbatim into the
+/// user message by [`distill_messages`].
+///
+/// Mirrors the single-shot call pattern every other one-off model call in this crate uses
+/// (`judge.rs::judge`, `backend/user_sim.rs`, `distil/gen.rs`'s leak check): build a `[system,
+/// user]` message pair, drive it through [`crate::backend::openai::chat_once_resampled`] (the
+/// provider-neutral degenerate-resample wrapper every production one-off call goes through), and
+/// read back `.content`. Deviates from those call sites in one respect: `distill_question` forces
+/// `temperature = Some(0.0)` on its own `Endpoint` copy (via [`OpenAiBackend::endpoint_config`])
+/// rather than deferring to the backend's configured reader temperature — this call always wants
+/// the deterministic canonical restatement, not the reader's sampling behavior (`KB_EVAL_TEMP` can
+/// still override it, exactly as `Endpoint::resolve_temperature` does uniformly everywhere else).
+///
+/// Returns the model's raw text trimmed. No mock exists for `OpenAiBackend`'s HTTP-backed model
+/// call (`MockBackend` only stands in for the `AgentBackend::answer` trait, not this crate's
+/// single-shot completions), so this function itself is exercised by Task 5's gate-mark
+/// integration; the pure interpolation this depends on is covered by
+/// `distill_messages_embeds_template_and_question` below.
+pub async fn distill_question(
+    backend: &OpenAiBackend,
+    prompt_tmpl: &str,
+    question: &str,
+) -> Result<String> {
+    let messages = distill_messages(prompt_tmpl, question);
+    let mut ep = backend.endpoint_config();
+    ep.temperature = Some(0.0);
+    let msg = crate::backend::openai::chat_once_resampled(&ep, &messages)
+        .context("question-distill endpoint request failed")?;
+    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    Ok(content.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +540,22 @@ mod tests {
             abstention: false,
             distilled_query: None,
         }
+    }
+
+    #[test]
+    fn distill_messages_embeds_template_and_question() {
+        // Pure interpolation check: the template text lands verbatim in the system message, the
+        // raw ticket question lands verbatim in the user message — no mangling, no reordering.
+        // (The model-call half of `distill_question` needs a live endpoint and is covered by
+        // Task 5's gate-mark integration; see that fn's doc comment.)
+        let tmpl = "Extract the distilled query. Ignore greetings and signatures.";
+        let question = "Good day! What is the max input voltage? Best regards, Alex";
+        let messages = distill_messages(tmpl, question);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], tmpl);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], question);
     }
 
     #[test]

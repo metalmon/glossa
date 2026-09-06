@@ -579,8 +579,11 @@ impl OpenAiBackend {
 
     /// Build the `Endpoint` this backend's `[model]` config resolves to — the SAME construction
     /// `answer_capturing` uses for `transport_for`, factored out so [`post_feedback`] can hand it
-    /// to a freshly-built transport without re-running the reader.
-    fn endpoint_config(&self) -> crate::lab::Endpoint {
+    /// to a freshly-built transport without re-running the reader. `pub(crate)` (rather than
+    /// private) so a one-off single-shot caller outside this module — e.g. `dataset_ops::
+    /// distill_question` — can build the same endpoint and override just `temperature` for a
+    /// deterministic call, without duplicating this field list.
+    pub(crate) fn endpoint_config(&self) -> crate::lab::Endpoint {
         crate::lab::Endpoint {
             endpoint: self.endpoint.clone(),
             model: self.model.clone(),
