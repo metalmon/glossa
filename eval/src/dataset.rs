@@ -42,6 +42,18 @@ pub struct Question {
     /// key `answerable` (parsed in `dataset_toml`, `#[serde(default = "default_true")]`) maps
     /// here.
     pub answerable: bool,
+    /// Whether the case is a deliberate ABSTENTION test: the correct behavior is for the reader to
+    /// decline rather than answer, independent of `answerable`/`hop_type`/`question` (orthogonal —
+    /// never conflated with them). Defaults to `false` (a dataset without the field, or a
+    /// `Question` built via `..Default::default()`, behaves exactly as before this field existed).
+    /// The `dataset.toml` `[[case]]` key `abstention` (parsed in `dataset_toml`,
+    /// `#[serde(default)]`) maps here.
+    pub abstention: bool,
+    /// An optional distilled/canonicalized restatement of `question` (e.g. a short, precise query
+    /// form used for a downstream gate/model pass). `None` when a case doesn't carry one — orthogonal
+    /// to `question` itself, which is never rewritten in place. The `dataset.toml` `[[case]]` key
+    /// `distilled_query` (parsed in `dataset_toml`, `#[serde(default)]`) maps here.
+    pub distilled_query: Option<String>,
 }
 
 /// Serde/`Default` helper: `answerable` defaults to `true` so an absent field keeps every case.
@@ -66,6 +78,8 @@ impl Default for Question {
             needs_graph: String::new(),
             source: Vec::new(),
             answerable: default_true(),
+            abstention: false,
+            distilled_query: None,
         }
     }
 }

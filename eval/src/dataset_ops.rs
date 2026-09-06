@@ -39,12 +39,26 @@ pub struct Case {
     pub source: Vec<String>,
     #[serde(skip_serializing_if = "is_true")]
     pub answerable: bool,
+    /// Deliberate abstention test, orthogonal to `answerable`/`hop_type`/`question` (never
+    /// conflated with them). Defaults to `false`; omitted on write when `false` so an absent
+    /// `[[case]]` key re-parses to the same default (byte-clean round-trip, like `answerable`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub abstention: bool,
+    /// Optional distilled/canonicalized restatement of `question`. Omitted on write when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distilled_query: Option<String>,
 }
 
 /// `#[serde(skip_serializing_if)]` predicate: omit `answerable` when it holds its `true` default
 /// (an absent `[[case]]` key re-parses to `true`, so the round-trip is lossless).
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+/// `#[serde(skip_serializing_if)]` predicate: omit `abstention` when it holds its `false` default
+/// (an absent `[[case]]` key re-parses to `false`, so the round-trip is lossless).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Case {
@@ -61,6 +75,8 @@ impl Case {
             needs_graph: q.needs_graph.clone(),
             source: q.source.clone(),
             answerable: q.answerable,
+            abstention: q.abstention,
+            distilled_query: q.distilled_query.clone(),
         }
     }
 }
@@ -470,6 +486,8 @@ mod tests {
             needs_graph: String::new(),
             source: Vec::new(),
             answerable: true,
+            abstention: false,
+            distilled_query: None,
         }
     }
 
@@ -487,6 +505,8 @@ mod tests {
             needs_graph: "yes".into(),
             source: vec!["a.pdf#p.1".into(), "b.pdf#p.2".into()],
             answerable: false,
+            abstention: true,
+            distilled_query: Some("configure profibus maxTsdr".into()),
         }];
         write_cases(&path, &cases).unwrap();
 
@@ -505,6 +525,12 @@ mod tests {
             vec!["a.pdf#p.1".to_string(), "b.pdf#p.2".to_string()]
         );
         assert!(!c.answerable, "answerable=false survives the round-trip");
+        assert!(c.abstention, "abstention=true survives the round-trip");
+        assert_eq!(
+            c.distilled_query.as_deref(),
+            Some("configure profibus maxTsdr"),
+            "distilled_query survives the round-trip"
+        );
     }
 
     #[test]
@@ -518,6 +544,32 @@ mod tests {
         assert!(back[0].hop_type.is_empty() && back[0].needs_graph.is_empty());
         assert!(back[0].source.is_empty());
         assert!(back[0].answerable, "absent answerable re-parses to true");
+        assert!(
+            !back[0].abstention,
+            "absent abstention re-parses to false"
+        );
+        assert!(
+            back[0].distilled_query.is_none(),
+            "absent distilled_query re-parses to None"
+        );
+    }
+
+    #[test]
+    fn write_cases_omits_abstention_and_distilled_query_when_default() {
+        // A case with abstention=false / distilled_query=None (the defaults) must OMIT both keys
+        // from the written TOML -- byte-clean, exactly like `answerable=true` is omitted.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.toml");
+        write_cases(&path, &[case("c0", "Q?", "A")]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("abstention"),
+            "abstention=false must be omitted from the written file: {text}"
+        );
+        assert!(
+            !text.contains("distilled_query"),
+            "distilled_query=None must be omitted from the written file: {text}"
+        );
     }
 
     #[test]
