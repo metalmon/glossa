@@ -544,10 +544,7 @@ mod tests {
         assert!(back[0].hop_type.is_empty() && back[0].needs_graph.is_empty());
         assert!(back[0].source.is_empty());
         assert!(back[0].answerable, "absent answerable re-parses to true");
-        assert!(
-            !back[0].abstention,
-            "absent abstention re-parses to false"
-        );
+        assert!(!back[0].abstention, "absent abstention re-parses to false");
         assert!(
             back[0].distilled_query.is_none(),
             "absent distilled_query re-parses to None"

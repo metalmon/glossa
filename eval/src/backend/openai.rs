@@ -1581,15 +1581,7 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(
-                name,
-                args,
-                dir.path(),
-                &idx,
-                Some(&g),
-                &spec,
-                &trace,
-            );
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1635,15 +1627,7 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(
-                name,
-                args,
-                dir.path(),
-                &idx,
-                Some(&g),
-                &spec,
-                &trace,
-            );
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1760,15 +1744,7 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(
-                name,
-                args,
-                dir.path(),
-                &idx,
-                Some(&g),
-                &spec,
-                &trace,
-            );
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1813,15 +1789,7 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(
-                name,
-                args,
-                dir.path(),
-                &idx,
-                Some(&g),
-                &spec,
-                &trace,
-            );
+            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 

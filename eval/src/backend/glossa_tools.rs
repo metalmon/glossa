@@ -531,20 +531,8 @@ pub fn exec(
                 Some(g) => {
                     let ont = glossa::graph::ontology::Ontology::load_or_default(root);
                     glossa::tools::reach(
-                        idx,
-                        g,
-                        &ont,
-                        from,
-                        from_path,
-                        from_n,
-                        relation,
-                        to,
-                        to_path,
-                        to_n,
-                        max_depth,
-                        bridge,
-                        trace,
-                        None,
+                        idx, g, &ont, from, from_path, from_n, relation, to, to_path, to_n,
+                        max_depth, bridge, trace, None,
                     )
                 }
                 None => "(graph unavailable)".to_string(),

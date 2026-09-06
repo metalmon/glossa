@@ -2484,16 +2484,7 @@ mod tests {
         let empty = ChainSpec {
             spine_rels: Vec::new(),
         };
-        let out = glossary(
-            &i,
-            &g,
-            "Bus link dropout",
-            &empty,
-            &t,
-            None,
-            None,
-            None,
-        );
+        let out = glossary(&i, &g, "Bus link dropout", &empty, &t, None, None, None);
         assert!(out.contains("[Symptom]"), "{out}");
         assert!(
             !out.contains("CAUSED_BY") && !out.contains("RESOLVED_BY"),
@@ -3339,8 +3330,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         assert_eq!(all_hits.len(), 2);
 
         // scope=docA.md: only that document's hit remains.
-        let (scoped_body, scoped_hits) =
-            search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
+        let (scoped_body, scoped_hits) = search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
     }
@@ -3934,16 +3924,7 @@ strict = true
         g.put_edge(&edge("fact:aristarchus", "MENTIONS", &sec_id))
             .unwrap();
 
-        let out = glossary(
-            &idx,
-            &g,
-            "Sun",
-            &ChainSpec::default(),
-            &t,
-            None,
-            None,
-            None,
-        );
+        let out = glossary(&idx, &g, "Sun", &ChainSpec::default(), &t, None, None, None);
         assert!(
             out.contains("3rd century BC"),
             "fact grounded to the matched section must surface, not just the stub: {out}"
@@ -3991,16 +3972,7 @@ strict = true
         let spec = ChainSpec {
             spine_rels: vec!["LEADS_TO".to_string()],
         };
-        let out = glossary(
-            &idx,
-            &g,
-            "Sun",
-            &spec,
-            &t,
-            None,
-            None,
-            None,
-        );
+        let out = glossary(&idx, &g, "Sun", &spec, &t, None, None, None);
         assert!(
             out.contains("3rd century BC"),
             "glossary must expand the LEADS_TO neighbour of a section-grounded fact so the next \
