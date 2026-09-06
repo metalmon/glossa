@@ -466,6 +466,58 @@ pub fn absent_terms(query: &str, g: &GraphStore, idx: &DocIndex, k: usize) -> Ve
         .collect()
 }
 
+// ---------------------------------------------------------------------------------------------
+// reset-gate (one-time legacy recovery)
+// ---------------------------------------------------------------------------------------------
+
+/// One-time recovery for datasets damaged by the OLD destructive `gate_mark` pass (the one
+/// [`mark_abstention`] above replaced), which used to overwrite `hop_type` -> `"unanswerable"` and
+/// `answerable` -> `false` in place, stamping a `gated` tag plus an `orig_hop:<t>` tag to remember
+/// the original `hop_type` `<t>` it clobbered.
+///
+/// For every case tagged `gated`: restore `hop_type` from its `orig_hop:<t>` tag (the suffix after
+/// the `orig_hop:` prefix — an empty suffix restores `hop_type = ""`, the untyped default; a
+/// `gated` case with no `orig_hop:*` tag at all also restores to `""`), set `answerable = true`,
+/// set `abstention = false` (the legacy gate's unanswerable stamp was never a real abstention
+/// signal), and strip both the `gated` tag and the `orig_hop:*` tag from `tags` so no trace of the
+/// legacy pass remains. A case without a `gated` tag — including the genuinely
+/// manually-marked-unanswerable cases, which the legacy gate never touched and so were never
+/// tagged `gated` — is left completely untouched. Returns the number of cases reset. Pure: no IO,
+/// mirroring [`mark_abstention`]'s shape.
+pub fn reset_gate_legacy(cases: &mut [Case]) -> usize {
+    let mut reset = 0usize;
+    for c in cases.iter_mut() {
+        if !c.tags.iter().any(|t| t == "gated") {
+            continue;
+        }
+        let orig_hop = c
+            .tags
+            .iter()
+            .find_map(|t| t.strip_prefix("orig_hop:"))
+            .unwrap_or("")
+            .to_string();
+        c.hop_type = orig_hop;
+        c.answerable = true;
+        c.abstention = false;
+        c.tags
+            .retain(|t| t != "gated" && !t.starts_with("orig_hop:"));
+        reset += 1;
+    }
+    reset
+}
+
+/// `kbx dataset reset-gate <file>` end-to-end: load, [`reset_gate_legacy`], back up to
+/// `<file>.bak`, write back. Returns the number of cases reset. Mirrors [`dedup_file`]'s shape.
+pub fn reset_gate_file(file: &Path) -> Result<usize> {
+    let mut cases = load_cases(file)?;
+    let reset = reset_gate_legacy(&mut cases);
+    let bak = backup_path(file);
+    std::fs::copy(file, &bak)
+        .with_context(|| format!("backing up {} to {}", file.display(), bak.display()))?;
+    write_cases(file, &cases)?;
+    Ok(reset)
+}
+
 /// Build the two seed messages for one `distill_question` call: `prompt_tmpl` (the behavior-guide
 /// instructions, e.g. `question_distill.md`) verbatim as the system message, `question` (the raw
 /// ticket text) verbatim as the user message — the same system+user split every other single-shot
@@ -634,6 +686,58 @@ mod tests {
             back[0].distilled_query.is_none(),
             "absent distilled_query re-parses to None"
         );
+    }
+
+    #[test]
+    fn reset_gate_legacy_restores_gated_case() {
+        let mut c = case("c0", "Q?", "A");
+        c.tags = vec!["gated".into(), "orig_hop:multihop".into()];
+        c.hop_type = "unanswerable".into();
+        c.answerable = false;
+        c.abstention = true;
+        let mut cases = vec![c];
+
+        let reset = reset_gate_legacy(&mut cases);
+
+        assert_eq!(reset, 1);
+        assert_eq!(cases[0].hop_type, "multihop");
+        assert!(cases[0].answerable);
+        assert!(!cases[0].abstention);
+        assert!(
+            cases[0].tags.is_empty(),
+            "both gated and orig_hop tags stripped, got {:?}",
+            cases[0].tags
+        );
+    }
+
+    #[test]
+    fn reset_gate_legacy_leaves_manual_unanswerable_untouched() {
+        let mut c = case("c1", "Q?", "A");
+        c.answerable = false; // one of the 24 genuinely-unanswerable cases, no `gated` tag
+        let mut cases = vec![c.clone()];
+
+        let reset = reset_gate_legacy(&mut cases);
+
+        assert_eq!(reset, 0);
+        assert_eq!(cases[0].hop_type, c.hop_type);
+        assert!(!cases[0].answerable, "manual unanswerable stays false");
+        assert_eq!(cases[0].tags, c.tags);
+    }
+
+    #[test]
+    fn reset_gate_legacy_empty_orig_hop_suffix_restores_untyped() {
+        let mut c = case("c2", "Q?", "A");
+        c.tags = vec!["gated".into(), "orig_hop:".into()];
+        c.hop_type = "unanswerable".into();
+        c.answerable = false;
+        let mut cases = vec![c];
+
+        let reset = reset_gate_legacy(&mut cases);
+
+        assert_eq!(reset, 1);
+        assert_eq!(cases[0].hop_type, "", "empty orig_hop suffix -> untyped");
+        assert!(cases[0].answerable);
+        assert!(cases[0].tags.is_empty());
     }
 
     #[test]

@@ -512,6 +512,16 @@ enum DatasetCmd {
         #[arg(long)]
         force: bool,
     },
+    /// ONE-TIME recovery for a dataset damaged by the OLD destructive `gate_mark` (the one
+    /// `GateMark` above replaced): for every case tagged `gated`, restores `hop_type` from its
+    /// `orig_hop:<t>` tag, sets `answerable = true` and `abstention = false`, and strips both the
+    /// `gated` and `orig_hop:*` tags. Cases without a `gated` tag — including genuinely
+    /// manually-marked-unanswerable cases — are left untouched. Backs `file` up to `<file>.bak`
+    /// first, then writes in place. Read-model-free: pure tag surgery, no corpus/graph needed.
+    ResetGate {
+        /// Dataset TOML to recover in place.
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -1536,6 +1546,15 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
             Ok(())
         }
         DatasetCmd::GateMark { file, force } => run_dataset_gate_mark(file, force),
+        DatasetCmd::ResetGate { file } => {
+            let reset = dataset_ops::reset_gate_file(&file)?;
+            println!(
+                "reset-gate: restored {reset} case(s) (backed up {} -> {})",
+                file.display(),
+                dataset_ops::backup_path(&file).display()
+            );
+            Ok(())
+        }
     }
 }
 
