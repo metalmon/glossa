@@ -26,8 +26,7 @@ use kb_eval::parallel::run_units_parallel;
 use kb_eval::reason::{self, ReasonArgs};
 use kb_eval::report::{
     confusion_text, gate_false_abstain_text, lexical_text, load_cases, summary_text,
-    write_answers_csv, write_case,
-    write_run, AnswerRow, CaseResult, RunMeta,
+    write_answers_csv, write_case, write_run, AnswerRow, CaseResult, RunMeta,
 };
 use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
@@ -888,8 +887,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // truth); `lab.toml`'s `[tuning] abstention_policy` is a deprecated fallback (see
     // `lab::resolve_abstention_policy`).
     let ontology = glossa::graph::ontology::Ontology::load_or_default(&kbx_paths.root);
-    let policy =
-        AbstentionPolicy::from_opt(lab::resolve_abstention_policy(&lab.tuning, &ontology).as_deref());
+    let policy = AbstentionPolicy::from_opt(
+        lab::resolve_abstention_policy(&lab.tuning, &ontology).as_deref(),
+    );
     let credit_abstention = policy.credit_abstention();
     if n_unanswerable > 0 {
         if use_judge {
@@ -1575,7 +1575,10 @@ fn run_dataset_gate_mark(file: PathBuf) -> Result<()> {
         .with_context(|| format!("backing up {} to {}", file.display(), bak.display()))?;
     dataset_ops::write_cases(&file, &cases)?;
 
-    let gaps_path = corpus_root.join(".glossa").join("kbx").join("coverage-gaps.md");
+    let gaps_path = corpus_root
+        .join(".glossa")
+        .join("kbx")
+        .join("coverage-gaps.md");
     if let Some(parent) = gaps_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;

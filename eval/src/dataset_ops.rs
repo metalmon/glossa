@@ -660,7 +660,10 @@ mod tests {
         assert_eq!(s.total, 4);
         assert_eq!(s.lexical, 1);
         assert_eq!(s.multihop, 1);
-        assert_eq!(s.untyped, 2, "c is untyped, d's hop_type is \"unanswerable\" (also untyped)");
+        assert_eq!(
+            s.untyped, 2,
+            "c is untyped, d's hop_type is \"unanswerable\" (also untyped)"
+        );
         assert_eq!(s.answerable, 2);
         assert_eq!(
             s.unanswerable, 2,
@@ -760,7 +763,10 @@ mod tests {
             "gated tag not duplicated"
         );
         assert_eq!(
-            c1.tags.iter().filter(|t| t.starts_with("orig_hop:")).count(),
+            c1.tags
+                .iter()
+                .filter(|t| t.starts_with("orig_hop:"))
+                .count(),
             1,
             "orig_hop tag not stacked"
         );

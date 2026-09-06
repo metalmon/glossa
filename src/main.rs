@@ -704,7 +704,8 @@ async fn serve_streamable_http(
             s.signals = std::sync::Arc::new(std::sync::Mutex::new(
                 glossa::tools::retrieval_progress::ReaderSignals::new(),
             ));
-            s.read_log = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+            s.read_log =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
             Ok(s)
         },
         std::sync::Arc::new(LocalSessionManager::default()),

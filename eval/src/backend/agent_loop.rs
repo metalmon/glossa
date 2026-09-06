@@ -196,7 +196,10 @@ fn call_with_context_retry(
                         let chars: usize = messages
                             .iter()
                             .map(|m| {
-                                m.get("content").and_then(Value::as_str).map(str::len).unwrap_or(0)
+                                m.get("content")
+                                    .and_then(Value::as_str)
+                                    .map(str::len)
+                                    .unwrap_or(0)
                                     + m.get("reasoning_content")
                                         .and_then(Value::as_str)
                                         .map(str::len)
@@ -1005,9 +1008,14 @@ mod tests {
         // Drops the oldest round (assistant "a" + tool "a"); question + rounds b,c remain.
         assert!(drop_oldest_round(&mut msgs));
         assert_eq!(msgs.len(), 5);
-        assert_eq!(msgs[0]["content"], "the question", "leading question preserved");
+        assert_eq!(
+            msgs[0]["content"], "the question",
+            "leading question preserved"
+        );
         assert!(
-            !msgs.iter().any(|m| m.get("tool_call_id").and_then(Value::as_str) == Some("a")),
+            !msgs
+                .iter()
+                .any(|m| m.get("tool_call_id").and_then(Value::as_str) == Some("a")),
             "oldest round's tool result dropped with its assistant turn (pairing kept)"
         );
         // Repeats: drops round b.

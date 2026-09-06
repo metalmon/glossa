@@ -462,18 +462,36 @@ mod tests {
         assert_eq!(
             arr.items,
             vec![
-                Item { doc: "a".into(), loc: "1".into() },
-                Item { doc: "b".into(), loc: "2".into() },
+                Item {
+                    doc: "a".into(),
+                    loc: "1".into()
+                },
+                Item {
+                    doc: "b".into(),
+                    loc: "2".into()
+                },
             ]
         );
         // A single object, not wrapped in an array — shorthand for a one-element list.
         let one: T = serde_json::from_str(r#"{"items":{"doc":"a","loc":"1"}}"#).unwrap();
-        assert_eq!(one.items, vec![Item { doc: "a".into(), loc: "1".into() }]);
+        assert_eq!(
+            one.items,
+            vec![Item {
+                doc: "a".into(),
+                loc: "1".into()
+            }]
+        );
         // The known client bug this whole module exists for: a structured param sent as a
         // JSON-encoded STRING instead of a native array.
         let stringified: T =
             serde_json::from_str(r#"{"items":"[{\"doc\":\"a\",\"loc\":\"1\"}]"}"#).unwrap();
-        assert_eq!(stringified.items, vec![Item { doc: "a".into(), loc: "1".into() }]);
+        assert_eq!(
+            stringified.items,
+            vec![Item {
+                doc: "a".into(),
+                loc: "1".into()
+            }]
+        );
         // Absent key → empty (handled by #[serde(default)] on the field, not this fn).
         let none: T = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(none.items, Vec::<Item>::new());

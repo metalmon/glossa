@@ -673,7 +673,10 @@ pub(crate) struct ReadArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CheckSpanArg {
-    #[serde(rename = "ref", deserialize_with = "crate::json_util::deserialize_string_loose")]
+    #[serde(
+        rename = "ref",
+        deserialize_with = "crate::json_util::deserialize_string_loose"
+    )]
     #[schemars(
         description = "the copy-ready `path#n` citation exactly as read()/search showed it (e.g. \"man.pdf#5\"); the `#n` anchor is split off server-side"
     )]
@@ -685,10 +688,7 @@ pub(crate) struct CheckSpanArg {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CheckAnswerArgs {
-    #[serde(
-        default,
-        deserialize_with = "crate::json_util::deserialize_vec_loose"
-    )]
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_vec_loose")]
     #[schemars(
         description = "citations to verify: each {ref, quote} must have been read() this session (ref = the `path#n` token), with `quote` appearing verbatim (whitespace-normalized) at that location"
     )]
@@ -3045,12 +3045,14 @@ mod tests {
         let ids = vec!["a.md#1".to_string()];
 
         // Prime the tracker: a real body, first call under key "k".
-        let first = srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
+        let first =
+            srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
         assert_eq!(first, "real hit");
 
         // An identical repeat (same tool+key) DOES get the tracker's marker treatment — the
         // Signal/Off path (never the sentinel) must still see signals as before this fix.
-        let repeat = srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
+        let repeat =
+            srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
         assert_ne!(
             repeat, "real hit",
             "an exact repeat must still get the tracker's marker"

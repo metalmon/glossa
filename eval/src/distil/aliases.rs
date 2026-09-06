@@ -417,18 +417,17 @@ fn enrich_one_chain(
                 Err(e) => (format!("graph_update failed: {e}"), Vec::new(), Vec::new()),
             }
         } else {
-            let (body, ids, _images) =
-                glossa_tools::exec(
-                    name,
-                    args,
-                    root,
-                    idx,
-                    Some(g),
-                    spec,
-                    &trace,
-                    glossa::tools::abstention::Enforcement::Off,
-                    0,
-                );
+            let (body, ids, _images) = glossa_tools::exec(
+                name,
+                args,
+                root,
+                idx,
+                Some(g),
+                spec,
+                &trace,
+                glossa::tools::abstention::Enforcement::Off,
+                0,
+            );
             (body, ids, Vec::new())
         }
     };

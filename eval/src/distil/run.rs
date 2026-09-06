@@ -586,7 +586,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // overrides when declared) + one-off --exclude/--only, so densify never enriches a
     // generic-reference doc that build was scoped to skip.
     {
-        let (scope_exclude, scope_only) = crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
+        let (scope_exclude, scope_only) =
+            crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
         let exclude: Vec<String> = scope_exclude.iter().chain(&args.exclude).cloned().collect();
         let only: Vec<String> = scope_only.iter().chain(&args.only).cloned().collect();
         let dropped;

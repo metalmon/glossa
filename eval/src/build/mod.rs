@@ -330,7 +330,8 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         // of grounded terminals from docs, so excluding here also scopes `reason`/`distil`.
         // Home is `lab.toml` `[tuning]` (build-time scope; a corpus `ontology.toml` `[abstention]`
         // list overrides it when declared), plus any one-off `--exclude`/`--only` CLI flags.
-        let (scope_exclude, scope_only) = crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
+        let (scope_exclude, scope_only) =
+            crate::lab::resolve_reasoning_scope(&lab.tuning, &ontology);
         let exclude: Vec<String> = scope_exclude.iter().chain(&opts.exclude).cloned().collect();
         let only: Vec<String> = scope_only.iter().chain(&opts.only).cloned().collect();
         let dropped;

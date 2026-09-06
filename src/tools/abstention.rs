@@ -3,21 +3,35 @@ use crate::index::store::DocIndex;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
-pub struct AbsentTerm { pub term: String }
+pub struct AbsentTerm {
+    pub term: String,
+}
 
 /// Distinctive question terms with no corpus coverage. A term is any alphabetic token of length
 /// >= 5 (dedup'd, case-insensitive); it is UNCOVERED when `covered` returns false. No stopword
 /// list: the index tokenizer (see `index::multilang`) stems but does NOT strip stopwords, so a
 /// frequent word is itself searchable and `covered` reports it present — self-calibrating on the
 /// corpus rather than on a hardcoded, language-specific word list.
-pub fn coverage_uncovered(question: &str, covered: &dyn Fn(&str) -> bool, _k: usize) -> Vec<AbsentTerm> {
+pub fn coverage_uncovered(
+    question: &str,
+    covered: &dyn Fn(&str) -> bool,
+    _k: usize,
+) -> Vec<AbsentTerm> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for tok in question.split(|c: char| !c.is_alphabetic()) {
-        if tok.chars().count() < 5 { continue; }
+        if tok.chars().count() < 5 {
+            continue;
+        }
         let low = tok.to_lowercase();
-        if !seen.insert(low.clone()) { continue; }
-        if !covered(tok) { out.push(AbsentTerm { term: tok.to_string() }); }
+        if !seen.insert(low.clone()) {
+            continue;
+        }
+        if !covered(tok) {
+            out.push(AbsentTerm {
+                term: tok.to_string(),
+            });
+        }
     }
     out
 }
@@ -160,9 +174,17 @@ mod tests {
         let covered = |t: &str| corpus.iter().any(|c| c.contains(&t.to_lowercase()));
         let absent = coverage_uncovered("how to configure maxTsdr for zzqunknownterm", &covered, 1);
         let terms: Vec<&str> = absent.iter().map(|a| a.term.as_str()).collect();
-        assert!(terms.iter().any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
-        assert!(!terms.iter().any(|t| t.eq_ignore_ascii_case("maxTsdr")), "covered term not flagged");
-        assert!(!terms.iter().any(|t| t.chars().count() < 5), "short terms excluded");
+        assert!(terms
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
+        assert!(
+            !terms.iter().any(|t| t.eq_ignore_ascii_case("maxTsdr")),
+            "covered term not flagged"
+        );
+        assert!(
+            !terms.iter().any(|t| t.chars().count() < 5),
+            "short terms excluded"
+        );
     }
 
     fn prov() -> crate::graph::store::Provenance {
@@ -213,9 +235,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
-        g.put_node(&node("sec:doc", "Section", "Manual intro")).unwrap();
-        g.put_node(&node("fact:quasar", "Fact", "Quasar9000 module reset procedure"))
+        g.put_node(&node("sec:doc", "Section", "Manual intro"))
             .unwrap();
+        g.put_node(&node(
+            "fact:quasar",
+            "Fact",
+            "Quasar9000 module reset procedure",
+        ))
+        .unwrap();
         g.put_edge(&edge("fact:quasar", crate::graph::MENTIONS, "sec:doc"))
             .unwrap();
         assert!(
@@ -236,12 +263,38 @@ mod tests {
     fn verify_spans_ok_only_when_read_and_verbatim() {
         let mut log = std::collections::HashSet::new();
         log.insert(("man.pdf".into(), "p.5".into()));
-        let fetch = |d: &str, l: &str| (d == "man.pdf" && l == "p.5").then(|| "the value is 42 tbit".to_string());
-        let ok = verify_spans(&[Span{doc:"man.pdf".into(),loc:"p.5".into(),quote:"value is 42".into()}], &log, &fetch);
+        let fetch = |d: &str, l: &str| {
+            (d == "man.pdf" && l == "p.5").then(|| "the value is 42 tbit".to_string())
+        };
+        let ok = verify_spans(
+            &[Span {
+                doc: "man.pdf".into(),
+                loc: "p.5".into(),
+                quote: "value is 42".into(),
+            }],
+            &log,
+            &fetch,
+        );
         assert!(matches!(ok[0], SpanVerdict::Ok));
-        let nv = verify_spans(&[Span{doc:"man.pdf".into(),loc:"p.5".into(),quote:"value is 99".into()}], &log, &fetch);
+        let nv = verify_spans(
+            &[Span {
+                doc: "man.pdf".into(),
+                loc: "p.5".into(),
+                quote: "value is 99".into(),
+            }],
+            &log,
+            &fetch,
+        );
         assert!(matches!(nv[0], SpanVerdict::NotVerbatim));
-        let nl = verify_spans(&[Span{doc:"other.pdf".into(),loc:"p.1".into(),quote:"x".into()}], &log, &fetch);
+        let nl = verify_spans(
+            &[Span {
+                doc: "other.pdf".into(),
+                loc: "p.1".into(),
+                quote: "x".into(),
+            }],
+            &log,
+            &fetch,
+        );
         assert!(matches!(nl[0], SpanVerdict::NotInReadLog));
     }
 

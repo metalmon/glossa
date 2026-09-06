@@ -293,18 +293,17 @@ pub fn densify_doc(
             } else {
                 // search/grep — unbounded exploration for existing context, delegated to the
                 // shared registry (same as `reason::chain_one_seed`/`distil::gen::generate_one`).
-                let (body, ids, _images) =
-                    glossa_tools::exec(
-                        name,
-                        args,
-                        root,
-                        idx,
-                        Some(writer.store()),
-                        &spec,
-                        &trace,
-                        glossa::tools::abstention::Enforcement::Off,
-                        0,
-                    );
+                let (body, ids, _images) = glossa_tools::exec(
+                    name,
+                    args,
+                    root,
+                    idx,
+                    Some(writer.store()),
+                    &spec,
+                    &trace,
+                    glossa::tools::abstention::Enforcement::Off,
+                    0,
+                );
                 (body, ids, Vec::new())
             }
         };

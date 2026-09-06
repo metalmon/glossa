@@ -509,7 +509,15 @@ impl OpenAiBackend {
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
             crate::backend::glossa_tools::next_best_action(
-                name, args, work, idx, graph, &spec, &trace, enforcement, k,
+                name,
+                args,
+                work,
+                idx,
+                graph,
+                &spec,
+                &trace,
+                enforcement,
+                k,
             )
         };
         // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the
@@ -1006,7 +1014,15 @@ fn execute_tool(
     // callers, e.g. related/neighbors for MCP's Editor/Full profiles). `exec` already returns
     // its own "unknown tool" body for names it genuinely doesn't handle, so it is the sole gate.
     let (body, ids, _images) = crate::backend::glossa_tools::exec(
-        name, args, root, idx, graph, spec, trace, enforcement, k,
+        name,
+        args,
+        root,
+        idx,
+        graph,
+        spec,
+        trace,
+        enforcement,
+        k,
     );
     let ids = if name == "read" {
         // Mirror glossa_tools::exec's own raw_arguments fallback so a stringified args object

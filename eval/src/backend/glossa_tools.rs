@@ -359,7 +359,16 @@ pub fn exec(
             let file_type = args.get("file_type").and_then(|v| v.as_str());
             let scope = args.get("scope").and_then(|v| v.as_str());
             let (body, titles) = run_search(
-                idx, query, limit, glob, file_type, trace, scope, graph, enforcement, k,
+                idx,
+                query,
+                limit,
+                glob,
+                file_type,
+                trace,
+                scope,
+                graph,
+                enforcement,
+                k,
             );
             (body, titles, Vec::new())
         }
@@ -556,9 +565,22 @@ pub fn exec(
                 Some(g) => {
                     let ont = glossa::graph::ontology::Ontology::load_or_default(root);
                     glossa::tools::reach(
-                        idx, g, &ont, from, from_path, from_n, relation, to, to_path, to_n,
-                        max_depth, bridge, trace, None,
-                        enforcement, k as u32,
+                        idx,
+                        g,
+                        &ont,
+                        from,
+                        from_path,
+                        from_n,
+                        relation,
+                        to,
+                        to_path,
+                        to_n,
+                        max_depth,
+                        bridge,
+                        trace,
+                        None,
+                        enforcement,
+                        k as u32,
                     )
                 }
                 None => "(graph unavailable)".to_string(),
@@ -1368,7 +1390,10 @@ mod tests {
 
         // (b) safety_first with no enforcement override -> Filter (the Reader default), k=1.
         let safety_default = Ontology::parse("[abstention]\npolicy = \"safety_first\"\n").unwrap();
-        assert_eq!(resolve_reader_gate(&safety_default), (Enforcement::Filter, 1));
+        assert_eq!(
+            resolve_reader_gate(&safety_default),
+            (Enforcement::Filter, 1)
+        );
 
         // (c) safety_first + enforcement="signal" -> the ontology override wins over the Filter default.
         let signal =
@@ -1383,8 +1408,8 @@ mod tests {
         assert_eq!(resolve_reader_gate(&off).0, Enforcement::Off);
 
         // (e) safety_first + coverage_k=2 -> k reflects the ontology's own value, not the default of 1.
-        let k2 = Ontology::parse("[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\n")
-            .unwrap();
+        let k2 =
+            Ontology::parse("[abstention]\npolicy = \"safety_first\"\ncoverage_k = 2\n").unwrap();
         assert_eq!(resolve_reader_gate(&k2).1, 2);
     }
 }

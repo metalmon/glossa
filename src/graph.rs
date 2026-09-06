@@ -144,7 +144,8 @@ mod grounded_or_chains_to_grounded_tests {
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         g.put_node(&node("sec:a", "Section", "Intro")).unwrap();
-        g.put_node(&node("sym:a", "Symptom", "Bus dropout")).unwrap();
+        g.put_node(&node("sym:a", "Symptom", "Bus dropout"))
+            .unwrap();
         g.put_node(&node("res:a", "Resolution", "Raise timeout"))
             .unwrap();
         g.put_edge(&edge("sym:a", "RESOLVED_BY", "res:a")).unwrap();
@@ -168,7 +169,8 @@ mod grounded_or_chains_to_grounded_tests {
             .unwrap();
         g.put_node(&node("ent:ungrounded", "Entity", "Unrelated entity"))
             .unwrap();
-        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a")).unwrap();
+        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a"))
+            .unwrap();
         g.put_edge(&edge("ent:ungrounded", "CO_OCCURS", "ent:grounded"))
             .unwrap();
         assert!(
@@ -187,7 +189,8 @@ mod grounded_or_chains_to_grounded_tests {
             .unwrap();
         g.put_node(&node("ent:ungrounded", "Entity", "Unrelated entity"))
             .unwrap();
-        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a")).unwrap();
+        g.put_edge(&edge("ent:grounded", MENTIONS, "sec:a"))
+            .unwrap();
         g.put_edge(&edge("ent:ungrounded", "CONTAINS", "ent:grounded"))
             .unwrap();
         assert!(
