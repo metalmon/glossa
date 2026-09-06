@@ -808,7 +808,10 @@ mod tests {
         );
         assert_eq!(s.answerable, 3, "a, c, e");
         assert_eq!(s.unanswerable, 2, "b (manual) + d (manual)");
-        assert_eq!(s.abstention_flagged, 2, "d and e both carry abstention=true");
+        assert_eq!(
+            s.abstention_flagged, 2,
+            "d and e both carry abstention=true"
+        );
         assert_eq!(s.false_abstain, 1, "e: answerable=true but abstention=true");
         assert_eq!(
             s.flagged_unanswerable, 1,
@@ -868,7 +871,10 @@ mod tests {
         assert_eq!(c1.distilled_query.as_deref(), Some("What is Zylophon?"));
 
         let c2 = cases.iter().find(|c| c.id == "c2").unwrap();
-        assert!(!c2.abstention, "fully-covered distilled query -> abstention=false");
+        assert!(
+            !c2.abstention,
+            "fully-covered distilled query -> abstention=false"
+        );
         assert_eq!(c2.hop_type, "lexical");
         assert!(c2.answerable);
         assert_eq!(c2.question, "raw q");
@@ -881,7 +887,10 @@ mod tests {
         // No `distilled_query` set -> the raw `question` is judged directly.
         let mut cases = vec![case("c1", "What is Zylophon?", "ans")];
         mark_abstention(&mut cases, &g, &idx, 1);
-        assert!(cases[0].abstention, "raw question's uncovered term flags it");
+        assert!(
+            cases[0].abstention,
+            "raw question's uncovered term flags it"
+        );
         assert!(cases[0].distilled_query.is_none(), "still untouched");
     }
 
