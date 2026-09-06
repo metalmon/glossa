@@ -71,6 +71,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          tag="${tag//\//-}"   # sanitize slashes so a branch dispatch (feat/x) yields a flat name
           stem="glossa-${tag}-${{ matrix.target }}"
           mkdir -p "dist/${stem}"
           cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
@@ -82,7 +83,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $tag = ("${{ github.ref_name }}" -replace '^v', '') -replace '/', '-'  # flat name for branch dispatch
           $stem = "glossa-${tag}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
