@@ -46,22 +46,6 @@ pub struct CaseResult {
     /// `#[serde(default = "default_true")]` so pre-existing persisted cases load as answerable.
     #[serde(default = "default_true")]
     pub answerable: bool,
-    /// True when the case was reclassified by `kbx dataset gate-mark` (carries tag `gated`): the
-    /// coverage-abstention gate blocked its question at runtime, so `answerable` was flipped to
-    /// `false` and `hop_type` to `"unanswerable"` even though the case was ORIGINALLY answerable.
-    /// Such a case is scored as an abstention test (decline = correct) exactly like a manually
-    /// authored unanswerable case, but it is ALSO counted separately in `gate_false_abstain_text`
-    /// (the gate's recall cost) since — unlike a manual unanswerable — declining it is a miss, not
-    /// a true negative. `#[serde(default)]` keeps pre-gate persisted reports loadable under
-    /// `--resume`.
-    #[serde(default)]
-    pub gated: bool,
-    /// `hop_type` BEFORE gating (recovered from the `orig_hop:<t>` tag); equal to `hop_type` when
-    /// the case is not `gated`. Lets `gate_false_abstain_text` bucket a gated case under the
-    /// hop_type it would have had if the gate hadn't fired. `#[serde(default)]` for the same
-    /// `--resume` reason as `gated`.
-    #[serde(default)]
-    pub orig_hop_type: String,
 }
 
 fn default_true() -> bool {
@@ -204,11 +188,7 @@ pub fn confusion_text(results: &[CaseResult]) -> String {
         if r.errored {
             continue;
         }
-        // Effective-answerable = `answerable && !gated`: a gate_mark'd case already carries
-        // answerable=false, so this is defensive, but it makes the intent explicit — a gated case
-        // is ALWAYS an abstention test (declining it is Correct), never the answerable cell.
-        let effective_answerable = r.answerable && !r.gated;
-        match (effective_answerable, r.verdict) {
+        match (r.answerable, r.verdict) {
             (true, Verdict::Correct) => a_c += 1,
             (true, Verdict::Partial) => a_p += 1,
             (true, Verdict::Wrong) => a_w += 1,
@@ -249,64 +229,6 @@ pub fn confusion_text(results: &[CaseResult]) -> String {
         rate(a_w + u_w, a_graded + u_graded)
     ));
     s
-}
-
-/// Recall cost of the runtime coverage-abstention gate: of the cases that were ORIGINALLY
-/// answerable (before `kbx dataset gate-mark` may have reclassified them), what fraction did the
-/// gate block? `gated || answerable` recovers original answerability (a `gated` case's
-/// `answerable` was flipped to `false` by gate-mark, but it WAS answerable before that); a manual
-/// unanswerable case (`answerable=false`, `gated=false`) is excluded from this metric entirely —
-/// it was never answerable, so the gate blocking it costs nothing. Bucketed by ORIGINAL hop_type
-/// (`orig_hop_type` for a gated case, `hop_type` otherwise), sorted for deterministic output.
-/// Endpoint-errored cases are skipped (never graded). Empty string when there are no
-/// originally-answerable results, so callers can print it unconditionally like `confusion_text`.
-pub fn gate_false_abstain_text(results: &[CaseResult]) -> String {
-    // hop -> (gated count, originally-answerable total count)
-    let mut g: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
-    let (mut total_gated, mut total_denom) = (0usize, 0usize);
-    for r in results {
-        if r.errored {
-            continue;
-        }
-        let originally_answerable = r.gated || r.answerable;
-        if !originally_answerable {
-            continue;
-        }
-        let hop = if r.gated {
-            r.orig_hop_type.as_str()
-        } else {
-            r.hop_type.as_str()
-        };
-        let hop = if hop.is_empty() { "(untyped)" } else { hop };
-        let e = g.entry(hop).or_default();
-        e.1 += 1;
-        total_denom += 1;
-        if r.gated {
-            e.0 += 1;
-            total_gated += 1;
-        }
-    }
-    if total_denom == 0 {
-        return String::new();
-    }
-    let rate = |num: usize, den: usize| -> f32 {
-        if den == 0 {
-            0.0
-        } else {
-            num as f32 / den as f32
-        }
-    };
-    let mut parts: Vec<String> = vec![format!(
-        "overall {total_gated}/{total_denom}={:.3}",
-        rate(total_gated, total_denom)
-    )];
-    for (hop, (gated, denom)) in &g {
-        parts.push(format!("{hop} {gated}/{denom}={:.3}", rate(*gated, *denom)));
-    }
-    format!(
-        "gate false-abstain (originally-answerable cases the gate blocked): {}",
-        parts.join(" | ")
-    )
 }
 
 /// Headline stats — graded judge quality (primary) plus counts/percentages per verdict —
@@ -536,14 +458,6 @@ pub fn write_run(
         out.push_str(&confusion);
         out.push('\n');
     }
-    let false_abstain = gate_false_abstain_text(results);
-    if !false_abstain.is_empty() {
-        if confusion.is_empty() {
-            out.push_str("\n## Abstention / FP-vs-FN\n\n");
-        }
-        out.push_str(&false_abstain);
-        out.push('\n');
-    }
 
     out.push_str("## By question type\n\n");
     out.push_str(&by_type_text(results));
@@ -732,8 +646,6 @@ mod tests {
                 needs_graph: "no".into(),
                 errored: false,
                 answerable: true,
-                gated: false,
-                orig_hop_type: String::new(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -749,8 +661,6 @@ mod tests {
                 needs_graph: "yes".into(),
                 errored: false,
                 answerable: true,
-                gated: false,
-                orig_hop_type: String::new(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -783,8 +693,6 @@ mod tests {
             needs_graph: String::new(),
             errored: false,
             answerable: true,
-            gated: false,
-            orig_hop_type: String::new(),
         }
     }
 
@@ -815,88 +723,6 @@ mod tests {
         );
         // Nothing graded (all Unscored) -> empty string, so callers can print unconditionally.
         assert_eq!(confusion_text(&[case("x", Verdict::Unscored)]).len(), 0);
-
-        // A gated case (reclassified by `kbx dataset gate-mark`: answerable flipped to false) that
-        // DECLINES lands in the abstention/correct cell (safe decline) even though it carries
-        // gated=true — the effective-answerable split key is `answerable && !gated`, not
-        // `answerable` alone.
-        let mut g = case("g1", Verdict::Correct);
-        g.answerable = false;
-        g.gated = true;
-        let c2 = confusion_text(&[g]);
-        assert!(
-            c2.contains("declined(correct) 1"),
-            "gated+declined counts as abstention-correct: {c2}"
-        );
-    }
-
-    #[test]
-    fn gated_answered_case_is_hallucination_in_confusion_text() {
-        // A gated case that ANSWERS substantively (Wrong verdict) is a hallucination — same
-        // abstention/wrong cell a manually-authored unanswerable case would land in.
-        let mut g = case("g2", Verdict::Wrong);
-        g.answerable = false;
-        g.gated = true;
-        let c = confusion_text(&[g]);
-        assert!(
-            c.contains("wrong/hallucination 1"),
-            "gated+answered counts as hallucination: {c}"
-        );
-    }
-
-    #[test]
-    fn gate_false_abstain_text_buckets_by_original_hop_type() {
-        // g1: gated, declined -> counts in the false-abstain numerator AND denominator under its
-        // ORIGINAL hop_type "lexical" (recovered from orig_hop_type, since gate_mark overwrote
-        // hop_type to "unanswerable").
-        let mut g1 = case("g1", Verdict::Correct);
-        g1.answerable = false;
-        g1.gated = true;
-        g1.orig_hop_type = "lexical".into();
-
-        // g2: gated, answered (hallucinated) -> still counts in the false-abstain numerator AND
-        // denominator under "multihop" -- the gate blocked it regardless of what the reader then
-        // did with the (mis)classified case.
-        let mut g2 = case("g2", Verdict::Wrong);
-        g2.answerable = false;
-        g2.gated = true;
-        g2.orig_hop_type = "multihop".into();
-
-        // a1: NOT gated, originally answerable, hop_type "lexical" -- raises the lexical bucket's
-        // denominator without being gated (rate dilutes from 1.0 to 0.5).
-        let mut a1 = case("a1", Verdict::Correct);
-        a1.hop_type = "lexical".into();
-
-        // m1: manual unanswerable (answerable=false, NOT gated) -- original-answerable is FALSE
-        // (gated||answerable = false||false), so it must be EXCLUDED from the denominator entirely.
-        let mut m1 = case("m1", Verdict::Correct);
-        m1.answerable = false;
-
-        let results = vec![g1, g2, a1, m1];
-        let fa = gate_false_abstain_text(&results);
-        assert!(
-            fa.contains("lexical 1/2=0.500"),
-            "1 gated / 2 originally-answerable lexical cases (g1+a1): {fa}"
-        );
-        assert!(
-            fa.contains("multihop 1/1=1.000"),
-            "1 gated / 1 originally-answerable multihop case (g2): {fa}"
-        );
-        assert!(
-            fa.contains("overall 2/3=0.667"),
-            "2 gated / 3 originally-answerable total (m1 excluded): {fa}"
-        );
-        // Empty when there are no originally-answerable results, so callers can print
-        // unconditionally (matching confusion_text's convention).
-        assert_eq!(gate_false_abstain_text(&[m1_only()]).len(), 0);
-    }
-
-    /// Single manual-unanswerable case (not gated) -- used to assert `gate_false_abstain_text`
-    /// returns empty when nothing in `results` was originally answerable.
-    fn m1_only() -> CaseResult {
-        let mut m = case("m1", Verdict::Correct);
-        m.answerable = false;
-        m
     }
 
     #[test]
