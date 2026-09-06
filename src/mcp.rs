@@ -673,16 +673,13 @@ pub(crate) struct ReadArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CheckSpanArg {
-    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
-    #[schemars(description = "document path the quote is claimed to come from, exactly as read() showed it")]
-    doc: String,
-    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
+    #[serde(rename = "ref", deserialize_with = "crate::json_util::deserialize_string_loose")]
     #[schemars(
-        description = "the chunk/page location within `doc` — the n in a `path#n` reference (e.g. \"5\") — that was actually read()"
+        description = "the copy-ready `path#n` citation exactly as read()/search showed it (e.g. \"man.pdf#5\"); the `#n` anchor is split off server-side"
     )]
-    loc: String,
+    reference: String,
     #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
-    #[schemars(description = "the exact text claimed to be verbatim at doc#loc")]
+    #[schemars(description = "the exact text claimed to be verbatim at that citation")]
     quote: String,
 }
 
@@ -693,7 +690,7 @@ pub(crate) struct CheckAnswerArgs {
         deserialize_with = "crate::json_util::deserialize_vec_loose"
     )]
     #[schemars(
-        description = "citations to verify: each {doc, loc, quote} must have been read() this session, with `quote` appearing verbatim (whitespace-normalized) at that location"
+        description = "citations to verify: each {ref, quote} must have been read() this session (ref = the `path#n` token), with `quote` appearing verbatim (whitespace-normalized) at that location"
     )]
     spans: Vec<CheckSpanArg>,
 }
@@ -1342,7 +1339,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Editor-only best-effort check: for each {doc, loc, quote} span, verify the quote was actually seen — `doc`/`loc` must match a location this session already called `read` on, AND `quote` must appear verbatim (whitespace-normalized) in that location's text. Use this before finalizing an authored answer's citations, to catch a fabricated quote or a citation to a location never actually read. Returns {ok, verdicts}: `ok` is true only if every span verifies; each verdict line is OK / NOT VERBATIM (read, but the quote doesn't match) / NOT READ (doc#loc was never read this session). This is a best-effort authoring aid, not a retrieval tool — it does not fetch or search anything new."
+        description = "Editor-only best-effort check: for each {ref, quote} span (ref = the copy-ready `path#n` citation), verify the quote was actually seen — `ref` must match a location this session already called `read` on, AND `quote` must appear verbatim (whitespace-normalized) in that location's text. Use this before finalizing an authored answer's citations, to catch a fabricated quote or a citation to a location never actually read. Returns {ok, verdicts}: `ok` is true only if every span verifies; each verdict line is OK / NOT VERBATIM (read, but the quote doesn't match) / NOT READ (the ref was never read this session). This is a best-effort authoring aid, not a retrieval tool — it does not fetch or search anything new."
     )]
     async fn check_answer(
         &self,
@@ -1364,13 +1361,22 @@ impl GlossaServer {
             );
             Some(out.text)
         };
+        // Split the copy-ready `path#n` citation into (doc, loc) on the LAST `#`, matching how
+        // `read` accepts its `path#n` token (a doc path itself may contain no `#`). A citation with
+        // no `#n` anchor has no chunk location, so it can never match the read-log -> NOT READ.
         let spans: Vec<crate::tools::abstention::Span> = a
             .spans
             .into_iter()
-            .map(|s| crate::tools::abstention::Span {
-                doc: s.doc,
-                loc: s.loc,
-                quote: s.quote,
+            .map(|s| {
+                let (doc, loc) = match s.reference.rsplit_once('#') {
+                    Some((d, l)) => (d.to_string(), l.to_string()),
+                    None => (s.reference.clone(), String::new()),
+                };
+                crate::tools::abstention::Span {
+                    doc,
+                    loc,
+                    quote: s.quote,
+                }
             })
             .collect();
         let verdicts = crate::tools::abstention::verify_spans(&spans, &read_log, &fetch);
@@ -2504,13 +2510,11 @@ mod tests {
             .check_answer(Parameters(CheckAnswerArgs {
                 spans: vec![
                     CheckSpanArg {
-                        doc: "a.md".into(),
-                        loc: "1".into(),
+                        reference: "a.md#1".into(),
                         quote: "value is 42".into(),
                     },
                     CheckSpanArg {
-                        doc: "a.md".into(),
-                        loc: "1".into(),
+                        reference: "a.md#1".into(),
                         quote: "a fabricated quote never in the doc".into(),
                     },
                 ],
