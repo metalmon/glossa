@@ -456,11 +456,6 @@ impl OpenAiBackend {
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
         let ont = glossa::graph::ontology::Ontology::load_or_default(work);
         let spec = glossa::tools::ChainSpec::from_ontology(&ont);
-        // C1 wiring: the eval reader stands in for the MCP Reader profile, so it enforces the SAME
-        // coverage-abstention gate `mcp::GlossaServer::abstention_gate` resolves for `Profile::Reader`
-        // (see `glossa_tools::resolve_reader_gate`'s doc comment for the full mirror + the one
-        // reviewed divergence). Resolved ONCE per question, not re-derived per tool call.
-        let (enforcement, k) = crate::backend::glossa_tools::resolve_reader_gate(&ont);
         // Per-episode reader-signal tracker (see `glossa_tools::ReaderSignals`): this wrapper only
         // acts on its PLATEAU kind — a NEUTRAL "gain has plateaued" observation applied via the
         // signal's own render (drop the redundant body on a drained plateau, or append the marker
@@ -470,8 +465,7 @@ impl OpenAiBackend {
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
         let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
         let exec = |name: &str, args: &Value| {
-            let (mut body, ids) =
-                execute_tool(name, args, work, idx, graph, &spec, &trace, enforcement, k);
+            let (mut body, ids) = execute_tool(name, args, work, idx, graph, &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
@@ -509,15 +503,7 @@ impl OpenAiBackend {
         // complementary tools instead of re-running the dead one.
         let nba = |name: &str, args: &Value| {
             crate::backend::glossa_tools::next_best_action(
-                name,
-                args,
-                work,
-                idx,
-                graph,
-                &spec,
-                &trace,
-                enforcement,
-                k,
+                name, args, work, idx, graph, &spec, &trace,
             )
         };
         // Simulated-user dialogue gate: built only when BOTH the `[user_sim]` endpoint and the
@@ -1005,25 +991,14 @@ fn execute_tool(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
-    enforcement: glossa::tools::abstention::Enforcement,
-    k: usize,
 ) -> (String, Vec<String>) {
     // No registry-membership pre-check here: `registry()` is the ADVERTISING source (what
     // `tools_schema` puts in front of the model); execution dispatches whatever
     // `glossa_tools::exec` supports, which is a superset (it also serves non-agent-facing
     // callers, e.g. related/neighbors for MCP's Editor/Full profiles). `exec` already returns
     // its own "unknown tool" body for names it genuinely doesn't handle, so it is the sole gate.
-    let (body, ids, _images) = crate::backend::glossa_tools::exec(
-        name,
-        args,
-        root,
-        idx,
-        graph,
-        spec,
-        trace,
-        enforcement,
-        k,
-    );
+    let (body, ids, _images) =
+        crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
     let ids = if name == "read" {
         // Mirror glossa_tools::exec's own raw_arguments fallback so a stringified args object
         // still yields the path.
@@ -1614,8 +1589,6 @@ mod tests {
                 Some(&g),
                 &spec,
                 &trace,
-                glossa::tools::abstention::Enforcement::Off,
-                0,
             );
             (body, ids, Vec::new())
         };
@@ -1670,8 +1643,6 @@ mod tests {
                 Some(&g),
                 &spec,
                 &trace,
-                glossa::tools::abstention::Enforcement::Off,
-                0,
             );
             (body, ids, Vec::new())
         };
@@ -1797,8 +1768,6 @@ mod tests {
                 Some(&g),
                 &spec,
                 &trace,
-                glossa::tools::abstention::Enforcement::Off,
-                0,
             );
             (body, ids, Vec::new())
         };
@@ -1852,8 +1821,6 @@ mod tests {
                 Some(&g),
                 &spec,
                 &trace,
-                glossa::tools::abstention::Enforcement::Off,
-                0,
             );
             (body, ids, Vec::new())
         };

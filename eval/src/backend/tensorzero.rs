@@ -696,9 +696,6 @@ impl AgentBackend for TensorZeroBackend {
         // the reasoning chain identically to the MCP surface.
         let ont = glossa::graph::ontology::Ontology::load_or_default(work);
         let spec = glossa::tools::ChainSpec::from_ontology(&ont);
-        // C1 wiring: same coverage-abstention gate as the OpenAI-transport reader (see
-        // `openai::answer_capturing`'s twin comment and `glossa_tools::resolve_reader_gate`'s doc).
-        let (enforcement, k) = crate::backend::glossa_tools::resolve_reader_gate(&ont);
         let exec = |name: &str, args: &Value| {
             let t = std::time::Instant::now();
             let r = crate::backend::glossa_tools::exec(
@@ -709,8 +706,6 @@ impl AgentBackend for TensorZeroBackend {
                 graph.as_ref(),
                 &spec,
                 &trace,
-                enforcement,
-                k,
             );
             prof!("[prof] tool {name} {}ms", t.elapsed().as_millis());
             r

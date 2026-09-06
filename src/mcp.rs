@@ -60,15 +60,6 @@ pub struct GlossaServer {
     /// `serve_streamable_http`) must give each NEW session its own fresh tracker rather than
     /// sharing this `Arc` via `clone()` — see the factory closure's override there.
     pub signals: Arc<Mutex<crate::tools::retrieval_progress::ReaderSignals>>,
-    /// Per-SESSION record of `(doc, loc)` locations this session has actually `read` — the trust
-    /// anchor for the Editor `check_answer` tool's Tier-2 verbatim+citation check (deterministic-
-    /// abstention-gate, C2): [`crate::tools::abstention::verify_spans`] only trusts a quote fetched
-    /// from a location this set contains. Populated by `read`/`read_common` on every successful
-    /// chunk read (see `parse_read_success_header`). Same sharing story as `signals` above: `new()`
-    /// gives the one stdio session its own set; the streamable-http factory (`main.rs`,
-    /// `serve_streamable_http`) must likewise give each NEW session a fresh one rather than sharing
-    /// this `Arc` via `clone()`.
-    pub read_log: Arc<Mutex<std::collections::HashSet<(String, String)>>>,
     /// The shared retrieval snapshot ([`crate::graph::handle::GraphHandle`]): the graph store, doc
     /// index, and pre-warmed CSR, built once and swapped on a corpus change (RCU). Every read tool
     /// loads it lock-free instead of re-opening per call. An `Arc` around the `ArcSwapOption` is
@@ -84,11 +75,11 @@ pub struct GlossaServer {
     /// under `engine = mmap`, racing on the CSR file writes). Uncontended after the first build — the
     /// hot path is a lock-free `cell.load_full()` and never touches this mutex.
     build_lock: Arc<Mutex<()>>,
-    /// The tool-visibility profile this server was constructed with. Besides gating `tool_router`
-    /// routes at construction (see `new()`), it is read at CALL time by [`Self::abstention_gate`]
-    /// to pick the coverage-abstention `Enforcement` default for `search`/`glossary`/`reach`:
-    /// `Reader` -> `Filter`, `Editor`/`Full` -> `Signal` (a corpus ontology `enforcement` setting
-    /// overrides this default when present).
+    /// The tool-visibility profile this server was constructed with. Gates `tool_router` routes at
+    /// construction (see `new()`); also read at CALL time by [`Self::abstention_gate`] to pick the
+    /// coverage-abstention `Enforcement` default (`Reader` -> `Filter`, `Editor`/`Full` -> `Signal`,
+    /// a corpus ontology `enforcement` setting overriding this default when present) — currently
+    /// unconsumed pending the `check_question` tool that will apply it.
     profile: Profile,
 }
 
@@ -110,9 +101,6 @@ const EDITOR_TOOLS: &[&str] = &[
     "graph_generalize",
     "graph_stats",
     "graph_doctor",
-    // Tier-2 best-effort verbatim+citation check (deterministic-abstention-gate, C2) — Editor
-    // authoring-only, not called by the eval reader, so no eval-crate routing sites need updating.
-    "check_answer",
     // Read-only, but withheld from Reader: low-level or rarely-reached navigation the weak reader
     // never calls in practice (measured over many runs: resolve 0%, constraint_solve 0%, neighbors
     // ~2%, related ~2-8% and correlating with wrong answers), so it is clutter that muddies tool
@@ -225,7 +213,6 @@ impl GlossaServer {
             signals: Arc::new(Mutex::new(
                 crate::tools::retrieval_progress::ReaderSignals::new(),
             )),
-            read_log: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
             profile,
@@ -240,6 +227,7 @@ impl GlossaServer {
     /// the ontology's own `enforcement` setting (`"filter"`/`"signal"`/`"off"`) OVERRIDES that
     /// default when present — an unrecognized value falls back to the profile default rather than
     /// erroring. `k` comes from the ontology's `coverage_k`, defaulting to 1.
+    #[allow(dead_code)] // unconsumed since the output-filter gate's removal; wired to check_question next
     fn abstention_gate(&self, ont: &Ontology) -> (crate::tools::abstention::Enforcement, u32) {
         use crate::tools::abstention::Enforcement;
         if ont.abstention_policy().as_deref() != Some("safety_first") {
@@ -382,26 +370,6 @@ impl GlossaServer {
             ResultRender::ReplaceWith { marker } => marker,
             ResultRender::OnlyNew { marker, .. } => format!("{body}{marker}"),
         }
-    }
-
-    /// Apply the retrieval-signal marker to `body` via [`Self::apply_signals`] — UNLESS the
-    /// coverage-abstention gate already replaced it with the sentinel (`Filter` tier, body
-    /// starting with [`crate::tools::abstention::SENTINEL`]), in which case `body` is returned
-    /// as-is. Without this guard a signals marker (e.g. a plateau/repeat note) gets appended BELOW
-    /// the sentinel, implying results followed the abstention when none did. Signal/Off bodies are
-    /// never the sentinel (the gate only ever swaps the body out under `Filter`), so they always
-    /// go through `apply_signals` as before.
-    fn apply_signals_unless_filtered(
-        &self,
-        tool: &str,
-        key: &str,
-        ids: Vec<String>,
-        body: String,
-    ) -> String {
-        if body.starts_with(crate::tools::abstention::SENTINEL) {
-            return body;
-        }
-        self.apply_signals(tool, key, ids, body)
     }
 
     /// Synchronous, sublinear freshness before serving a read: gate a full scan behind the cheap
@@ -669,30 +637,6 @@ pub(crate) struct ReadArgs {
         description = "PDF only: return a raster of page `n` as JPEG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text. Requires the server to be started with --vision."
     )]
     page_image: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct CheckSpanArg {
-    #[serde(
-        rename = "ref",
-        deserialize_with = "crate::json_util::deserialize_string_loose"
-    )]
-    #[schemars(
-        description = "the copy-ready `path#n` citation exactly as read()/search showed it (e.g. \"man.pdf#5\"); the `#n` anchor is split off server-side"
-    )]
-    reference: String,
-    #[serde(deserialize_with = "crate::json_util::deserialize_string_loose")]
-    #[schemars(description = "the exact text claimed to be verbatim at that citation")]
-    quote: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct CheckAnswerArgs {
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_vec_loose")]
-    #[schemars(
-        description = "citations to verify: each {ref, quote} must have been read() this session (ref = the `path#n` token), with `quote` appearing verbatim (whitespace-normalized) at that location"
-    )]
-    spans: Vec<CheckSpanArg>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1220,22 +1164,6 @@ impl GraphUpdateArgs {
     }
 }
 
-/// Parse a successful `read` chunk reply's leading `── {doc}#{loc} ──` header back into the
-/// `(doc, loc)` pair it was served for — the SAME normalization the `check_answer` fetch/verify
-/// path keys on, so the two join. `None` for any non-chunk reply (error text, `page_image`'s
-/// one-line reply, an omnivorous graph-node read) — those aren't populated into `read_log`.
-fn parse_read_success_header(text: &str) -> Option<(String, String)> {
-    let rest = text.strip_prefix("── ")?;
-    let end = rest.find(" ──")?;
-    let token = &rest[..end];
-    let pos = token.rfind('#')?;
-    let loc = &token[pos + 1..];
-    if loc.is_empty() || !loc.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((token[..pos].to_string(), loc.to_string()))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn read_common(
     root: &std::path::Path,
@@ -1246,13 +1174,9 @@ fn read_common(
     page_image: bool,
     include_images: bool,
     trace: &crate::trace::TraceLog,
-    read_log: &Mutex<std::collections::HashSet<(String, String)>>,
     wrap_text: impl FnOnce(String) -> String,
 ) -> CallToolResult {
     let mut out = crate::tools::read(root, idx, g, path, n, page_image, trace);
-    if let Some(key) = parse_read_success_header(&out.text) {
-        read_log.lock().unwrap().insert(key);
-    }
     out.text = wrap_text(out.text);
     let mut content = Vec::new();
     // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
@@ -1292,8 +1216,6 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
-        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("search:{a:?}");
         let (body, hits) = crate::tools::search(
             &h.idx,
@@ -1303,12 +1225,9 @@ impl GlossaServer {
             a.file_type.as_deref(),
             &self.trace,
             a.scope.as_deref(),
-            Some(&h.graph),
-            enforcement,
-            k,
         );
         let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
-        let body = self.apply_signals_unless_filtered("search", &key, ids, body);
+        let body = self.apply_signals("search", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1333,66 +1252,8 @@ impl GlossaServer {
             page_image,
             include_images,
             &self.trace,
-            &self.read_log,
             |body| self.apply_signals("read", &key, ids, body),
         ))
-    }
-
-    #[tool(
-        description = "Editor-only best-effort check: for each {ref, quote} span (ref = the copy-ready `path#n` citation), verify the quote was actually seen — `ref` must match a location this session already called `read` on, AND `quote` must appear verbatim (whitespace-normalized) in that location's text. Use this before finalizing an authored answer's citations, to catch a fabricated quote or a citation to a location never actually read. Returns {ok, verdicts}: `ok` is true only if every span verifies; each verdict line is OK / NOT VERBATIM (read, but the quote doesn't match) / NOT READ (the ref was never read this session). This is a best-effort authoring aid, not a retrieval tool — it does not fetch or search anything new."
-    )]
-    async fn check_answer(
-        &self,
-        Parameters(a): Parameters<CheckAnswerArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let h = self.handle().map_err(internal)?;
-        let read_log = self.read_log.lock().unwrap().clone();
-        let root = self.root.clone();
-        let fetch = |doc: &str, loc: &str| -> Option<String> {
-            let n: u64 = loc.parse().ok()?;
-            let out = crate::tools::read(
-                &root,
-                &h.idx,
-                Some(&h.graph),
-                doc,
-                n,
-                false,
-                &crate::trace::TraceLog::disabled(),
-            );
-            Some(out.text)
-        };
-        // Split the copy-ready `path#n` citation into (doc, loc) on the LAST `#`, matching how
-        // `read` accepts its `path#n` token (a doc path itself may contain no `#`). A citation with
-        // no `#n` anchor has no chunk location, so it can never match the read-log -> NOT READ.
-        let spans: Vec<crate::tools::abstention::Span> = a
-            .spans
-            .into_iter()
-            .map(|s| {
-                let (doc, loc) = match s.reference.rsplit_once('#') {
-                    Some((d, l)) => (d.to_string(), l.to_string()),
-                    None => (s.reference.clone(), String::new()),
-                };
-                crate::tools::abstention::Span {
-                    doc,
-                    loc,
-                    quote: s.quote,
-                }
-            })
-            .collect();
-        let verdicts = crate::tools::abstention::verify_spans(&spans, &read_log, &fetch);
-        let ok = verdicts
-            .iter()
-            .all(|v| matches!(v, crate::tools::abstention::SpanVerdict::Ok));
-        let mut body = format!("ok: {ok}\n");
-        for (s, v) in spans.iter().zip(verdicts.iter()) {
-            let tag = match v {
-                crate::tools::abstention::SpanVerdict::Ok => "OK",
-                crate::tools::abstention::SpanVerdict::NotVerbatim => "NOT VERBATIM",
-                crate::tools::abstention::SpanVerdict::NotInReadLog => "NOT READ",
-            };
-            body.push_str(&format!("{tag}  {}#{} — \"{}\"\n", s.doc, s.loc, s.quote));
-        }
-        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -1439,7 +1300,6 @@ impl GlossaServer {
         let ont = Ontology::load_or_default(&self.root);
         let spec = crate::tools::ChainSpec::from_ontology(&ont);
         let stale = crate::tools::StaleChecker::new(self.root.clone());
-        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
             &h.idx,
@@ -1451,11 +1311,9 @@ impl GlossaServer {
             a.as_of.as_deref(),
             Some(&stale),
             a.scope.as_deref(),
-            enforcement,
-            k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals_unless_filtered("glossary", &key, ids, body);
+        let body = self.apply_signals("glossary", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1527,7 +1385,6 @@ impl GlossaServer {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
         let ont = Ontology::load_or_default(&self.root);
-        let (enforcement, k) = self.abstention_gate(&ont);
         let key = format!("reach:{a:?}");
         let body = crate::tools::reach(
             &h.idx,
@@ -1544,11 +1401,9 @@ impl GlossaServer {
             a.bridge.unwrap_or(true),
             &self.trace,
             a.scope.as_deref(),
-            enforcement,
-            k,
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals_unless_filtered("reach", &key, ids, body);
+        let body = self.apply_signals("reach", &key, ids, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -2470,66 +2325,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn check_answer_verifies_a_read_span_and_flags_a_fabricated_one() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), b"# A\nthe value is 42 tbit\n").unwrap();
-        index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
-            dir.path().to_path_buf(),
-            Profile::Editor,
-            false,
-            ServerFlags::default(),
-        );
-        // check_answer is Editor-only — not in the Reader profile's route set.
-        let reader = GlossaServer::new(
-            dir.path().to_path_buf(),
-            Profile::Reader,
-            false,
-            ServerFlags::default(),
-        );
-        assert!(
-            !reader.tool_router.has_route("check_answer"),
-            "check_answer must be withheld from the Reader profile"
-        );
-        assert!(
-            srv.tool_router.has_route("check_answer"),
-            "check_answer must be available to the Editor profile"
-        );
-        // Read the doc first — only a location this session actually read joins the check.
-        let _ = srv
-            .read(Parameters(ReadArgs {
-                path: "a.md".into(),
-                n: 1,
-                page_image: None,
-                include_images: None,
-            }))
-            .await
-            .unwrap();
-        let out = srv
-            .check_answer(Parameters(CheckAnswerArgs {
-                spans: vec![
-                    CheckSpanArg {
-                        reference: "a.md#1".into(),
-                        quote: "value is 42".into(),
-                    },
-                    CheckSpanArg {
-                        reference: "a.md#1".into(),
-                        quote: "a fabricated quote never in the doc".into(),
-                    },
-                ],
-            }))
-            .await
-            .unwrap();
-        let text = format!("{out:?}");
-        assert!(text.contains("ok: false"), "one span is fabricated: {text}");
-        assert!(text.contains("OK"), "the real span must verify: {text}");
-        assert!(
-            text.contains("NOT VERBATIM"),
-            "the fabricated span must be flagged: {text}"
-        );
-    }
-
     #[cfg(feature = "notebook")]
     #[tokio::test]
     async fn read_picks_up_an_external_note_edit() {
@@ -3035,36 +2830,6 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "lock free → generalize ran, node_meta written"
-        );
-    }
-
-    #[test]
-    fn apply_signals_unless_filtered_passes_sentinel_through_untouched() {
-        let root = std::path::PathBuf::from(".");
-        let srv = GlossaServer::new(root, Profile::Reader, false, ServerFlags::default());
-        let ids = vec!["a.md#1".to_string()];
-
-        // Prime the tracker: a real body, first call under key "k".
-        let first =
-            srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
-        assert_eq!(first, "real hit");
-
-        // An identical repeat (same tool+key) DOES get the tracker's marker treatment — the
-        // Signal/Off path (never the sentinel) must still see signals as before this fix.
-        let repeat =
-            srv.apply_signals_unless_filtered("search", "k", ids.clone(), "real hit".into());
-        assert_ne!(
-            repeat, "real hit",
-            "an exact repeat must still get the tracker's marker"
-        );
-
-        // A Filter-tier sentinel body — even under what would otherwise be a repeat key — passes
-        // through untouched: no marker gets appended below it.
-        let sentinel_body = format!("{} — absent: foo", crate::tools::abstention::SENTINEL);
-        let out = srv.apply_signals_unless_filtered("search", "k", ids, sentinel_body.clone());
-        assert_eq!(
-            out, sentinel_body,
-            "sentinel body must pass through untouched, no marker appended below it"
         );
     }
 

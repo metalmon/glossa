@@ -315,17 +315,8 @@ fn rollout_one(
         )
     };
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-        let (mut body, ids, _images) = crate::backend::glossa_tools::exec(
-            name,
-            args,
-            &cfg.work,
-            idx,
-            graph,
-            spec,
-            &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
-        );
+        let (mut body, ids, _images) =
+            crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace);
         // Mirror openai::execute_tool: `read`'s surfaced id is its `path` arg (glossa_tools::exec
         // returns no ids for read itself).
         let ids = if name == "read" {
@@ -364,15 +355,7 @@ fn rollout_one(
     ];
     let nba = |name: &str, args: &Value| {
         crate::backend::glossa_tools::next_best_action(
-            name,
-            args,
-            &cfg.work,
-            idx,
-            graph,
-            spec,
-            &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
+            name, args, &cfg.work, idx, graph, spec, &trace,
         )
     };
     // Simulated-user dialogue gate (opt-in): built only when BOTH the `[user_sim]` endpoint and its

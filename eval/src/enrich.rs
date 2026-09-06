@@ -280,17 +280,7 @@ pub fn run_enrich(
                     };
                     (msg, vec![], vec![])
                 } else {
-                    glossa_tools::exec(
-                        name,
-                        args,
-                        &work_iter,
-                        &idx,
-                        Some(&graph),
-                        &spec,
-                        &trace,
-                        glossa::tools::abstention::Enforcement::Off,
-                        0,
-                    )
+                    glossa_tools::exec(name, args, &work_iter, &idx, Some(&graph), &spec, &trace)
                 }
             };
 

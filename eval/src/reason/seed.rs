@@ -233,17 +233,8 @@ pub fn chain_one_seed(
             };
             (message, ids, Vec::new())
         } else {
-            let (body, ids, _images) = glossa_tools::exec(
-                name,
-                args,
-                root,
-                idx,
-                Some(g),
-                &spec,
-                &trace,
-                glossa::tools::abstention::Enforcement::Off,
-                0,
-            );
+            let (body, ids, _images) =
+                glossa_tools::exec(name, args, root, idx, Some(g), &spec, &trace);
             (body, ids, Vec::new())
         }
     };

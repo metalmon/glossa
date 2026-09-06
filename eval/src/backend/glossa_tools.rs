@@ -210,7 +210,6 @@ mod reader_signal_render_tests {
 ///
 /// Takes a borrowed `DocIndex` so the caller opens it once per question and reuses it (with its
 /// cached reader) across every search/read in the episode, instead of reopening per tool call.
-#[allow(clippy::too_many_arguments)]
 pub fn run_search(
     idx: &DocIndex,
     query: &str,
@@ -219,26 +218,8 @@ pub fn run_search(
     file_type: Option<&str>,
     trace: &TraceLog,
     scope: Option<&str>,
-    graph: Option<&glossa::graph::store::GraphStore>,
-    enforcement: glossa::tools::abstention::Enforcement,
-    k: usize,
 ) -> (String, Vec<String>) {
-    // `graph` is threaded through ONLY so the coverage gate (`enforcement`/`k`) has a store to
-    // check groundedness against, mirroring `mcp::GlossaServer::search`'s `Some(&h.graph)` — the
-    // gate never fires at `Enforcement::Off` regardless (see `tools::search`'s `g` match), so an
-    // `Off, 0` caller (every existing caller before this parameter existed) is byte-identical.
-    let (body, hits) = glossa::tools::search(
-        idx,
-        query,
-        limit,
-        glob,
-        file_type,
-        trace,
-        scope,
-        graph,
-        enforcement,
-        k as u32,
-    );
+    let (body, hits) = glossa::tools::search(idx, query, limit, glob, file_type, trace, scope);
     (body, hits.iter().map(|h| h.location.clone()).collect())
 }
 
@@ -338,8 +319,6 @@ pub fn exec(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
-    enforcement: glossa::tools::abstention::Enforcement,
-    k: usize,
 ) -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
     // The raw_arguments fallback (TZ hands back a JSON *string* when the model's args didn't match
     // the tool schema, e.g. a float where an int was required) would make field lookups see empty
@@ -358,18 +337,7 @@ pub fn exec(
             let glob = args.get("glob").and_then(|v| v.as_str());
             let file_type = args.get("file_type").and_then(|v| v.as_str());
             let scope = args.get("scope").and_then(|v| v.as_str());
-            let (body, titles) = run_search(
-                idx,
-                query,
-                limit,
-                glob,
-                file_type,
-                trace,
-                scope,
-                graph,
-                enforcement,
-                k,
-            );
+            let (body, titles) = run_search(idx, query, limit, glob, file_type, trace, scope);
             (body, titles, Vec::new())
         }
         "glob" => {
@@ -446,8 +414,6 @@ pub fn exec(
                     as_of.as_deref(),
                     None,
                     None,
-                    enforcement,
-                    k as u32,
                 ),
                 None => "(graph unavailable)".to_string(),
             };
@@ -579,8 +545,6 @@ pub fn exec(
                         bridge,
                         trace,
                         None,
-                        enforcement,
-                        k as u32,
                     )
                 }
                 None => "(graph unavailable)".to_string(),
@@ -665,10 +629,6 @@ pub fn unproductive_steer(_name: &str) -> String {
 /// NOT just call), returning their non-empty results fused — concrete alternatives instead of the
 /// same dead result. Bounded fan-out; no query reformulation yet (that is the systemic version).
 /// Falls back to [`repeat_nudge`] when no text intent exists or nothing complementary comes back.
-/// `enforcement`/`k` are threaded through to the internal fan-out `exec` calls so this bypass path
-/// is gated identically to the primary reader path — passing `Enforcement::Off, 0` reproduces the
-/// pre-gate behavior byte-for-byte for every caller that isn't the live reader (train rollouts,
-/// tests).
 #[allow(clippy::too_many_arguments)]
 pub fn next_best_action(
     name: &str,
@@ -678,8 +638,6 @@ pub fn next_best_action(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
-    enforcement: glossa::tools::abstention::Enforcement,
-    k: usize,
 ) -> String {
     let Some(term) = repeated_term(name, args) else {
         return repeat_nudge(name, args);
@@ -712,7 +670,7 @@ pub fn next_best_action(
     );
     let mut any = false;
     for (tool, a) in &candidates {
-        let (body, _, _) = exec(tool, a, root, idx, graph, spec, trace, enforcement, k);
+        let (body, _, _) = exec(tool, a, root, idx, graph, spec, trace);
         let body = body.trim();
         if body.is_empty() || looks_empty(body) {
             continue;
@@ -807,8 +765,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(out.contains("seventh"), "got: {out}");
@@ -821,8 +777,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(out2.contains("seventh"), "digit-strip fallback: {out2}");
@@ -848,8 +802,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(out.contains("maxTsdr"), "got: {out}");
@@ -884,8 +836,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(out.contains("a.pdf"), "scoped hit present: {out}");
@@ -920,8 +870,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(g.contains("TEMPLATE") && !g.contains("Other"), "glob: {g}");
@@ -933,8 +881,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -962,8 +908,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert_eq!(result, "(no matches)", "expected no matches, got: {result}");
@@ -977,8 +921,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert_eq!(result_no_graph, "(graph unavailable)");
@@ -1017,8 +959,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
 
@@ -1058,8 +998,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(out.contains("delivered whole file: note.txt"), "got: {out}");
@@ -1074,8 +1012,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -1135,8 +1071,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -1152,8 +1086,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert_eq!(
@@ -1169,8 +1101,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert_eq!(
@@ -1197,8 +1127,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -1215,8 +1143,6 @@ mod tests {
             None,
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert_eq!(no_graph, "(graph unavailable)");
@@ -1248,8 +1174,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -1266,8 +1190,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(
@@ -1297,8 +1219,6 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(reach_out.contains("--REFERENCES-->"), "got: {reach_out}");
@@ -1311,68 +1231,9 @@ mod tests {
             Some(&g),
             &glossa::tools::ChainSpec::default(),
             &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
         )
         .0;
         assert!(path_out.starts_with("unknown tool"), "got: {path_out}");
-    }
-
-    /// Task 7 (C1 wiring): `exec`'s new `enforcement`/`k` params must actually reach the coverage-
-    /// abstention gate, not just be plumbed and ignored. `Enforcement::Filter` with `k=1` must
-    /// replace a real BM25 hit's body with [`glossa::tools::abstention::SENTINEL`] once a
-    /// distinctive query term ("teleportation") is uncovered by both the index and the (empty)
-    /// graph — even though the OTHER term ("widget") is a genuine hit. `Enforcement::Off` (every
-    /// caller before this parameter existed) must leave that same real hit untouched, proving the
-    /// gate is opt-in and byte-identical when off.
-    #[test]
-    fn search_dispatch_enforces_coverage_gate_when_filter_else_passes_through() {
-        let dir = tempfile::tempdir().unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("w.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "widget assembly manual".into(),
-        }])
-        .unwrap();
-        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
-        let trace = TraceLog::disabled();
-        let args = json!({"query": "widget teleportation"});
-
-        let filtered = exec(
-            "search",
-            &args,
-            dir.path(),
-            &idx,
-            Some(&g),
-            &glossa::tools::ChainSpec::default(),
-            &trace,
-            glossa::tools::abstention::Enforcement::Filter,
-            1,
-        )
-        .0;
-        assert!(
-            filtered.starts_with(glossa::tools::abstention::SENTINEL),
-            "Filter must replace the real hit with the abstention sentinel: {filtered}"
-        );
-
-        let off = exec(
-            "search",
-            &args,
-            dir.path(),
-            &idx,
-            Some(&g),
-            &glossa::tools::ChainSpec::default(),
-            &trace,
-            glossa::tools::abstention::Enforcement::Off,
-            0,
-        )
-        .0;
-        assert!(
-            off.contains("widget") && !off.starts_with(glossa::tools::abstention::SENTINEL),
-            "Off must leave the real search hit untouched: {off}"
-        );
     }
 
     /// Fix round 1, Finding 2: `resolve_reader_gate` must mirror `mcp::GlossaServer::abstention_gate`
