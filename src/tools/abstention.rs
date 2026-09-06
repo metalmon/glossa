@@ -221,7 +221,11 @@ mod tests {
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         let v = question_verdict("zzqunknownterm mystery", &i, &g, Enforcement::Off, 1);
-        assert_eq!(v, QVerdict::InScope, "Off never gates, regardless of coverage");
+        assert_eq!(
+            v,
+            QVerdict::InScope,
+            "Off never gates, regardless of coverage"
+        );
     }
 
     #[test]
@@ -238,7 +242,11 @@ mod tests {
         let g = GraphStore::open(d.path()).unwrap();
         for tier in [Enforcement::Filter, Enforcement::Signal] {
             let v = question_verdict("profibus maxTsdr timeout", &i, &g, tier, 1);
-            assert_eq!(v, QVerdict::InScope, "covered question stays in-scope under {tier:?}");
+            assert_eq!(
+                v,
+                QVerdict::InScope,
+                "covered question stays in-scope under {tier:?}"
+            );
         }
     }
 
@@ -259,7 +267,9 @@ mod tests {
         let v = question_verdict("zzqunknownterm mystery", &i, &g, Enforcement::Signal, 1);
         match v {
             QVerdict::Coverage { absent } => {
-                assert!(absent.iter().any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
+                assert!(absent
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("zzqunknownterm")));
                 assert!(absent.iter().any(|t| t.eq_ignore_ascii_case("mystery")));
             }
             other => panic!("expected Coverage, got {other:?}"),

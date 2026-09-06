@@ -1583,7 +1583,10 @@ impl GlossaServer {
                     format!("{SENTINEL} — not answerable, decline")
                 }
                 QVerdict::Coverage { absent } => {
-                    format!("coverage: low — absent: {} — reformulate", absent.join(", "))
+                    format!(
+                        "coverage: low — absent: {} — reformulate",
+                        absent.join(", ")
+                    )
                 }
                 QVerdict::InScope => "in scope — proceed".to_string(),
             }
@@ -3516,7 +3519,10 @@ mod tests {
             .await
             .unwrap();
         let text = format!("{out:?}");
-        assert!(text.contains("covered:"), "report must list covered: {text}");
+        assert!(
+            text.contains("covered:"),
+            "report must list covered: {text}"
+        );
         assert!(text.contains("absent:"), "report must list absent: {text}");
         assert!(
             text.contains("profibus"),
