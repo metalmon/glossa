@@ -502,8 +502,8 @@ enum DatasetCmd {
     /// in the orthogonal `abstention` field. Unlike the old destructive `gate_mark`, `answerable`/
     /// `hop_type`/`question` are NEVER touched. Only acts when the corpus ontology's `[abstention]
     /// policy = "safety_first"`; otherwise a no-op notice is printed and the file is left
-    /// untouched. Backs `file` up to `<file>.bak` first and writes a `coverage-gaps.md` report (id
-    /// + question + distilled query + absent terms) under `<corpus>/.glossa/kbx/` for every
+    /// untouched. Backs `file` up to `<file>.bak` first and writes a `coverage-gaps.md` report
+    /// (id, question, distilled query, absent terms) under `<corpus>/.glossa/kbx/` for every
     /// abstention-flagged case.
     GateMark {
         /// Dataset TOML to process in place.
