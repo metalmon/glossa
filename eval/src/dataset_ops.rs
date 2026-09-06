@@ -508,7 +508,7 @@ fn distill_messages(prompt_tmpl: &str, question: &str) -> Vec<Value> {
 /// single-shot completions), so this function itself is exercised by Task 5's gate-mark
 /// integration; the pure interpolation this depends on is covered by
 /// `distill_messages_embeds_template_and_question` below.
-pub async fn distill_question(
+pub fn distill_question(
     backend: &OpenAiBackend,
     prompt_tmpl: &str,
     question: &str,
