@@ -159,10 +159,16 @@ pub fn grep(
     }
     match crate::grep::grep(idx, pattern, opts) {
         Ok(hits) => {
+            let mut paths: Vec<&str> = Vec::new();
+            for h in &hits {
+                if !paths.contains(&h.path.as_str()) {
+                    paths.push(h.path.as_str());
+                }
+            }
             trace.log(
                 "grep",
                 json!({"pattern": pattern}),
-                json!({"hits": hits.len()}),
+                json!({"hits": hits.len(), "paths": paths}),
             );
             if hits.is_empty() {
                 // Feedback in the glossary/sql spirit: a weak model tends to over-build the
@@ -2134,6 +2140,33 @@ mod tests {
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
         assert!(out.images[0].bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn grep_trace_logs_distinct_paths() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("doc_a.md"), b"# A\nalpha beta calibration\n").unwrap();
+        std::fs::write(d.path().join("doc_b.md"), b"# B\ngamma delta\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        let tlog = TraceLog::to_dir(d.path());
+        let _ = grep(d.path(), &i, "calibration", &GrepOpts::default(), &tlog);
+        let tdir = d.path().join(".glossa").join("traces");
+        let file = std::fs::read_dir(&tdir).unwrap().next().unwrap().unwrap().path();
+        let body = std::fs::read_to_string(file).unwrap();
+        let entry = body
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .find(|v| v["tool"] == "grep")
+            .unwrap();
+        let paths: Vec<String> = entry["result"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect();
+        assert!(paths.contains(&"doc_a.md".to_string()));
+        assert!(!paths.contains(&"doc_b.md".to_string()));
     }
 
     #[test]
