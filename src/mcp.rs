@@ -36,6 +36,10 @@ impl Profile {
 #[derive(Clone)]
 pub struct GlossaServer {
     root: PathBuf,
+    /// The serving profile (Reader/Editor/Full). Stored because the `verify` handler projects its
+    /// response by profile (terse for Reader, full diagnostic for Editor/Full); `new()` also uses it
+    /// to gate tool visibility.
+    profile: Profile,
     tool_router: ToolRouter<Self>,
     trace: crate::trace::TraceLog,
     /// Set when a freshen reindexed something — derived layer (closure/SIMILAR +
@@ -189,6 +193,21 @@ impl GlossaServer {
             router.disable_route("constraint_solve");
             router.disable_route("graph_build");
         }
+        // Fail-closed exposure for the answer-grounding gate: `verify` is in the registry (advertised
+        // in every profile) but WITHHELD from the live router until the corpus both enables it and
+        // has a calibrated threshold. An uncalibrated `verify` could only ever return `abstain`
+        // (`gate::decide` fails closed), so serving the route would be misleading — hide it instead.
+        {
+            let glossa_dir = root.join(".glossa");
+            let cfg = crate::gate::VerifyConfig::resolve(&glossa_dir);
+            if !(cfg.enabled && cfg.is_calibrated()) {
+                router.disable_route("verify");
+                tracing::warn!(
+                    "[verify] disabled: enable it (`[verify].enabled`) and calibrate a threshold \
+                     (`[verify.threshold]`) first"
+                );
+            }
+        }
         let trace = if trace {
             crate::trace::TraceLog::to_dir(&root)
         } else {
@@ -196,6 +215,7 @@ impl GlossaServer {
         };
         Self {
             root,
+            profile,
             tool_router: router,
             trace,
             dirty: Arc::new(AtomicBool::new(false)),
@@ -734,6 +754,22 @@ pub(crate) struct GlossaryArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct VerifyArgs {
+    #[schemars(
+        description = "The final answer to gate (submit exactly what you would send the user)."
+    )]
+    pub answer: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
+    )]
+    #[schemars(
+        description = "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop."
+    )]
+    pub chunk_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ReachArgs {
     #[serde(default)]
     #[schemars(description = "start: graph node id (or use from_path+from_n)")]
@@ -1169,6 +1205,28 @@ fn read_common(
     CallToolResult::success(content)
 }
 
+/// Project a gate outcome into the JSON the `verify` tool returns, by serving profile. Reader gets a
+/// terse verdict (decision + score + one-line reason) so a weak reader isn't tempted to reinterpret
+/// the internals; Editor/Full get the full diagnostic (bucket, threshold, rare-token counts, the
+/// ungrounded tokens, chunk count) for calibration and debugging.
+fn project_verify(
+    profile: Profile,
+    o: &crate::gate::GateOutcome,
+    n_chunks: usize,
+) -> serde_json::Value {
+    match profile {
+        // Reader gets: decision, score, a SHORT static reason (no token prose), and the
+        // ungrounded tokens as their OWN structured field — so the answering agent can drop or
+        // reground the unsupported specific and re-verify. The Editor-only internals
+        // (threshold/bucket/rare_total/rare_ungrounded) stay out of the Reader arm. Built by the
+        // one shared builder so this can't drift from the eval-side executor.
+        Profile::Reader => crate::gate::reader_verify_json(o, n_chunks),
+        // Editor/Full get the full diagnostic (incl. the ungrounded token list), built by the one
+        // shared builder so the shape can't drift from the eval/calibration side (`gate::verify_json`).
+        Profile::Editor | Profile::Full => crate::gate::full_diagnostic_json(o, n_chunks),
+    }
+}
+
 #[tool_router]
 impl GlossaServer {
     // keep in sync with registry::DESC_SEARCH (rmcp's #[tool(description=…)] rejects a
@@ -1220,6 +1278,23 @@ impl GlossaServer {
             &self.trace,
             |body| self.apply_signals("read", &key, ids, body),
         ))
+    }
+
+    // keep in sync with registry::DESC_VERIFY (see search's comment above for why this is a literal;
+    // the mcp_tool_list_matches_registry test enforces byte-equality with the registry constant).
+    #[tool(
+        description = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on."
+    )]
+    async fn verify(
+        &self,
+        Parameters(a): Parameters<VerifyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let glossa_dir = self.root.join(".glossa");
+        let paths = a.chunk_paths.unwrap_or_default();
+        let (outcome, n_chunks) = crate::gate::verify_outcome(&glossa_dir, &a.answer, &paths)
+            .map_err(|e| McpError::internal_error(format!("verify: {e}"), None))?;
+        let json = project_verify(self.profile, &outcome, n_chunks);
+        Ok(CallToolResult::success(vec![Content::json(json)?]))
     }
 
     #[tool(
@@ -2011,6 +2086,97 @@ impl ServerHandler for GlossaServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a `.glossa/ontology.toml` under `root` that both enables the answer-grounding gate and
+    /// declares calibrated thresholds, so `GlossaServer::new` keeps the `verify` route live (no env,
+    /// no process-global state — race-free across parallel tests).
+    fn write_verify_enabled_ontology(root: &std::path::Path) {
+        let g = root.join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled = true\n[verify.threshold]\nsingle = 0.8\nmulti = 0.9\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn verify_in_registry() {
+        assert!(crate::tools::registry::registry()
+            .iter()
+            .any(|d| d.name == "verify"));
+    }
+
+    #[test]
+    fn verify_exposed_in_all_profiles_when_calibrated() {
+        for p in [Profile::Reader, Profile::Editor, Profile::Full] {
+            let dir = tempfile::tempdir().unwrap();
+            write_verify_enabled_ontology(dir.path());
+            let names = GlossaServer::new(dir.path().to_path_buf(), p, false, ServerFlags::default())
+                .enabled_tools();
+            assert!(
+                names.contains(&"verify".to_string()),
+                "verify missing in {p:?} when enabled+calibrated"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_fail_closed_when_uncalibrated() {
+        // No [verify.threshold] (a bare tempdir has no ontology) ⇒ withheld from every profile.
+        for p in [Profile::Reader, Profile::Editor, Profile::Full] {
+            let dir = tempfile::tempdir().unwrap();
+            let names = GlossaServer::new(dir.path().to_path_buf(), p, false, ServerFlags::default())
+                .enabled_tools();
+            assert!(
+                !names.contains(&"verify".to_string()),
+                "verify must be fail-closed (hidden) in {p:?} when uncalibrated"
+            );
+        }
+    }
+
+    /// Spec §6: the Reader projection carries a SHORT static `reason_short` (never the
+    /// "ungrounded specifics: <token list>" prose from `o.reason`) plus the ungrounded tokens as a
+    /// STRUCTURED field (so the agent can reground and re-verify). The Editor-only internals
+    /// (threshold/bucket/rare_total/rare_ungrounded) must stay out of the Reader arm.
+    #[test]
+    fn reader_projection_short_reason_keeps_structured_tokens() {
+        use crate::gate::{Bucket, Decision, GateOutcome, GateScore};
+        let o = GateOutcome {
+            decision: Decision::Abstain,
+            score: GateScore {
+                grounding: 0.4,
+                rare_total: 2,
+                rare_ungrounded: 1,
+                ungrounded_tokens: vec!["gsd-driver".into(), "step7".into()],
+                bucket: Bucket::Single,
+            },
+            threshold: Some(0.8),
+            reason: "ungrounded specifics: gsd-driver, step7".into(),
+        };
+        let reader = project_verify(Profile::Reader, &o, 1);
+        // tokens travel as their own structured field
+        let toks = reader["ungrounded_tokens"].as_array().expect("token field");
+        assert_eq!(toks.len(), 2, "reader must keep structured tokens: {reader}");
+        // reason_short is a short static label, NOT the comma-joined token prose
+        let rs = reader["reason_short"].as_str().unwrap();
+        assert_eq!(rs, "ungrounded");
+        assert!(
+            !rs.contains(',') && !rs.contains("specifics") && !rs.contains("step7"),
+            "reason_short leaked the token prose: {rs}"
+        );
+        // Editor-only internals must NOT appear in the Reader arm
+        for k in ["threshold", "bucket", "rare_total", "rare_ungrounded"] {
+            assert!(
+                reader.get(k).is_none(),
+                "reader must not carry Editor-only field '{k}': {reader}"
+            );
+        }
+        // Editor keeps the full diagnostic incl. the token list + internals.
+        let editor = project_verify(Profile::Editor, &o, 1);
+        assert!(editor["ungrounded_tokens"].as_array().is_some());
+        assert!(editor.get("threshold").is_some());
+    }
 
     #[test]
     fn sql_tool_description_matches_registry_desc_sql() {
@@ -3118,6 +3284,10 @@ mod tests {
         // superset of the registry names; the extra admin/structural tools (index, purge, resolve,
         // graph_upsert, ...) are expected and NOT compared.
         let dir = tempfile::tempdir().unwrap();
+        // `verify` is fail-closed: hidden from the live router until the corpus enables+calibrates it.
+        // Write an ontology that does both so the FULL tool list includes `verify` here — otherwise
+        // the byte-match guard could never see (and enforce) its advertised description.
+        write_verify_enabled_ontology(dir.path());
         let srv = GlossaServer::new(
             dir.path().to_path_buf(),
             Profile::Full,

@@ -1179,6 +1179,12 @@ pub fn index_file_into(
     root: &Path,
     abs_path: &Path,
     links: &mut Vec<(String, String)>,
+    // `Some` ONLY on the full-coverage (`--force`) rebuild, which accumulates the grounding DF
+    // table over EVERY document. Incremental/single-file/scoped passes pass `None`: a DfTable has
+    // no per-source decrement, so merging just the changed docs into the existing sidecar would
+    // double-count modified files and never subtract removed ones, inflating df/n_chunks over a
+    // long-lived server's uptime. The sidecar is therefore refreshed only by `kb index --force`.
+    mut df: Option<&mut crate::gate::df::DfTable>,
 ) -> anyhow::Result<Option<FileSig>> {
     let path_str = rel_key(root, abs_path);
     let sig = match file_sig(abs_path) {
@@ -1212,6 +1218,12 @@ pub fn index_file_into(
         // affects the label/location field, not the (already ordinal) section id.
         if c.location.is_empty() {
             c.location = ord.to_string();
+        }
+        // DF accumulation (full-rebuild only — see the `df` param doc) reuses the same chunk body
+        // text being written to the tantivy `body` field below — one tokenize pass per chunk, no
+        // separate corpus walk (rides the existing per-chunk indexing loop's progress).
+        if let Some(df) = df.as_deref_mut() {
+            df.add_chunk(&crate::gate::token::tokenize(&c.text));
         }
         let _ = writer.add_document(doc!(
             idx.fields.body => c.text.clone(),
@@ -1327,6 +1339,18 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     if force {
         graph.delete_auto()?;
     }
+    let df_path = crate::gate::df::DfTable::sidecar_path(&dir.join(".glossa"));
+    // The grounding DF sidecar is (re)built ONLY on the full-coverage `--force` rebuild, which
+    // re-extracts EVERY document (delta.changed = all files, since the manifest was reset above) so
+    // the table accumulates over the whole corpus. Incremental passes leave `df = None` and never
+    // touch the sidecar: DfTable has no per-source decrement, so merging only the changed docs would
+    // double-count edits and never subtract removals, inflating df/n_chunks over uptime. A stale
+    // sidecar is corrected by `kb index --force` (see the note in that command's help).
+    let mut df = if force {
+        Some(crate::gate::df::DfTable::new())
+    } else {
+        None
+    };
 
     // The delta drives everything below in a single tree walk: the hot-path gate skips all work when
     // nothing changed, the walk-free indexing loop re-extracts just `delta.changed`, and the notes
@@ -1374,7 +1398,9 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
         // whole index — log and skip it, exactly as the old walk_files-driven loop did (walk_files
         // caught the visit closure's error and printed "skip …"). The file stays recorded in
         // next.files, so a later pass treats it as unchanged and doesn't retry it every time.
-        if let Err(e) = index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links) {
+        if let Err(e) =
+            index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links, df.as_mut())
+        {
             eprintln!("skip {}: {e}", abs.display());
             stats.errors.push((path_str.clone(), e.to_string()));
             continue;
@@ -1461,6 +1487,19 @@ pub fn index_dir_locked(dir: &Path, force: bool) -> anyhow::Result<IndexStats> {
     let stored = read_dirsig(dir).unwrap_or_default();
     let unsettled = unsettled_dirs(&idx.root, &indexed);
     write_dirsig(dir, &settled_dirsig(&cur, &stored, &unsettled));
+    // Sidecar serialization is a distinct, potentially slow phase on a large vocabulary — flag it
+    // explicitly rather than let it pass silently inside the (already-finished) index loop above.
+    // Only the full `--force` rebuild produced a DF table (`Some`); incremental passes leave the
+    // existing sidecar untouched (see the `df` binding above).
+    if let Some(df) = &df {
+        eprintln!(
+            "writing DF sidecar: {} tokens over {} chunks...",
+            df.len(),
+            df.n_chunks
+        );
+        df.save(&df_path)?;
+        eprintln!("DF sidecar written ({} tokens)", df.len());
+    }
     Ok(stats)
 }
 
@@ -1474,7 +1513,9 @@ pub fn index_one_file_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<Fil
     let abs = idx.root.join(rel);
     let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
     let mut links: Vec<(String, String)> = Vec::new();
-    let sig = match index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links)? {
+    // Single-file reindex is an incremental path: it does NOT touch the grounding DF sidecar (no
+    // per-source decrement — see index_file_into's `df` param). Only `kb index --force` rebuilds it.
+    let sig = match index_file_into(&idx, &graph, &writer, &idx.root, &abs, &mut links, None)? {
         Some(s) => s,
         None => return Ok(None),
     };
@@ -1601,6 +1642,8 @@ pub fn reindex_dirs_locked(
     let mut links: Vec<(String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stats = IndexStats::default();
+    // Scoped freshen is an incremental path: it does NOT touch the grounding DF sidecar (no
+    // per-source decrement — see index_file_into's `df` param). Only `kb index --force` rebuilds it.
     // Files we actually (re)indexed this pass, with the signature we captured — re-stat'd at the
     // end so a file that changed WHILE we were indexing it holds back its dir's dirsig entry.
     let mut indexed: Vec<(String, FileSig)> = Vec::new();
@@ -1636,7 +1679,7 @@ pub fn reindex_dirs_locked(
                 // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
                 // resilience of the `kb index` walk. On error the file is left unrecorded so a later
                 // freshen can retry it once it changes.
-                match index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links) {
+                match index_file_into(&idx, &graph, &writer, &idx.root, path, &mut links, None) {
                     Ok(Some(_)) => {
                         manifest.files.insert(rel.clone(), sig);
                         indexed.push((rel.clone(), sig));

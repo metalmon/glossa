@@ -36,6 +36,15 @@ Write "CHECK:" and for each extract item mark: "answers" / "answers together wit
 Grounding decides reliability: an answer produced by a traversal (`reach`/`sql` returned it, or you read it from a node's grounded source) is settled. An answer inferred from prose that merely sits near the entity is not settled until `reach` confirms the link — if no path comes back, they were only co-mentioned; reconsider. The answer is what the question's OWN relation lands on directly — not a broader entity, not the far end of a different relation; if your candidate is a different KIND of thing than asked, you stopped at the intermediate.
 — An "answers" item → STEP 5. Assembled from several → "CHAIN: from 1 and 2 it follows …" → STEP 5. Two items give different answers → show both with sources and flag the discrepancy. An item states a condition ("if …, then …") and the user's specifics only partly confirm it → "CLARIFY: <question to the user>" and stop. All "on topic, no answer" → STEP 5 (boundary) with the adjacent information.
 
+SELF-CHECK (verify) — after CHECK, before RESULT; only if the `verify` tool is in your toolset
+`verify` is an external grounding check on your answer, and it is DECISIVE: when the tool is available, IT decides serve-or-abstain, not your own confidence.
+1. Assemble the draft answer and the chunk paths you actually read to ground it (`path#n` from your `read` calls).
+2. Call `verify(<draft answer>, [<chunk paths>])`.
+3. serve → go to RESULT and give the answer.
+4. abstain → look at `ungrounded_tokens` (specifics not grounded on the cited chunks): for each, either read/cite the chunk that grounds it (back to search) or drop that claim from the answer — then re-verify. Budget: 2 re-checks.
+5. Still abstain after 2 tries → honest decline in RESULT ("no information"); do not force an answer against `verify`.
+If `verify` is not in your toolset, OR it returns `reason_short: "uncalibrated"` / an error — treat it as unavailable and let your own CHECK/grounding decide, as before (this is NOT an abstain).
+
 STEP 5. RESULT
 Write "ANSWER:" and then: either 1–3 sentences drawn only from the extract's words + source (title, section); or "The knowledge base has no information on this question" + adjacent information, if any, + what is missing. Answer at the granularity the question asks for — a short exact span for a name/value/date, the full procedure for a how-to.
 

@@ -36,8 +36,8 @@ pub(crate) fn agent_min_p() -> f64 {
 pub struct OpenAiTransport;
 
 impl ChatTransport for OpenAiTransport {
-    fn tools_schema(&self, graph_on: bool) -> Value {
-        tools_schema(graph_on)
+    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
+        tools_schema(graph_on, verify_available)
     }
 
     fn call(
@@ -254,13 +254,16 @@ pub(crate) fn chat_http_full(
 /// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
 /// shared registry (`glossa::tools::registry::registry()`) instead of a hand-written per-tool
 /// JSON block — MCP and the eval agent can no longer drift apart on name/description/schema.
-/// Graph-gated descriptors (glossary/reach/sql) are included only when `graph_on`; registry
-/// order is preserved as-is (search/read/grep/glob first, then the graph tools), so ordering
-/// here is a byproduct of the registry, not a curated hand-order.
-pub(crate) fn tools_schema(graph_on: bool) -> Value {
+/// Graph-gated descriptors (glossary/reach/sql) are included only when `graph_on`; `verify` is
+/// included only when `verify_available` (serving parity — an uncalibrated/disabled answer-
+/// grounding gate is withheld from the advertised schema, not just the exec arm). Registry order
+/// is preserved as-is (search/read/grep/glob first, then the graph tools), so ordering here is a
+/// byproduct of the registry, not a curated hand-order.
+pub(crate) fn tools_schema(graph_on: bool, verify_available: bool) -> Value {
     let tools: Vec<Value> = glossa::tools::registry::registry()
         .iter()
         .filter(|d| !d.graph_gated || graph_on)
+        .filter(|d| !d.verify_gated || verify_available)
         .map(|d| {
             json!({
                 "type": "function",
@@ -439,11 +442,11 @@ mod tests {
         assert_eq!(parse_tool_args(&bad), json!({}));
     }
 
-    /// New Task-2 test: `OpenAiTransport.tools_schema(true)` renders the OpenAI function-tool
+    /// New Task-2 test: `OpenAiTransport.tools_schema(true, true)` renders the OpenAI function-tool
     /// envelope and includes a graph-gated tool name (only advertised when `graph_on`).
     #[test]
     fn transport_tools_schema_graph_on_has_function_envelope_and_graph_tool() {
-        let schema = OpenAiTransport.tools_schema(true);
+        let schema = OpenAiTransport.tools_schema(true, true);
         let s = serde_json::to_string(&schema).unwrap();
         assert!(
             s.contains("\"type\":\"function\""),
@@ -458,6 +461,34 @@ mod tests {
         assert!(
             names.contains(&"glossary"),
             "expected a graph-gated tool name (glossary) when graph_on; got {names:?}"
+        );
+    }
+
+    /// Task-3: `verify` is advertised when `verify_available` is true and withheld when false —
+    /// serving parity with the live MCP server's fail-closed advertisement of an
+    /// uncalibrated/disabled answer-grounding gate.
+    #[test]
+    fn verify_absent_from_schema_when_unavailable() {
+        let names_of = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| {
+                    t.pointer("/function/name")
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                })
+                .collect()
+        };
+        let with = names_of(&tools_schema(true, true));
+        let without = names_of(&tools_schema(true, false));
+        assert!(
+            with.iter().any(|n| n == "verify"),
+            "verify present when available"
+        );
+        assert!(
+            !without.iter().any(|n| n == "verify"),
+            "verify absent when unavailable"
         );
     }
 

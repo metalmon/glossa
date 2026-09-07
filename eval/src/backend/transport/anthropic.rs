@@ -17,8 +17,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct AnthropicTransport;
 
 impl ChatTransport for AnthropicTransport {
-    fn tools_schema(&self, graph_on: bool) -> Value {
-        tools_schema(graph_on)
+    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
+        tools_schema(graph_on, verify_available)
     }
 
     fn call(
@@ -106,11 +106,13 @@ fn reconstruct_assistant_content(reply: &TurnReply) -> Vec<Value> {
 /// (`glossa::tools::registry::registry()`) `OpenAiTransport::tools_schema` uses — same
 /// name/description/params_schema per tool, but the flat Anthropic envelope (`input_schema`, no
 /// `type:"function"` wrapper). Graph-gated descriptors (glossary/reach/sql/…) are included only
-/// when `graph_on`.
-pub(crate) fn tools_schema(graph_on: bool) -> Value {
+/// when `graph_on`; `verify` is included only when `verify_available` (serving parity — see
+/// `transport::openai::tools_schema`).
+pub(crate) fn tools_schema(graph_on: bool, verify_available: bool) -> Value {
     let tools: Vec<Value> = glossa::tools::registry::registry()
         .iter()
         .filter(|d| !d.graph_gated || graph_on)
+        .filter(|d| !d.verify_gated || verify_available)
         .map(|d| {
             json!({
                 "name": d.name,
@@ -262,7 +264,7 @@ mod tests {
 
     #[test]
     fn tools_schema_has_flat_envelope_and_graph_tool() {
-        let schema = AnthropicTransport.tools_schema(true);
+        let schema = AnthropicTransport.tools_schema(true, true);
         let s = serde_json::to_string(&schema).unwrap();
         assert!(
             !s.contains("\"type\":\"function\""),
@@ -284,9 +286,34 @@ mod tests {
         );
     }
 
+    /// Task-3 serving parity: `verify` is withheld from the flat Anthropic envelope when
+    /// `verify_available` is false, and present when true — mirrors
+    /// `transport::openai::tests::verify_absent_from_schema_when_unavailable`, catching a
+    /// copy-paste that dropped this transport's `verify_gated` filter line.
+    #[test]
+    fn verify_absent_from_schema_when_unavailable() {
+        let names_of = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
+                .collect()
+        };
+        let with = names_of(&AnthropicTransport.tools_schema(true, true));
+        let without = names_of(&AnthropicTransport.tools_schema(true, false));
+        assert!(
+            with.iter().any(|n| n == "verify"),
+            "verify present when available; got {with:?}"
+        );
+        assert!(
+            !without.iter().any(|n| n == "verify"),
+            "verify absent when unavailable; got {without:?}"
+        );
+    }
+
     #[test]
     fn tools_schema_graph_off_omits_graph_tool() {
-        let schema = AnthropicTransport.tools_schema(false);
+        let schema = AnthropicTransport.tools_schema(false, true);
         let names: Vec<&str> = schema
             .as_array()
             .unwrap()
@@ -481,7 +508,7 @@ mod tests {
         };
 
         let transport = AnthropicTransport;
-        let tools = tools_schema(true);
+        let tools = tools_schema(true, true);
         let exec = |name: &str, args: &Value| {
             assert_eq!(name, "search");
             assert_eq!(args["query"], "x");

@@ -53,6 +53,14 @@
         "string",
         "null"
       ]
+    },
+    "scope": {
+      "default": null,
+      "description": "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "type": "object"

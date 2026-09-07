@@ -46,6 +46,16 @@ pub struct CaseResult {
     /// `#[serde(default = "default_true")]` so pre-existing persisted cases load as answerable.
     #[serde(default = "default_true")]
     pub answerable: bool,
+    /// The reader's final parsed answer text — same value as `answer` today, carried under its own
+    /// name as the calibration data source (`kbx eval calibrate`, Task 9) reads going forward.
+    /// `#[serde(default)]` keeps pre-existing persisted cases loadable.
+    #[serde(default)]
+    pub final_answer: String,
+    /// Document paths the agent's `read` tool calls surfaced while answering this case — the
+    /// grounding-gate calibrator (Task 9) re-fetches these to check `final_answer` is actually
+    /// supported by what was read. `#[serde(default)]` keeps pre-existing persisted cases loadable.
+    #[serde(default)]
+    pub chunk_paths: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -584,6 +594,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn caseresult_loads_without_new_fields() {
+        // an old case JSON lacking final_answer/chunk_paths still deserializes (serde defaults)
+        let old = r#"{"id":"x","verdict":"Correct","reason":"","f1":0.0,"em":0.0,"tools":[],"answer":"a","transcript":"","judge_raw":""}"#;
+        let c: CaseResult = serde_json::from_str(old).unwrap();
+        assert_eq!(c.final_answer, "");
+        assert!(c.chunk_paths.is_empty());
+    }
+
+    #[test]
     fn answers_csv_quotes_columns_and_bom_adapts_to_gold() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -646,6 +665,8 @@ mod tests {
                 needs_graph: "no".into(),
                 errored: false,
                 answerable: true,
+                final_answer: String::new(),
+                chunk_paths: Vec::new(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -661,6 +682,8 @@ mod tests {
                 needs_graph: "yes".into(),
                 errored: false,
                 answerable: true,
+                final_answer: String::new(),
+                chunk_paths: Vec::new(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -693,6 +716,8 @@ mod tests {
             needs_graph: String::new(),
             errored: false,
             answerable: true,
+            final_answer: String::new(),
+            chunk_paths: Vec::new(),
         }
     }
 

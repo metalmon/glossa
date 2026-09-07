@@ -549,7 +549,7 @@ fn make_exec(
         match name {
             "get_task" => (exec_get_task(&src_doc), vec![], vec![]),
             "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors"
-            | "reach" | "resolve" | "get_source_file" => kb_eval::backend::glossa_tools::exec(
+            | "reach" | "resolve" | "get_source_file" | "verify" => kb_eval::backend::glossa_tools::exec(
                 name,
                 args,
                 &agent_g_dir,
@@ -2396,7 +2396,7 @@ fn main() -> Result<()> {
             match name {
                 "get_task" => (exec_get_task(&src_doc_exec), vec![], vec![]),
                 "search" | "read" | "grep" | "glob" | "glossary" | "related" | "neighbors"
-                | "reach" | "resolve" | "get_source_file" => kb_eval::backend::glossa_tools::exec(
+                | "reach" | "resolve" | "get_source_file" | "verify" => kb_eval::backend::glossa_tools::exec(
                     name,
                     args,
                     &agent_g_dir_clone,

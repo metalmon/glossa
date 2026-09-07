@@ -2,6 +2,17 @@
   "$defs": {
     "GraphUpdateNode": {
       "properties": {
+        "add_aliases": {
+          "default": null,
+          "description": "search aliases to ADD to this node (extra phrasings users might type) — appended in place, never creating a node/edge",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "label": {
           "description": "current label of the node to edit",
           "type": "string"
@@ -31,6 +42,17 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "add_aliases": {
+      "default": null,
+      "description": "single-update shortcut: search aliases to ADD to the node named by `label`",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
     "label": {
       "default": null,
       "description": "single-update shortcut: current label of the node to edit (alternative to `nodes`)",

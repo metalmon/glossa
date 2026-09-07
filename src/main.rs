@@ -119,6 +119,9 @@ enum Cmd {
     /// --file <rel>: reindex just that one document (picks up an in-place edit).
     Index {
         path: Option<PathBuf>,
+        /// Full rebuild from scratch. This is also the ONLY pass that (re)builds the answer-grounding
+        /// DF sidecar (`.glossa/df`): incremental indexing never refreshes it, so run `--force` after
+        /// large corpus changes to keep the `verify` gate's rarity counts accurate.
         #[arg(long)]
         force: bool,
         #[arg(long)]

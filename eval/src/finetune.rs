@@ -1,7 +1,7 @@
 //! Fine-tuning dataset collection — the provider-agnostic capture + export layer.
 //!
 //! Phase 1 (capture) records a reader episode's full chat trajectory via
-//! [`crate::backend::agent_loop::CapturedEpisode`]; `kbx eval --capture` joins the graded judge
+//! [`crate::backend::agent_loop::CapturedEpisode`]; `kbx eval run --capture` joins the graded judge
 //! [`Verdict`] as the reward and writes one [`TrajectoryRecord`] per sampled episode to
 //! `runs/<tag>/trajectories.jsonl`.
 //!

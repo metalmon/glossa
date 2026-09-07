@@ -53,6 +53,14 @@
         "null"
       ]
     },
+    "scope": {
+      "default": null,
+      "description": "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "to": {
       "default": null,
       "description": "end: graph node id to VERIFY a connection to (or use to_path+to_n); omit for DISCOVERY — find every node `from` reaches along `relation`",

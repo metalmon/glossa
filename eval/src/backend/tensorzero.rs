@@ -91,6 +91,9 @@ fn tool_kind(name: &str) -> ToolKind {
         // graph mutation, else the model sees a stale verdict and fights the "cache".
         "glossary" | "related" | "neighbors" | "reach" | "resolve" | "graph_stats"
         | "constraint_solve" => ToolKind::GraphRead,
+        // `verify` reads chunk text (via `glossa::gate::read_chunk_text`, same path as `read`),
+        // not the graph — a static-KB read, so it dedups like search/read/grep below.
+        "search" | "read" | "grep" | "verify" => ToolKind::Corpus,
         _ => ToolKind::Corpus,
     }
 }

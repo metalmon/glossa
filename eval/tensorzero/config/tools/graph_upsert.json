@@ -34,6 +34,14 @@
           },
           "type": "array"
         },
+        "id": {
+          "default": null,
+          "description": "OPTIONAL call-scoped handle for this node. NOT persisted — the real id is always\nderived from `node_type` + `label` exactly as without it. Assign a short `id`\n(e.g. `\"n1\"`) so an edge in the SAME call can reference this node by that handle in\nits `from`/`to`. The success response returns the handle → real id mapping so later\ncalls (where handles no longer apply) can reference the created node by its real id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "label": {
           "type": "string"
         },
@@ -41,6 +49,8 @@
           "type": "string"
         },
         "source_path": {
+          "default": "",
+          "description": "Document section this node is grounded in (`path#n`). Omit (or send blank) to\ncreate the node UNGROUNDED — allowed only for node types that are not\n`requires_grounding` per the ontology; a `requires_grounding` type with no\n`source_path` is dropped with an actionable error instead.",
           "type": "string"
         },
         "valid_from": {
@@ -62,8 +72,7 @@
       },
       "required": [
         "node_type",
-        "label",
-        "source_path"
+        "label"
       ],
       "type": "object"
     }

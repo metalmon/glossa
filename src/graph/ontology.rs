@@ -67,6 +67,31 @@ struct RawRetrieval {
     bridge: Option<String>,
 }
 
+/// The `[verify]` overlay: per-corpus answer-grounding-gate tuning (see `crate::gate`). All keys
+/// optional; an unset key falls back to the engine default. Kept separate from any legacy `[gate]`
+/// table — this is the model-free grounding verifier, not a different concern.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawVerify {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    rare_df_frac: Option<f32>,
+    #[serde(default)]
+    min_answer_tokens: Option<usize>,
+    #[serde(default)]
+    threshold: Option<RawVerifyThreshold>,
+}
+
+/// Calibrated grounding thresholds by [`crate::gate::score::Bucket`]. `None` (either field, or the
+/// whole table) means uncalibrated — the gate must abstain rather than guess a threshold.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawVerifyThreshold {
+    #[serde(default)]
+    single: Option<f32>,
+    #[serde(default)]
+    multi: Option<f32>,
+}
+
 /// One valid reasoning shape: an anchor node type plus the ordered relations leading from it
 /// (e.g. anchor `Symptom`, relations `[CAUSED_BY, RESOLVED_BY]`). A node survives hygiene if it
 /// lies on a COMPLETE instance of ANY declared spine — so distinct case shapes (causal
@@ -242,6 +267,8 @@ struct RawOntology {
     #[serde(default)]
     retrieval: RawRetrieval,
     #[serde(default)]
+    verify: RawVerify,
+    #[serde(default)]
     reasoning: RawReasoning,
     #[serde(default)]
     constraint_types: BTreeMap<String, RawConstraintType>,
@@ -280,6 +307,13 @@ pub struct Ontology {
     /// Per-corpus dual-seed PPR mode from `[retrieval].bridge`. `None` when unset → engine default
     /// Off. See [`Ontology::ppr_bridge_mode`].
     ppr_bridge: Option<String>,
+    /// Per-corpus answer-grounding-gate overlay from `[verify]`. `None` per field when unset →
+    /// `gate::config::VerifyConfig` applies its engine default. See the `verify_*` getters.
+    verify_enabled: Option<bool>,
+    verify_rare_df_frac: Option<f32>,
+    verify_min_answer_tokens: Option<usize>,
+    verify_threshold_single: Option<f32>,
+    verify_threshold_multi: Option<f32>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -407,6 +441,11 @@ impl Ontology {
                 .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
             ppr_bridge: raw.retrieval.bridge,
+            verify_enabled: raw.verify.enabled,
+            verify_rare_df_frac: raw.verify.rare_df_frac,
+            verify_min_answer_tokens: raw.verify.min_answer_tokens,
+            verify_threshold_single: raw.verify.threshold.as_ref().and_then(|t| t.single),
+            verify_threshold_multi: raw.verify.threshold.as_ref().and_then(|t| t.multi),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -577,6 +616,32 @@ impl Ontology {
     /// the ontology declares none — in which case PPR applies its engine default (Off).
     pub fn ppr_bridge_mode(&self) -> Option<String> {
         self.ppr_bridge.clone()
+    }
+
+    /// Per-corpus `[verify].enabled` override, or `None` when the ontology declares none — in which
+    /// case `gate::config::VerifyConfig` applies its engine default (`false`).
+    pub fn verify_enabled(&self) -> Option<bool> {
+        self.verify_enabled
+    }
+
+    /// Per-corpus `[verify].rare_df_frac` override, or `None` when the ontology declares none.
+    pub fn verify_rare_df_frac(&self) -> Option<f32> {
+        self.verify_rare_df_frac
+    }
+
+    /// Per-corpus `[verify].min_answer_tokens` override, or `None` when the ontology declares none.
+    pub fn verify_min_answer_tokens(&self) -> Option<usize> {
+        self.verify_min_answer_tokens
+    }
+
+    /// Per-corpus `[verify].threshold.single` override, or `None` when uncalibrated.
+    pub fn verify_threshold_single(&self) -> Option<f32> {
+        self.verify_threshold_single
+    }
+
+    /// Per-corpus `[verify].threshold.multi` override, or `None` when uncalibrated.
+    pub fn verify_threshold_multi(&self) -> Option<f32> {
+        self.verify_threshold_multi
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {

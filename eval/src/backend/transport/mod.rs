@@ -70,8 +70,10 @@ pub trait ChatTransport {
     /// Render the tool registry into this provider's tool-schema shape (OpenAI's
     /// `{type:function,function:{...}}` envelope vs. Anthropic's flat `{name,input_schema}`).
     /// `graph_on` gates the graph-only tools (glossary/reach/sql/…) the same way both arms of the
-    /// eval do today.
-    fn tools_schema(&self, graph_on: bool) -> serde_json::Value;
+    /// eval do today. `verify_available` gates `verify` — withheld from the advertised schema when
+    /// the answer-grounding gate is disabled/uncalibrated for the corpus, mirroring the live MCP
+    /// server's fail-closed advertisement (see `glossa::gate::VerifyConfig`).
+    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> serde_json::Value;
 
     /// One request/response round-trip: POST `messages` (+ optional `system`, `tools`) to `ep` and
     /// return the normalized `TurnReply`. `temperature` is `Some(t)` to sample at `t`, or `None` to

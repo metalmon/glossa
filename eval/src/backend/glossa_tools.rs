@@ -552,6 +552,33 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "verify" => {
+            // Answer-grounding gate (model-free): resolve chunk_paths -> score -> decide, via the
+            // SAME `glossa::gate` core the MCP `verify` tool uses (`src/mcp.rs`), so eval runs and
+            // the live server agree. Reuses the loose vec-of-string deser (mirrors `VerifyArgs`)
+            // since some models send `chunk_paths` as a single string / comma-joined string.
+            let answer = args.get("answer").and_then(|v| v.as_str()).unwrap_or("");
+            let chunk_paths: Vec<String> = args
+                .get("chunk_paths")
+                .and_then(|v| {
+                    glossa::json_util::deserialize_opt_vec_string_loose(v)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_default();
+            let glossa_dir = root.join(".glossa");
+            let cfg = glossa::gate::VerifyConfig::resolve(&glossa_dir);
+            let body = if !(cfg.enabled && cfg.is_calibrated()) {
+                // Serving parity: an uncalibrated/disabled verify is withheld on the live server.
+                glossa::gate::reader_uncalibrated_json().to_string()
+            } else {
+                match glossa::gate::verify_outcome(&glossa_dir, answer, &chunk_paths) {
+                    Ok((o, n)) => glossa::gate::reader_verify_json(&o, n).to_string(),
+                    Err(e) => format!("verify error: {e}"),
+                }
+            };
+            (body, Vec::new(), Vec::new())
+        }
         other => (format!("unknown tool: {other}"), Vec::new(), Vec::new()),
     }
 }
@@ -734,6 +761,57 @@ mod tests {
         )
         .0;
         assert!(out2.contains("seventh"), "digit-strip fallback: {out2}");
+    }
+
+    /// `exec("verify", ...)` must have a real arm — not fall through to "unknown tool: verify".
+    /// A bare tempdir has no ontology.toml, so `VerifyConfig::resolve` comes back
+    /// disabled/uncalibrated by default; the arm withholds the diagnostic (serving parity)
+    /// rather than erroring or mis-routing.
+    #[test]
+    fn verify_arm_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+        let out = exec(
+            "verify",
+            &json!({"answer": "x", "chunk_paths": []}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        assert!(!out.contains("unknown tool"), "got: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["reason_short"], "uncalibrated", "got: {out}");
+    }
+
+    /// Gate off (no `[verify]` enabled / no thresholds) → the arm returns the uncalibrated
+    /// signal even when a DF sidecar is present, mirroring the live server's withholding.
+    #[test]
+    fn verify_arm_uncalibrated_when_gate_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        std::fs::create_dir_all(&glossa).unwrap();
+        // minimal df sidecar so verify_outcome wouldn't error if it were reached
+        glossa::gate::df::DfTable::new()
+            .save(&glossa::gate::df::DfTable::sidecar_path(&glossa))
+            .unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+        let out = exec(
+            "verify",
+            &json!({"answer": "anything", "chunk_paths": []}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        )
+        .0;
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["reason_short"], "uncalibrated", "got: {out}");
     }
 
     #[test]

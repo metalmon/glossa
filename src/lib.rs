@@ -3,6 +3,7 @@ pub mod cli_fmt;
 pub mod convert;
 pub mod default_ignore;
 pub mod extract;
+pub mod gate;
 pub mod glob;
 pub mod graph;
 pub mod grep;

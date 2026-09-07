@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod bridge_probe;
 pub mod build;
+pub mod calibrate;
 pub mod checkpoint;
 pub mod connectivity;
 pub mod constraint_gepa_sop;

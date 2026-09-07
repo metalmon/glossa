@@ -450,7 +450,16 @@ impl OpenAiBackend {
         // `transport_for` builds `TzTransport` when `api = "tensorzero"`, so the eval reader gets
         // native TZ episode grouping + feedback without a separate code path.
         let transport = crate::backend::transport::transport_for(&ep);
-        let tools = transport.tools_schema(graph.is_some());
+        // Serving parity: withhold `verify` from the advertised schema when the answer-grounding
+        // gate is disabled/uncalibrated for this corpus — mirrors the live MCP server's fail-closed
+        // advertisement (the `exec` arm already withholds the diagnostic; this also stops the model
+        // from being offered a tool call that can't do anything).
+        let verify_available = {
+            let glossa_dir = work.join(".glossa");
+            let c = glossa::gate::VerifyConfig::resolve(&glossa_dir);
+            c.enabled && c.is_calibrated()
+        };
+        let tools = transport.tools_schema(graph.is_some(), verify_available);
 
         let trace = TraceLog::to_dir(work);
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
@@ -900,8 +909,8 @@ impl<C> ChatTransport for ClosureTransport<C>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
 {
-    fn tools_schema(&self, graph_on: bool) -> Value {
-        tools_schema(graph_on)
+    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
+        tools_schema(graph_on, verify_available)
     }
 
     fn call(
@@ -2024,20 +2033,23 @@ mod schema_tests {
     fn grep_is_advertised_in_both_arms() {
         // grep is ungated in the registry, so it must appear in both graph-OFF and graph-ON.
         assert!(
-            tool_names(&tools_schema(false)).contains(&"grep".into()),
+            tool_names(&tools_schema(false, true)).contains(&"grep".into()),
             "graph-OFF must advertise grep"
         );
         assert!(
-            tool_names(&tools_schema(true)).contains(&"grep".into()),
+            tool_names(&tools_schema(true, true)).contains(&"grep".into()),
             "graph-ON must advertise grep"
         );
     }
 
+    /// `tools_schema`/`exec` parity guard (mirrors [[mcp-tool-add-rename-eval-sites]]): when BOTH
+    /// gates are open (graph-ON, verify available) the advertised schema must equal the FULL
+    /// registry, in registry order — no hand-curated subset or reordering; MCP and the eval agent
+    /// render from the same source of truth, and `verify`'s exec arm (`glossa_tools::exec`) is
+    /// only exercised for a name the model was actually offered.
     #[test]
     fn openai_tools_match_registry_graph_on() {
-        // graph-ON advertises the FULL registry, in registry order — no hand-curated subset or
-        // reordering; MCP and the eval agent render from the same source of truth.
-        let names = tool_names(&tools_schema(true));
+        let names = tool_names(&tools_schema(true, true));
         let reg: Vec<_> = glossa::tools::registry::registry()
             .iter()
             .map(|d| d.name.to_string())
@@ -2047,7 +2059,7 @@ mod schema_tests {
 
     #[test]
     fn openai_tools_hide_graph_gated_when_off() {
-        let names = tool_names(&tools_schema(false));
+        let names = tool_names(&tools_schema(false, true));
         // related/neighbors aren't in the registry at all (withheld from the Reader profile as
         // measured clutter) — only glossary/reach/sql are graph-gated now.
         for gated in ["glossary", "reach", "sql"] {
@@ -2062,5 +2074,21 @@ mod schema_tests {
                 "graph-OFF must advertise ungated tool {ungated}; got {names:?}"
             );
         }
+    }
+
+    /// Task-3 serving parity: `verify` is withheld from the advertised schema when
+    /// `verify_available` is false, and present (graph tools notwithstanding) when true.
+    #[test]
+    fn openai_tools_hide_verify_when_unavailable() {
+        let names = tool_names(&tools_schema(true, false));
+        assert!(
+            !names.contains(&"verify".to_string()),
+            "verify must be withheld when unavailable; got {names:?}"
+        );
+        let names_on = tool_names(&tools_schema(true, true));
+        assert!(
+            names_on.contains(&"verify".to_string()),
+            "verify must be advertised when available; got {names_on:?}"
+        );
     }
 }

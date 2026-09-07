@@ -11,7 +11,7 @@
     },
     "n": {
       "default": null,
-      "description": "chunk number, exactly as shown in `[#n]` in a search result",
+      "description": "chunk number — the n in a `path#n` reference from a search result",
       "format": "uint64",
       "minimum": 0,
       "type": [
@@ -30,6 +30,14 @@
     "path": {
       "default": null,
       "description": "document path, exactly as shown in a search result (use with `n` instead of `node`)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "default": null,
+      "description": "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus.",
       "type": [
         "string",
         "null"

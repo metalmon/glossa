@@ -13,7 +13,7 @@
     },
     "n": {
       "default": null,
-      "description": "cited page number (PDF), as shown in `[#n]` — used for provenance and, if the file exceeds the cap, to deliver just that page",
+      "description": "cited page number (PDF) — the n in a `path#n` reference — used for provenance and, if the file exceeds the cap, to deliver just that page",
       "format": "uint32",
       "minimum": 0,
       "type": [

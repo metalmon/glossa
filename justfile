@@ -76,15 +76,20 @@ health:
 gw-logs:
     docker logs -f --tail 100 tensorzero-gateway-1
 
+# The `verify` gate is fail-closed at runtime (hidden until a corpus enables+calibrates it), but the
+# generated TZ catalog advertises the FULL tool set — so enable it here purely so `dump-tz-tools`
+# emits verify's schema/description alongside the rest.
+verify_gen_env := "GLOSSA_VERIFY_ENABLED=true GLOSSA_VERIFY_THRESHOLD_SINGLE=0.5 GLOSSA_VERIFY_THRESHOLD_MULTI=0.5"
+
 tools: (build-kb "force")
-    {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir {{tzcfg}}
+    {{preface}}{{verify_gen_env}} {{kb_bin}} mcp dump-tz-tools --config-dir {{tzcfg}}
     @echo "regenerated — run 'just gw-restart' to load the new schemas"
 
 # TZ gateway runs from the primary checkout (docker compose cwd); sync generated tool schemas there.
 gw_root := env_var_or_default("GLOSSA_GW_ROOT", "../glossa")
 
 tools-glossa: (build-kb "force")
-    {{preface}}{{kb_bin}} mcp dump-tz-tools --config-dir {{gw_root}}/eval/tensorzero/config
+    {{preface}}{{verify_gen_env}} {{kb_bin}} mcp dump-tz-tools --config-dir {{gw_root}}/eval/tensorzero/config
     @echo "regenerated {{gw_root}}/eval/tensorzero/config — run 'just gw-restart' from {{gw_root}}/eval/tensorzero"
 
 # ── enrich → export-tz → GEPA (against {{work}}) ───────────────────────────

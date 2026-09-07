@@ -218,7 +218,7 @@ mod tests {
         }
     }
     impl ChatTransport for MockTransport {
-        fn tools_schema(&self, _graph_on: bool) -> Value {
+        fn tools_schema(&self, _graph_on: bool, _verify_available: bool) -> Value {
             json!([])
         }
         fn call(

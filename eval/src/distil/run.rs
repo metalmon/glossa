@@ -2,7 +2,7 @@
 //! non-structural graph nodes, run `gen::generate_one` (generate + verify-gate) once per attempt,
 //! and write the kept synthetic golds as `[[case]]` rows to `--out` — the SAME `dataset.toml`
 //! shape `dataset_toml::parse_dataset_toml` reads back, so `kbx reason --gold <out>` and
-//! `kbx eval --dataset <out>` consume it unchanged.
+//! `kbx eval run --dataset <out>` consume it unchanged.
 //!
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.

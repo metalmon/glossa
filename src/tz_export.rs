@@ -90,6 +90,46 @@ fn splice(
     Ok(result)
 }
 
+/// Fetch the `verify` tool's spec (name/description/input_schema) from an isolated scratch
+/// workspace with a hand-written, force-calibrated `.glossa/ontology.toml` — used only when the
+/// real dump CWD's own `.glossa` has verify disabled/uncalibrated, so `full_tools` (built from the
+/// live CWD) dropped the route entirely (`GlossaServer::new`'s fail-closed `disable_route`,
+/// src/mcp.rs). Isolated on purpose: a global env-var override (`GLOSSA_VERIFY_ENABLED`) would work
+/// too but is process-global mutable state, unsafe to flip from `dump()` while other tests may be
+/// constructing `GlossaServer`s in parallel threads expecting the real default. A throwaway
+/// directory has no such side effect. Returns `Ok(None)` only if the registry ever drops `verify`
+/// entirely (nothing to backfill — the tools=[...] regions won't reference it either).
+fn fetch_verify_tool_spec() -> anyhow::Result<Option<rmcp::model::Tool>> {
+    let dir = std::env::temp_dir().join(format!(
+        "glossa-tz-export-verify-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(dir.join(".glossa"))
+        .with_context(|| format!("create scratch dir {}", dir.display()))?;
+    std::fs::write(
+        dir.join(".glossa").join("ontology.toml"),
+        "[verify]\nenabled = true\n[verify.threshold]\nsingle = 0.5\nmulti = 0.5\n",
+    )
+    .with_context(|| format!("write scratch ontology under {}", dir.display()))?;
+    let forced_srv = crate::mcp::GlossaServer::new(
+        dir.clone(),
+        crate::mcp::Profile::Full,
+        false,
+        crate::mcp::ServerFlags::default(),
+    );
+    let found = forced_srv
+        .tool_specs()
+        .into_iter()
+        .find(|t| t.name == "verify");
+    // Best-effort cleanup; a leaked scratch dir under the OS temp root is harmless.
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(found)
+}
+
 // ── public API ────────────────────────────────────────────────────────────────
 
 /// Sorted tool names the TZ **Reader**-profile dump would emit — i.e. the same
@@ -123,6 +163,9 @@ pub fn reader_tool_names() -> Vec<String> {
 ///   the `GENERATED TOOL LIST` markers.
 /// * Splices the `tools = [...]` line (Editor set — the enrich function, a read+edit agent)
 ///   between the `GENERATED ENRICH TOOL LIST` markers.
+/// * Splices the `tools = [...]` line (Reader set minus `verify` — the answer_hotpot_noverify
+///   function, selected by the launcher for a workspace that hasn't enabled/calibrated verify)
+///   between the `GENERATED NOVERIFY TOOL LIST` markers.
 ///
 /// Returns the number of tool JSON files written.
 pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
@@ -140,6 +183,22 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     );
     let mut full_tools = full_srv.tool_specs();
     full_tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // `verify` is fail-closed for EVERY profile (`disable_route("verify")` in `GlossaServer::new`
+    // applies regardless of `profile` — src/mcp.rs) whenever the CWD's `.glossa` isn't
+    // `enabled && is_calibrated`. This generator's own working tree is the common uncalibrated
+    // case, so `full_tools` legitimately drops `verify` here too — which would silently delete the
+    // `[tools.verify]` block (and stop refreshing `tools/verify.json`) this splice writes below,
+    // even though the `answer_hotpot` tools-list region (built further down) is about to be made to
+    // reference it by name. Both TZ regions must be deterministic (spec §2.3), so backfill the real
+    // spec from an isolated, force-calibrated scratch workspace rather than depending on the dump
+    // CWD's own gate state.
+    if !full_tools.iter().any(|t| t.name == "verify") {
+        if let Some(verify_tool) = fetch_verify_tool_spec()? {
+            full_tools.push(verify_tool);
+            full_tools.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
 
     // 2b. Reader profile — LIST set: names for the answer-function tools = [...] line.
     let reader_srv = crate::mcp::GlossaServer::new(
@@ -215,11 +274,42 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     ));
 
     // 5. Build the tool-list line (reader set — the answer_hotpot function).
-    let names: Vec<String> = reader_tools
+    //
+    // `reader_tools` is the Reader-profile `tool_specs()` (2b above), and `GlossaServer::new`
+    // fail-closed disables the `verify` route when the CWD's `.glossa` isn't
+    // `enabled && is_calibrated` (src/mcp.rs) — so under a default/uncalibrated workspace (the
+    // common case when this generator runs), `reader_tools` legitimately lacks `verify` already
+    // (see `reader_profile_tool_names_match_registry` below). The two static TZ regions this
+    // function writes must NOT inherit that CWD-dependent state (spec §2.3, load-bearing): they are
+    // shared config, generated once, and read by every corpus regardless of that corpus's own gate
+    // state. So both regions are built by NAME FILTER off the same base list, not off whatever
+    // `reader_tools` happened to contain at dump time:
+    //   - `answer_hotpot`          (this region) — the reader set with `verify` GUARANTEED PRESENT
+    //     (added back in if `reader_tools` dropped it; `verify` is a real registry tool with an
+    //     exec arm, so advertising it here is always valid).
+    //   - `answer_hotpot_noverify` (below)       — the same set with `verify` GUARANTEED ABSENT.
+    // Per-workspace enforcement of the *real* `verify_available` happens at runtime via the
+    // launcher's `--tensorzero-function` choice (§2.3), not by which names land in this file.
+    let mut with_verify_names: Vec<String> =
+        reader_tools.iter().map(|t| t.name.to_string()).collect();
+    if !with_verify_names.iter().any(|n| n == "verify") {
+        with_verify_names.push("verify".to_string());
+        with_verify_names.sort();
+    }
+    let names: Vec<String> = with_verify_names
         .iter()
-        .map(|t| format!("\"{}\"", t.name))
+        .map(|n| format!("\"{}\"", n))
         .collect();
     let tool_list = format!("tools = [{}]\n", names.join(", "));
+
+    // The same reader set, minus `verify`, for the answer_hotpot_noverify function (used when the
+    // workspace has verify disabled/uncalibrated — the launcher selects it via --tensorzero-function).
+    let noverify_names: Vec<String> = with_verify_names
+        .iter()
+        .filter(|n| n.as_str() != "verify")
+        .map(|n| format!("\"{}\"", n))
+        .collect();
+    let noverify_list = format!("tools = [{}]\n", noverify_names.join(", "));
 
     // 5b. Build the tool-list line (editor set — the enrich function). Append the runtime `done`
     // tool: enrich-only (the answer/reader list above does NOT get it — its completion is a text
@@ -253,6 +343,12 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
         "# <<< GENERATED ENRICH TOOL LIST",
         &enrich_list,
     )?;
+    let content = splice(
+        &content,
+        "# >>> GENERATED NOVERIFY TOOL LIST",
+        "# <<< GENERATED NOVERIFY TOOL LIST",
+        &noverify_list,
+    )?;
     std::fs::write(&toml_path, &content)
         .with_context(|| format!("write {}", toml_path.display()))?;
 
@@ -285,6 +381,12 @@ type = \"chat\"\n\
 # >>> GENERATED TOOL LIST\n\
 tools = [\"old\"]\n\
 # <<< GENERATED TOOL LIST\n\
+\n\
+[functions.answer_hotpot_noverify]\n\
+type = \"chat\"\n\
+# >>> GENERATED NOVERIFY TOOL LIST\n\
+tools = [\"old\"]\n\
+# <<< GENERATED NOVERIFY TOOL LIST\n\
 \n\
 [functions.enrich]\n\
 type = \"chat\"\n\
@@ -411,6 +513,34 @@ type = \"boolean\"\n";
             !answer_region.contains("\"done\""),
             "answer list must NOT carry 'done'"
         );
+
+        // (h) determinism (spec §2.3): the answer_hotpot (with-verify) region MUST carry "verify"
+        // and the answer_hotpot_noverify region MUST NOT — regardless of the CWD's own verify-gate
+        // state (the reader profile used to build `reader_tools` legitimately lacks "verify" under
+        // a default/uncalibrated workspace, per `reader_profile_tool_names_match_registry` below;
+        // `dump()` must add it back in for this region rather than passing that state through).
+        assert!(
+            answer_region.contains("\"verify\""),
+            "answer_hotpot region must guarantee 'verify' present"
+        );
+        // the with-verify region (answer_hotpot) contains "verify"; the noverify region does not
+        let out = std::fs::read_to_string(config_dir.join("tensorzero.toml")).unwrap();
+        let noverify = out
+            .split("# >>> GENERATED NOVERIFY TOOL LIST")
+            .nth(1)
+            .unwrap()
+            .split("# <<< GENERATED NOVERIFY TOOL LIST")
+            .next()
+            .unwrap();
+        assert!(
+            !noverify.contains("\"verify\""),
+            "noverify region must not list verify"
+        );
+        // the noverify region otherwise carries the same reader set (e.g. "search").
+        assert!(
+            noverify.contains("\"search\""),
+            "noverify region should still carry the rest of the reader set"
+        );
     }
 
     #[test]
@@ -435,6 +565,13 @@ type = \"boolean\"\n";
             .collect();
         let reader = reader_tool_names();
         for name in &reg {
+            // `verify` is fail-closed: it lives in the registry (advertised in every profile) but is
+            // WITHHELD from the live router until the corpus enables+calibrates the gate, so a
+            // default-config Reader dump legitimately lacks it. Its description byte-match is enforced
+            // (with the gate enabled) by mcp::tests::mcp_tool_list_matches_registry instead.
+            if name == "verify" {
+                continue;
+            }
             assert!(
                 reader.contains(name),
                 "registry tool '{name}' is missing from the Reader-profile MCP dump \

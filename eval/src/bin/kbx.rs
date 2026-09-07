@@ -1,7 +1,9 @@
 //! `kbx` — the file-first eval toolkit CLI: `init` scaffolds a workspace (lab.toml + editable
-//! answer/judge prompts + a starter dataset.toml + runs/), `eval` runs a dataset.toml against a
-//! corpus with the OpenAI-compatible agent backend, scores EM/F1, optionally judges each case,
+//! answer/judge prompts + a starter dataset.toml + runs/), `eval run` runs a dataset.toml against
+//! a corpus with the OpenAI-compatible agent backend, scores EM/F1, optionally judges each case,
 //! and writes a `runs/<tag>/report.md` (+ per-case trace files) via `kb_eval::report::write_run`.
+//! `eval calibrate` sweeps the answer-grounding gate's verify-threshold over a past run
+//! (`kb_eval::calibrate::run`).
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -12,6 +14,7 @@ use kb_eval::backend::openai::{
 };
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
+use kb_eval::calibrate::{self, CalibrateArgs};
 use kb_eval::dataset::Question;
 use kb_eval::dataset_ops;
 use kb_eval::dataset_toml::parse_dataset_toml;
@@ -83,73 +86,11 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Run a corpus's `.glossa/kbx/dataset.toml` against it and write a run report.
+    /// Score a dataset against a corpus (`run`), or calibrate the answer-grounding gate's
+    /// verify-threshold from a past run (`calibrate`).
     Eval {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
-        path: Option<PathBuf>,
-        /// Run tag (report dir name under runs/). Default: slug(root)-slug(dataset).
-        #[arg(long)]
-        tag: Option<String>,
-        /// Override the workspace's default `dataset.toml`.
-        #[arg(long)]
-        dataset: Option<PathBuf>,
-        /// Override the workspace's default `answer.md` (the answer-agent system prompt file).
-        #[arg(long)]
-        prompt: Option<PathBuf>,
-        /// Override the workspace's default `judge.md`.
-        #[arg(long)]
-        judge: Option<PathBuf>,
-        /// Only run the first N cases (after --tag-filter).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Only run cases whose `tags` include this value.
-        #[arg(long = "tag-filter")]
-        tag_filter: Option<String>,
-        /// Skip LLM judging even if lab.toml has a [judge] endpoint configured.
-        #[arg(long = "no-judge")]
-        no_judge: bool,
-        /// Skip cases whose id already has a persisted result under runs/<tag>/cases/, then merge
-        /// the old + newly-run cases into the final report.
-        #[arg(long)]
-        resume: bool,
-        /// Never draw the progress bar, even on a TTY.
-        #[arg(long = "no-progress")]
-        no_progress: bool,
-        /// Worker-pool size for the per-case reader+judge loop (default 3). Falls back to
-        /// `lab.toml`'s `[tuning] jobs_eval`, then the built-in default, when unset. `0` clamps to
-        /// 1 (never zero workers). `1` reproduces the sequential run exactly.
-        #[arg(long)]
-        jobs: Option<usize>,
-        /// Record each case's full chat trajectory (system+user, every tool round, final answer)
-        /// to `runs/<tag>/trajectories.jsonl`, joining the judge verdict as the reward — the raw
-        /// material for `kbx export`. OFF by default: no file, no overhead, byte-identical.
-        #[arg(long)]
-        capture: bool,
-        /// With `--capture`, run each case this many times so several varied trajectories per
-        /// question accumulate (the reader is stochastic at temp>0) — needed for DPO pairs.
-        /// Ignored without `--capture`; the reported EM/F1/verdict still come from the first sample.
-        #[arg(long, default_value_t = 1)]
-        samples: usize,
-        /// Predict-only: run the agent over the dataset's questions WITHOUT scoring — skips the
-        /// judge, keeps `answerable=false` cases (there are no golds to be un/answerable), and
-        /// tolerates empty gold answers. Use for a fresh question list you only want answered. The
-        /// end-of-run graded-quality summary is omitted (nothing to score against).
-        #[arg(long = "no-gold")]
-        no_gold: bool,
-        /// Also write a flat question->answer CSV for handing to the customer to grade — always with
-        /// a trailing blank `quality` column. With golds it also carries `gold`+`verdict`; under
-        /// `--no-gold` just `id;question;answer;quality`. Excel-oriented: UTF-8 BOM (Cyrillic opens
-        /// on double-click), `;`-separated (the list separator most non-US Excel locales expect), and
-        /// every field collapsed to one line (no row spill). A relative path resolves under
-        /// `runs/<tag>/` (never the indexed corpus); absolute is used as given.
-        #[arg(long)]
-        answers: Option<PathBuf>,
-        /// Override the `lab.toml` path (default `<root>/.glossa/kbx/lab.toml`). Use to run a
-        /// cross-model job: point eval at e.g. `lab.9b.toml` while a concurrent `kbx train` uses
-        /// `lab.35b.toml`. Prompt files still come from the workspace.
-        #[arg(long)]
-        lab: Option<PathBuf>,
+        #[command(subcommand)]
+        cmd: EvalCmd,
     },
     /// Post-process captured `runs/<tag>/trajectories.jsonl` into an Unsloth-ready fine-tuning
     /// dataset: SFT (`messages`/`sharegpt`) from Correct trajectories, or DPO
@@ -454,6 +395,17 @@ enum Cmd {
     },
 }
 
+/// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
+/// <path>`), added alongside `calibrate` (the answer-grounding gate's verify-threshold sweep,
+/// `kb_eval::calibrate::run`) so `eval` can host both without a name clash.
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Score a dataset against a corpus (the former `kbx eval <path>`).
+    Run(EvalArgs),
+    /// Sweep the verify-gate threshold over a run and (optionally) write it to ontology.toml.
+    Calibrate(CalibrateArgs),
+}
+
 /// `kbx dataset` subcommands — pure file ops on the `[[case]]` dataset format (logic lives in
 /// `kb_eval::dataset_ops`; this layer only parses args and prints).
 #[derive(Subcommand)]
@@ -507,40 +459,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Eval {
-            path,
-            tag,
-            dataset,
-            prompt,
-            judge: judge_path,
-            limit,
-            tag_filter,
-            no_judge,
-            resume,
-            no_progress,
-            jobs,
-            capture,
-            samples,
-            no_gold,
-            answers,
-            lab,
-        } => run_eval(EvalArgs {
-            path,
-            tag,
-            dataset,
-            prompt,
-            judge: judge_path,
-            limit,
-            tag_filter,
-            no_judge,
-            resume,
-            no_progress,
-            jobs,
-            capture,
-            samples,
-            no_gold,
-            answers,
-            lab,
-        }),
+            cmd: EvalCmd::Run(args),
+        } => run_eval(args),
+        Cmd::Eval {
+            cmd: EvalCmd::Calibrate(args),
+        } => calibrate::run(args),
         Cmd::Export {
             path,
             from,
@@ -717,27 +640,72 @@ fn main() -> Result<()> {
     }
 }
 
+#[derive(clap::Args)]
 struct EvalArgs {
+    /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+    /// current directory upward, else the current directory).
     path: Option<PathBuf>,
+    /// Run tag (report dir name under runs/). Default: slug(root)-slug(dataset).
+    #[arg(long)]
     tag: Option<String>,
+    /// Override the workspace's default `dataset.toml`.
+    #[arg(long)]
     dataset: Option<PathBuf>,
+    /// Override the workspace's default `answer.md` (the answer-agent system prompt file).
+    #[arg(long)]
     prompt: Option<PathBuf>,
+    /// Override the workspace's default `judge.md`.
+    #[arg(long)]
     judge: Option<PathBuf>,
+    /// Only run the first N cases (after --tag-filter).
+    #[arg(long)]
     limit: Option<usize>,
+    /// Only run cases whose `tags` include this value.
+    #[arg(long = "tag-filter")]
     tag_filter: Option<String>,
+    /// Skip LLM judging even if lab.toml has a [judge] endpoint configured.
+    #[arg(long = "no-judge")]
     no_judge: bool,
+    /// Skip cases whose id already has a persisted result under runs/<tag>/cases/, then merge
+    /// the old + newly-run cases into the final report.
+    #[arg(long)]
     resume: bool,
+    /// Never draw the progress bar, even on a TTY.
+    #[arg(long = "no-progress")]
     no_progress: bool,
+    /// Worker-pool size for the per-case reader+judge loop (default 3). Falls back to
+    /// `lab.toml`'s `[tuning] jobs_eval`, then the built-in default, when unset. `0` clamps to
+    /// 1 (never zero workers). `1` reproduces the sequential run exactly.
+    #[arg(long)]
     jobs: Option<usize>,
-    /// Capture full chat trajectories to `runs/<tag>/trajectories.jsonl`.
+    /// Record each case's full chat trajectory (system+user, every tool round, final answer)
+    /// to `runs/<tag>/trajectories.jsonl`, joining the judge verdict as the reward — the raw
+    /// material for `kbx export`. OFF by default: no file, no overhead, byte-identical.
+    #[arg(long)]
     capture: bool,
-    /// With `--capture`, samples per case (varied trajectories for DPO). Default 1.
+    /// With `--capture`, run each case this many times so several varied trajectories per
+    /// question accumulate (the reader is stochastic at temp>0) — needed for DPO pairs.
+    /// Ignored without `--capture`; the reported EM/F1/verdict still come from the first sample.
+    #[arg(long, default_value_t = 1)]
     samples: usize,
-    /// Predict-only: run the agent without scoring (no judge, keep unanswerable, tolerate empty gold).
+    /// Predict-only: run the agent over the dataset's questions WITHOUT scoring — skips the
+    /// judge, keeps `answerable=false` cases (there are no golds to be un/answerable), and
+    /// tolerates empty gold answers. Use for a fresh question list you only want answered. The
+    /// end-of-run graded-quality summary is omitted (nothing to score against).
+    #[arg(long = "no-gold")]
     no_gold: bool,
-    /// Optional path for a question->answer CSV deliverable (relative resolves under runs/<tag>/).
+    /// Also write a flat question->answer CSV for handing to the customer to grade — always with
+    /// a trailing blank `quality` column. With golds it also carries `gold`+`verdict`; under
+    /// `--no-gold` just `id;question;answer;quality`. Excel-oriented: UTF-8 BOM (Cyrillic opens
+    /// on double-click), `;`-separated (the list separator most non-US Excel locales expect), and
+    /// every field collapsed to one line (no row spill). A relative path resolves under
+    /// `runs/<tag>/` (never the indexed corpus); absolute is used as given.
+    #[arg(long)]
     answers: Option<PathBuf>,
-    /// Override the lab.toml path (default `<root>/.glossa/kbx/lab.toml`) — for cross-model runs.
+    /// Override the `lab.toml` path (default `<root>/.glossa/kbx/lab.toml`). Use to run a
+    /// cross-model job: point eval at e.g. `lab.9b.toml` while a concurrent `kbx train` uses
+    /// `lab.35b.toml`. Prompt files still come from the workspace.
+    #[arg(long)]
     lab: Option<PathBuf>,
 }
 
@@ -1000,6 +968,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             type Sample = (
                 String,                                        // answer
                 Vec<String>,                                   // tools (deduped names)
+                Vec<String>,                                   // chunk_paths (deduped read-cited doc paths)
                 String,                                        // transcript
                 f32,                                           // em
                 f32,                                           // f1
@@ -1044,9 +1013,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // This sample's exact trace file — the one `answer*()` created on THIS worker thread —
                 // read straight from the thread-local rather than diffing the trace dir (which races
                 // under concurrency). Best-effort: empty when tracing was disabled / no file recorded.
-                let (tools, transcript) = match glossa::trace::last_trace_path() {
+                let (tools, chunk_paths, transcript) = match glossa::trace::last_trace_path() {
                     Some(p) => parse_trace_file(&p),
-                    None => (Vec::new(), String::new()),
+                    None => (Vec::new(), Vec::new(), String::new()),
                 };
 
                 let golds = gold_forms(q);
@@ -1127,13 +1096,25 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 }
 
                 (
-                    answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode, errored,
+                    answer, tools, chunk_paths, transcript, em, f1, verdict, reason, judge_raw,
+                    episode, errored,
                 )
             };
 
             // Sample 0 produces the reported CaseResult (and its trajectory when capturing).
-            let (answer, tools, transcript, em, f1, verdict, reason, judge_raw, episode, errored) =
-                run_sample(args.capture);
+            let (
+                answer,
+                tools,
+                chunk_paths,
+                transcript,
+                em,
+                f1,
+                verdict,
+                reason,
+                judge_raw,
+                episode,
+                errored,
+            ) = run_sample(args.capture);
 
             // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
             if args.capture {
@@ -1156,7 +1137,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 push(&answer, &episode, verdict);
                 for _ in 1..n_samples {
                     let s = run_sample(true);
-                    push(&s.0, &s.8, s.5);
+                    push(&s.0, &s.9, s.6);
                 }
             }
 
@@ -1177,6 +1158,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 f1,
                 em,
                 tools,
+                final_answer: answer.clone(),
                 answer,
                 transcript,
                 judge_raw,
@@ -1184,6 +1166,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 needs_graph: q.needs_graph.clone(),
                 errored,
                 answerable: q.answerable,
+                chunk_paths,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
@@ -1531,14 +1514,26 @@ fn gold_forms(q: &Question) -> Vec<String> {
 
 /// Parse a single case's trace file (the exact path `TraceLog::to_dir` created on this case's
 /// worker thread, retrieved via `glossa::trace::last_trace_path`) into (deduped tool names in
-/// first-seen order, raw JSONL trace text). Best-effort: an empty pair when the file is missing or
-/// unreadable (e.g. the corpus has tracing disabled) — the run stays functional, it just carries no
-/// tool/transcript detail for that case. Attributing by the known path (not a directory diff) is
-/// race-free under the parallel case pool.
-fn parse_trace_file(path: &Path) -> (Vec<String>, String) {
+/// first-seen order, deduped `read`-cited document paths in first-seen order, raw JSONL trace
+/// text). Best-effort: empty when the file is missing or unreadable (e.g. the corpus has tracing
+/// disabled) — the run stays functional, it just carries no tool/chunk/transcript detail for that
+/// case. Attributing by the known path (not a directory diff) is race-free under the parallel case
+/// pool.
+///
+/// `chunk_paths` reads the `path`+`n` args logged for each `"read"` entry (`glossa::tools::read`
+/// logs `{"path": <resolved path>, "n": <n>}` for a document chunk read — see
+/// `src/tools/mod.rs`) and renders them as the `path#n` chunk-anchor token — `Task 9`'s
+/// `glossa::gate::read_chunk_text` resolver expects that exact `path#loc` shape and falls back to
+/// ordinal 1 when the `#n` is missing, so a bare path here would silently mis-attribute grounding
+/// to chunk #1 instead of whatever chunk the agent actually read. A graph-node read
+/// (`{"node": ...}`) or notebook read (`{"notebook": ...}`) has no `path` key and is skipped,
+/// since those aren't corpus chunks the grounding-gate calibrator (Task 9) can re-fetch.
+fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, String) {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut tools = Vec::new();
     let mut seen = HashSet::new();
+    let mut chunk_paths = Vec::new();
+    let mut seen_paths = HashSet::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -1548,10 +1543,28 @@ fn parse_trace_file(path: &Path) -> (Vec<String>, String) {
                 if seen.insert(t.to_string()) {
                     tools.push(t.to_string());
                 }
+                if t == "read" {
+                    if let Some(p) = v
+                        .get("args")
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str())
+                        .filter(|p| !p.is_empty())
+                    {
+                        let n = v
+                            .get("args")
+                            .and_then(|a| a.get("n"))
+                            .and_then(|n| n.as_u64())
+                            .unwrap_or(1);
+                        let token = format!("{p}#{n}");
+                        if seen_paths.insert(token.clone()) {
+                            chunk_paths.push(token);
+                        }
+                    }
+                }
             }
         }
     }
-    (tools, text)
+    (tools, chunk_paths, text)
 }
 
 /// Stable slug: `slug(root basename)-slug(dataset stem)` — no clock in it, so repeat runs against
@@ -1655,8 +1668,9 @@ mod tests {
     fn parse_trace_file_is_empty_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.jsonl");
-        let (tools, transcript) = parse_trace_file(&missing);
+        let (tools, chunk_paths, transcript) = parse_trace_file(&missing);
         assert!(tools.is_empty());
+        assert!(chunk_paths.is_empty());
         assert!(transcript.is_empty());
     }
 
@@ -1667,29 +1681,41 @@ mod tests {
         std::fs::write(
             &file,
             concat!(
-                "{\"ts_ms\":2,\"tool\":\"read\",\"args\":{},\"result\":{}}\n",
-                "{\"ts_ms\":3,\"tool\":\"read\",\"args\":{},\"result\":{}}\n",
-                "{\"ts_ms\":4,\"tool\":\"search\",\"args\":{},\"result\":[]}\n",
+                "{\"ts_ms\":2,\"tool\":\"read\",\"args\":{\"path\":\"a.md\",\"n\":1},\"result\":{\"path\":\"a.md\"}}\n",
+                "{\"ts_ms\":3,\"tool\":\"read\",\"args\":{\"path\":\"a.md\",\"n\":1},\"result\":{\"path\":\"a.md\"}}\n",
+                "{\"ts_ms\":4,\"tool\":\"read\",\"args\":{\"path\":\"b.md\",\"n\":2},\"result\":{\"path\":\"b.md\"}}\n",
+                "{\"ts_ms\":5,\"tool\":\"read\",\"args\":{\"node\":\"Resolution:x\"},\"result\":{\"node\":\"Resolution:x\"}}\n",
+                "{\"ts_ms\":6,\"tool\":\"search\",\"args\":{},\"result\":[]}\n",
             ),
         )
         .unwrap();
 
-        let (tools, transcript) = parse_trace_file(&file);
+        let (tools, chunk_paths, transcript) = parse_trace_file(&file);
         assert_eq!(tools, vec!["read".to_string(), "search".to_string()]);
+        // Deduped `path#n` tokens (the `#n` chunk anchor Task 9's resolver requires), first-seen
+        // order; the graph-node read (no `path` key) is skipped.
+        assert_eq!(
+            chunk_paths,
+            vec!["a.md#1".to_string(), "b.md#2".to_string()]
+        );
         assert!(transcript.contains("read") && transcript.contains("search"));
     }
 
     #[test]
     fn eval_cmd_parses_jobs_flag() {
-        let cli = Cli::try_parse_from(["kbx", "eval", "--jobs", "5"]).unwrap();
+        let cli = Cli::try_parse_from(["kbx", "eval", "run", "--jobs", "5"]).unwrap();
         match cli.cmd {
-            Cmd::Eval { jobs, .. } => assert_eq!(jobs, Some(5)),
-            _ => panic!("expected Cmd::Eval"),
+            Cmd::Eval {
+                cmd: EvalCmd::Run(EvalArgs { jobs, .. }),
+            } => assert_eq!(jobs, Some(5)),
+            _ => panic!("expected Cmd::Eval Run"),
         }
-        let cli = Cli::try_parse_from(["kbx", "eval"]).unwrap();
+        let cli = Cli::try_parse_from(["kbx", "eval", "run"]).unwrap();
         match cli.cmd {
-            Cmd::Eval { jobs, .. } => assert!(jobs.is_none()),
-            _ => panic!("expected Cmd::Eval"),
+            Cmd::Eval {
+                cmd: EvalCmd::Run(EvalArgs { jobs, .. }),
+            } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Eval Run"),
         }
     }
 
@@ -1893,25 +1919,30 @@ mod tests {
 
     #[test]
     fn eval_capture_defaults_off_and_samples_one() {
-        let cli = Cli::try_parse_from(["kbx", "eval"]).unwrap();
+        let cli = Cli::try_parse_from(["kbx", "eval", "run"]).unwrap();
         match cli.cmd {
             Cmd::Eval {
-                capture, samples, ..
+                cmd: EvalCmd::Run(EvalArgs {
+                    capture, samples, ..
+                }),
             } => {
                 assert!(!capture, "--capture must default OFF (non-breaking)");
                 assert_eq!(samples, 1, "--samples must default to 1");
             }
-            _ => panic!("expected Cmd::Eval"),
+            _ => panic!("expected Cmd::Eval Run"),
         }
-        let cli = Cli::try_parse_from(["kbx", "eval", "--capture", "--samples", "4"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["kbx", "eval", "run", "--capture", "--samples", "4"]).unwrap();
         match cli.cmd {
             Cmd::Eval {
-                capture, samples, ..
+                cmd: EvalCmd::Run(EvalArgs {
+                    capture, samples, ..
+                }),
             } => {
                 assert!(capture);
                 assert_eq!(samples, 4);
             }
-            _ => panic!("expected Cmd::Eval"),
+            _ => panic!("expected Cmd::Eval Run"),
         }
     }
 

@@ -7,7 +7,7 @@
 //! to the OpenAI-function core `{ "type": "object", "properties": {…}, "required": […] }`.
 
 use crate::mcp::{
-    GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs,
+    GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs, VerifyArgs,
 };
 
 pub const DESC_SEARCH: &str = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.";
@@ -22,6 +22,8 @@ pub const DESC_GREP: &str = "Find an exact string in the text — a code, identi
 
 pub const DESC_GLOB: &str = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text).";
 
+pub const DESC_VERIFY: &str = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on.";
+
 pub const DESC_SQL: &str = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed.";
 
 /// A single agent tool declaration: name, model-facing description, JSON-Schema for its
@@ -31,6 +33,10 @@ pub struct ToolDescriptor {
     pub description: &'static str,
     pub params_schema: serde_json::Value,
     pub graph_gated: bool,
+    /// Withheld from the advertised tool schema when the answer-grounding gate is
+    /// disabled/uncalibrated for the corpus (`glossa::gate::VerifyConfig`) — serving parity with
+    /// the live MCP server's fail-closed advertisement. Set only on `verify`.
+    pub verify_gated: bool,
 }
 
 /// Normalize a `schemars::schema_for!` result to the OpenAI-function core schema:
@@ -66,42 +72,56 @@ pub fn registry() -> Vec<ToolDescriptor> {
             description: DESC_SEARCH,
             params_schema: schema_of::<SearchArgs>(),
             graph_gated: false,
+            verify_gated: false,
         },
         ToolDescriptor {
             name: "read",
             description: DESC_READ,
             params_schema: schema_of::<ReadArgs>(),
             graph_gated: false,
+            verify_gated: false,
         },
         ToolDescriptor {
             name: "grep",
             description: DESC_GREP,
             params_schema: schema_of::<GrepArgs>(),
             graph_gated: false,
+            verify_gated: false,
         },
         ToolDescriptor {
             name: "glob",
             description: DESC_GLOB,
             params_schema: schema_of::<GlobArgs>(),
             graph_gated: false,
+            verify_gated: false,
+        },
+        ToolDescriptor {
+            name: "verify",
+            description: DESC_VERIFY,
+            params_schema: schema_of::<VerifyArgs>(),
+            graph_gated: false,
+            verify_gated: true,
         },
         ToolDescriptor {
             name: "glossary",
             description: DESC_GLOSSARY,
             params_schema: schema_of::<GlossaryArgs>(),
             graph_gated: true,
+            verify_gated: false,
         },
         ToolDescriptor {
             name: "reach",
             description: DESC_REACH,
             params_schema: schema_of::<ReachArgs>(),
             graph_gated: true,
+            verify_gated: false,
         },
         ToolDescriptor {
             name: "sql",
             description: DESC_SQL,
             params_schema: schema_of::<GraphQueryArgs>(),
             graph_gated: true,
+            verify_gated: false,
         },
     ]
 }
@@ -114,7 +134,7 @@ mod tests {
     fn registry_lists_core_tools_with_schemas() {
         let r = registry();
         let names: Vec<_> = r.iter().map(|d| d.name).collect();
-        for t in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
+        for t in ["search", "read", "grep", "glob", "verify", "glossary", "reach", "sql"] {
             assert!(names.contains(&t), "registry missing {t}");
         }
         // withheld from the Reader profile: measured clutter (related/neighbors)
@@ -123,10 +143,10 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            7,
-            "registry must contain exactly the Reader profile's 7 tools"
+            8,
+            "registry must contain exactly the Reader profile's 8 tools"
         );
-        // graph tools gated; retrieval tools not
+        // graph tools gated; retrieval + the model-free grounding gate are not
         let g = |n| r.iter().find(|d| d.name == n).unwrap();
         assert!(g("glossary").graph_gated && g("reach").graph_gated && g("sql").graph_gated);
         assert!(
@@ -134,7 +154,13 @@ mod tests {
                 && !g("read").graph_gated
                 && !g("grep").graph_gated
                 && !g("glob").graph_gated
+                && !g("verify").graph_gated
         );
+        // verify alone is gated on the answer-grounding gate being enabled/calibrated
+        assert!(g("verify").verify_gated, "verify must be verify_gated");
+        for t in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
+            assert!(!g(t).verify_gated, "{t} must NOT be verify_gated");
+        }
         // schema is a valid object with properties for a known arg
         let s = &g("search").params_schema;
         assert_eq!(s["type"], "object");

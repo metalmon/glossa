@@ -10,7 +10,8 @@
       ]
     },
     "n": {
-      "description": "chunk number to read, exactly as shown in `[#n]` in a search result (page number for PDFs)",
+      "default": 0,
+      "description": "chunk number to read — the n in a `path#n` reference (page number for PDFs). Omit when `path` already carries the `#n` anchor.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -24,13 +25,12 @@
       ]
     },
     "path": {
-      "description": "document path, exactly as shown in a search result",
+      "description": "the copy-ready `path#n` token exactly as a search/grep/read result showed it (or just the document path, paired with `n` below)",
       "type": "string"
     }
   },
   "required": [
-    "path",
-    "n"
+    "path"
   ],
   "type": "object"
 }

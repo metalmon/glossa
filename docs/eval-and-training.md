@@ -147,7 +147,7 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   (today's behavior).
 - **user_sim dialogue gate** — an opt-in patient simulated user that deflects a non-answer back into
   the reader loop instead of accepting it (eval + train).
-- **Customer-facing prediction runs** — `kbx eval --no-gold` runs the reader over a question list
+- **Customer-facing prediction runs** — `kbx eval run --no-gold` runs the reader over a question list
   WITHOUT scoring (skips the judge, keeps `answerable=false` cases, tolerates empty gold answers), so
   a fresh unanswered question set can be run as-is. `--answers <path>` writes a flat question→answer
   CSV (UTF-8 BOM so Excel opens Cyrillic, RFC-4180 quoting, a trailing blank `quality` column for the
@@ -196,7 +196,7 @@ kb graph doctor && kb graph prune    # clean orphans / stale (see graph-lifecycl
 kbx distil                           # densify with a strong model (optional)
 kbx distil --aliases-only            # enrich search aliases → better retrieval → better capture
 kbx distil --emit-golds qa.toml      # synthesize (Q,A) golds from the graph
-kbx eval --dataset qa.toml --capture --tag teacher   # solve the golds, capture trajectories
+kbx eval run --dataset qa.toml --capture --tag teacher   # solve the golds, capture trajectories
 kbx export --from teacher --format sft --out teacher-sft.jsonl
 ```
 

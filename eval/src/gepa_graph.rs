@@ -953,7 +953,15 @@ pub fn run(
     let idx = DocIndex::open_or_create(&cfg.work).context("open index for graph GEPA")?;
     let graph = GraphStore::open(&cfg.work).ok();
     let spec = ChainSpec::from_ontology(&Ontology::load_or_default(&cfg.work));
-    let tools = crate::backend::openai::tools_schema(graph.is_some());
+    // Serving parity: same verify-availability gate the reader uses (`backend::openai::
+    // answer_capturing`) — GEPA's reflected prompt should describe the tool set the reader will
+    // actually be offered.
+    let verify_available = {
+        let glossa_dir = cfg.work.join(".glossa");
+        let c = glossa::gate::VerifyConfig::resolve(&glossa_dir);
+        c.enabled && c.is_calibrated()
+    };
+    let tools = crate::backend::openai::tools_schema(graph.is_some(), verify_available);
     // Full chat-completions URL, used verbatim (no suffix appended).
     let url = cfg.endpoint.clone();
 
@@ -1401,7 +1409,7 @@ mod tests {
         // Tool reference is rendered from the reader's ACTUAL schema (single source of truth),
         // graph-ON so the graph tools (glossary/reach/sql) the old hardcoded list drifted from
         // are present.
-        let tools = crate::backend::openai::tools_schema(true);
+        let tools = crate::backend::openai::tools_schema(true, true);
         let ctx = GraphReflectContext {
             parent_prompt: "seed graph prompt".to_string(),
             parent_score: 0.25,

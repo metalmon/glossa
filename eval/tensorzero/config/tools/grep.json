@@ -117,6 +117,14 @@
       "description": "The text to find. It is a regex by default, so `A|B` matches A or B, `[0-9]+` matches digits, `.` matches any character; plain text also works as-is. For a value list, grep one value or the parameter name with `context` to pull its table window.",
       "type": "string"
     },
+    "scope": {
+      "default": null,
+      "description": "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. ANDed with `path`/`glob` when set. Omit to search the whole corpus.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "word": {
       "default": null,
       "description": "match whole words only (-w)",

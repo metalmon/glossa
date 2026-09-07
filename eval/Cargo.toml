@@ -45,6 +45,9 @@ glossa-constraint = { path = "../constraint", optional = true }
 anyhow = "1"
 regex = "1"
 toml = "1.1"
+# Edit-in-place `ontology.toml` writes (`calibrate::write_threshold`) that preserve unrelated
+# tables/comments — plain `toml`'s round-trip loses formatting the `toml` crate doesn't model.
+toml_edit = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -70,3 +73,6 @@ jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+# Deterministic mtimes in `calibrate::latest_run` tests instead of racing a coarse-granularity
+# Windows FS clock with thread::sleep (same rationale as the root crate's freshen tests).
+filetime = "0.2"

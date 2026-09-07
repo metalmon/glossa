@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "answer": {
+      "description": "The final answer to gate (submit exactly what you would send the user).",
+      "type": "string"
+    },
+    "chunk_paths": {
+      "default": null,
+      "description": "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "answer"
+  ],
+  "type": "object"
+}

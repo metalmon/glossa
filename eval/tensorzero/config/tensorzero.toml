@@ -341,7 +341,7 @@ max_tokens = 4096
 [functions.answer_hotpot]
 type = "chat"
 # >>> GENERATED TOOL LIST
-tools = ["get_ontology", "get_source_file", "glob", "glossary", "grep", "ls", "reach", "read", "search", "sql"]
+tools = ["get_ontology", "get_source_file", "glob", "glossary", "grep", "ls", "reach", "read", "search", "sql", "verify"]
 # <<< GENERATED TOOL LIST
 parallel_tool_calls = true   # let the model issue several search/grep/read calls in one turn
 
@@ -361,6 +361,32 @@ extra_body = [
 ]
 # Add more [functions.answer_hotpot.variants.<name>] blocks (with `weight`) to A/B
 # alternative prompts; TensorZero optimization can then propose better variants.
+
+# ── verify-free twin of answer_hotpot: SAME prompt/variants, `verify` removed from the tool
+# list. Selected by the launcher (not runtime code — TZ's tool list is baked into this static
+# config) via `--tensorzero-function answer_hotpot_noverify` for phases where the workspace
+# hasn't enabled/calibrated the grounding gate yet (train/collect): advertising an always-abstain
+# `verify` there would make the reader decline every answer. The post-calibration eval instead
+# passes `--tensorzero-function answer_hotpot` to exercise verify for real. See
+# docs/superpowers/specs/2026-09-07-eval-verify-serving-parity-design.md §2.3.
+[functions.answer_hotpot_noverify]
+type = "chat"
+# >>> GENERATED NOVERIFY TOOL LIST
+tools = ["get_ontology", "get_source_file", "glob", "glossary", "grep", "ls", "reach", "read", "search", "sql"]
+# <<< GENERATED NOVERIFY TOOL LIST
+parallel_tool_calls = true
+
+[functions.answer_hotpot_noverify.variants.baseline]
+type = "chat_completion"
+model = "qwen"
+system_template = "answer_hotpot/system.minijinja"
+temperature = 1.0
+top_p = 0.95
+extra_body = [
+  { pointer = "/top_k", value = 40 },
+  { pointer = "/min_p", value = 0.1 },
+  { pointer = "/repetition_penalty", value = 1.1 },
+]
 
 # ── Control arm for the graph ablation: the SAME prompt and sampling as answer_hotpot, but with
 # the reasoning-graph tools (glossary/related/neighbors/path/resolve) removed and the graph paragraph dropped
@@ -402,7 +428,7 @@ description = "List knowledge-base documents whose path matches a ripgrep `-g` g
 parameters = "tools/glob.json"
 
 [tools.glossary]
-description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read path #n` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path #n` anchor. Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
+description = "Resolve a concept (a symptom, error, component or task in a few words) to graph nodes. A reasoning node prints its `id [type] label` followed by its full chain — cause → resolution — each with a `read(path#n)` anchor, so ONE call gives you the likely fix. The line may also show `· comm N · pr …` — the problem cluster id. After a hit, call `related(<that node id>)` to list alternate and related cases before searching again. Structural Section/Document nodes show their `path#n` anchor — that same token grounds a node's `source_path` (omit `source_path` entirely for an ungrounded query-side node). Empty result = nothing matches yet. Morphology-aware over labels/aliases. Also call it before creating a node, to REUSE an existing one."
 parameters = "tools/glossary.json"
 
 [tools.graph_delete]
@@ -410,7 +436,7 @@ description = "Remove reasoning nodes/edges from the graph by label — use it t
 parameters = "tools/graph_delete.json"
 
 [tools.graph_doctor]
-description = "Diagnose graph health: the three doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), and incomplete nodes (off-spine / degenerate, on no complete reasoning chain). Report-only — never mutates the graph. Use it to decide what to re-ground, re-verify, or clean up; pruning incomplete/ungrounded nodes is CLI-only (`kb graph doctor --prune-incomplete` / `--prune-ungrounded`)."
+description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default — pass prune_incomplete/prune_ungrounded/prune_dangling/prune_stale (each opt-in, last resort — prefer re-grounding, restoring the terminal, or re-syncing/rebuilding the source over deleting) to also delete that bucket; the response then includes the pruned counts."
 parameters = "tools/graph_doctor.json"
 
 [tools.graph_generalize]
@@ -422,15 +448,15 @@ description = "Universal graph statistics. Default (summary) mode: node counts b
 parameters = "tools/graph_stats.json"
 
 [tools.graph_update]
-description = "Edit an existing graph node in place — change its label or type while keeping its id and all its edges (delete-and-recreate would drop the edges). Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
+description = "Edit an existing graph node in place — change its label or type, and/or ADD search aliases to it (`add_aliases`: extra phrasings users might type), while keeping its id and all its edges (delete-and-recreate would drop the edges). `add_aliases` only appends to an existing node; it never creates a node or edge. Identify the node by its label. To correct an edge, remove it with graph_delete and add the right one with graph_upsert."
 parameters = "tools/graph_update.json"
 
 [tools.graph_upsert]
-description = "Create/update reasoning nodes and directed edges. Each node needs a human-readable `label`, `node_type`, and indexed `source_path`. Reference endpoints in `edges` by label, or a document section as `<path>#<n>` where `<n>` is the INTEGER chunk number exactly as a search/grep/read shows it (the `[#n]` / `path:#n:`) — just that number, with nothing appended (no clause like `4.1`, no note in parentheses). When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
+description = "Create/update reasoning nodes and directed edges. A GROUNDED node (backed by document evidence) needs a human-readable `label`, `node_type`, and `source_path` set to the exact `path#n` token a search/grep/read result showed you — the same copy-ready reference, unchanged: just the path, `#`, and the INTEGER chunk number, nothing appended (no clause like `4.1`, no note in parentheses). An UNGROUNDED node — a query-side/entry node with no document backing — must OMIT `source_path` entirely; do not invent or guess a value for it. Reference endpoints in `edges` the same way: by label, or a document section as that same `path#n` token. When two nodes share a label but differ in type, a bare label is ambiguous — reference the endpoint by its node id (shown on every graph tool line) or qualify it as `Type:label` (e.g. `Symptom:cache`). To wire an edge to a node you are creating in THIS SAME call, give that node a short `id` handle (e.g. `\"n1\"`) and reference it from an edge's `from`/`to` by that handle — handles are call-scoped, must be unique within the call, and are not persisted; the response returns each handle's real id so you can reference the created node in LATER calls. The response lists written node ids and resolved edges. Send a node and edges that reference it in the same call."
 parameters = "tools/graph_upsert.json"
 
 [tools.grep]
-description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path:#n: line`; a context line uses `-` instead of `:`. Reach for `read(path, n)` only when you actually need a whole chunk, not to locate a value. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
+description = "Find an exact string in the text — a code, identifier, parameter name, or a value (e.g. `maxTsdr`, `M6`, `250`). ripgrep regex supported; smart-case. Use it whenever you know a precise token to locate (beats keyword `search`; for fuzzy/conceptual lookup use `search`). TO READ A TABLE, grep one of its values with `context` set to ~20-40: the reply then carries that many lines around each hit — a focused window onto the table — so you get the whole column in one call without reading the entire chunk. Returns matching lines as `path#n: line`; a context line uses `-` instead of `:`. Reach for `read(path#n)` only when you actually need a whole chunk, not to locate a value; that same `path#n` token is what a node's `source_path` takes to ground it. Other flags mirror ripgrep: -i/-F/-w, -o only-matching, -n line-number, -c count, -m max-count, -U multiline."
 parameters = "tools/grep.json"
 
 [tools.index]
@@ -442,7 +468,7 @@ description = "List notebook notes. Optional doc filter. Paths in the output are
 parameters = "tools/ls.json"
 
 [tools.neighbors]
-description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read path #n` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
+description = "List a node's DIRECT structural edges (its actual typed relationships — e.g. what it REFERENCES, what CONSTRAINS it), one hop, each with the real edge direction (-> outgoing, <- incoming) and a `read(path#n)` anchor. Pass a `node` id (from `glossary`) or a chunk `path`+`n`. Filter with `edge_types` (relation names) and `direction` (out/in/both). This is FACTUAL graph structure — for fuzzy 'similar cases' use `related`; for how two nodes connect (possibly across documents) use `reach`. Empty => no such edges."
 parameters = "tools/neighbors.json"
 
 [tools.note]
@@ -454,15 +480,15 @@ description = "Delete the index + graph for the knowledge base."
 parameters = "tools/purge.json"
 
 [tools.reach]
-description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read path #n` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump. Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
+description = "Cross-document reasoning bridge — the ONE traversal tool, two directions. Omit `to` for DISCOVERY: walk `relation` forward from `from`, crossing document boundaries on shared mentions (the bridge, on by default), and return every node reached as a candidate answer — use this to resolve a relational multi-hop instead of inferring it from prose. Pass `to` for VERIFY: does a grounded path from `from` to that specific candidate exist (a self-check on an answer you already produced)? `relation` fuzzy-matches an ontology edge type (omit = all chaining relations, undirected). Each hop prints its real edge direction (--REL--> / <--REL--) with a `read(path#n)` anchor, or `↝ bridged on \"<term>\"` where the reasoning crossed a document — never a silent jump; that same `path#n` token grounds a node's `source_path` (omit it for an ungrounded query-side node). Give `from`/`to` as node ids (from `glossary`) or as `from_path`+`from_n` / `to_path`+`to_n` chunk refs. `max_depth` defaults to 6 (max 12); `bridge` defaults to true (false = graph-only, in-document connectivity — this reproduces the old `path` tool). For a node's own direct edges use `neighbors`."
 parameters = "tools/reach.json"
 
 [tools.read]
-description = "Read material by reference. Usually a document chunk: pass the `path` and chunk number `n` (the `[#n]` from a search/grep result; for PDFs the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk numbers; if `n` is out of range the reply states the valid range. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
+description = "Read material by reference. Usually a document chunk: pass the copy-ready `path#n` token exactly as a search/grep/read result showed it (or `path` plus chunk number `n` separately; for PDFs `n` is the page). It returns the chunk's WHOLE text — for a large chunk that is a lot, and a table in its middle is easy to under-read; when you only need a value or its table, `grep` that value with `context` and read just the window instead. If a PDF table page is hard to read as text, call read again with `page_image: true` to return a 200 DPI JPEG instead (requires the server started with --vision). Returns the full text plus prev/next chunk references, also `path#n`; if `n` is out of range the reply states the valid range. That same `path#n` token is what a node's `source_path` takes to ground it — an ungrounded query-side node should OMIT `source_path` entirely. You may ALSO pass a graph NODE id (e.g. a Resolution id from a `glossary` line) as `path` — then it returns that node plus every evidence chunk it and its 1-hop chain MENTION, each labelled with where it came from."
 parameters = "tools/read.json"
 
 [tools.related]
-description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read path #n` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
+description = "Broaden a `glossary` hit — list OTHER solved cases linked to the same node. Call AFTER `glossary` when the cause→resolution chain is close but not quite right, you want alternates, or before running another search. Pass the reasoning-node `node` id copied from the glossary line (the token before `[Symptom]`/`[Cause]`/`[Resolution]`, e.g. `sym:...`), or a chunk `path` + `n`. Each line is prefixed and has a `read(path#n)` anchor: `SIMILAR` — paraphrase cases that share evidence; `COMMUNITY` — other nodes in the same problem cluster (same `comm N` as the glossary suffix), top by centrality. Empty → try another glossary term or fall back to search/grep. For the node's OWN chain, use `glossary` — not related."
 parameters = "tools/related.json"
 
 [tools.resolve]
@@ -470,12 +496,16 @@ description = "Resolve a name to existing graph node ids (entity resolution)."
 parameters = "tools/resolve.json"
 
 [tools.search]
-description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `[#n] path · label · snippet`. Open a hit with `read(path, n)` using that `[#n]` number. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
+description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
 parameters = "tools/search.json"
 
 [tools.sql]
-description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto)."
+description = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed."
 parameters = "tools/sql.json"
+
+[tools.verify]
+description = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on."
+parameters = "tools/verify.json"
 
 [tools.done]
 description = "Signal that the reasoning graph for this case is complete — the chain is written with a MENTIONS anchor, or `glossary` showed it already exists. Calling `done` ends the episode. Give a one-line `note`."
@@ -646,7 +676,7 @@ extra_body = [
 [functions.enrich]
 type = "chat"
 # >>> GENERATED ENRICH TOOL LIST (kb dump-tz-tools) — do not edit by hand
-tools = ["del", "get_ontology", "get_source_file", "glob", "glossary", "graph_delete", "graph_doctor", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "reach", "read", "related", "resolve", "search", "sql", "done"]
+tools = ["del", "get_ontology", "get_source_file", "glob", "glossary", "graph_delete", "graph_doctor", "graph_generalize", "graph_stats", "graph_update", "graph_upsert", "grep", "index", "ls", "neighbors", "note", "reach", "read", "related", "resolve", "search", "sql", "verify", "done"]
 # <<< GENERATED ENRICH TOOL LIST
 parallel_tool_calls = true
 

@@ -1,5 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "properties": {},
+  "properties": {
+    "prune_dangling": {
+      "default": null,
+      "description": "also delete dangling nodes (last resort; prefer restoring the terminal); default false (report-only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "prune_incomplete": {
+      "default": null,
+      "description": "also delete incomplete (off-spine/degenerate) nodes; default false (report-only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "prune_stale": {
+      "default": null,
+      "description": "also delete stale nodes (source drifted; last resort — prefer re-syncing/rebuilding the source); default false (report-only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "prune_ungrounded": {
+      "default": null,
+      "description": "also delete ungrounded nodes (last resort; prefer re-grounding); default false (report-only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
   "type": "object"
 }

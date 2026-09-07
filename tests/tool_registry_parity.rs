@@ -33,6 +33,14 @@ fn all_glossa_surfaces_expose_at_least_the_registry_tools() {
     // (`answer_hotpot`) function's `tools = [...]` line.
     let tz: Vec<String> = glossa::tz_export::reader_tool_names();
     for name in &reg {
+        // `verify` fails closed when the corpus is uncalibrated: `GlossaServer` (built here on
+        // `"."`, which has no calibrated `[verify]` ontology) drops it from the live tool_specs(),
+        // so it is absent from `reader_tool_names()` even though it IS in `registry()`. Skip it in
+        // the parity assertion — mirrors the identical `if name == "verify" { continue; }` skip in
+        // the in-crate `reader_profile_tool_names_match_registry` test (src/tz_export.rs).
+        if name == "verify" {
+            continue;
+        }
         assert!(
             tz.contains(name),
             "registry tool '{name}' missing from the TZ reader dump (tz has: {tz:?})"
@@ -44,6 +52,10 @@ fn all_glossa_surfaces_expose_at_least_the_registry_tools() {
     // re-deriving `GlossaServer`/`Profile::Reader`/`ServerFlags` construction here.
     let mcp: Vec<String> = glossa::tz_export::reader_tool_names();
     for name in &reg {
+        // Same fail-closed skip as above: uncalibrated `verify` is not in the live Reader profile.
+        if name == "verify" {
+            continue;
+        }
         assert!(
             mcp.contains(name),
             "registry tool '{name}' missing from the MCP Reader profile (mcp has: {mcp:?})"
