@@ -511,10 +511,11 @@ pub fn read(
 pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
+            let paths: Vec<&str> = docs.iter().map(|(p, _)| p.as_str()).collect();
             trace.log(
                 "glob",
                 json!({"pattern": pattern}),
-                json!({"docs": docs.len()}),
+                json!({"docs": docs.len(), "paths": paths}),
             );
             if docs.is_empty() {
                 "(no documents match — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text)".to_string()
@@ -3638,6 +3639,38 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "page_image is only supported for PDF (got sym:test)"
         );
         assert!(out.images.is_empty());
+    }
+
+    #[test]
+    fn glob_trace_logs_doc_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("notes/doc_a.md"),
+                location: "p.1".into(),
+                file_type: "md".into(),
+                text: "alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("notes/doc_b.md"),
+                location: "p.1".into(),
+                file_type: "md".into(),
+                text: "beta".into(),
+            },
+        ])
+        .unwrap();
+        let tlog = TraceLog::to_dir(d.path());
+        let _ = glob(&i, "notes/**/*.md", &tlog);
+        let tdir = d.path().join(".glossa").join("traces");
+        let file = std::fs::read_dir(&tdir).unwrap().next().unwrap().unwrap().path();
+        let body = std::fs::read_to_string(file).unwrap();
+        let entry = body
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .find(|v| v["tool"] == "glob")
+            .unwrap();
+        assert_eq!(entry["result"]["paths"].as_array().unwrap().len(), 2);
     }
 
     #[test]
