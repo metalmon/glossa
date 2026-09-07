@@ -56,6 +56,9 @@ pub struct CaseResult {
     /// supported by what was read. `#[serde(default)]` keeps pre-existing persisted cases loadable.
     #[serde(default)]
     pub chunk_paths: Vec<String>,
+    /// Deduped retrieved source docs, score-ranked (search) then coverage (grep/glob).
+    #[serde(default)]
+    pub ranked_sources: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -667,6 +670,7 @@ mod tests {
                 answerable: true,
                 final_answer: String::new(),
                 chunk_paths: Vec::new(),
+                ranked_sources: Vec::new(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -684,6 +688,7 @@ mod tests {
                 answerable: true,
                 final_answer: String::new(),
                 chunk_paths: Vec::new(),
+                ranked_sources: Vec::new(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -718,6 +723,7 @@ mod tests {
             answerable: true,
             final_answer: String::new(),
             chunk_paths: Vec::new(),
+            ranked_sources: Vec::new(),
         }
     }
 

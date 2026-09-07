@@ -35,7 +35,7 @@ use kb_eval::scaffold::scaffold_init;
 use kb_eval::score::{relaxed_match_any, token_f1_any};
 use kb_eval::train::{self, TrainArgs};
 use kb_eval::workspace::{self, KbxPaths};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -983,6 +983,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 String,                                        // judge_raw
                 kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
                 bool,                                          // errored (reader endpoint failure)
+                Vec<String>, // ranked_sources (deduped retrieved doc paths, score/coverage ranked)
             );
             let run_sample = |capture: bool| -> Sample {
                 // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
@@ -1019,10 +1020,11 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // This sample's exact trace file — the one `answer*()` created on THIS worker thread —
                 // read straight from the thread-local rather than diffing the trace dir (which races
                 // under concurrency). Best-effort: empty when tracing was disabled / no file recorded.
-                let (tools, chunk_paths, transcript) = match glossa::trace::last_trace_path() {
-                    Some(p) => parse_trace_file(&p),
-                    None => (Vec::new(), Vec::new(), String::new()),
-                };
+                let (tools, chunk_paths, ranked_sources, transcript) =
+                    match glossa::trace::last_trace_path() {
+                        Some(p) => parse_trace_file(&p),
+                        None => (Vec::new(), Vec::new(), Vec::new(), String::new()),
+                    };
 
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the
@@ -1103,7 +1105,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 
                 (
                     answer, tools, chunk_paths, transcript, em, f1, verdict, reason, judge_raw,
-                    episode, errored,
+                    episode, errored, ranked_sources,
                 )
             };
 
@@ -1120,6 +1122,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 judge_raw,
                 episode,
                 errored,
+                ranked_sources,
             ) = run_sample(args.capture);
 
             // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
@@ -1173,6 +1176,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 errored,
                 answerable: q.answerable,
                 chunk_paths,
+                ranked_sources,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
@@ -1536,12 +1540,20 @@ fn gold_forms(q: &Question) -> Vec<String> {
 /// to chunk #1 instead of whatever chunk the agent actually read. A graph-node read
 /// (`{"node": ...}`) or notebook read (`{"notebook": ...}`) has no `path` key and is skipped,
 /// since those aren't corpus chunks the grounding-gate calibrator (Task 9) can re-fetch.
-fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, String) {
+fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>, String) {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut tools = Vec::new();
     let mut seen = HashSet::new();
     let mut chunk_paths = Vec::new();
     let mut seen_paths = HashSet::new();
+    // ranked_sources: `search` hits are ranked by their best (max) score across all search calls
+    // in the trace, first-seen order broken ties; `grep`/`glob` hits have no score, so they're
+    // appended after the scored set (coverage, not ranking) in first-seen order, skipping any
+    // path the scored set already carries.
+    let mut best_score: HashMap<String, f64> = HashMap::new();
+    let mut scored_order: Vec<String> = Vec::new();
+    let mut coverage: Vec<String> = Vec::new();
+    let mut coverage_seen = HashSet::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -1569,10 +1581,54 @@ fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, String) {
                         }
                     }
                 }
+                if t == "search" {
+                    if let Some(arr) = v.get("result").and_then(|r| r.as_array()) {
+                        for item in arr {
+                            if let Some(p) = item.get("path").and_then(|p| p.as_str()) {
+                                let sc = item.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
+                                let e = best_score.entry(p.to_string()).or_insert(f64::MIN);
+                                if *e == f64::MIN {
+                                    scored_order.push(p.to_string());
+                                }
+                                if sc > *e {
+                                    *e = sc;
+                                }
+                            }
+                        }
+                    }
+                }
+                if t == "grep" || t == "glob" {
+                    if let Some(arr) = v
+                        .get("result")
+                        .and_then(|r| r.get("paths"))
+                        .and_then(|p| p.as_array())
+                    {
+                        for item in arr {
+                            if let Some(p) = item.as_str() {
+                                if coverage_seen.insert(p.to_string()) {
+                                    coverage.push(p.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    (tools, chunk_paths, text)
+    let mut scored = scored_order.clone();
+    scored.sort_by(|a, b| {
+        best_score[b]
+            .partial_cmp(&best_score[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let scored_set: HashSet<String> = scored.iter().cloned().collect();
+    let mut ranked_sources = scored;
+    for p in coverage {
+        if !scored_set.contains(&p) {
+            ranked_sources.push(p);
+        }
+    }
+    (tools, chunk_paths, ranked_sources, text)
 }
 
 /// Stable slug: `slug(root basename)-slug(dataset stem)` — no clock in it, so repeat runs against
@@ -1676,9 +1732,10 @@ mod tests {
     fn parse_trace_file_is_empty_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.jsonl");
-        let (tools, chunk_paths, transcript) = parse_trace_file(&missing);
+        let (tools, chunk_paths, ranked_sources, transcript) = parse_trace_file(&missing);
         assert!(tools.is_empty());
         assert!(chunk_paths.is_empty());
+        assert!(ranked_sources.is_empty());
         assert!(transcript.is_empty());
     }
 
@@ -1698,7 +1755,7 @@ mod tests {
         )
         .unwrap();
 
-        let (tools, chunk_paths, transcript) = parse_trace_file(&file);
+        let (tools, chunk_paths, _ranked_sources, transcript) = parse_trace_file(&file);
         assert_eq!(tools, vec!["read".to_string(), "search".to_string()]);
         // Deduped `path#n` tokens (the `#n` chunk anchor Task 9's resolver requires), first-seen
         // order; the graph-node read (no `path` key) is skipped.
@@ -1707,6 +1764,20 @@ mod tests {
             vec!["a.md#1".to_string(), "b.md#2".to_string()]
         );
         assert!(transcript.contains("read") && transcript.contains("search"));
+    }
+
+    #[test]
+    fn parse_trace_file_builds_ranked_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        let lines = [
+            r#"{"ts_ms":1,"tool":"search","args":{"query":"x"},"result":[{"path":"b.md","location":"p.2","score":10.0,"snippet":"s"},{"path":"a.md","location":"p.1","score":30.0,"snippet":"s"}]}"#,
+            r#"{"ts_ms":2,"tool":"grep","args":{"pattern":"y"},"result":{"hits":1,"paths":["c.md"]}}"#,
+            r#"{"ts_ms":3,"tool":"search","args":{"query":"z"},"result":[{"path":"a.md","location":"p.9","score":5.0,"snippet":"s"}]}"#,
+        ];
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let (_tools, _chunks, ranked, _transcript) = parse_trace_file(&file);
+        assert_eq!(ranked, vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]);
     }
 
     #[test]
