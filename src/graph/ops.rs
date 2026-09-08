@@ -1460,8 +1460,16 @@ pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
     let mut out = String::new();
     out.push_str(&fmt_bucket("ungrounded", &rep.ungrounded, LIMIT));
     out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
-    out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT));
-    out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT));
+    // `incomplete`/`dangling` can be structurally inert for some ontologies (no spines; no
+    // query-side types). Print `n/a — <reason>` rather than a bare `0` that reads as a clean check.
+    match rep.incomplete_disabled {
+        Some(why) => out.push_str(&format!("incomplete: n/a — {why}\n")),
+        None => out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT)),
+    }
+    match rep.dangling_inapplicable {
+        Some(why) => out.push_str(&format!("dangling: n/a — {why}\n")),
+        None => out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT)),
+    }
     out.push_str(&format!("unverifiable: {}\n", rep.unverifiable));
     out
 }

@@ -48,6 +48,15 @@ pub struct DoctorReport {
     /// from) the same derivation `doctor()` used to flag `dangling` in the first place.
     pub live_terminal_count: usize,
     pub unverifiable: usize,
+    /// `Some(reason)` when the `incomplete` check could not run against this ontology — currently
+    /// only "no `[reasoning] spines` declared", which makes `incomplete_nodes` a structural no-op.
+    /// Lets the formatter distinguish "0 incomplete nodes" (check ran, clean) from "check disabled",
+    /// so a bare `0` can't read as a false all-clear on a spine-less / terminal-as-sink ontology.
+    pub incomplete_disabled: Option<&'static str>,
+    /// `Some(reason)` when the `dangling` check is inapplicable — no declared node type is
+    /// query-side (every entity type is `requires_grounding` or structural), so `dangling_nodes`
+    /// has no candidate and can never fire. Same false-all-clear guard as `incomplete_disabled`.
+    pub dangling_inapplicable: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -154,8 +163,24 @@ pub fn doctor(
         })
     };
 
+    // Two doubts are structurally inert on some ontologies — record WHY so the formatter can print
+    // `n/a` instead of a bare `0` that reads as a false all-clear. `incomplete_nodes` no-ops without
+    // spines; `dangling_nodes` has no candidate when every declared type is a grounded terminal or
+    // structural substrate (the "terminal-as-sink" shape, e.g. an all-`requires_grounding` ontology).
+    let incomplete_disabled = spines
+        .is_empty()
+        .then_some("no [reasoning] spines declared in ontology");
+    let has_query_side_type = ont
+        .entity_types()
+        .iter()
+        .any(|t| !grounding_types.contains(t) && !structural.contains(t));
+    let dangling_inapplicable = (!has_query_side_type)
+        .then_some("no query-side node types (every type is a grounded terminal or structural)");
+
     let mut rep = DoctorReport {
         live_terminal_count: live_terminal_ids.len(),
+        incomplete_disabled,
+        dangling_inapplicable,
         ..Default::default()
     };
     for id in &ungrounded_ids {
@@ -393,6 +418,15 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         std::fs::write(&doc_a, b"v2-longer").unwrap();
 
         let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        // ONT declares spines and has query-side types (Symptom/Cause) → both checks are LIVE.
+        assert!(
+            rep.incomplete_disabled.is_none(),
+            "ONT declares [reasoning] spines"
+        );
+        assert!(
+            rep.dangling_inapplicable.is_none(),
+            "ONT has query-side Symptom/Cause types"
+        );
         assert_eq!(rep.stale.len(), 1, "res:a's source drifted");
         assert_eq!(rep.ungrounded.len(), 1, "res:b has no live MENTIONS");
         assert_eq!(
@@ -490,6 +524,53 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
             rep.unverifiable, 2,
             "agent- and distil-origin ungrounded Resolution nodes must both count; curated must not"
         );
+    }
+
+    #[test]
+    fn doctor_marks_incomplete_and_dangling_disabled_on_spineless_all_grounding_ontology() {
+        // A "terminal-as-sink" ontology: every entity type is a grounded terminal and NO
+        // [reasoning] spines are declared. `incomplete` (spine-based) and `dangling`
+        // (query-side-based) are then BOTH structurally inert — doctor must mark them
+        // disabled/inapplicable so the formatter prints `n/a`, not a false-all-clear `0`.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(
+            r#"
+[entities.Entity]
+requires_grounding = true
+[entities.Fact]
+requires_grounding = true
+[relations.HAS_FACT]
+from = ["Entity"]
+to = ["Fact"]
+role = "chaining"
+[validation]
+strict = false
+"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("d.md"), b"v1").unwrap();
+        g.upsert(
+            &ont,
+            &[node("ent:1", "Entity", "E", prov("d.md", None))],
+            &[],
+        )
+        .unwrap();
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert!(
+            rep.incomplete_disabled.is_some(),
+            "no [reasoning] spines → incomplete check disabled"
+        );
+        assert!(
+            rep.dangling_inapplicable.is_some(),
+            "every type is a grounded terminal → dangling check inapplicable"
+        );
+        // And the shared formatter renders `n/a`, not `0`.
+        let text = crate::graph::ops::fmt_doctor_report(&rep);
+        assert!(text.contains("incomplete: n/a"), "got:\n{text}");
+        assert!(text.contains("dangling: n/a"), "got:\n{text}");
     }
 
     #[test]
