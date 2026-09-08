@@ -42,7 +42,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "kbx", about = "File-first glossa eval toolkit")]
+// Report the glossa engine version (kbx is co-shipped with `kb`), not the eval crate's own — so
+// `kbx --version` matches `kb --version`.
+#[command(name = "kbx", about = "File-first glossa eval toolkit", version = glossa::version())]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
