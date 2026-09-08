@@ -60,6 +60,7 @@ reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 uuid = { version = "1", features = ["v7"] }
 rand = "0.8"
+rand_chacha = "0.3"
 base64 = "0.22"
 bzip2 = "0.4"
 tar = "0.4"

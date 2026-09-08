@@ -2244,6 +2244,7 @@ dependencies = [
  "jsonrepair",
  "predicates",
  "rand 0.8.7",
+ "rand_chacha 0.3.1",
  "regex",
  "reqwest",
  "serde",

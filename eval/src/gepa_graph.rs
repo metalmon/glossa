@@ -29,8 +29,8 @@ use glossa::index::store::DocIndex;
 use glossa::tools::ChainSpec;
 use glossa::trace::TraceLog;
 use indicatif::ProgressBar;
-use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -175,11 +175,11 @@ struct RolloutOutcome {
     is_fp: bool,
 }
 
-#[derive(Clone)]
-struct Candidate {
-    prompt: String,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Candidate {
+    pub(crate) prompt: String,
     /// Per-instance graded score on D_pareto (not full val).
-    score_val: Vec<f64>,
+    pub(crate) score_val: Vec<f64>,
 }
 
 /// A candidate's reflect-minibatch, scored ONCE the first time the candidate is a reflect parent
@@ -786,7 +786,7 @@ fn tokens_lower(s: &str) -> Vec<String> {
 
 // --- sampling + Pareto (single-objective, local; see module note) ---------------------------
 
-fn sample_indices(len: usize, n: usize, rng: &mut StdRng) -> Vec<usize> {
+fn sample_indices(len: usize, n: usize, rng: &mut ChaCha12Rng) -> Vec<usize> {
     if len == 0 || n == 0 {
         return Vec::new();
     }
@@ -797,7 +797,7 @@ fn sample_indices(len: usize, n: usize, rng: &mut StdRng) -> Vec<usize> {
     rand::seq::index::sample(rng, len, n).into_iter().collect()
 }
 
-fn sample_questions(pool: &[Question], n: usize, rng: &mut StdRng) -> Vec<Question> {
+fn sample_questions(pool: &[Question], n: usize, rng: &mut ChaCha12Rng) -> Vec<Question> {
     sample_indices(pool.len(), n, rng)
         .into_iter()
         .map(|i| pool[i].clone())
@@ -900,7 +900,7 @@ fn pareto_frontier_win_counts(pool: &[Candidate]) -> (Vec<usize>, Vec<usize>) {
     (frontier_idxs, counts)
 }
 
-fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize {
+fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut ChaCha12Rng) -> usize {
     if pool.len() == 1 {
         return 0;
     }
@@ -927,7 +927,7 @@ fn select_parent_pareto_weighted(pool: &[Candidate], rng: &mut StdRng) -> usize 
     *frontier_idxs.last().unwrap_or(&0)
 }
 
-fn select_parent_idx(pool: &[Candidate], sel: CandidateSelection, rng: &mut StdRng) -> usize {
+fn select_parent_idx(pool: &[Candidate], sel: CandidateSelection, rng: &mut ChaCha12Rng) -> usize {
     if pool.len() == 1 {
         return 0;
     }
@@ -1051,7 +1051,7 @@ pub fn run(
     let baseline_score = mean_scored(&baseline_out);
     pb.println(format!("baseline val: score={baseline_score:.3}"));
 
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = ChaCha12Rng::seed_from_u64(cfg.seed);
     let pareto_set = sample_questions(&val, cfg.pareto_size, &mut rng);
     pb.println(format!(
         "pareto set (D_pareto): {} of {} val",
@@ -1599,7 +1599,7 @@ mod tests {
                 score_val: vec![1.0, 1.0, 1.0],
             },
         ];
-        let mut rng = StdRng::seed_from_u64(1);
+        let mut rng = ChaCha12Rng::seed_from_u64(1);
         assert_eq!(
             select_parent_idx(&pool, CandidateSelection::CurrentBest, &mut rng),
             1
@@ -1818,5 +1818,40 @@ mod tests {
         assert_eq!(called.get(), 0);
         let _ = _f("x");
         assert_eq!(called.get(), 1);
+    }
+
+    #[test]
+    fn stdrng_and_chacha12_streams_are_identical() {
+        use rand::{Rng, SeedableRng};
+        let mut a = rand::rngs::StdRng::seed_from_u64(20260909);
+        let mut b = rand_chacha::ChaCha12Rng::seed_from_u64(20260909);
+        for _ in 0..1000 {
+            assert_eq!(a.gen::<u64>(), b.gen::<u64>());
+        }
+        // and gen_range parity (used by select_parent_pareto_weighted)
+        let mut a2 = rand::rngs::StdRng::seed_from_u64(7);
+        let mut b2 = rand_chacha::ChaCha12Rng::seed_from_u64(7);
+        for _ in 0..1000 {
+            assert_eq!(a2.gen_range(0..97usize), b2.gen_range(0..97usize));
+        }
+    }
+
+    #[test]
+    fn chacha_state_roundtrip_reproduces_stream() {
+        use rand::{Rng, SeedableRng};
+        let mut r = rand_chacha::ChaCha12Rng::seed_from_u64(42);
+        for _ in 0..37 {
+            let _: u64 = r.gen();
+        } // advance
+        let seed = r.get_seed();
+        let pos = r.get_word_pos();
+        let expected: Vec<u64> = {
+            let mut c = r.clone();
+            (0..64).map(|_| c.gen()).collect()
+        };
+        let mut restored = rand_chacha::ChaCha12Rng::from_seed(seed);
+        restored.set_word_pos(pos);
+        let got: Vec<u64> = (0..64).map(|_| restored.gen()).collect();
+        assert_eq!(expected, got);
     }
 }
