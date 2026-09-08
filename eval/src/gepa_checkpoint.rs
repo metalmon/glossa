@@ -6,10 +6,11 @@
 //! of the run config matches the current run, or if --resume forces it anyway (caller validates
 //! that intent is sound).
 
-pub const CHECKPOINT_VERSION: u32 = 1;
+#[allow(dead_code)]
+pub(crate) const CHECKPOINT_VERSION: u32 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub struct GepaCheckpoint {
+pub(crate) struct GepaCheckpoint {
     pub version: u32,
     pub fingerprint: String,
     pub pool: Vec<crate::gepa_graph::Candidate>,
@@ -25,13 +26,15 @@ pub struct GepaCheckpoint {
     pub final_val: Option<Vec<Option<f64>>>,
 }
 
-pub enum ResumeDecision {
+#[allow(dead_code)]
+pub(crate) enum ResumeDecision {
     Fresh,
     Resume(Box<GepaCheckpoint>),
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-pub fn fingerprint(
+pub(crate) fn fingerprint(
     seed_prompt: &str,
     model: &str,
     endpoint: &str,
@@ -69,6 +72,7 @@ pub fn fingerprint(
     format!("{:016x}", h.finish())
 }
 
+#[allow(dead_code)]
 fn tmp_path(path: &std::path::Path) -> std::path::PathBuf {
     let name = path
         .file_name()
@@ -77,7 +81,8 @@ fn tmp_path(path: &std::path::Path) -> std::path::PathBuf {
     path.with_file_name(format!("{name}.tmp"))
 }
 
-pub fn save(path: &std::path::Path, ckpt: &GepaCheckpoint) -> anyhow::Result<()> {
+#[allow(dead_code)]
+pub(crate) fn save(path: &std::path::Path, ckpt: &GepaCheckpoint) -> anyhow::Result<()> {
     use anyhow::Context;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -94,7 +99,8 @@ pub fn save(path: &std::path::Path, ckpt: &GepaCheckpoint) -> anyhow::Result<()>
     Ok(())
 }
 
-pub fn load(path: &std::path::Path) -> anyhow::Result<Option<GepaCheckpoint>> {
+#[allow(dead_code)]
+pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Option<GepaCheckpoint>> {
     use anyhow::Context;
     if !path.exists() {
         return Ok(None);
@@ -106,7 +112,8 @@ pub fn load(path: &std::path::Path) -> anyhow::Result<Option<GepaCheckpoint>> {
     Ok(Some(ckpt))
 }
 
-pub fn delete(path: &std::path::Path) -> anyhow::Result<()> {
+#[allow(dead_code)]
+pub(crate) fn delete(path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context;
     if path.exists() {
         std::fs::remove_file(path)
@@ -115,7 +122,8 @@ pub fn delete(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn decide_resume(
+#[allow(dead_code)]
+pub(crate) fn decide_resume(
     on_disk: Option<GepaCheckpoint>,
     current_fp: &str,
     resume: bool,
