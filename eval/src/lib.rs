@@ -26,6 +26,7 @@ pub mod finetune;
 pub mod gepa;
 #[cfg(feature = "constraint")]
 pub mod gepa_constraint;
+pub mod gepa_checkpoint;
 pub mod gepa_graph;
 pub mod judge;
 pub mod lab;

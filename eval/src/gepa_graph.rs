@@ -175,7 +175,7 @@ struct RolloutOutcome {
     is_fp: bool,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Candidate {
     pub(crate) prompt: String,
     /// Per-instance graded score on D_pareto (not full val).
