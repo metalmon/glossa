@@ -890,6 +890,11 @@ fn run_optimize_graph(
             // abstention credit, no FP ceiling).
             credit_abstention: false,
             fp_gate: false,
+            // Legacy research binary has no checkpoint/resume flags; keep checkpointing off (no
+            // behaviour change).
+            checkpoint_path: None,
+            resume: false,
+            force: false,
         },
         qs,
         &reflect,

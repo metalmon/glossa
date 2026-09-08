@@ -320,6 +320,11 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         user_sim_prompt,
         credit_abstention: policy.credit_abstention(),
         fp_gate: policy.fp_gate(),
+        // A later task wires the real checkpoint path/flags here; keep checkpointing disabled
+        // on this path for now.
+        checkpoint_path: None,
+        resume: false,
+        force: false,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

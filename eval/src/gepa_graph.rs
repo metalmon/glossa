@@ -111,6 +111,12 @@ pub struct GepaGraphConfig {
     /// full-set FP (Wrong) rate exceeds the seed's, even if its mean score rose. `false`
     /// (default/balanced) = quality-only gate, today's behavior.
     pub fp_gate: bool,
+    /// Stable on-disk checkpoint path (`<kbx_dir>/gepa.checkpoint.json`). `None` disables
+    /// checkpointing entirely (callers without a workspace, e.g. tests).
+    pub checkpoint_path: Option<std::path::PathBuf>,
+    /// Resume flags (mutually exclusive at the CLI). See `gepa_checkpoint::decide_resume`.
+    pub resume: bool,
+    pub force: bool,
 }
 
 /// False-positive rate over non-errored outcomes: `count(is_fp) / count(!errored)`. `0.0` when every
@@ -946,6 +952,45 @@ fn select_parent_idx(pool: &[Candidate], sel: CandidateSelection, rng: &mut ChaC
     }
 }
 
+// --- checkpointing ----------------------------------------------------------------------------
+
+/// Assemble a `GepaCheckpoint` from live `run` state. Pure (no I/O) — `run` calls
+/// `gepa_checkpoint::save` separately, gated on `cfg.checkpoint_path.is_some()`. `val_ids`/
+/// `pareto_ids`/`blocked_train` are derived from the `id` fields; `blocked_train` is sorted for a
+/// stable serialization. `rng` is snapshotted (not consumed) via `get_seed`/`get_word_pos`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_checkpoint(
+    fingerprint: &str,
+    pool: &[Candidate],
+    best_pareto_so_far: f64,
+    baseline_score: f64,
+    val: &[Question],
+    pareto_set: &[Question],
+    blocked_train: &std::collections::HashSet<String>,
+    iter: usize,
+    metric_calls: usize,
+    rng: &ChaCha12Rng,
+    final_val: Option<Vec<Option<f64>>>,
+) -> crate::gepa_checkpoint::GepaCheckpoint {
+    let mut blocked_train: Vec<String> = blocked_train.iter().cloned().collect();
+    blocked_train.sort();
+    crate::gepa_checkpoint::GepaCheckpoint {
+        version: crate::gepa_checkpoint::CHECKPOINT_VERSION,
+        fingerprint: fingerprint.to_string(),
+        pool: pool.to_vec(),
+        best_pareto_so_far,
+        baseline_score,
+        val_ids: val.iter().map(|q| q.id.clone()).collect(),
+        pareto_ids: pareto_set.iter().map(|q| q.id.clone()).collect(),
+        blocked_train,
+        iter,
+        metric_calls,
+        rng_seed: rng.get_seed(),
+        rng_word_pos: rng.get_word_pos(),
+        final_val,
+    }
+}
+
 // --- driver ---------------------------------------------------------------------------------
 
 pub fn run(
@@ -978,6 +1023,29 @@ pub fn run(
         |q| q.id.as_str(),
         |q| q.hop_type.as_str(),
         cfg.val_frac,
+    );
+    // Checkpoint fingerprint: hashes the run config + full (sorted) question-id set, computed ONCE
+    // up front so every write below stamps the same value. A checkpoint whose fingerprint doesn't
+    // match a later run's is a config/dataset mismatch, not a stale-but-compatible resume point
+    // (see `gepa_checkpoint::decide_resume`, wired in the resume task).
+    let ckpt_path = cfg.checkpoint_path.clone();
+    let mut sorted_ids: Vec<String> = questions.iter().map(|q| q.id.clone()).collect();
+    sorted_ids.sort();
+    let fp = crate::gepa_checkpoint::fingerprint(
+        &cfg.seed_prompt,
+        &cfg.model,
+        &cfg.endpoint,
+        cfg.max_metric_calls,
+        cfg.max_candidates,
+        cfg.minibatch,
+        cfg.pareto_size,
+        cfg.val_frac,
+        cfg.seed,
+        cfg.rollout_samples,
+        cfg.judge.is_some(),
+        cfg.credit_abstention,
+        cfg.fp_gate,
+        &sorted_ids,
     );
     // All user-facing progress lines below go through `pb.println` (not raw `println!`/`eprintln!`):
     // the bar is LIVE for the whole run (created in `run_train` before this fn is called), and a raw
@@ -1088,6 +1156,42 @@ pub fn run(
     // val/D_pareto side is pre-filtered once via `drop_baseline_errored`; the train side has no
     // baseline pass, so we blocklist a question the first time it errors and skip it thereafter.
     let mut blocked_train: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Checkpoint write helper: a no-op when `cfg.checkpoint_path` is `None` (no workspace, e.g.
+    // tests/legacy binaries). Borrows `fp`/`ckpt_path` from above so every call site just supplies
+    // live state; `save` itself is atomic (tmp + rename), so a crash mid-write can't corrupt the
+    // prior checkpoint.
+    let save_ckpt = |pool: &[Candidate],
+                      best: f64,
+                      base: f64,
+                      val: &[Question],
+                      pareto: &[Question],
+                      blocked: &std::collections::HashSet<String>,
+                      it: usize,
+                      mc: usize,
+                      rng: &ChaCha12Rng,
+                      fv: Option<Vec<Option<f64>>>|
+     -> Result<()> {
+        if let Some(p) = &ckpt_path {
+            let c = build_checkpoint(&fp, pool, best, base, val, pareto, blocked, it, mc, rng, fv);
+            crate::gepa_checkpoint::save(p, &c)?;
+        }
+        Ok(())
+    };
+    // Checkpoint the baseline/pareto so a crash mid-search resumes without re-running phase 1.
+    save_ckpt(
+        &pool,
+        best_pareto_so_far,
+        baseline_score,
+        &val,
+        &pareto_set,
+        &blocked_train,
+        0,
+        metric_calls,
+        &rng,
+        None,
+    )?;
+
     // Minibatch-cache mode (see `GepaGraphConfig::minibatch_cache`). Default OFF = canonical GEPA
     // (fresh minibatch + parent re-roll every proposal). Turn ON only for a weak, high-variance
     // reader. Source: lab.toml `[tuning].gepa_minibatch_cache` (cfg.minibatch_cache); env
@@ -1284,6 +1388,18 @@ pub fn run(
             .map(|c| mean(&c.score_val))
             .fold(f64::NEG_INFINITY, f64::max);
         best_pareto_so_far = best_pareto;
+        save_ckpt(
+            &pool,
+            best_pareto_so_far,
+            baseline_score,
+            &val,
+            &pareto_set,
+            &blocked_train,
+            it,
+            metric_calls,
+            &rng,
+            None,
+        )?;
         pb.println(format!(
             "[iter {it}] parent_idx={parent_idx} parent_mb={parent_mb_score:.3} -> child_mb={child_mb_score:.3} — accepted (pareto_score={best_pareto:.3}, pool_size={})",
             pool.len(),
@@ -1853,5 +1969,30 @@ mod tests {
         restored.set_word_pos(pos);
         let got: Vec<u64> = (0..64).map(|_| restored.gen()).collect();
         assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn build_checkpoint_captures_ids_and_rng_state() {
+        use rand::SeedableRng;
+        let pool = vec![Candidate {
+            prompt: "p".into(),
+            score_val: vec![1.0, 0.0],
+        }];
+        let val = vec![q("a", "qa", "x", &[]), q("b", "qb", "y", &[])];
+        let pareto = vec![q("a", "qa", "x", &[])];
+        let mut blocked = std::collections::HashSet::new();
+        blocked.insert("z".to_string());
+        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(5);
+        let c = build_checkpoint(
+            "FP", &pool, 0.5, 0.4, &val, &pareto, &blocked, 3, 30, &rng,
+            Some(vec![None]),
+        );
+        assert_eq!(c.version, crate::gepa_checkpoint::CHECKPOINT_VERSION);
+        assert_eq!(c.val_ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(c.pareto_ids, vec!["a".to_string()]);
+        assert_eq!(c.blocked_train, vec!["z".to_string()]);
+        assert_eq!(c.iter, 3);
+        assert_eq!(c.rng_word_pos, rng.get_word_pos());
+        assert_eq!(c.rng_seed, rng.get_seed());
     }
 }
