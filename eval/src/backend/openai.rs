@@ -429,11 +429,20 @@ impl OpenAiBackend {
         // question), else open per question (today's behavior). `graph` stays `None` in the
         // graph-OFF baseline arm regardless, so the A/B knob is unchanged.
         let local_handle;
+        // The shared handle's search index is behind an `ArcSwap`; hold its current snapshot in an
+        // outer binding so the `&DocIndex` borrow below outlives the match.
+        let shared_idx;
         let (idx, graph): (
             &glossa::index::store::DocIndex,
             Option<&glossa::graph::store::GraphStore>,
         ) = match &self.shared {
-            Some(h) => (&h.idx, if self.use_graph { Some(&h.graph) } else { None }),
+            Some(h) => {
+                shared_idx = h.idx();
+                (
+                    &shared_idx,
+                    if self.use_graph { Some(&h.graph) } else { None },
+                )
+            }
             None => {
                 local_handle = (
                     glossa::index::store::DocIndex::open_or_create(work)?,

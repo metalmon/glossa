@@ -7,13 +7,13 @@
 //! knobs are accepted and the server still serves. It does NOT (and cannot) assert fault-injected
 //! retry/serve-stale behavior over the socket.
 //!
-//! OBSERVED (documented for the freshen test's shape): the on-read freshen DOES index a newly-added
-//! file server-side (the `/metrics` `glossa_index_chunks` gauge climbs), and the FIRST `search`/`read`
-//! after the file appears observes it. A search reader that was already built by an EARLIER query,
-//! however, keeps serving its snapshot for a just-added file (an externally-committed segment is not
-//! surfaced to the pre-existing reader) — so this test drives the negative "before" state via
-//! `/metrics` (which does not build the search reader) rather than a search, then asserts the first
-//! post-add search surfaces the new file.
+//! REGRESSION (the search-reader staleness fix): the server serves search from a shared handle whose
+//! search index is behind an `ArcSwap`; a freshen that indexes a change swaps in a freshly-opened
+//! reader (see `GraphHandle::refresh_idx`). So a reader ALREADY BUILT by an earlier query must, after
+//! a subsequent freshen, serve a newly-added file too — not keep its stale snapshot. This test proves
+//! exactly that over the socket: it does a first search (which builds the reader), THEN adds a file,
+//! THEN asserts a later search through that same live server surfaces it (previously it could not, and
+//! the test had to fall back to `/metrics`, which opens a fresh reader per scrape).
 #![cfg(feature = "e2e")]
 
 #[path = "e2e/harness.rs"]
@@ -33,17 +33,19 @@ fn on_read_freshen_picks_up_a_newly_added_file() {
         .env("GLOSSA_MIN_RESCAN_MS", "50")
         .start();
 
-    // Establish the "before" state WITHOUT building the search reader: the /metrics chunk gauge
-    // reflects only the single initial file. (Poll briefly for the startup freshen to land it.)
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // BUILD the shared search reader NOW, before the change: a first search that finds the initial
+    // file. This is the pre-existing, long-lived reader a daemon caches for its lifetime — the exact
+    // thing that used to go stale. (A brief retry only absorbs startup-freshen/commit latency.)
+    let mcp = McpClient::connect(server.base());
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let m = http_get(server.base(), "/metrics", &[]).body;
-        if m.contains("glossa_index_chunks 1") {
+        if mcp.search_text("term_one").contains("term_one") {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "startup freshen never indexed the initial file (chunks stayed 0).\nmetrics:\n{m}"
+            "the initial file never became searchable.\nstderr:\n{}",
+            server.stderr()
         );
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -53,9 +55,9 @@ fn on_read_freshen_picks_up_a_newly_added_file() {
     c.add_file("b.md", "# Second\n\nThis document introduces term_two.\n");
     bump_dir_mtime(c.path());
 
-    // The FIRST search drives the on-read freshen AND is the first reader build, so it observes the
-    // newly-added file. (A few retries only absorb commit/gate latency, not reader staleness.)
-    let mcp = McpClient::connect(server.base());
+    // The SAME already-built reader must now surface the new file: the on-read freshen indexes it and
+    // swaps a fresh reader into the shared handle. (Retries absorb the min-rescan gate + commit, NOT
+    // reader staleness — pre-fix this search would keep serving the stale snapshot indefinitely.)
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut found = false;
     loop {
@@ -70,11 +72,11 @@ fn on_read_freshen_picks_up_a_newly_added_file() {
     }
     assert!(
         found,
-        "on-read freshen did not surface the newly-added file to the first search.\nstderr:\n{}",
+        "the already-built search reader did not surface the newly-added file after a freshen.\nstderr:\n{}",
         server.stderr()
     );
 
-    // The original file is still retrievable too (the reader now carries both).
+    // And the original file is still retrievable (the swapped-in reader carries both).
     assert!(
         mcp.search_text("term_one").contains("term_one"),
         "original file should remain retrievable after the freshen"

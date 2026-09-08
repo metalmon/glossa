@@ -508,14 +508,17 @@ impl GlossaServer {
         self.last_change
             .store(crate::trace::now_ms(), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);
-        // A corpus change just landed. The shared handle self-freshens for correctness — the graph
-        // store's SQLite reads are live (WAL) and its PPR/CSR caches self-invalidate on the DB file
-        // signature — so we do NOT rebuild the handle here (that would run heavy open + a possible
-        // O(N+E) CSR build inline on this async task). We only nudge the shared tantivy reader to the
-        // latest commit so a just-reindexed doc is visible on the very next query rather than after
-        // its auto-reload delay. Cheap and best-effort.
+        // A corpus change just landed. The graph store's SQLite reads are live (WAL) and its PPR/CSR
+        // caches self-invalidate on the DB file signature, so we do NOT rebuild the whole handle here
+        // (that would run heavy open + a possible O(N+E) CSR build inline on this async task). But the
+        // tantivy search reader does NOT reliably see a commit made through freshen's separate `Index`
+        // — its background auto-reload rides tantivy's filesystem watcher, which is dead on the network
+        // folders we target. So swap in a freshly-opened `DocIndex` (watcher-independent, retry-hardened)
+        // instead. A failed refresh is logged, never silently swallowed, so stale serving is observable.
         if let Some(h) = self.cell.load_full() {
-            h.idx.reload();
+            if let Err(e) = h.refresh_idx() {
+                tracing::warn!("search index refresh after freshen failed (serving may be stale until next change): {e:#}");
+            }
         }
     }
 
@@ -1467,7 +1470,7 @@ impl GlossaServer {
         let h = self.handle().map_err(internal)?;
         let key = format!("search:{a:?}");
         let (body, hits) = crate::tools::search(
-            &h.idx,
+            &h.idx(),
             &a.query,
             a.limit.unwrap_or(50),
             a.glob.as_deref(),
@@ -1494,7 +1497,7 @@ impl GlossaServer {
         let ids = vec![a.path.clone()];
         Ok(read_common(
             &self.state_base,
-            &h.idx,
+            &h.idx(),
             Some(&h.graph),
             &a.path,
             a.n as u64,
@@ -1536,7 +1539,7 @@ impl GlossaServer {
             .max_bytes
             .unwrap_or(crate::tools::DEFAULT_SOURCE_MAX_BYTES);
         let out = crate::tools::get_source_file(
-            &h.idx,
+            &h.idx(),
             Some(&h.graph),
             &a.path,
             a.n.map(u64::from),
@@ -1567,7 +1570,7 @@ impl GlossaServer {
         let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
-            &h.idx,
+            &h.idx(),
             &h.graph,
             &a.name,
             Some(a.query.as_str()).filter(|s| !s.is_empty()),
@@ -1594,7 +1597,7 @@ impl GlossaServer {
         let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("related:{a:?}");
         let body = crate::tools::related(
-            &h.idx,
+            &h.idx(),
             &h.graph,
             a.node.as_deref(),
             a.path.as_deref(),
@@ -1622,7 +1625,7 @@ impl GlossaServer {
         let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("neighbors:{a:?}");
         let body = crate::tools::neighbors(
-            &h.idx,
+            &h.idx(),
             &h.graph,
             a.node.as_deref(),
             a.path.as_deref(),
@@ -1652,7 +1655,7 @@ impl GlossaServer {
         let ont = self.ontology();
         let key = format!("reach:{a:?}");
         let body = crate::tools::reach(
-            &h.idx,
+            &h.idx(),
             &h.graph,
             &ont,
             a.from.as_deref(),
@@ -2601,10 +2604,57 @@ mod tests {
         std::fs::write(root_b.path().join("beta.md"), "beta secondary content").unwrap();
         srv.freshen_now().await;
         let h = srv.handle().unwrap();
-        let hits = h.idx.search("beta", 10).unwrap();
+        let hits = h.idx().search("beta", 10).unwrap();
         assert!(
             hits.iter().any(|hit| hit.path.contains("beta.md")),
             "freshen_now must pick up a change under the secondary root, got: {hits:?}"
+        );
+        std::env::remove_var("GLOSSA_MIN_RESCAN_MS");
+    }
+
+    /// Regression guard for the search-reader staleness bug: a long-lived server caches ONE
+    /// `GraphHandle` (built at first use) for its whole lifetime. When a corpus file lands AFTER
+    /// that handle was opened, a `freshen_now` on the SAME server must make the new file visible to
+    /// searches served through that SAME cached handle — not only to a freshly re-opened reader.
+    /// The pre-existing `freshen_now_picks_up_a_change_under_the_secondary_root` test masks this by
+    /// building the handle AFTER the write; here we open it BEFORE, exactly as a daemon does.
+    #[tokio::test]
+    async fn search_same_handle_sees_file_added_after_open() {
+        // Two back-to-back freshens with no elapsed time — open the min-rescan gate so the second
+        // actually re-walks instead of being skipped as "too soon".
+        std::env::set_var("GLOSSA_MIN_RESCAN_MS", "0");
+        let corpus = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(corpus.path().join("a.md"), "alpha content").unwrap();
+        let roots = vec![Root {
+            label: String::new(),
+            path: corpus.path().into(),
+        }];
+        let srv = GlossaServer::new(
+            roots,
+            state.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        // Establish the baseline dirsig AND build+cache the long-lived handle NOW, before the change.
+        srv.freshen_now().await;
+        let h = srv.handle().unwrap();
+        assert!(
+            h.idx()
+                .search("alpha", 10)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.path.contains("a.md")),
+            "sanity: the pre-change file is visible through the cached handle"
+        );
+        // A NEW file lands AFTER the handle was opened (the daemon keeps serving from `h`).
+        std::fs::write(corpus.path().join("beta.md"), "beta latecomer content").unwrap();
+        srv.freshen_now().await; // freshen the SAME server → must refresh the cached handle's reader
+        let hits = h.idx().search("latecomer", 10).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.path.contains("beta.md")),
+            "a live daemon's cached search reader must see a file added after open, got: {hits:?}"
         );
         std::env::remove_var("GLOSSA_MIN_RESCAN_MS");
     }

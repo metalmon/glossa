@@ -235,14 +235,6 @@ impl DocIndex {
         doc_file_in(&self.roots, key)
     }
 
-    /// Refresh this long-lived reader to the latest committed segments, immediately (cheap: it swaps
-    /// the searcher generation, O(segments) — no reopen, no mmap of new files here). The reader's
-    /// `OnCommitWithDelay` policy already reloads on its own after a short delay; calling this makes a
-    /// just-completed reindex visible to a SHARED reader (e.g. a server's `GraphHandle`) on the very
-    /// next query instead of within that delay. Best-effort — a reload error is not fatal to a read.
-    pub fn reload(&self) {
-        let _ = self.reader.reload();
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4310,6 +4302,61 @@ mod search_tests {
         assert_eq!(hits[0].path, "a.md");
         assert!(hits[0].score > 0.0);
         assert!(!hits[0].snippet.is_empty());
+    }
+
+    /// The core of the search-reader staleness bug, made deterministic. A long-lived shared reader
+    /// picks up a commit made through a SEPARATE `Index` (as the server's freshen does) only via
+    /// tantivy's background filesystem watcher — which is dead on the network folders this daemon
+    /// targets. We emulate that here by forcing the shared reader to `ReloadPolicy::Manual` (no
+    /// watcher). The reader is then STALE for a new file (the bug), and RE-OPENING the index — what
+    /// `GraphHandle::refresh_idx` does on a freshen — is what surfaces it. (A bare `reload()` also
+    /// surfaces it, but its error was swallowed and it was skipped when the local delta was 0; the
+    /// fix reopens through the transient-FS-retry path and propagates the error.)
+    #[test]
+    fn shared_reader_is_stale_until_reopen_when_watcher_is_dead() {
+        use tantivy::ReloadPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let mut shared = DocIndex::open_or_create(dir.path()).unwrap();
+        // Defeat the background watcher — the network-share reality.
+        shared.reader = shared
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .unwrap();
+        shared
+            .write_chunks(&[chunk("a.md", "alpha content")])
+            .unwrap();
+        assert!(
+            !shared.search("alpha", 10).unwrap().is_empty(),
+            "sanity: the pre-existing file is visible"
+        );
+
+        // A NEW file is committed through a SEPARATE index instance (mirrors freshen's own `Index`).
+        let external = DocIndex::open_or_create(dir.path()).unwrap();
+        external
+            .write_chunks(&[
+                chunk("a.md", "alpha content"),
+                chunk("b.md", "beta latecomer content"),
+            ])
+            .unwrap();
+
+        // The bug: with no watcher and no explicit refresh, the shared reader misses it.
+        assert!(
+            shared.search("latecomer", 10).unwrap().is_empty(),
+            "regression: a dead-watcher shared reader must be stale before an explicit refresh"
+        );
+
+        // The fix: re-opening the index (what GraphHandle::refresh_idx does) surfaces the commit.
+        let reopened = DocIndex::open_or_create(dir.path()).unwrap();
+        assert!(
+            reopened
+                .search("latecomer", 10)
+                .unwrap()
+                .iter()
+                .any(|h| h.path.contains("b.md")),
+            "a freshly re-opened index must see the externally committed file"
+        );
     }
 
     #[test]

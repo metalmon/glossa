@@ -74,7 +74,7 @@ fn full_cycle_never_writes_into_corpus_roots() {
     }];
     glossa::index::store::index_dir_at(&roots, state.path(), true).unwrap();
     let h = glossa::graph::handle::GraphHandle::open_at(&roots, state.path()).unwrap();
-    let _ = h.idx; // search/read exercised via DocIndex
+    let _ = h.idx(); // search/read exercised via DocIndex
     glossa::cli_fmt::write_last_search(state.path(), &[("a.md".into(), "p.1".into())]).unwrap();
     // Traces and notebook notes must ALSO land under state_base, not the corpus.
     glossa::trace::TraceLog::to_dir(state.path()).log("read", serde_json::json!({}), serde_json::json!({}));
@@ -143,7 +143,7 @@ fn two_root_index_leaves_both_corpus_roots_unchanged() {
     // The secondary root is indexed and searchable end-to-end through the shared retrieval
     // handle — not just present in the walk, but actually retrievable.
     let h = glossa::graph::handle::GraphHandle::open_at(&roots, state.path()).unwrap();
-    let hits = h.idx.search("valves", 10).unwrap();
+    let hits = h.idx().search("valves", 10).unwrap();
     assert!(
         hits.iter().any(|r| r.path == "specs/b.md"),
         "secondary-root file must be indexed and searchable end-to-end: {hits:?}"
@@ -159,7 +159,7 @@ fn two_root_index_leaves_both_corpus_roots_unchanged() {
     let before_specs_reindex_edit = snapshot(specs.path());
     glossa::index::store::ensure_fresh_at(&roots, state.path()).unwrap();
     let h2 = glossa::graph::handle::GraphHandle::open_at(&roots, state.path()).unwrap();
-    let hits2 = h2.idx.search("actuators", 10).unwrap();
+    let hits2 = h2.idx().search("actuators", 10).unwrap();
     assert!(
         hits2.iter().any(|r| r.path == "specs/b.md"),
         "in-place edit under the secondary root must be picked up by a lazy reindex: {hits2:?}"
