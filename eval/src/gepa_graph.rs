@@ -991,6 +991,26 @@ pub(crate) fn build_checkpoint(
     }
 }
 
+/// Look up `ids` in `questions` (by `Question::id`), preserving `ids` order; error if any id is
+/// absent. Used to rebuild the val / D_pareto subsets on a checkpoint resume: the checkpoint stores
+/// only the ids, and the deterministic split is recomputed from the (unchanged) dataset. A missing
+/// id means the dataset changed under the checkpoint — only reachable via a forced `--resume`
+/// mismatch — so it is a hard error rather than a silent drop.
+pub(crate) fn subset_by_ids(questions: &[Question], ids: &[String]) -> Result<Vec<Question>> {
+    let by_id: std::collections::HashMap<&str, &Question> =
+        questions.iter().map(|q| (q.id.as_str(), q)).collect();
+    ids.iter()
+        .map(|id| {
+            by_id.get(id.as_str()).map(|q| (*q).clone()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "checkpoint question id {id:?} is absent from the current dataset \
+                     (the dataset changed under --resume)"
+                )
+            })
+        })
+        .collect()
+}
+
 // --- driver ---------------------------------------------------------------------------------
 
 pub fn run(
@@ -1018,7 +1038,7 @@ pub fn run(
     // Stratified by `hop_type` so the small val split proportionally represents each reasoning
     // shape present in the dataset (empty `hop_type` forms one stratum); within each stratum the
     // split is still by episode id, so no gold's paraphrases straddle train/val.
-    let (train, val) = crate::gepa::split_by_episode_stratified(
+    let (train, val_split) = crate::gepa::split_by_episode_stratified(
         &questions,
         |q| q.id.as_str(),
         |q| q.hop_type.as_str(),
@@ -1056,7 +1076,7 @@ pub fn run(
         "gepa_graph: {} questions ({} train, {} val), max_metric_calls={}, max_candidates={}, minibatch={}, pareto_size={}, graph={}, selection={}, work={}",
         questions.len(),
         train.len(),
-        val.len(),
+        val_split.len(),
         cfg.max_metric_calls,
         cfg.max_candidates,
         cfg.minibatch,
@@ -1066,96 +1086,14 @@ pub fn run(
         cfg.work.display(),
     ));
     anyhow::ensure!(
-        !val.is_empty(),
+        !val_split.is_empty(),
         "empty validation split — need >=2 distinct question ids"
     );
 
-    // PHASE 1 (baseline + pareto): tick the bar per validation case so the long baseline pass shows
-    // real progress instead of sitting frozen. Length starts at the baseline val size and is extended
-    // to cover the pareto pass once that set is sampled (below). `reset` zeroes elapsed so the ETA is
-    // phase-local. Phases 2 (search) and 3 (final-val) each re-arm the bar the same way — the bar
-    // fills to 100% three times per run.
-    pb.reset();
-    pb.set_length(val.len() as u64);
-    pb.set_prefix("training · baseline");
-
-    // Running count of reader rollouts (metric calls) spent by the SEARCH; bumped after every
-    // `score_questions` pass by the number of questions it scored. Bounds the candidate loop.
-    let mut metric_calls: usize = 0;
-    // Each question now costs `cfg.rollout_samples` model calls (K rollouts averaged into one
-    // score), so every metric-call increment below is `<set>.len() * k`. K=1 (default) = ×1, no
-    // change from the pre-averaging accounting.
+    // Each question costs `cfg.rollout_samples` model calls (K rollouts averaged into one score),
+    // so every metric-call increment below is `<set>.len() * k`. K=1 (default) = ×1, no change from
+    // the pre-averaging accounting.
     let k = cfg.rollout_samples;
-
-    let baseline_out = score_questions(
-        &cfg,
-        &url,
-        &tools,
-        &cfg.seed_prompt,
-        &val,
-        &idx,
-        graph.as_ref(),
-        &spec,
-        pb,
-        true, // PHASE 1: advance the real bar per val case
-    );
-    metric_calls += val.len() * k;
-    // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored on the
-    // endpoint (a deterministic 500 / context-overflow reproduces for every candidate). Doing this
-    // ONCE, before D_pareto is built, keeps every candidate's per-instance `score_val` vector aligned
-    // on the SAME scorable instances and excludes endpoint errors from the reported score. Surfaced,
-    // never silently dropped.
-    let (val, baseline_out, dropped) = drop_baseline_errored(val, baseline_out);
-    if dropped > 0 {
-        pb.println(format!(
-            "pareto set: dropped {dropped} question(s) that errored on the endpoint (excluded from scoring)"
-        ));
-    }
-    anyhow::ensure!(
-        !val.is_empty(),
-        "every validation question errored on the endpoint — check the reader endpoint"
-    );
-    // No errored outcomes remain after the pre-filter, so `mean_scored` here equals a plain mean.
-    let baseline_score = mean_scored(&baseline_out);
-    pb.println(format!("baseline val: score={baseline_score:.3}"));
-
-    let mut rng = ChaCha12Rng::seed_from_u64(cfg.seed);
-    let pareto_set = sample_questions(&val, cfg.pareto_size, &mut rng);
-    pb.println(format!(
-        "pareto set (D_pareto): {} of {} val",
-        pareto_set.len(),
-        val.len(),
-    ));
-    // Extend PHASE 1 to cover the pareto pass too — one continuous fill through baseline + pareto.
-    pb.set_length(pb.position() + pareto_set.len() as u64);
-    let base_pareto = score_questions(
-        &cfg,
-        &url,
-        &tools,
-        &cfg.seed_prompt,
-        &pareto_set,
-        &idx,
-        graph.as_ref(),
-        &spec,
-        pb,
-        true, // PHASE 1 (cont.): advance the real bar per pareto case
-    );
-    metric_calls += pareto_set.len() * k;
-    let mut pool = vec![Candidate {
-        prompt: cfg.seed_prompt.clone(),
-        score_val: scores(&base_pareto),
-    }];
-    // Best full-Pareto mean seen so far, surfaced in the bar prefix each iteration.
-    let mut best_pareto_so_far = mean(&pool[0].score_val);
-    // Per-candidate cached reflect-minibatch, indexed parallel to `pool` (see `MbCache`). Grows
-    // with `pool` on every accept; the seed starts uncached.
-    let mut mb_cache: Vec<Option<MbCache>> = vec![None];
-    // Train questions to STOP sampling into reflect minibatches: a question whose rollout failed on
-    // the endpoint (a deterministic context-length overflow / 500) would fail identically every time
-    // it is resampled, burning budget + wall-clock and shrinking each minibatch for zero signal. The
-    // val/D_pareto side is pre-filtered once via `drop_baseline_errored`; the train side has no
-    // baseline pass, so we blocklist a question the first time it errors and skip it thereafter.
-    let mut blocked_train: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Checkpoint write helper: a no-op when `cfg.checkpoint_path` is `None` (no workspace, e.g.
     // tests/legacy binaries). Borrows `fp`/`ckpt_path` from above so every call site just supplies
@@ -1178,19 +1116,156 @@ pub fn run(
         }
         Ok(())
     };
-    // Checkpoint the baseline/pareto so a crash mid-search resumes without re-running phase 1.
-    save_ckpt(
-        &pool,
-        best_pareto_so_far,
-        baseline_score,
-        &val,
-        &pareto_set,
-        &blocked_train,
-        0,
-        metric_calls,
-        &rng,
-        None,
-    )?;
+
+    // Decide fresh vs resume from any on-disk checkpoint (see `gepa_checkpoint::decide_resume`).
+    let on_disk = match &ckpt_path {
+        Some(p) => crate::gepa_checkpoint::load(p)?,
+        None => None,
+    };
+    let decision = crate::gepa_checkpoint::decide_resume(on_disk, &fp, cfg.resume, cfg.force)?;
+
+    // The candidate SEARCH loop and the final-val loop below run identically whether this is a fresh
+    // start or a resume: both arms populate exactly these bindings, then control falls through to the
+    // shared PHASE 2 setup. A Fresh run's behavior is unchanged from before checkpointing existed.
+    let val: Vec<Question>;
+    let pareto_set: Vec<Question>;
+    let baseline_score: f64;
+    let mut pool: Vec<Candidate>;
+    let mut mb_cache: Vec<Option<MbCache>>;
+    let mut best_pareto_so_far: f64;
+    let mut blocked_train: std::collections::HashSet<String>;
+    let mut metric_calls: usize;
+    let mut it: usize;
+    let mut rng: ChaCha12Rng;
+    // Per-candidate full-val scores, filled at PHASE 3 and carried in the checkpoint so a crash
+    // during the final-val pass resumes candidate-granularly. Empty on a fresh run until PHASE 3.
+    let mut final_scores: Vec<Option<f64>>;
+
+    match decision {
+        crate::gepa_checkpoint::ResumeDecision::Fresh => {
+            // PHASE 1 (baseline + pareto): tick the bar per validation case so the long baseline pass
+            // shows real progress instead of sitting frozen. Length starts at the baseline val size
+            // and is extended to cover the pareto pass once that set is sampled (below). `reset`
+            // zeroes elapsed so the ETA is phase-local. Phases 2 (search) and 3 (final-val) each
+            // re-arm the bar the same way — the bar fills to 100% three times per run.
+            pb.reset();
+            pb.set_length(val_split.len() as u64);
+            pb.set_prefix("training · baseline");
+
+            let mut mc: usize = 0;
+            let baseline_out = score_questions(
+                &cfg,
+                &url,
+                &tools,
+                &cfg.seed_prompt,
+                &val_split,
+                &idx,
+                graph.as_ref(),
+                &spec,
+                pb,
+                true, // PHASE 1: advance the real bar per val case
+            );
+            mc += val_split.len() * k;
+            // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored
+            // on the endpoint (a deterministic 500 / context-overflow reproduces for every
+            // candidate). Doing this ONCE, before D_pareto is built, keeps every candidate's
+            // per-instance `score_val` vector aligned on the SAME scorable instances and excludes
+            // endpoint errors from the reported score. Surfaced, never silently dropped.
+            let (val_kept, baseline_out, dropped) = drop_baseline_errored(val_split, baseline_out);
+            if dropped > 0 {
+                pb.println(format!(
+                    "pareto set: dropped {dropped} question(s) that errored on the endpoint (excluded from scoring)"
+                ));
+            }
+            anyhow::ensure!(
+                !val_kept.is_empty(),
+                "every validation question errored on the endpoint — check the reader endpoint"
+            );
+            // No errored outcomes remain after the pre-filter, so `mean_scored` equals a plain mean.
+            let base_score = mean_scored(&baseline_out);
+            pb.println(format!("baseline val: score={base_score:.3}"));
+
+            let mut r = ChaCha12Rng::seed_from_u64(cfg.seed);
+            let p_set = sample_questions(&val_kept, cfg.pareto_size, &mut r);
+            pb.println(format!(
+                "pareto set (D_pareto): {} of {} val",
+                p_set.len(),
+                val_kept.len(),
+            ));
+            // Extend PHASE 1 to cover the pareto pass — one continuous fill through baseline + pareto.
+            pb.set_length(pb.position() + p_set.len() as u64);
+            let base_pareto = score_questions(
+                &cfg,
+                &url,
+                &tools,
+                &cfg.seed_prompt,
+                &p_set,
+                &idx,
+                graph.as_ref(),
+                &spec,
+                pb,
+                true, // PHASE 1 (cont.): advance the real bar per pareto case
+            );
+            mc += p_set.len() * k;
+            let init_pool = vec![Candidate {
+                prompt: cfg.seed_prompt.clone(),
+                score_val: scores(&base_pareto),
+            }];
+            // Best full-Pareto mean seen so far, surfaced in the bar prefix each iteration.
+            let bpsf = mean(&init_pool[0].score_val);
+
+            // Publish into the shared bindings. `mb_cache` is parallel to `pool` (the seed starts
+            // uncached); `blocked_train` starts empty (train has no baseline pass — a question is
+            // blocklisted the first time it errors, inside the loop).
+            val = val_kept;
+            pareto_set = p_set;
+            baseline_score = base_score;
+            best_pareto_so_far = bpsf;
+            mb_cache = vec![None];
+            blocked_train = std::collections::HashSet::new();
+            metric_calls = mc;
+            it = 0;
+            rng = r;
+            final_scores = Vec::new();
+            pool = init_pool;
+
+            // Checkpoint the baseline/pareto so a crash mid-search resumes without re-running phase 1.
+            save_ckpt(
+                &pool,
+                best_pareto_so_far,
+                baseline_score,
+                &val,
+                &pareto_set,
+                &blocked_train,
+                0,
+                metric_calls,
+                &rng,
+                None,
+            )?;
+        }
+        crate::gepa_checkpoint::ResumeDecision::Resume(ckpt) => {
+            // SKIP the baseline + pareto passes: their results were checkpointed. Rebuild the val /
+            // D_pareto question sets by id from the deterministic split (unchanged); `subset_by_ids`
+            // errors if the dataset changed under a forced `--resume`. `mb_cache` is NOT persisted —
+            // a candidate's reflect minibatch is recomputed lazily the next time it parents.
+            baseline_score = ckpt.baseline_score;
+            val = subset_by_ids(&questions, &ckpt.val_ids)?;
+            pareto_set = subset_by_ids(&questions, &ckpt.pareto_ids)?;
+            pool = ckpt.pool.clone();
+            mb_cache = vec![None; pool.len()];
+            best_pareto_so_far = ckpt.best_pareto_so_far;
+            blocked_train = ckpt.blocked_train.iter().cloned().collect();
+            metric_calls = ckpt.metric_calls;
+            it = ckpt.iter;
+            rng = ChaCha12Rng::from_seed(ckpt.rng_seed);
+            rng.set_word_pos(ckpt.rng_word_pos);
+            final_scores = ckpt.final_val.clone().unwrap_or_default();
+            pb.println(format!(
+                "resuming GEPA from checkpoint: iter {it}, {metric_calls} metric-calls spent, pool={}",
+                pool.len()
+            ));
+        }
+    }
 
     // Minibatch-cache mode (see `GepaGraphConfig::minibatch_cache`). Default OFF = canonical GEPA
     // (fresh minibatch + parent re-roll every proposal). Turn ON only for a weak, high-variance
@@ -1220,7 +1295,6 @@ pub fn run(
     pb.set_length(cfg.max_metric_calls as u64);
     pb.set_position(metric_calls as u64);
     pb.set_prefix("training");
-    let mut it: usize = 0;
     while metric_calls < cfg.max_metric_calls && pool.len() < cfg.max_candidates {
         it += 1;
         // Static stage word + live candidate progress in the prefix; the StatusTicker owns `{msg}`
@@ -1415,9 +1489,18 @@ pub fn run(
     pb.set_prefix(format!(
         "training · final-val · best={best_pareto_so_far:.3}"
     ));
-    let mut best_prompt = pool[0].prompt.clone();
-    let mut best_score = f64::NEG_INFINITY;
-    for c in &pool {
+    // Candidate-granular + checkpointed: score each pool candidate on the full val set, skipping any
+    // already scored on a resume (`final_scores[c_idx]` is `Some`), and checkpoint after each so a
+    // crash mid-final-val resumes without re-scoring completed candidates. A fresh run initializes
+    // `final_scores` to all-`None` here; a resumed run inherits whatever was persisted (its length
+    // equals the checkpointed pool, so it already matches `pool.len()`).
+    if final_scores.len() != pool.len() {
+        final_scores.resize(pool.len(), None);
+    }
+    for (c_idx, c) in pool.iter().enumerate() {
+        if final_scores[c_idx].is_some() {
+            continue; // already scored on a prior (interrupted) run — skip
+        }
         let out = score_questions(
             &cfg,
             &url,
@@ -1430,15 +1513,34 @@ pub fn run(
             pb,
             true, // PHASE 3: advance the real bar per case
         );
-        let em = mean_scored(&out);
-        if em > best_score {
-            best_score = em;
-            best_prompt = c.prompt.clone();
-        }
+        final_scores[c_idx] = Some(mean_scored(&out));
+        save_ckpt(
+            &pool,
+            best_pareto_so_far,
+            baseline_score,
+            &val,
+            &pareto_set,
+            &blocked_train,
+            it,
+            metric_calls,
+            &rng,
+            Some(final_scores.clone()),
+        )?;
     }
-    if !best_score.is_finite() {
-        best_score = 0.0;
-    }
+    // Winner = highest full-val score; ties keep the earliest candidate (the seed at index 0).
+    let (best_idx, best_val) = final_scores
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|v| (i, v)))
+        .fold((0usize, f64::NEG_INFINITY), |(bi, bs), (i, v)| {
+            if v > bs {
+                (i, v)
+            } else {
+                (bi, bs)
+            }
+        });
+    let mut best_prompt = pool[best_idx].prompt.clone();
+    let mut best_score = if best_val.is_finite() { best_val } else { 0.0 };
     pb.println(format!(
         "gepa_graph final: score={best_score:.3} (baseline was {baseline_score:.3}), candidates={}",
         pool.len(),
@@ -1493,6 +1595,12 @@ pub fn run(
         best_score = seed_full;
     }
 
+    // Success: the run finished, so the checkpoint has served its purpose — remove it so a later run
+    // starts fresh (rather than tripping the fingerprint/resume machinery on a completed run).
+    if let Some(p) = &ckpt_path {
+        crate::gepa_checkpoint::delete(p)?;
+    }
+
     Ok(GepaGraphResult {
         prompt: best_prompt,
         baseline_score,
@@ -1517,6 +1625,17 @@ mod tests {
             tags: vec![],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn subset_by_ids_preserves_order_and_errors_on_missing() {
+        let all = vec![q("a", "qa", "x", &[]), q("b", "qb", "y", &[]), q("c", "qc", "z", &[])];
+        let got = subset_by_ids(&all, &["c".into(), "a".into()]).unwrap();
+        assert_eq!(
+            got.iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
+            vec!["c".to_string(), "a".to_string()]
+        );
+        assert!(subset_by_ids(&all, &["nope".into()]).is_err());
     }
 
     #[test]
