@@ -21,6 +21,7 @@ User-facing documentation for the glossa knowledge-base engine.
 | [deploy/service.md](deploy/service.md) | Ops | Service install (Linux / Windows / macOS) |
 | [deploy/mcp-server.md](deploy/mcp-server.md) | DevOps | Advanced HTTP deployment, multi-instance |
 | [security-and-operations.md](security-and-operations.md) | Ops / Security | Auth, TLS, idle timeout, metrics, JSON logs, audit events, readiness scorecard |
+| [testing/e2e.md](testing/e2e.md) | Contributors | End-to-end test harness: spawn the real `kb` binary over real sockets (`e2e`/`tls` features) |
 | [ROADMAP.md](ROADMAP.md) | Contributors | Backlog and product direction |
 | [graph-reasoning-directions.md](graph-reasoning-directions.md) | Contributors | Reasoning-graph direction: Peirce triad, planned inference modes |
 | [benchmarks.md](benchmarks.md) | Researchers | Append-only eval run log |

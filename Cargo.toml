@@ -88,6 +88,10 @@ sd-notify = "0.4"
 # standard release binary by default (no need for `--features constraint` to pull it in).
 default = ["notebook"]
 notebook = []
+# End-to-end tests that spawn the real `kb` binary and drive it over real sockets (tests/e2e_*.rs
+# + tests/e2e/harness.rs). OFF by default so a normal `cargo test` is completely unaffected; opt in
+# with `--features e2e` (add `,tls` for the HTTPS/mTLS e2e). Carries no extra deps of its own.
+e2e = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
 # Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
