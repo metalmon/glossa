@@ -1475,7 +1475,14 @@ fn freshen_deadline_ms() -> u64 {
     std::env::var("GLOSSA_FRESHEN_DEADLINE_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(3000)
+        // Test builds default to an effectively-unbounded wall budget. The freshen unit tests assert
+        // that a pass COMPLETES (file indexed, sig recorded) — not that it times out — but under a
+        // loaded `-j4` box the real 3s budget can elapse mid-pass from CPU starvation alone, dropping
+        // the pass into serve-stale and flaking those completion assertions (~1/12). That is a test
+        // harness race, not a behavior under test: the two tests that DO exercise a budget drive it
+        // explicitly via the `timeout` (lock spin) / `deadline` (reindex) params and never touch this
+        // env default. Production keeps the 3s default unchanged.
+        .unwrap_or(if cfg!(test) { 600_000 } else { 3000 })
 }
 
 /// `GLOSSA_MIN_RESCAN_MS` (default 2000) — minimum spacing between freshen stat-walks (Task 10,

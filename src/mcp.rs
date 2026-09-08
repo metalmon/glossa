@@ -2309,8 +2309,15 @@ mod tests {
 
     /// Proves the dispatch barrier (R-C2): a panicking tool future yields `Err(McpError)` instead of
     /// unwinding, a normal future passes through untouched, and only the panic increments the counter.
+    // `TOOL_PANICS` is a process-global atomic bumped by EVERY barrier panic, including the sibling
+    // `panic_barrier_does_not_poison_a_parking_lot_lock`; without serializing, a concurrent sibling
+    // panic lands between this test's `before` snapshot and its `before + 1` assert and flakes it.
+    // The guard is held across `.await` on purpose (current-thread `#[tokio::test]`, never crosses
+    // threads) so the whole delta measurement is exclusive.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn panic_barrier_converts_panic_and_counts() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let before = TOOL_PANICS.load(Ordering::Relaxed);
         // panicking branch
         let err = run_with_panic_barrier("boom_tool", async { panic!("kaboom") }).await;
@@ -2327,8 +2334,13 @@ mod tests {
 
     /// End-to-end no-poisoning proof: a panic mid-`parking_lot`-guard inside the barrier leaves the
     /// lock usable for the next call — the barrier + Task 1's non-poisoning locks compose safely.
+    // Serialized against `panic_barrier_converts_panic_and_counts`: this test bumps the shared
+    // process-global `TOOL_PANICS` atomic, so it must not run concurrently with that test's exact
+    // delta measurement. Guard held across `.await` on purpose (current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn panic_barrier_does_not_poison_a_parking_lot_lock() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let m = std::sync::Arc::new(parking_lot::Mutex::new(0u32));
         let m2 = m.clone();
         let _ = run_with_panic_barrier("locker", async move {

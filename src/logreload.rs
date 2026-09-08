@@ -65,20 +65,36 @@ pub fn spawn_poll(path: std::path::PathBuf, cancel: tokio_util::sync::Cancellati
 mod tests {
     #[test]
     fn apply_from_file_parses_valid_and_rejects_garbage() {
+        // Serialize on the crate-wide global-state lock: `install`/`reload` mutate the process-global
+        // tracing subscriber + `RELOAD_HANDLE` (a `OnceLock`) shared by every test in this module.
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("loglevel");
-        // No handle installed in a bare unit test → reload() is skipped, but parsing still gates the result.
+        // Order-independent: both assertions hold whether or not a sibling test already installed the
+        // process-global RELOAD_HANDLE. An empty file returns None before any parse; a directive
+        // EnvFilter genuinely rejects returns None at the `try_new(..).ok()?` parse gate — BEFORE the
+        // handle is ever consulted. NB: EnvFilter is lenient — "not a level" parses as a bare *target*
+        // directive and is ACCEPTED (so it applies once a handle exists, which used to flake this
+        // test); a bogus LEVEL like "foo=notalevel" is what `try_new` actually rejects.
         std::fs::write(&p, "").unwrap();
         assert_eq!(super::apply_from_file(&p), None, "empty file is a no-op");
-        std::fs::write(&p, "not a level !!!").unwrap();
-        assert_eq!(super::apply_from_file(&p), None, "garbage rejected, no crash");
+        std::fs::write(&p, "foo=notalevel").unwrap();
+        assert_eq!(
+            super::apply_from_file(&p),
+            None,
+            "an unparseable directive (invalid level) is rejected at the parse gate, no crash"
+        );
         std::fs::write(&p, "  debug\n").unwrap();
-        // With no RELOAD_HANDLE set, apply returns None after parse; parse-validity is covered by
-        // EnvFilter::try_new above. See the integration test below for the end-to-end reload.
+        // A syntactically valid directive parses; whether it applies depends on a handle existing,
+        // which the end-to-end `apply_from_file_reloads_via_installed_handle` below covers.
     }
 
     #[test]
     fn apply_from_file_reloads_via_installed_handle() {
+        // Serialize on the crate-wide global-state lock: this test reloads the process-global
+        // subscriber's shared filter, which siblings (e.g. spawn_poll) also mutate — running them
+        // concurrently races on that single handle.
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `install` uses `try_init`, which is global-once-per-process; tolerate a prior init from
         // another test in this binary and only assert on the returned directive, never on global
         // filter state, so this stays isolated from other tests' subscriber.
@@ -95,13 +111,21 @@ mod tests {
 
     #[test]
     fn missing_file_is_a_no_op() {
+        // Held for parity with the other logreload tests: they all touch the process-global tracing
+        // subscriber, so the whole module serializes on the shared lock.
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("does-not-exist");
         assert_eq!(super::apply_from_file(&p), None);
     }
 
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this test's
+    // reload of the process-global subscriber against sibling logreload tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn spawn_poll_detects_the_control_file_and_applies_it() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure a handle exists (idempotent: OnceLock.set is a no-op if another test in this
         // binary already installed one — we only assert on the effect of OUR reload below).
         super::install(false, tracing_subscriber::EnvFilter::new("info"));
