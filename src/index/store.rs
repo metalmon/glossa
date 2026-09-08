@@ -2391,7 +2391,7 @@ fn scan_scoped_delta_at(
         if scanned.contains(pk.as_str()) {
             continue; // its dir was actually scanned this pass (and came back without it) — drop it
         }
-        if !truncated && removed.iter().any(|r| *r == pk) {
+        if !truncated && removed.contains(&pk) {
             continue; // dir confirmed gone (this pass wasn't truncated) — drop it
         }
         d.next.files.insert(k.clone(), *sig);
@@ -2525,7 +2525,7 @@ fn hold_back_empty_mount_roots(
     }
     for key in cur.keys().chain(stored.keys()) {
         if let Some((_, label)) = resolve_dir_key(key, roots) {
-            if empty_mount_roots.iter().any(|l| *l == label) {
+            if empty_mount_roots.contains(&label) {
                 unsettled.insert(key.clone());
             }
         }
@@ -2575,6 +2575,9 @@ pub fn reindex_dirs_locked(
 /// defeat the point of the dir-mtime gate; the scoped rescan keeps the freshen pass sublinear in the
 /// common case (a handful of dirs touched) while still converging to full correctness (see
 /// `scan_scoped_delta_at`'s doc for the exact fallback rules).
+// Scoped-freshen signature mirrors `reindex_dirs_locked` (incl. the reserved `_cur_map` /
+// `_notes_touched` slots); bundling into a params struct is churn for no readability gain.
+#[allow(clippy::too_many_arguments)]
 pub fn reindex_dirs_at_locked(
     roots: &[crate::root::Root],
     state_base: &Path,
