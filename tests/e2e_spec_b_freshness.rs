@@ -88,6 +88,24 @@ fn retry_tuning_knobs_are_accepted_and_server_serves() {
     // Setting the retry knobs must not break startup: the server still becomes ready and serves.
     let c = Corpus::with_files(&[("a.md", "# Doc\n\nsearchable smoke_term content.\n")]);
     let state = state_dir();
+
+    // Index the corpus first, targeting the SAME labeled root + state-dir the server below will
+    // serve (the root label is persisted in index keys, so it must match the server's `--root`
+    // exactly), with the same retry-tuning knobs set (mirrors e2e_spec_a_multiroot's index-then-serve
+    // pattern), so the server's first search is against an already-built index instead of racing
+    // startup indexing.
+    assert_cmd::Command::cargo_bin("kb")
+        .unwrap()
+        .arg("index")
+        .arg("--root")
+        .arg(c.root_arg("docs"))
+        .arg("--state-dir")
+        .arg(state.path())
+        .env("GLOSSA_READ_RETRIES", "5")
+        .env("GLOSSA_READ_RETRY_BACKOFF_MS", "50")
+        .assert()
+        .success();
+
     let server = ServerBuilder::new()
         .root(c.root_arg("docs"))
         .state_dir(state.path())

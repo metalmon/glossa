@@ -41,6 +41,17 @@ fn config_file_alone_starts_and_serves() {
     );
     let (_cfgdir, cfgpath) = write_config(&body);
 
+    // Index the corpus first (same config file, so it targets the SAME roots + state_dir the server
+    // will use) so the server's first search is against an already-built index — no startup-indexing
+    // race, and no need to retry the same query (which would hit the session's identical-query dedup).
+    assert_cmd::Command::cargo_bin("kb")
+        .unwrap()
+        .arg("index")
+        .arg("--config")
+        .arg(&cfgpath)
+        .assert()
+        .success();
+
     // No flags beyond --config: roots, state_dir, transport and bind all come from the file.
     let mut cmd = kb_command();
     cmd.arg("mcp").arg("--config").arg(&cfgpath);
