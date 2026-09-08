@@ -541,17 +541,22 @@ fn score_questions(
     // Threaded to `rollout_one` so a rollout's endpoint/judge error prints ABOVE the live bar (via
     // `pb.println`) instead of a raw `eprintln!` that garbles it.
     pb: &ProgressBar,
+    // When true, per-case completion advances the REAL `pb` — used by the baseline and final-val
+    // phases, which own the bar for their whole duration (a per-case fill to 100%). When false, it
+    // feeds a throwaway hidden bar: the in-iteration minibatch/child passes, whose bar position is
+    // the metric-call budget (set at each iteration boundary), would be rewound by a per-case tick.
+    advance_bar: bool,
 ) -> Vec<RolloutOutcome> {
     let units: Vec<(usize, Question)> = questions.iter().cloned().enumerate().collect();
-    // The main training bar tracks metric-call spend end-to-end (length = max_metric_calls, position
-    // = rollouts spent; set in `run`), NOT individual scoring passes — so a pass must not rewind it.
-    // Per-rollout completion is fed to a throwaway hidden bar; within-pass liveness comes from the
-    // `StatusTicker`'s live `{msg}` (elapsed/ETA/tokens) and the per-pass `pb.println` lines.
+    // Per-rollout completion advances either the real `pb` (baseline/final-val phases) or a throwaway
+    // hidden bar (in-iteration passes, tracked by the metric-call budget instead). Either way the
+    // `StatusTicker`'s live `{msg}` (elapsed/ETA/tokens) and per-pass `pb.println` lines stay current.
     let sink = ProgressBar::hidden();
+    let tick = if advance_bar { pb } else { &sink };
     let mut indexed: Vec<(usize, RolloutOutcome)> = crate::parallel::run_units_parallel(
         units,
         cfg.jobs,
-        &sink,
+        tick,
         |_unit| 1,
         |(i, q)| {
             // Each question is rolled `cfg.rollout_samples` times and averaged (see
@@ -997,11 +1002,13 @@ pub fn run(
         "empty validation split — need >=2 distinct question ids"
     );
 
-    // Main bar tracks metric-call spend end-to-end: length = max_metric_calls (the DSPy-style
-    // budget), position = rollouts spent so far. This yields a real whole-run ETA (StatusTicker
-    // derives it from pos/len). The baseline/pareto passes below run at position 0.
-    pb.set_length(cfg.max_metric_calls as u64);
-    pb.set_position(0);
+    // PHASE 1 (baseline + pareto): tick the bar per validation case so the long baseline pass shows
+    // real progress instead of sitting frozen. Length starts at the baseline val size and is extended
+    // to cover the pareto pass once that set is sampled (below). `reset` zeroes elapsed so the ETA is
+    // phase-local. Phases 2 (search) and 3 (final-val) each re-arm the bar the same way — the bar
+    // fills to 100% three times per run.
+    pb.reset();
+    pb.set_length(val.len() as u64);
     pb.set_prefix("training · baseline");
 
     // Running count of reader rollouts (metric calls) spent by the SEARCH; bumped after every
@@ -1022,6 +1029,7 @@ pub fn run(
         graph.as_ref(),
         &spec,
         pb,
+        true, // PHASE 1: advance the real bar per val case
     );
     metric_calls += val.len() * k;
     // Pre-filter the val/pareto question set: drop any question whose BASELINE rollout errored on the
@@ -1050,6 +1058,8 @@ pub fn run(
         pareto_set.len(),
         val.len(),
     ));
+    // Extend PHASE 1 to cover the pareto pass too — one continuous fill through baseline + pareto.
+    pb.set_length(pb.position() + pareto_set.len() as u64);
     let base_pareto = score_questions(
         &cfg,
         &url,
@@ -1060,6 +1070,7 @@ pub fn run(
         graph.as_ref(),
         &spec,
         pb,
+        true, // PHASE 1 (cont.): advance the real bar per pareto case
     );
     metric_calls += pareto_set.len() * k;
     let mut pool = vec![Candidate {
@@ -1098,6 +1109,13 @@ pub fn run(
     // the parent scored) or, on a cached-parent reflect-fail / leak-reject, EVICTS that parent's cache
     // (see the two `continue`s below) so its next selection re-samples fresh — so the metric-call
     // counter always advances and the ceiling alone guarantees termination (no stall counter needed).
+    // PHASE 2 (search): re-arm the bar to track the metric-call BUDGET (position = spent, set at each
+    // iteration top below). `reset` gives this phase its own elapsed/ETA; the in-iteration scoring
+    // passes advance a hidden bar (advance_bar=false), so only the budget moves this fill.
+    pb.reset();
+    pb.set_length(cfg.max_metric_calls as u64);
+    pb.set_position(metric_calls as u64);
+    pb.set_prefix("training");
     let mut it: usize = 0;
     while metric_calls < cfg.max_metric_calls && pool.len() < cfg.max_candidates {
         it += 1;
@@ -1143,6 +1161,7 @@ pub fn run(
                         graph.as_ref(),
                         &spec,
                         pb,
+                        false, // PHASE 2 in-iteration pass: bar tracks budget, not per-case
                     );
                     metric_calls += batch.len() * k;
                     // Blocklist any question that errored on the endpoint so it is never sampled
@@ -1226,6 +1245,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
             pb,
+            false, // PHASE 2 in-iteration pass
         );
         metric_calls += batch.len() * k;
         let child_mb_score = mean_scored(&child_mb);
@@ -1246,6 +1266,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
             pb,
+            false, // PHASE 2 in-iteration pass
         );
         metric_calls += pareto_set.len() * k;
         pool.push(Candidate {
@@ -1270,7 +1291,11 @@ pub fn run(
     }
 
     pb.println(format!("final full-val scoring: {} candidates", pool.len()));
-    pb.set_position(cfg.max_metric_calls as u64);
+    // PHASE 3 (final-val): re-arm the bar to tick per case across every candidate's full-val pass AND
+    // the two apply-gate passes (winner + seed on the full question set) — one fill to 100% at the
+    // very end. `reset` gives this phase its own elapsed/ETA.
+    pb.reset();
+    pb.set_length((pool.len() * val.len() + 2 * questions.len()) as u64);
     pb.set_prefix(format!(
         "training · final-val · best={best_pareto_so_far:.3}"
     ));
@@ -1287,6 +1312,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
             pb,
+            true, // PHASE 3: advance the real bar per case
         );
         let em = mean_scored(&out);
         if em > best_score {
@@ -1318,6 +1344,7 @@ pub fn run(
             graph.as_ref(),
             &spec,
             pb,
+            true, // PHASE 3 (apply-gate): advance the real bar per case
         )
     };
     let winner_out = outcomes_full(&best_prompt);
