@@ -591,21 +591,23 @@ fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> 
 
 /// Advisory check for a grounded node's source having drifted since grounding: compares the
 /// stored `Provenance.file_sig` against a fresh `crate::index::store::file_sig` re-stat of the
-/// source file under `root`, re-stat results cached per `source_path` for the life of the
-/// checker (one per tool call — many nodes typically share a doc). Same comparison as
+/// source file, resolved against `roots` via the same label-aware `doc_file_in` logic `DocIndex`
+/// uses (a node grounded in a SECONDARY root's document must re-stat under that root, not the
+/// primary one). Re-stat results are cached per `source_path` for the life of the checker (one per
+/// tool call — many nodes typically share a doc). Same comparison as
 /// `graph::generalize::hygiene::stale_nodes`, single-node form: a `None` stored sig, or a
 /// missing/unreadable source, is never stale.
 pub struct StaleChecker {
-    root: std::path::PathBuf,
+    roots: Vec<crate::root::Root>,
     cache: std::cell::RefCell<
         std::collections::HashMap<String, Option<crate::index::manifest::FileSig>>,
     >,
 }
 
 impl StaleChecker {
-    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(roots: Vec<crate::root::Root>) -> Self {
         Self {
-            root: root.into(),
+            roots,
             cache: Default::default(),
         }
     }
@@ -619,7 +621,8 @@ impl StaleChecker {
             .borrow_mut()
             .entry(node.prov.source_path.clone())
             .or_insert_with(|| {
-                crate::index::store::file_sig(&self.root.join(&node.prov.source_path)).ok()
+                let abs = crate::index::store::doc_file_in(&self.roots, &node.prov.source_path);
+                crate::index::store::file_sig(&abs).ok()
             });
         matches!(cur, Some(cur) if cur != stored)
     }
@@ -2535,7 +2538,10 @@ mod tests {
         std::fs::write(&drifted_path, b"v2-longer-content").unwrap();
 
         let t = TraceLog::disabled();
-        let stale = StaleChecker::new(root.path());
+        let stale = StaleChecker::new(vec![crate::root::Root {
+            label: String::new(),
+            path: root.path().to_path_buf(),
+        }]);
 
         let out = glossary(
             &i,

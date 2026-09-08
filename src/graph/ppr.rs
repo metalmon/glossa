@@ -24,8 +24,9 @@ const SIMILARITY_EDGES: &[&str] = &["SIMILAR"];
 ///
 /// Resolution precedence: the `GLOSSA_PPR_SIM_WEIGHT` env var (a sweep re-runs without recompiling
 /// and without editing the corpus) > the per-corpus `[retrieval].sim_weight` in `ontology.toml` >
-/// the engine default **0.1**. `gdir` is the corpus's `.glossa` directory; the ontology sits at
-/// `gdir/ontology.toml`, so its root is `gdir.parent()`.
+/// the engine default **0.1**. `gdir` is the graph's state base's `.glossa` directory (`GraphStore`
+/// opens under the resolved state base, not necessarily the corpus root); the ontology sits at
+/// `gdir/ontology.toml`, so its root is `gdir.parent()` = the state base.
 ///
 /// Why a knob and not a fixed default: the best value depends on the READER, not the graph. A weak
 /// reader (e.g. a 4B) benefits from heavier SIMILAR mass (~0.3 won a kb-abac A/B on 4B); a strong

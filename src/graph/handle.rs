@@ -32,19 +32,47 @@ pub struct GraphHandle {
 }
 
 impl GraphHandle {
-    /// Open all components for `root` and pre-warm the CSR (mmaps it, building once on a miss).
-    /// Called once at startup (lazily, on first use) and again on a freshness swap.
-    pub fn open(root: &Path) -> anyhow::Result<GraphHandle> {
-        let idx = DocIndex::open_or_create(root)?;
-        let graph = GraphStore::open(root)?;
+    /// Open all components across `roots` (corpus content) with state (index + graph store) rooted
+    /// at `state_base`, and pre-warm the CSR (mmaps it, building once on a miss). Called once at
+    /// startup (lazily, on first use) and again on a freshness swap.
+    pub fn open_at(roots: &[crate::root::Root], state_base: &Path) -> anyhow::Result<GraphHandle> {
+        let idx = DocIndex::open_or_create_at(roots, state_base)?;
+        let graph = GraphStore::open(state_base)?;
         let csr = graph.csr()?;
         Ok(GraphHandle { graph, idx, csr })
+    }
+
+    /// Back-compat: a single positional root that is also the state base (corpus == state dir).
+    pub fn open(root: &Path) -> anyhow::Result<GraphHandle> {
+        Self::open_at(
+            &[crate::root::Root {
+                label: String::new(),
+                path: root.to_path_buf(),
+            }],
+            root,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handle_open_at_uses_state_base_for_graph_and_index() {
+        use crate::root::Root;
+        let corpus = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(corpus.path().join("a.md"), "content").unwrap();
+        let roots = [Root {
+            label: String::new(),
+            path: corpus.path().into(),
+        }];
+        let h = GraphHandle::open_at(&roots, state.path()).unwrap();
+        assert!(state.path().join(".glossa").join("graph.sqlite").exists());
+        assert!(!corpus.path().join(".glossa").exists());
+        assert!(h.graph.all_nodes().is_ok());
+    }
 
     #[test]
     fn arcswap_handle_serves_reads_and_swaps() {

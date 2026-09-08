@@ -8,37 +8,149 @@ use std::path::PathBuf;
 #[cfg(windows)]
 mod winsvc;
 
-/// Resolve the KB root and report it — plus any ambiguity warnings — so the operator can SEE which
-/// `.glossa` a command actually used. The nested-corpus and deleted-`.glossa`-walks-up traps are
-/// otherwise silent (a deleted corpus `.glossa` makes `kb index` recreate the index in an ANCESTOR,
-/// splitting CLI and MCP apart). `via_tracing` picks the channel: interactive CLI commands print
-/// plain lines to stderr; the long-lived server routes them through `tracing` so they match its
-/// other logs (and become JSON under `GLOSSA_LOG_FORMAT=json`).
-fn resolve_root_reported(explicit: Option<PathBuf>, via_tracing: bool) -> PathBuf {
-    let r = glossa::root::resolve_root_verbose(explicit);
-    let shown = std::path::absolute(&r.root).unwrap_or_else(|_| r.root.clone());
-    if via_tracing {
-        tracing::info!(root = %shown.display(), "resolved kb root");
-        for a in r.advisories() {
-            tracing::warn!("{a}");
-        }
+/// Pure merge of `--root` flags / `GLOSSA_ROOTS` env / `--state-dir` into a `RootInputs`, factored
+/// out of `resolve_inputs` so it is unit-testable without clap or real env vars. Precedence: an
+/// explicit `--root` flag list wins OUTRIGHT over `GLOSSA_ROOTS` — a single `--root` present
+/// suppresses the env entirely (never merged line-by-line). Only when NO `--root` flag is given do
+/// we fall back to parsing `GLOSSA_ROOTS` (newline-separated `[LABEL=]PATH`, blank lines skipped).
+fn build_root_inputs(
+    positional: Option<PathBuf>,
+    flags: &[String],
+    env_roots: Option<String>,
+    state_dir: Option<PathBuf>,
+) -> anyhow::Result<glossa::root::RootInputs> {
+    let roots = if !flags.is_empty() {
+        flags
+            .iter()
+            .map(|s| glossa::root::parse_root_arg(s))
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else if let Some(env) = env_roots {
+        env.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(glossa::root::parse_root_arg)
+            .collect::<anyhow::Result<Vec<_>>>()?
     } else {
-        eprintln!("root: {}", shown.display());
-        for a in r.advisories() {
-            eprintln!("warning: {a}");
+        Vec::new()
+    };
+    Ok(glossa::root::RootInputs {
+        positional,
+        roots,
+        state_dir,
+    })
+}
+
+/// Scan raw argv for `--config <path>` / `--config=<path>` without invoking clap (clap parsing
+/// happens later, in `Cli::parse()`; this only needs to run early enough to gate the logging-init
+/// block). Global flags in this CLI can appear before or after the subcommand, so this scans the
+/// whole argv, not just a fixed position.
+fn peek_config_flag(args: &[String]) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("--config=") {
+            return Some(PathBuf::from(v));
+        }
+        if a == "--config" {
+            return it.next().map(PathBuf::from);
         }
     }
-    r.root
+    None
 }
 
-/// Root resolution for interactive CLI commands — reports to stderr as plain lines.
-fn resolve_root_logged(explicit: Option<PathBuf>) -> PathBuf {
-    resolve_root_reported(explicit, false)
+/// Resolve `roots`/`state_base` for one CLI invocation: build the inputs (flags + `GLOSSA_ROOTS`
+/// env), resolve via the shared resolver (real cwd; the explicit-path guard lives there — no
+/// silent CWD fallback once state-dir/multi-root is in play), then report the resolved root plus
+/// advisories/warnings. `via_tracing` picks the channel: interactive CLI commands print plain
+/// lines to stderr; the long-lived server routes them through `tracing` so they match its other
+/// logs (and become JSON under `GLOSSA_LOG_FORMAT=json`).
+fn resolve_inputs_reported(
+    positional: Option<PathBuf>,
+    root_flags: &[String],
+    state_dir: Option<PathBuf>,
+    via_tracing: bool,
+) -> anyhow::Result<glossa::root::ResolvedRoot> {
+    let env_roots = std::env::var("GLOSSA_ROOTS").ok();
+    let inputs = build_root_inputs(positional, root_flags, env_roots, state_dir)?;
+    let rr = glossa::root::resolve_roots_verbose(inputs)?;
+    // Auto-create + verify `<state_base>/.glossa` is writable BEFORE anything tries to use it — a
+    // clear startup error (read-only mount, stale network share, permissions) beats a confusing
+    // failure deep inside the index/graph writer.
+    glossa::root::ensure_state_writable(&rr.state_base)?;
+    let warn = |msg: String| {
+        if via_tracing {
+            tracing::warn!("{msg}");
+        } else {
+            eprintln!("warning: {msg}");
+        }
+    };
+    let shown = std::path::absolute(&rr.root).unwrap_or_else(|_| rr.root.clone());
+    if via_tracing {
+        tracing::info!(root = %shown.display(), "resolved kb root");
+    } else {
+        eprintln!("root: {}", shown.display());
+    }
+    for a in rr.advisories() {
+        warn(a);
+    }
+    if let Some(w) =
+        glossa::fs_detect::state_dir_network_warning(&glossa::fs_detect::SysFsDetector, &rr.state_base)
+    {
+        warn(w);
+    }
+    // Stale co-located `.glossa`: --state-dir moved state elsewhere, but a root still carries its
+    // own populated `.glossa` (graph.sqlite present) — that layer is silently ignored now, which is
+    // almost never intended (looks like data loss until you know to check).
+    if rr.state_base != rr.root {
+        for r in &rr.roots {
+            let g = r.path.join(".glossa");
+            if g.join("graph.sqlite").exists() {
+                warn(format!(
+                    "--state-dir set but a populated {} exists — its graph/edges are NOT used; \
+                     move it into the state-dir or remove it",
+                    g.display()
+                ));
+            }
+        }
+    }
+    Ok(rr)
 }
 
-/// Root resolution for the long-lived MCP server — reports through `tracing` (structured, JSON-able).
-fn resolve_root_traced(explicit: Option<PathBuf>) -> PathBuf {
-    resolve_root_reported(explicit, true)
+/// `resolve_inputs` for interactive CLI commands — reports to stderr as plain lines.
+fn resolve_inputs(
+    positional: Option<PathBuf>,
+    root_flags: &[String],
+    state_dir: Option<PathBuf>,
+) -> anyhow::Result<glossa::root::ResolvedRoot> {
+    resolve_inputs_reported(positional, root_flags, state_dir, false)
+}
+
+/// `resolve_inputs` for the long-lived MCP server — reports through `tracing`.
+fn resolve_inputs_traced(
+    positional: Option<PathBuf>,
+    root_flags: &[String],
+    state_dir: Option<PathBuf>,
+) -> anyhow::Result<glossa::root::ResolvedRoot> {
+    resolve_inputs_reported(positional, root_flags, state_dir, true)
+}
+
+/// Merge `--root`/`GLOSSA_ROOTS`/`--state-dir` with a deployment config's `[corpus]` section: the
+/// flag/env pair outranks the file OUTRIGHT — checked here, since `resolve_inputs`'s own flag/env
+/// precedence only ever sees whichever roots list it is handed — and the file is consulted only
+/// when neither flag nor env supplied any roots. Shared by `Cmd::Mcp` (Task 6) and `Cmd::Index`
+/// (Task 7) so this precedence lives in exactly one place.
+fn merge_corpus(
+    root_flags: &[String],
+    state_dir: Option<PathBuf>,
+    c: &glossa::config::DeploymentConfig,
+) -> (Vec<String>, Option<PathBuf>) {
+    let env_roots_present = std::env::var("GLOSSA_ROOTS").is_ok();
+    let effective_roots: Vec<String> = if !root_flags.is_empty() || env_roots_present {
+        root_flags.to_vec()
+    } else {
+        c.corpus.roots.clone()
+    };
+    let effective_state_dir = glossa::config::pick_opt(state_dir, c.corpus.state_dir.clone());
+    (effective_roots, effective_state_dir)
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -58,6 +170,20 @@ enum OutputFormat {
     about = "File-First knowledge-base search (ripgrep syntax)"
 )]
 struct Cli {
+    /// Corpus source folder(s): repeatable `--root [LABEL=]PATH`. A bare `--root PATH` auto-labels
+    /// from the basename. Mutually usable with a single positional PATH (empty-label, back-compat).
+    #[arg(long = "root", global = true, value_name = "[LABEL=]PATH")]
+    root: Vec<String>,
+    /// Local directory that holds `.glossa` state (index/graph/locks). Defaults to the (sole) corpus
+    /// root — the co-located behavior. Point at LOCAL disk when the corpus is a network share.
+    #[arg(long = "state-dir", global = true, env = "GLOSSA_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+    /// Path to a TOML deployment config file (see docs/deploy/glossa.toml). Also `GLOSSA_CONFIG`.
+    /// Settings here are the role's base; CLI flags and env vars override per setting. Consumed via a
+    /// pre-parse argv peek (see `peek_config_flag`) so `[logging]` can be folded in before the tracing
+    /// subscriber installs; this field exists so clap surfaces it in `--help` and validates its shape.
+    #[arg(long, global = true, env = "GLOSSA_CONFIG")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -243,16 +369,14 @@ enum Cmd {
         #[arg(long = "source-file", env = "GLOSSA_SOURCE_FILE")]
         source_file: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
-        #[arg(
-            long,
-            value_enum,
-            default_value = "stdio",
-            env = "GLOSSA_MCP_TRANSPORT"
-        )]
-        transport: McpTransport,
-        /// Bind address for --transport streamable-http.
-        #[arg(long, default_value = "127.0.0.1:8080", env = "GLOSSA_MCP_BIND")]
-        bind: String,
+        /// `Option` with NO `default_value`: the built-in default now lives in `config::defaults`
+        /// (Plan E merges CLI > env > config-file > default), resolved at the wiring layer.
+        #[arg(long, value_enum, env = "GLOSSA_MCP_TRANSPORT")]
+        transport: Option<McpTransport>,
+        /// Bind address for --transport streamable-http. `Option` with NO `default_value` — see
+        /// `transport` above; the default lives in `config::defaults::BIND`.
+        #[arg(long, env = "GLOSSA_MCP_BIND")]
+        bind: Option<String>,
         /// Extra allowed `Host` header value(s) for streamable-http (DNS-rebind guard). Repeatable.
         /// Default permits loopback only — set your gateway/public host(s) for a prod deployment.
         #[arg(long = "allowed-host")]
@@ -263,16 +387,35 @@ enum Cmd {
         /// (the loopback default). Ignored for `--transport stdio` (a local subprocess).
         #[arg(long = "auth-token", env = "GLOSSA_MCP_TOKEN", hide_env_values = true)]
         auth_token: Option<String>,
+        /// Override the non-loopback+no-auth startup refusal (§3c). Logs a loud warning + audit event.
+        /// `Option<bool>` with NO `default_value`: unset means "defer to config" — the effective default
+        /// `false` lives in `config::defaults` (Plan E merges CLI > env > config-file > default). Resolve
+        /// to a bool at the wiring layer before passing to the interlock.
+        #[arg(long = "insecure", env = "GLOSSA_MCP_INSECURE")]
+        insecure: Option<bool>,
+        /// PEM certificate chain for native TLS on --transport streamable-http (requires the `tls`
+        /// build feature; the default build has no crypto surface). Set with --tls-key to serve
+        /// HTTPS directly instead of terminating TLS at a reverse proxy.
+        #[cfg(feature = "tls")]
+        #[arg(long = "tls-cert", env = "GLOSSA_TLS_CERT")]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key matching --tls-cert (requires the `tls` build feature).
+        #[cfg(feature = "tls")]
+        #[arg(long = "tls-key", env = "GLOSSA_TLS_KEY")]
+        tls_key: Option<PathBuf>,
+        /// PEM client-CA certificate(s) enabling mTLS: client certs are then REQUIRED and verified
+        /// against this CA (requires --tls-cert/--tls-key and the `tls` build feature).
+        #[cfg(feature = "tls")]
+        #[arg(long = "tls-client-ca", env = "GLOSSA_TLS_CLIENT_CA")]
+        tls_client_ca: Option<PathBuf>,
         /// Idle-session timeout in seconds for the streamable-http transport: a session that makes no
         /// request for this long is refused with 404 on its next request, so the client
         /// re-initializes (a cheap handshake; the KB holds no per-session state). OPT-IN — `0`
         /// (default) disables it. Set e.g. `900` (15 min) for a corporate policy.
-        #[arg(
-            long = "session-idle-secs",
-            env = "GLOSSA_MCP_SESSION_IDLE_SECS",
-            default_value_t = 0
-        )]
-        session_idle_secs: u64,
+        /// `Option` with NO `default_value_t` — see `transport` above; the default lives in
+        /// `config::defaults::SESSION_IDLE_SECS`.
+        #[arg(long = "session-idle-secs", env = "GLOSSA_MCP_SESSION_IDLE_SECS")]
+        session_idle_secs: Option<u64>,
         /// Run under the Windows Service Control Manager (set by the service binPath; not for manual
         /// use). The SCM Stop/Shutdown control triggers the same graceful shutdown as Ctrl-C/SIGTERM.
         #[arg(long = "windows-service", hide = true)]
@@ -558,11 +701,22 @@ fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
+/// The live `ReloadableTls`, registered by `serve_streamable_http` once it builds one (`tls`
+/// feature + cert/key configured), so the SIGHUP handler above -- spawned earlier, before the
+/// transport is known -- can trigger a reload without threading it through as a parameter. Set
+/// once per process; a Windows-service restart that reuses the process would keep the previous
+/// TLS config until that path is revisited (out of scope here, same limitation as other
+/// process-lifetime statics in this file).
+#[cfg(feature = "tls")]
+static TLS_RELOADABLE: std::sync::OnceLock<std::sync::Arc<glossa::tls::ReloadableTls>> =
+    std::sync::OnceLock::new();
+
 /// Everything needed to start one MCP serve instance. Built once from the CLI; reused by both the
 /// foreground path and the Windows Service path (which stashes it before the SCM dispatcher starts).
 #[derive(Clone)]
 pub(crate) struct ServeParams {
-    pub path: PathBuf,
+    pub roots: Vec<glossa::root::Root>,
+    pub state_base: PathBuf,
     pub profile: glossa::mcp::Profile,
     pub trace: bool,
     pub no_graph: bool,
@@ -573,8 +727,18 @@ pub(crate) struct ServeParams {
     pub allowed_hosts: Vec<String>,
     /// Optional bearer token for the streamable-http `/mcp` endpoint (None → unauthenticated).
     pub auth_token: Option<String>,
+    /// Override the non-loopback+no-auth startup refusal (§3c). `None` → resolved default `false`
+    /// (Plan E's config-file merge slots in at this same wiring layer).
+    pub insecure: Option<bool>,
     /// Idle-session timeout (seconds) for streamable-http; 0 disables (opt-in).
     pub session_idle_secs: u64,
+    /// Native TLS cert/key/client-CA (§3b), only present in a `tls`-feature build.
+    #[cfg(feature = "tls")]
+    pub tls_cert: Option<PathBuf>,
+    #[cfg(feature = "tls")]
+    pub tls_key: Option<PathBuf>,
+    #[cfg(feature = "tls")]
+    pub tls_client_ca: Option<PathBuf>,
 }
 
 /// Run one MCP serve instance to completion. `cancel` drives graceful shutdown; when `handle_signals`
@@ -587,7 +751,8 @@ pub(crate) fn run_serve(
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> anyhow::Result<()> {
     let server = glossa::mcp::GlossaServer::new(
-        p.path,
+        p.roots,
+        p.state_base,
         p.profile,
         p.trace,
         glossa::mcp::ServerFlags {
@@ -603,7 +768,14 @@ pub(crate) fn run_serve(
     let bind = p.bind;
     let allowed_hosts = p.allowed_hosts;
     let auth_token = p.auth_token;
+    let insecure = p.insecure;
     let session_idle_secs = p.session_idle_secs;
+    #[cfg(feature = "tls")]
+    let tls_cert = p.tls_cert;
+    #[cfg(feature = "tls")]
+    let tls_key = p.tls_key;
+    #[cfg(feature = "tls")]
+    let tls_client_ca = p.tls_client_ca;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         if handle_signals {
@@ -611,7 +783,48 @@ pub(crate) fn run_serve(
             tokio::spawn(async move {
                 shutdown_signal().await;
                 tracing::info!("shutdown signal received — draining");
+                glossa::sdnotify::stopping();
                 c.cancel();
+            });
+        }
+        // SIGHUP: reload the log level from the control file and force a freshen, without a full
+        // restart. Independent of the SIGTERM/Ctrl-C stream above — tokio allows multiple `signal()`
+        // registrations for different signal kinds coexisting on the same runtime.
+        #[cfg(unix)]
+        if handle_signals {
+            let hup_srv = server.clone();
+            let hup_cancel = cancel.clone();
+            let hup_path = server.state_dir().join(".glossa").join("loglevel");
+            tokio::spawn(async move {
+                let mut hup = match tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::hangup(),
+                ) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                loop {
+                    tokio::select! {
+                        _ = hup_cancel.cancelled() => break,
+                        got = hup.recv() => {
+                            if got.is_none() { break; }
+                            glossa::sdnotify::reloading(); // RELOADING=1 (no-op off systemd)
+                            if let Some(d) = glossa::logreload::apply_from_file(&hup_path) {
+                                tracing::info!("SIGHUP: log level reloaded: {d}");
+                            }
+                            tracing::warn!("SIGHUP does not reload bind/transport/state-dir/auth-token — restart for those");
+                            #[cfg(feature = "tls")]
+                            if let Some(r) = TLS_RELOADABLE.get() {
+                                match r.reload() {
+                                    Ok(()) => tracing::info!("SIGHUP: TLS cert/key reloaded"),
+                                    Err(e) => tracing::warn!("SIGHUP: TLS reload failed, keeping the previous cert: {e:#}"),
+                                }
+                            }
+                            tracing::info!("SIGHUP: forcing a freshen");
+                            hup_srv.freshen_now().await;
+                            glossa::sdnotify::ready(); // back to READY=1 after the reload
+                        }
+                    }
+                }
             });
         }
         if run_maintenance {
@@ -635,9 +848,16 @@ pub(crate) fn run_serve(
                     &bind,
                     allowed_hosts,
                     auth_token,
+                    insecure,
                     session_idle_secs,
                     cancel,
                     on_transport_ready,
+                    #[cfg(feature = "tls")]
+                    tls_cert,
+                    #[cfg(feature = "tls")]
+                    tls_key,
+                    #[cfg(feature = "tls")]
+                    tls_client_ca,
                 )
                 .await?;
             }
@@ -680,13 +900,44 @@ async fn serve_streamable_http(
     bind: &str,
     allowed_hosts: Vec<String>,
     auth_token: Option<String>,
+    insecure: Option<bool>,
     session_idle_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
     on_transport_ready: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(feature = "tls")] tls_cert: Option<PathBuf>,
+    #[cfg(feature = "tls")] tls_key: Option<PathBuf>,
+    #[cfg(feature = "tls")] tls_client_ca: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
+    // Resolve Option<bool> → bool here; the `false` default is config::defaults' (Plan E), not clap's.
+    let insecure = insecure.unwrap_or(false);
+    // Real signal in a `tls` build: TLS is only "active" once both cert and key are configured
+    // (matching the condition the serve step below uses to actually build the HTTPS listener).
+    // Default (non-`tls`) build: always false, so the interlock's non-loopback+no-auth refusal
+    // behaves exactly as before this task.
+    #[cfg(feature = "tls")]
+    let tls_active = tls_cert.is_some() && tls_key.is_some();
+    #[cfg(not(feature = "tls"))]
+    let tls_active = false;
+    if let Some(msg) =
+        glossa::serve_guard::interlock_refuses(bind, auth_token.is_some(), tls_active, insecure)
+    {
+        anyhow::bail!(msg);
+    }
+    if insecure && !glossa::serve_guard::is_loopback_bind(bind) && auth_token.is_none() {
+        if tls_active {
+            tracing::warn!(
+                "--insecure: serving MCP on a non-loopback bind with no auth token (TLS is \
+                 active, but token-less access is still weak unless a client certificate is \
+                 required -- verify mTLS is enforced or set a token)"
+            );
+        } else {
+            tracing::warn!("--insecure: serving MCP with NO authentication on a non-loopback bind");
+        }
+        glossa::audit::security_event("access", "insecure_serve", "override", "-", bind);
+    }
     // Shutdown is driven by `cancel` (the caller wires the OS signal or the SCM control handler to it).
     let mut config = StreamableHttpServerConfig::default();
     config.cancellation_token = cancel.clone();
@@ -696,6 +947,7 @@ async fn serve_streamable_http(
     let ready_srv = server.clone();
     let metrics_srv = server.clone();
     let freshen_srv = server.clone();
+    let loglevel_path = server.state_dir().join(".glossa").join("loglevel");
     let http = server.http_metrics();
     let service = StreamableHttpService::new(
         move || {
@@ -703,7 +955,7 @@ async fn serve_streamable_http(
             // rest of `server`'s Arc fields (index caches, http metrics, etc.) stay shared by
             // design, only `signals` gets swapped for a brand-new tracker per session.
             let mut s = server.clone();
-            s.signals = std::sync::Arc::new(std::sync::Mutex::new(
+            s.signals = std::sync::Arc::new(parking_lot::Mutex::new(
                 glossa::tools::retrieval_progress::ReaderSignals::new(),
             ));
             Ok(s)
@@ -745,6 +997,47 @@ async fn serve_streamable_http(
             );
         }
     }
+    // Global request timeout + body-limit on /mcp only (/health, /ready, /metrics are registered
+    // outside `mcp` and stay exempt). `req_timeout` MUST exceed the freshen serve-stale deadline
+    // (Spec B D1) and legitimate slow-query time, or normal slow queries get cut mid-flight.
+    let req_timeout = std::env::var("GLOSSA_MCP_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120u64);
+    let max_body = std::env::var("GLOSSA_MCP_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4_000_000usize);
+    mcp = mcp
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(req_timeout),
+        ))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body));
+    // Opt-in overload guards (§3c), all OFF unless their env var is set -- proxy deployments
+    // (TLS/LB in front) delegate this to the proxy; these exist for native-TLS-without-proxy
+    // deployments. The gating + layer construction lives in `apply_overload_guards` (pure,
+    // env-free) so tests can exercise the REAL gating instead of a hand-rolled mirror of it.
+    let max_concurrency = std::env::var("GLOSSA_MCP_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let rate_limit_per_sec = std::env::var("GLOSSA_MCP_RATE_LIMIT_PER_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    if rate_limit_per_sec.is_some_and(|n| n > 0)
+        && (std::env::var("GLOSSA_MCP_MAX_CONNECTIONS").is_ok() || tls_active)
+    {
+        tracing::warn!(
+            "MCP overload guards: GLOSSA_MCP_RATE_LIMIT_PER_SEC is set together with a serving \
+             path that can't supply axum's ConnectInfo -- GLOSSA_MCP_MAX_CONNECTIONS (the \
+             connection-cap listener) and/or native TLS (serve_tls serves the plain `app` with \
+             no `into_make_service_with_connect_info`) -- so per-IP rate-limiting degrades to a \
+             single shared bucket for any /mcp request that doesn't carry a trusted \
+             X-Forwarded-For/X-Real-Ip/Forwarded header (see conn_cap.rs and task-7-report.md). \
+             Set a trusted proxy header if you need real per-IP limits in this configuration."
+        );
+    }
+    mcp = apply_overload_guards(mcp, max_concurrency, rate_limit_per_sec);
     // Request metrics wrap /health, /ready and /mcp. /metrics is registered AFTER this `.layer`, so
     // scraping it is NOT counted as a served request (axum applies a layer only to routes added
     // before it) — the scrape must not measure itself.
@@ -781,13 +1074,23 @@ async fn serve_streamable_http(
         )
         .layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let scheme = if tls_active { "https" } else { "http" };
     tracing::info!(
-        "glossa MCP (streamable-http) on http://{bind}/mcp  (+ /health /ready /metrics)"
+        "glossa MCP (streamable-http) on {scheme}://{bind}/mcp  (+ /health /ready /metrics)"
     );
+    glossa::sdnotify::ready(); // Type=notify: report READY after bind (R-C4), NOT after index warm-up
     if let Some(f) = on_transport_ready {
         f();
     }
     tokio::spawn(async move { freshen_srv.freshen_now().await });
+    if let Some(usec) = glossa::sdnotify::watchdog_usec() {
+        tracing::info!("systemd watchdog armed: pinging every {}us", usec / 2);
+        glossa::sdnotify::spawn_watchdog(usec, cancel.clone());
+    }
+    glossa::logreload::spawn_poll(
+        loglevel_path.clone(), // = <state-dir>/.glossa/loglevel, computed from `server` before it moves into the factory
+        cancel.clone(),
+    );
     if idle_ms > 0 {
         // Housekeeping: periodically drop sessions abandoned past the idle window so the activity
         // map can't grow unbounded. Stops with the server (shares `cancel`).
@@ -804,11 +1107,191 @@ async fn serve_streamable_http(
             }
         });
     }
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { cancel.cancelled().await })
+    // Listener-level connection cap (§3c, anti-slowloris), opt-in via GLOSSA_MCP_MAX_CONNECTIONS.
+    // Parsed once here so both the native-TLS branch below (FU2: this cap now also applies over
+    // TLS, nested inside `glossa::tls::serve_tls`) and the plaintext branch further down share the
+    // SAME parsed knob.
+    let max_connections = std::env::var("GLOSSA_MCP_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    // Native TLS (§3b, `tls` feature only): when cert+key are configured, terminate TLS in-process
+    // instead of the plaintext/conn-cap paths below (a reverse-proxy in front stays the default
+    // deployment for the plaintext build). Cert/key are re-read on SIGHUP (registered into
+    // `TLS_RELOADABLE` for the HUP handler above) and on mtime change (`spawn_reload_poll`),
+    // without dropping this listener -- see `glossa::tls` module docs.
+    #[cfg(feature = "tls")]
+    if tls_active {
+        let files = glossa::tls::TlsFiles {
+            cert: tls_cert.expect("tls_active implies tls_cert is set"),
+            key: tls_key.expect("tls_active implies tls_key is set"),
+            client_ca: tls_client_ca,
+        };
+        let mtls = files.client_ca.is_some();
+        let reloadable = std::sync::Arc::new(glossa::tls::ReloadableTls::new(files)?);
+        let _ = TLS_RELOADABLE.set(reloadable.clone());
+        glossa::tls::spawn_reload_poll(reloadable.clone(), cancel.clone());
+        let handshake_timeout = glossa::tls::handshake_timeout_from_env();
+        let max_handshakes = glossa::tls::max_handshakes_from_env();
+        tracing::info!(
+            "MCP TLS: serving HTTPS{mtls_note} (reload on SIGHUP + cert-file mtime change, \
+             {handshake_timeout:?} handshake timeout, max {max_handshakes} concurrent \
+             handshakes{cap_note})",
+            mtls_note = if mtls { " with client-certificate (mTLS) required" } else { "" },
+            cap_note = match max_connections {
+                Some(n) => format!(", max {n} concurrent established connections"),
+                None => String::new(),
+            }
+        );
+        glossa::tls::serve_tls(
+            listener,
+            app,
+            reloadable,
+            cancel,
+            handshake_timeout,
+            max_handshakes,
+            max_connections,
+        )
         .await?;
+        tracing::info!("glossa MCP (streamable-http) stopped");
+        return Ok(());
+    }
+    // Plaintext connection cap (§3c, anti-slowloris).
+    //
+    // Unset (the common case): serve exactly as before this task, PLUS peer-address extraction
+    // (`into_make_service_with_connect_info`) so the per-IP rate-limit guard's
+    // `SmartIpKeyExtractor` can fall back to the direct socket address when no
+    // X-Forwarded-For/X-Real-Ip/Forwarded header is present. Harmless when that guard is also
+    // off (GLOSSA_MCP_RATE_LIMIT_PER_SEC unset) -- nothing reads the extension.
+    //
+    // Set: serve through `CappedListener` instead. FLAGGED DEVIATION (see task-7-report.md and
+    // the NOTE in conn_cap.rs): axum 0.8 only ships `Connected<IncomingStream<'_, L>>` for its
+    // own listener types, and a bridge impl for a custom `Listener` wrapper isn't expressible
+    // from outside axum's crate (orphan rule) -- so this branch does NOT wire connect-info. If
+    // the rate-limit guard is ALSO enabled in this combination, its direct-socket fallback can't
+    // fire (no ConnectInfo to read); a trusted proxy's forwarded-for/real-ip header still works
+    // (`SmartIpKeyExtractor` checks those before ever falling back to the peer address), and
+    // requests with neither degrade to `FailOpenIpKeyExtractor`'s global bucket (see its doc
+    // comment) rather than being rejected outright -- the guard never fails closed.
+    match max_connections {
+        Some(max_conn) => {
+            tracing::info!(
+                "MCP overload guard: max concurrent connections = {max_conn} (excess waits at the listener)"
+            );
+            axum::serve(glossa::conn_cap::CappedListener::new(listener, max_conn), app)
+                .with_graceful_shutdown(async move { cancel.cancelled().await })
+                .await?;
+        }
+        None => {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move { cancel.cancelled().await })
+            .await?;
+        }
+    }
     tracing::info!("glossa MCP (streamable-http) stopped");
     Ok(())
+}
+
+/// Applies the opt-in overload guards (§3c) to `mcp`, given already-PARSED knob values -- no env
+/// reads, no I/O. `serve_streamable_http` is the only real caller (it reads the env vars itself
+/// and passes the parsed `Option`s in); tests call this directly with knob values of their
+/// choosing, so they exercise the REAL `if let Some(..)` gating rather than a hand-rolled mirror
+/// of it. Each guard's own comment (inline below) explains its layer placement/ordering.
+fn apply_overload_guards(
+    mut mcp: axum::Router,
+    max_concurrency: Option<usize>,
+    rate_limit_per_sec: Option<u32>,
+) -> axum::Router {
+    if let Some(n) = max_concurrency {
+        tracing::info!("MCP overload guard: max in-flight /mcp = {n} (excess → 503)");
+        // Built as ONE `tower::ServiceBuilder` stack and applied as a single `.layer()` call:
+        // `Router::layer` type-checks each individual `.layer()` call's resulting error against
+        // `Into<Infallible>` immediately, and `tower::load_shed`'s `Error` is a `BoxError` (not
+        // `Infallible`) regardless of what it wraps -- so a bare `mcp.layer(LoadShed).layer(..)`
+        // chain fails to compile one layer too early. Building the composite via `ServiceBuilder`
+        // first, with `HandleErrorLayer` folding that `BoxError` back into a plain 503 response,
+        // keeps the WHOLE unit's error type `Infallible` before it ever touches `mcp`.
+        // `ServiceBuilder` order = declaration order = the order a request is seen (first added
+        // = outermost): `HandleErrorLayer` outermost (catches errors from everything inside it),
+        // then `LoadShedLayer` (watches `ConcurrencyLimit`'s readiness and, when at capacity,
+        // sheds immediately instead of the caller queuing behind it -- queuing in front of a
+        // heavy backend just deepens the latency tail), then `ConcurrencyLimitLayer` innermost.
+        mcp = mcp.layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_: tower::BoxError| async { axum::http::StatusCode::SERVICE_UNAVAILABLE },
+                ))
+                .layer(tower::load_shed::LoadShedLayer::new())
+                .layer(tower::limit::ConcurrencyLimitLayer::new(n)),
+        );
+    }
+    // Per-IP token-bucket rate-limit (opt-in, tower-governor): keeps one abusive/bursty client
+    // from burning the concurrency-limit/load-shed budget that other clients need. Added AFTER
+    // (thus outer to) the concurrency/load-shed guard above, so an over-quota IP gets 429 before
+    // it ever touches the in-flight counter. `FailOpenIpKeyExtractor` (below) wraps
+    // `SmartIpKeyExtractor`'s existing X-Forwarded-For/X-Real-Ip/Forwarded/ConnectInfo fallback
+    // chain and only widens to a single global bucket as the very last resort -- see its doc
+    // comment for why plain `SmartIpKeyExtractor` is unsafe to use directly here.
+    if let Some(per_sec) = rate_limit_per_sec.filter(|n| *n > 0) {
+        tracing::info!("MCP overload guard: per-IP rate limit = {per_sec}/s on /mcp (excess → 429)");
+        let governor_conf = std::sync::Arc::new(
+            tower_governor::governor::GovernorConfigBuilder::default()
+                .key_extractor(FailOpenIpKeyExtractor)
+                .per_nanosecond(1_000_000_000u64 / u64::from(per_sec))
+                .burst_size(per_sec)
+                .finish()
+                .expect("non-zero per-second/burst-size always produce a GovernorConfig"),
+        );
+        mcp = mcp.layer(tower_governor::GovernorLayer::new(governor_conf));
+    }
+    mcp
+}
+
+/// Rate-limit bucket key: the caller's IP when derivable, else ONE shared global bucket.
+///
+/// `tower_governor`'s own extractors (`PeerIpKeyExtractor`, `SmartIpKeyExtractor`) return
+/// `Err(GovernorError::UnableToExtractKey)` when nothing works, and `Governor` turns THAT into an
+/// immediate rejection response for the request -- i.e. plugging one of them in directly does
+/// NOT degrade gracefully when a key can't be derived, it takes `/mcp` down entirely for every
+/// request in that state. That state is reachable in production: when the connection-cap guard
+/// (`GLOSSA_MCP_MAX_CONNECTIONS`, `src/conn_cap.rs`) is also enabled, `serve_streamable_http`
+/// serves through `CappedListener` without `into_make_service_with_connect_info` (axum's
+/// `Connected` bridge for a custom `Listener` isn't expressible from outside axum's crate --
+/// orphan rule), so `ConnectInfo` is never populated; a request with no trusted
+/// X-Forwarded-For/X-Real-Ip/Forwarded header then has NO extractable key at all.
+///
+/// `FailOpenIpKeyExtractor` never fails closed: it delegates to `SmartIpKeyExtractor`'s full
+/// fallback chain first (so the common cases -- a fronting proxy's header, or a direct socket
+/// address when `ConnectInfo` IS available -- still get real per-IP limiting), and only widens
+/// to `Global` when that returns `Err`. A `Global` bucket still bounds total `/mcp` load (just
+/// not per-caller) -- it degrades the guard's precision, it never turns it into an outage.
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+enum RateLimitKey {
+    Ip(std::net::IpAddr),
+    Global,
+}
+
+/// See [`RateLimitKey`] for why this exists instead of using `tower_governor`'s
+/// `SmartIpKeyExtractor` directly.
+#[derive(Clone, Copy, Debug)]
+struct FailOpenIpKeyExtractor;
+
+impl tower_governor::key_extractor::KeyExtractor for FailOpenIpKeyExtractor {
+    type Key = RateLimitKey;
+
+    fn extract<T>(
+        &self,
+        req: &axum::http::Request<T>,
+    ) -> Result<Self::Key, tower_governor::errors::GovernorError> {
+        // `KeyExtractor` (the trait being implemented here) is already in scope for calling its
+        // own methods on other types within this `impl` block -- no extra `use` needed.
+        match tower_governor::key_extractor::SmartIpKeyExtractor.extract(req) {
+            Ok(ip) => Ok(RateLimitKey::Ip(ip)),
+            Err(_) => Ok(RateLimitKey::Global),
+        }
+    }
 }
 
 /// State for the bearer-auth middleware: the expected token plus the metrics handle (so a rejection
@@ -910,35 +1393,139 @@ async fn session_idle_layer(
     next.run(req).await
 }
 
+/// env ?? file — the already-set process env (the operator's flag/env layer) wins; else the file value.
+fn pick_env_file(env_key: &str, file: Option<String>) -> Option<String> {
+    std::env::var(env_key).ok().or(file)
+}
+
+/// Export a merged value into the process env, only if something resolved (leaving the opt-in
+/// overload knobs — `max_concurrency`/`rate_limit_per_sec`/`connection_cap` — genuinely unset, with
+/// no spurious default, when neither env nor file supplies a value).
+fn export_if_resolved(key: &str, merged: Option<String>) {
+    if let Some(v) = merged {
+        std::env::set_var(key, v);
+    }
+}
+
+/// Fold the file's env-only `[retrieval]`/`[limits]` sections into the process env with correct
+/// precedence (flag/env already-set wins; else the file value; else leave unset so each call site's
+/// own built-in default applies). `[logging]` is handled separately, above, before the subscriber
+/// installs.
+fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
+    // [retrieval] — Spec B.
+    export_if_resolved(
+        "GLOSSA_READ_RETRIES",
+        pick_env_file("GLOSSA_READ_RETRIES", c.retrieval.read_retries.map(|n| n.to_string())),
+    );
+    export_if_resolved(
+        "GLOSSA_READ_RETRY_BACKOFF_MS",
+        pick_env_file(
+            "GLOSSA_READ_RETRY_BACKOFF_MS",
+            c.retrieval.read_retry_backoff_ms.map(|n| n.to_string()),
+        ),
+    );
+    export_if_resolved(
+        "GLOSSA_FRESHEN_DEADLINE_MS",
+        pick_env_file(
+            "GLOSSA_FRESHEN_DEADLINE_MS",
+            c.retrieval.freshen_deadline_ms.map(|n| n.to_string()),
+        ),
+    );
+    export_if_resolved(
+        "GLOSSA_MIN_RESCAN_MS",
+        pick_env_file("GLOSSA_MIN_RESCAN_MS", c.retrieval.min_rescan_ms.map(|n| n.to_string())),
+    );
+    // [limits]/overload — Spec C (all env-only serve guards). Each is opt-in (no built-in default
+    // here): leaving it unset when neither env nor file supplies a value is the correct behavior.
+    export_if_resolved(
+        "GLOSSA_MCP_REQUEST_TIMEOUT_SECS",
+        pick_env_file(
+            "GLOSSA_MCP_REQUEST_TIMEOUT_SECS",
+            c.limits.request_timeout_secs.map(|n| n.to_string()),
+        ),
+    );
+    export_if_resolved(
+        "GLOSSA_MCP_MAX_BODY_BYTES",
+        pick_env_file("GLOSSA_MCP_MAX_BODY_BYTES", c.limits.max_body_bytes.map(|n| n.to_string())),
+    );
+    export_if_resolved(
+        "GLOSSA_MCP_MAX_CONCURRENCY",
+        pick_env_file(
+            "GLOSSA_MCP_MAX_CONCURRENCY",
+            c.limits.max_concurrency.map(|n| n.to_string()),
+        ),
+    );
+    export_if_resolved(
+        "GLOSSA_MCP_RATE_LIMIT_PER_SEC",
+        pick_env_file(
+            "GLOSSA_MCP_RATE_LIMIT_PER_SEC",
+            c.limits.rate_limit_per_sec.map(|n| n.to_string()),
+        ),
+    );
+    export_if_resolved(
+        "GLOSSA_MCP_MAX_CONNECTIONS",
+        pick_env_file("GLOSSA_MCP_MAX_CONNECTIONS", c.limits.connection_cap.map(|n| n.to_string())),
+    );
+    // `max_handshakes` (round-1 fix C1, `tls` feature only) has a built-in default even when
+    // unset everywhere, but it's still merged the same env-or-file way as its siblings above --
+    // leaving it unset here simply means `glossa::tls::max_handshakes_from_env()` applies its own
+    // default at the call site, same as any other unset env var.
+    export_if_resolved(
+        "GLOSSA_MCP_MAX_HANDSHAKES",
+        pick_env_file("GLOSSA_MCP_MAX_HANDSHAKES", c.limits.max_handshakes.map(|n| n.to_string())),
+    );
+}
+
 fn main() -> anyhow::Result<()> {
+    // A deployment config file (`--config` / `GLOSSA_CONFIG`) must be loaded before the tracing
+    // subscriber installs below, because its `[logging]` section can affect that subscriber — but
+    // `Cli::parse()` (which would normally give us the `--config` value) runs AFTER the subscriber
+    // install (so parse errors are still logged). Resolve the flag by scanning raw argv instead.
+    let argv: Vec<String> = std::env::args().collect();
+    let deploy_cfg = match glossa::config::config_path(peek_config_flag(&argv)) {
+        Some(p) => glossa::config::load(&p)?, // runs validate_static: secret rejection + tls gate
+        None => glossa::config::DeploymentConfig::default(),
+    };
     // Structured logs go to STDERR — stdout is the stdio JSON-RPC channel and must never carry logs.
     // Level via RUST_LOG (default `info`). `GLOSSA_LOG_FORMAT=json` emits one JSON object per line
     // (for a SIEM / log pipeline); anything else is the human-readable default. Best-effort init (a
     // second init in tests is a no-op). Read from the env directly — logging is set up before Cli
-    // parsing so parse errors are still logged.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        // Our logs at info; silence noisy deps. RUST_LOG overrides.
-        .unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
-        });
+    // parsing so parse errors are still logged. [logging] is the one section that MUST resolve
+    // before `Cli::parse()`; env still wins over the file (the same precedence as the rest of Plan
+    // E), it's just inlined here because `pick`/`pick_opt` aren't reachable yet at this point.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        deploy_cfg
+            .logging
+            .level
+            .as_deref()
+            .and_then(|v| tracing_subscriber::EnvFilter::try_new(v).ok())
+            .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error"))
+    });
     let json_logs = std::env::var("GLOSSA_LOG_FORMAT")
+        .ok()
+        .or_else(|| deploy_cfg.logging.format.clone())
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
-    if json_logs {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .json()
-            .flatten_event(true)
-            .try_init();
-    } else {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .try_init();
+    glossa::logreload::install(json_logs, filter);
+    let Cli {
+        root: root_flags,
+        state_dir,
+        config: _config, // already consumed via peek_config_flag above; kept for --help/validation
+        cmd,
+    } = Cli::parse();
+    // [retrieval]/[limits] have NO parameter path — Spec B/C read them via std::env::var at their
+    // call sites, all of which run later than this point, so exporting here (after Cli::parse,
+    // unlike [logging]) is sufficient. Full precedence stays flag > env > file > default.
+    export_env_overrides(&deploy_cfg);
+    // Serving-only sections ([server]/[tls]/[limits]/[logging]) matter only to `kb mcp`. One role
+    // config file must work for both provisioning (`kb index` and friends) and serving, so their
+    // presence here is inert for every other subcommand — a debug note, never an error.
+    if !matches!(cmd, Cmd::Mcp { .. }) && deploy_cfg.serving_sections_present() {
+        tracing::debug!(
+            "config: serving-only sections ([server]/[tls]/[limits]/[logging]) are ignored by this subcommand"
+        );
     }
-    let cli = Cli::parse();
-    match cli.cmd {
+    match cmd {
         Cmd::Search {
             pattern,
             path,
@@ -953,7 +1540,7 @@ fn main() -> anyhow::Result<()> {
             no_ignore,
             format,
         } => {
-            let path = resolve_root_logged(path);
+            let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
             let pretty = match format {
                 OutputFormat::Pretty => true,
                 OutputFormat::Rg => false,
@@ -964,8 +1551,9 @@ fn main() -> anyhow::Result<()> {
             let mut records: Vec<(String, String)> = Vec::new();
 
             if !scan {
-                glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
-                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 for h in idx.search_filtered(
                     &pattern,
                     limit,
@@ -978,7 +1566,7 @@ fn main() -> anyhow::Result<()> {
                         h.path, h.location, h.snippet, h.score
                     ));
                     display.push(glossa::cli_fmt::DisplayHit {
-                        file: glossa::cli_fmt::rel_file(&path, &h.path),
+                        file: glossa::cli_fmt::rel_file(&rr.root, &h.path),
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: Some(h.score),
@@ -993,12 +1581,12 @@ fn main() -> anyhow::Result<()> {
                     fixed,
                 };
                 let re = compile(&pattern, &opts)?;
-                let chunks = collect_chunks(&path, glob.as_deref(), !no_ignore)?;
+                let chunks = collect_chunks(&rr.root, glob.as_deref(), !no_ignore)?;
                 for h in search_chunks(&chunks, &re, limit) {
                     let p = h.doc_path.display().to_string();
                     rg_lines.push(format!("{}:{}:{}: {}", p, h.location, h.line, h.snippet));
                     display.push(glossa::cli_fmt::DisplayHit {
-                        file: glossa::cli_fmt::rel_file(&path, &p),
+                        file: glossa::cli_fmt::rel_file(&rr.root, &p),
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: None,
@@ -1010,7 +1598,7 @@ fn main() -> anyhow::Result<()> {
             // Persist for `kb read <#>` (best-effort; ignore IO errors).
             // Don't clobber the previous search when this one returns no hits.
             if !records.is_empty() {
-                let _ = glossa::cli_fmt::write_last_search(&path, &records);
+                let _ = glossa::cli_fmt::write_last_search(&rr.state_base, &records);
             }
 
             if pretty {
@@ -1042,8 +1630,8 @@ fn main() -> anyhow::Result<()> {
                 print_read(std::path::Path::new(&target), location.as_deref())?;
             } else if let Ok(n) = target.parse::<usize>() {
                 // 2. Target is a number and no file by that name exists — resolve from last search.
-                let root = resolve_root_logged(None);
-                let rec = glossa::cli_fmt::read_last_search(&root)
+                let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;
+                let rec = glossa::cli_fmt::read_last_search(&rr.state_base)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
                 match rec {
                     Some((p, loc)) => {
@@ -1058,9 +1646,12 @@ fn main() -> anyhow::Result<()> {
                         // Read the chunk straight from the index (cwd-independent, like MCP `read`);
                         // fall back to opening the file only when the chunk isn't indexed.
                         let from_index = loc_opt.as_deref().and_then(|l| {
-                            glossa::index::store::DocIndex::open_or_create(&root)
-                                .ok()
-                                .and_then(|idx| idx.read_chunk(&p, l).ok().flatten())
+                            glossa::index::store::DocIndex::open_or_create_at(
+                                &rr.roots,
+                                &rr.state_base,
+                            )
+                            .ok()
+                            .and_then(|idx| idx.read_chunk(&p, l).ok().flatten())
                         });
                         match from_index {
                             Some(body) => {
@@ -1092,16 +1683,21 @@ fn main() -> anyhow::Result<()> {
             file,
             ontology,
         } => {
-            let root = resolve_root_logged(path);
+            // Same 3-way corpus precedence as `Cmd::Mcp` (Task 6): --root/GLOSSA_ROOTS outrank the
+            // file outright; the file's [corpus] is consulted only when neither supplied any roots.
+            let (effective_roots, effective_state_dir) =
+                merge_corpus(&root_flags, state_dir.clone(), &deploy_cfg);
+            let rr = resolve_inputs(path, &effective_roots, effective_state_dir)?;
             let started = std::time::Instant::now();
             if let Some(rel) = file {
-                let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 let Some(rel) = idx.canonical_document_path(&rel) else {
                     anyhow::bail!("not an indexed document: {rel}");
                 };
-                let _lock = glossa::index::lock::try_index_lock(&root)
+                let _lock = glossa::index::lock::try_index_lock(&rr.state_base)
                     .ok_or_else(|| anyhow::anyhow!("another process is indexing; try again"))?;
-                glossa::index::store::index_one_file_locked(&root, &rel)?;
+                glossa::index::store::index_one_file_locked_at(&rr.roots, &rr.state_base, &rel)?;
                 println!(
                     "reindexed {rel} in {}",
                     glossa::cli_fmt::format_elapsed(started.elapsed())
@@ -1109,7 +1705,9 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             if let Some(name) = ontology {
-                match glossa::ontology_templates::write_template(&root, &name, false)? {
+                // The preset always materializes under the STATE base (`<state_base>/.glossa/ontology.toml`),
+                // never a corpus root — state-dir separation means these can differ.
+                match glossa::ontology_templates::write_template(&rr.state_base, &name, false)? {
                     glossa::ontology_templates::Written::Created => {
                         println!("ontology: wrote '{name}' preset to .glossa/ontology.toml");
                     }
@@ -1124,13 +1722,13 @@ fn main() -> anyhow::Result<()> {
             }
             // Seed a default whitelist `.ignore` on a corpus that has none, so a first index doesn't
             // slurp installers/archives/temp files as text. Never clobbers an existing ignore setup.
-            if let Some(p) = glossa::default_ignore::seed_if_absent(&root) {
+            if let Some(p) = glossa::default_ignore::seed_if_absent(&rr.root) {
                 eprintln!(
                     "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
                     p.display()
                 );
             }
-            let stats = glossa::index::store::index_dir(&root, force)?;
+            let stats = glossa::index::store::index_dir_at(&rr.roots, &rr.state_base, force)?;
             let skipped = if stats.errors.is_empty() {
                 String::new()
             } else {
@@ -1155,8 +1753,8 @@ fn main() -> anyhow::Result<()> {
                 // (closure + SIMILAR), communities and centrality stay in sync. Non-destructive:
                 // merges are only reported, never applied here (use `kb graph generalize --merge`).
                 // This mirrors what the old `kb reindex` did — --force is its replacement.
-                let g = glossa::graph::store::GraphStore::open(&root)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&root);
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let opts = glossa::graph::generalize::apply::Opts::from_ontology(
                     &ont,
                     glossa::trace::now_ms(),
@@ -1171,8 +1769,9 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "notebook")]
         Cmd::Prune { path, dry_run } => {
-            let root = resolve_root_logged(path);
-            let orphans = glossa::index::store::orphan_notes(&root)?;
+            let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+            let root = rr.state_base.clone();
+            let orphans = glossa::index::store::orphan_notes_at(&rr.roots, &root)?;
             if orphans.is_empty() {
                 println!("no orphaned notes");
                 return Ok(());
@@ -1203,7 +1802,7 @@ fn main() -> anyhow::Result<()> {
                         dir = parent.to_path_buf();
                     }
                 }
-                glossa::index::store::ensure_fresh(&root)?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &root)?;
                 println!("pruned {removed} orphaned note(s)");
             }
             Ok(())
@@ -1226,9 +1825,9 @@ fn main() -> anyhow::Result<()> {
             max_count,
             multiline,
         } => {
-            let path = resolve_root_logged(path);
-            glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
-            let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+            let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+            glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
+            let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
             let opts = glossa::grep::GrepOpts {
                 ignore_case,
                 fixed,
@@ -1253,9 +1852,9 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Glob { pattern, path } => {
-            let path = resolve_root_logged(path);
-            glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
-            let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
+            let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+            glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
+            let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
             let docs = glossa::glob::glob_docs(&idx, &pattern)?;
             if docs.is_empty() {
                 println!("(no documents match — ripgrep -g glob syntax: use * or **/* or *.{{pdf,md}}; matches PATHS not content; use `kb grep` or `kb search` for text)");
@@ -1279,7 +1878,14 @@ fn main() -> anyhow::Result<()> {
             bind,
             allowed_hosts,
             auth_token,
+            insecure,
             session_idle_secs,
+            #[cfg(feature = "tls")]
+            tls_cert,
+            #[cfg(feature = "tls")]
+            tls_key,
+            #[cfg(feature = "tls")]
+            tls_client_ca,
             windows_service,
             service_name: _service_name,
         } => match action {
@@ -1292,9 +1898,49 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             None => {
-                let path = resolve_root_traced(path);
+                let c = &deploy_cfg;
+                // Corpus (Spec A): fall through to the file's roots/state_dir ONLY when neither
+                // --root nor GLOSSA_ROOTS is present (see `merge_corpus`).
+                let (effective_roots, effective_state_dir) =
+                    merge_corpus(&root_flags, state_dir.clone(), c);
+                let rr = resolve_inputs_traced(path, &effective_roots, effective_state_dir)?;
+                // Server (Spec C): each setting is a clap Option<T> that already collapsed flag+env
+                // via `env=`, so a plain two-tier pick/merge_list is correct here (no
+                // GLOSSA_ROOTS-style 3-way trap).
+                let bind = glossa::config::pick(bind, c.server.bind.clone(), glossa::config::defaults::BIND.to_string());
+                let transport = match glossa::config::pick_opt(
+                    transport,
+                    c.server
+                        .transport
+                        .as_deref()
+                        .map(|s| <McpTransport as clap::ValueEnum>::from_str(s, true))
+                        .transpose()
+                        .map_err(anyhow::Error::msg)?,
+                ) {
+                    Some(t) => t,
+                    None => McpTransport::Stdio, // = config::defaults::TRANSPORT
+                };
+                let session_idle_secs = glossa::config::pick(
+                    session_idle_secs,
+                    c.server.session_idle_secs,
+                    glossa::config::defaults::SESSION_IDLE_SECS,
+                );
+                let allowed_hosts = glossa::config::merge_list(allowed_hosts, c.server.allowed_hosts.clone());
+                // stays Option<bool>; .unwrap_or(false) happens at the serve_streamable_http call
+                // site (src/main.rs), unchanged.
+                let insecure = glossa::config::pick_opt(insecure, c.server.insecure);
+                #[cfg(feature = "tls")]
+                let tls_cert = glossa::config::pick_opt(tls_cert, c.tls.as_ref().and_then(|t| t.cert.clone()));
+                #[cfg(feature = "tls")]
+                let tls_key = glossa::config::pick_opt(tls_key, c.tls.as_ref().and_then(|t| t.key.clone()));
+                #[cfg(feature = "tls")]
+                let tls_client_ca =
+                    glossa::config::pick_opt(tls_client_ca, c.tls.as_ref().and_then(|t| t.client_ca.clone()));
+                // auth_token is env/flag ONLY (never c.server.*) — validate_static already rejected
+                // a token key in the file at load time, so there is nothing to merge here.
                 let params = ServeParams {
-                    path,
+                    roots: rr.roots,
+                    state_base: rr.state_base,
                     profile: glossa::mcp::Profile::parse(&profile),
                     trace,
                     no_graph,
@@ -1306,7 +1952,14 @@ fn main() -> anyhow::Result<()> {
                     bind,
                     allowed_hosts,
                     auth_token,
+                    insecure,
                     session_idle_secs,
+                    #[cfg(feature = "tls")]
+                    tls_cert,
+                    #[cfg(feature = "tls")]
+                    tls_key,
+                    #[cfg(feature = "tls")]
+                    tls_client_ca,
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
@@ -1332,8 +1985,8 @@ fn main() -> anyhow::Result<()> {
         },
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 println!("{}", glossa::tools::graph_stats(&g));
                 Ok(())
             }
@@ -1343,15 +1996,15 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 scope,
             } => {
-                let path = resolve_root_logged(path);
-                glossa::index::store::ensure_fresh(&path)?; // file-first: pick up new/changed docs
-                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
+                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let trace = glossa::trace::TraceLog::disabled();
                 let spec = glossa::tools::ChainSpec::from_ontology(
-                    &glossa::graph::ontology::Ontology::load_or_default(&path),
+                    &glossa::graph::ontology::Ontology::load_or_default(&rr.state_base),
                 );
-                let stale = glossa::tools::StaleChecker::new(path.clone());
+                let stale = glossa::tools::StaleChecker::new(rr.roots.clone());
                 println!(
                     "{}",
                     glossa::tools::glossary(
@@ -1368,10 +2021,10 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Query { sql, path } => {
-                let path = glossa::root::resolve_root(path);
-                glossa::index::store::ensure_fresh(&path)?;
-                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let trace = glossa::trace::TraceLog::disabled();
                 println!("{}", glossa::tools::sql(&idx, &g, &sql, &trace));
                 Ok(())
@@ -1383,8 +2036,8 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let at = as_of
                     .as_deref()
                     .map(glossa::graph::temporal::normalize_point)
@@ -1429,9 +2082,9 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             GraphAction::Generalize { path, merge } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let mut opts = glossa::graph::generalize::apply::Opts::from_ontology(
                     &ont,
                     glossa::trace::now_ms(),
@@ -1457,10 +2110,10 @@ fn main() -> anyhow::Result<()> {
                 prune_stale,
                 force,
             } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
-                let report = glossa::graph::doctor::doctor(&g, &ont, &path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
+                let report = glossa::graph::doctor::doctor(&g, &ont, &rr.roots)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
                 if prune_dangling && !force {
                     if let Some(reason) =
@@ -1498,8 +2151,8 @@ fn main() -> anyhow::Result<()> {
                 now: _now,
                 scope,
             } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let filter = if types.is_empty() {
                     None
                 } else {
@@ -1544,8 +2197,8 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now,
             } => {
-                let path = resolve_root_logged(path);
-                let g = glossa::graph::store::GraphStore::open(&path)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let at = as_of
                     .as_deref()
                     .map(glossa::graph::temporal::normalize_point)
@@ -1613,11 +2266,11 @@ fn main() -> anyhow::Result<()> {
                 max_depth,
                 scope,
             } => {
-                let path = glossa::root::resolve_root(path);
-                glossa::index::store::ensure_fresh(&path)?;
-                let idx = glossa::index::store::DocIndex::open_or_create(&path)?;
-                let g = glossa::graph::store::GraphStore::open(&path)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let trace = glossa::trace::TraceLog::disabled();
                 println!(
                     "{}",
@@ -1647,7 +2300,8 @@ fn main() -> anyhow::Result<()> {
                 as_of,
                 now: _now,
             } => {
-                let path = resolve_root_logged(path);
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                let path = rr.state_base;
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let at = as_of
                     .as_deref()
@@ -1813,15 +2467,15 @@ fn main() -> anyhow::Result<()> {
                 doc,
                 tables_dir,
             } => {
-                let root = resolve_root_logged(path);
-                glossa::index::store::ensure_fresh(&root)?;
+                let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
                 let tables = tables_dir.unwrap_or_else(|| {
-                    glossa::notebook::notes_root(&root)
+                    glossa::notebook::notes_root(&rr.state_base)
                         .join(glossa::notebook::mirror_dir_for_doc(&doc))
                 });
-                let idx = glossa::index::store::DocIndex::open_or_create(&root)?;
-                let g = glossa::graph::store::GraphStore::open(&root)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&root);
+                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
+                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let report = glossa::tables::tables_to_graph(&idx, &g, &ont, &doc, &tables)?;
                 for line in &report.lines {
                     println!("{line}");
@@ -1872,8 +2526,10 @@ fn main() -> anyhow::Result<()> {
                     template,
                     force,
                 } => {
-                    let root = resolve_root_logged(path);
-                    match ot::write_template(&root, &template, force)? {
+                    // The preset always materializes under the STATE base — see the matching note
+                    // at `kb index --ontology` above.
+                    let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+                    match ot::write_template(&rr.state_base, &template, force)? {
                         ot::Written::Created => {
                             println!("wrote '{template}' to .glossa/ontology.toml")
                         }
@@ -1899,5 +2555,246 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_root_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn glossa_roots_env_and_flag_merge_flag_wins() {
+        // flag > env: a --root flag present suppresses GLOSSA_ROOTS entirely (precedence contract).
+        let inputs = build_root_inputs(
+            None,
+            &["docs=/mnt/a".to_string()],
+            Some("specs=/mnt/b".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(inputs.roots.len(), 1);
+        assert_eq!(inputs.roots[0].label, "docs");
+    }
+
+    #[test]
+    fn glossa_roots_env_used_when_no_flag_given() {
+        let inputs =
+            build_root_inputs(None, &[], Some("specs=/mnt/b\n\ndocs=/mnt/a".to_string()), None)
+                .unwrap();
+        assert_eq!(inputs.roots.len(), 2, "blank env lines are skipped");
+        assert_eq!(inputs.roots[0].label, "specs");
+        assert_eq!(inputs.roots[1].label, "docs");
+    }
+
+    #[test]
+    fn state_dir_without_path_errors_through_resolve_inputs() {
+        let state = tempfile::tempdir().unwrap();
+        let err = resolve_inputs(None, &[], Some(state.path().to_path_buf())).unwrap_err();
+        assert!(err.to_string().contains("corpus path"), "got: {err}");
+    }
+}
+
+/// Layer-wiring checks for the `/mcp` hardening layers (§3c): a minimal router built with the same
+/// `tower_http` layers `serve_streamable_http` applies to its `mcp` sub-router, driven with
+/// `tower::ServiceExt::oneshot` (no socket, no full server harness). `/health`/`/ready`/`/metrics`
+/// are registered on `observed`/`app` OUTSIDE the layered `mcp` router in `serve_streamable_http`
+/// (see the `.merge(mcp)` call), so they structurally never see these layers — that exemption is
+/// enforced by router topology, not tested again here.
+#[cfg(test)]
+mod mcp_serve_layer_tests {
+    use super::apply_overload_guards;
+    use tower::{Service, ServiceExt};
+
+    #[tokio::test]
+    async fn mcp_body_limit_rejects_oversized_payload() {
+        // `RequestBodyLimitLayer` rejects eagerly off the `Content-Length` header (see
+        // tower_http::limit::request_body::RequestBodyLimit::call); a real HTTP/1 server fills
+        // that header in from the wire, so it must be set explicitly when driving the service
+        // in-process via `oneshot` (no socket, so nothing parses a wire request for us).
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::post(|| async { "ok" }))
+            .layer(tower_http::limit::RequestBodyLimitLayer::new(8));
+        let req = axum::http::Request::post("/mcp")
+            .header(axum::http::header::CONTENT_LENGTH, "64")
+            .body(axum::body::Body::from(vec![b'x'; 64]))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn mcp_body_limit_allows_payload_within_limit() {
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::post(|| async { "ok" }))
+            .layer(tower_http::limit::RequestBodyLimitLayer::new(64));
+        let req = axum::http::Request::post("/mcp")
+            .body(axum::body::Body::from(vec![b'x'; 8]))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mcp_request_timeout_returns_408_for_slow_handler() {
+        let app = axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    "ok"
+                }),
+            )
+            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                std::time::Duration::from_millis(20),
+            ));
+        let req = axum::http::Request::post("/mcp")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn mcp_request_timeout_allows_fast_handler() {
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::post(|| async { "ok" }))
+            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                std::time::Duration::from_secs(5),
+            ));
+        let req = axum::http::Request::post("/mcp")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mcp_concurrency_limit_and_load_shed_sheds_excess_request() {
+        // Per the brief: an axum-Router `.oneshot()` per call can't reliably reproduce real
+        // concurrent contention on shared middleware state (each in-process oneshot drives its
+        // own call to completion independently) -- so this drives the SAME
+        // `tower::ServiceBuilder` composite `serve_streamable_http` applies when
+        // GLOSSA_MCP_MAX_CONCURRENCY is set directly via `tower::Service`, no axum Router/HTTP
+        // involved. `ServiceBuilder`'s declaration order = request order (first added =
+        // outermost): `LoadShedLayer` outer (watches `ConcurrencyLimitLayer`'s readiness and, at
+        // capacity, sheds immediately instead of the caller queuing behind it), then
+        // `ConcurrencyLimitLayer(1)` inner. Both layers implement `Clone` by sharing their inner
+        // `Arc` state (the semaphore), so `svc.clone()` below is the SAME limiter, not a fresh
+        // one -- exactly like two real concurrent requests hitting one running server.
+        let slow = tower::service_fn(|_req: ()| async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok::<(), std::convert::Infallible>(())
+        });
+        let svc = tower::ServiceBuilder::new()
+            .layer(tower::load_shed::LoadShedLayer::new())
+            .layer(tower::limit::ConcurrencyLimitLayer::new(1))
+            .service(slow);
+        let mut svc1 = svc.clone();
+        let mut svc2 = svc;
+        let call1 = async {
+            tower::ServiceExt::<()>::ready(&mut svc1).await.unwrap();
+            svc1.call(()).await
+        };
+        let call2 = async {
+            tower::ServiceExt::<()>::ready(&mut svc2).await.unwrap();
+            svc2.call(()).await
+        };
+        let (r1, r2): (
+            Result<(), tower::BoxError>,
+            Result<(), tower::BoxError>,
+        ) = tokio::join!(call1, call2);
+        let results = [&r1, &r2];
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "exactly one of the two concurrent calls should succeed, got {r1:?} / {r2:?}"
+        );
+        assert_eq!(
+            results.iter().filter(|r| r.is_err()).count(),
+            1,
+            "exactly one of the two concurrent calls should be shed as Overloaded, got {r1:?} / {r2:?}"
+        );
+    }
+
+    // The four tests below call `apply_overload_guards` directly -- the SAME function
+    // `serve_streamable_http` calls with its parsed env values -- so they exercise the real
+    // `if let Some(..)` gating for each knob, not a hand-rolled mirror of it (a prior version of
+    // this test built an unrelated bare router by hand, which passed even if the gating in
+    // `apply_overload_guards` were deleted entirely).
+    //
+    // These use SINGLE, sequential requests rather than concurrent ones on purpose: an
+    // axum-Router `.oneshot()` clone driven concurrently via `tokio::join!` was already shown
+    // (in the concurrency-limit test above, and in an earlier draft of these tests) to be an
+    // unreliable way to reproduce real contention on shared middleware state through a full
+    // Router -- exactly what the brief warns "oneshot is insufficient for concurrency" about.
+    // `GLOSSA_MCP_MAX_CONCURRENCY(0)` sheds a SINGLE request deterministically (a limiter with
+    // zero capacity is never ready, no contention needed), and the rate-limiter's admit/reject
+    // decision is time-based, not concurrency-based, so two sequential calls suffice there too.
+    fn mk_app() -> axum::Router {
+        axum::Router::new().route("/mcp", axum::routing::post(|| async { "ok" }))
+    }
+
+    fn mk_req() -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post("/mcp")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn apply_overload_guards_is_a_no_op_when_all_knobs_are_none() {
+        let app = apply_overload_guards(mk_app(), None, None);
+        let resp = app.oneshot(mk_req()).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn apply_overload_guards_adds_a_real_concurrency_shed_when_max_concurrency_is_set() {
+        // A limiter built with capacity 0 is NEVER ready, so even a single, non-concurrent
+        // request is shed -- this deterministically proves the `if let Some(n) =
+        // max_concurrency` branch actually attached the ConcurrencyLimit+LoadShed layer (vs.
+        // the `None` case above, which passes the very same request straight through as 200).
+        let app = apply_overload_guards(mk_app(), Some(0), None);
+        let resp = app.oneshot(mk_req()).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn apply_overload_guards_adds_a_real_rate_limit_when_rate_limit_per_sec_is_set() {
+        // burst_size == 1 means the SECOND request within the same ~second is over quota. Both
+        // requests carry no forwarded-for header and no ConnectInfo extension (this test drives
+        // the router directly with `.oneshot()`, not through a real listener), so both land on
+        // `FailOpenIpKeyExtractor`'s `Global` bucket -- proving the `if let Some(per_sec) =
+        // rate_limit_per_sec` branch attached a real, enforcing rate-limit layer (not just that
+        // it compiles): first request admitted, second rejected, both against the SAME shared
+        // limiter state via `app.clone()`.
+        let app = apply_overload_guards(mk_app(), None, Some(1));
+        let first = app.clone().oneshot(mk_req()).await.unwrap();
+        let second = app.oneshot(mk_req()).await.unwrap();
+        assert_eq!(first.status(), axum::http::StatusCode::OK);
+        assert_eq!(second.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_guard_degrades_to_global_bucket_instead_of_failing_closed() {
+        // Reproduces the exact "both knobs on" production scenario for the KEY-EXTRACTION path
+        // specifically: `GLOSSA_MCP_MAX_CONNECTIONS` set means `serve_streamable_http` serves
+        // WITHOUT `into_make_service_with_connect_info` (see conn_cap.rs's NOTE), so a request
+        // with no trusted forwarded-for/real-ip/forwarded header has no `ConnectInfo` to fall
+        // back to either -- exactly what this test recreates by never wiring ConnectInfo at all.
+        // Before the fix, plugging `SmartIpKeyExtractor` straight into the rate-limit guard made
+        // THIS request fail with `GovernorError::UnableToExtractKey` on the very first call --
+        // i.e. every /mcp request in this combination, an outage, not a degraded guard.
+        // `FailOpenIpKeyExtractor` must never do that: the first (and only) request here has to
+        // succeed normally.
+        let app = apply_overload_guards(mk_app(), None, Some(5));
+        let resp = app.oneshot(mk_req()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "a request with no forwarded header and no ConnectInfo must still be served (global \
+             bucket), never rejected merely because a per-IP key couldn't be derived"
+        );
     }
 }

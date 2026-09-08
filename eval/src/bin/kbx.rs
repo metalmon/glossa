@@ -453,6 +453,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Init { path, force } => {
+            // spec-A: honors state-dir once kbx grows the --root/--state-dir flags; co-located
+            // (single PATH) walk-up discovery for now.
             let root = workspace::resolve(path).root;
             let paths = scaffold_init(&root, force)?;
             println!("initialized kbx workspace at {}", paths.kbx_dir.display());
@@ -502,6 +504,8 @@ fn main() -> Result<()> {
             max_rounds,
             jobs,
         } => {
+            // spec-A: honors state-dir once kbx grows the --root/--state-dir flags; co-located
+            // (single PATH) walk-up discovery for now.
             let paths = workspace::resolve(path);
             let report = run_build(
                 paths,
@@ -767,6 +771,8 @@ fn verdict_score(v: Verdict) -> f32 {
 }
 
 fn run_eval(args: EvalArgs) -> Result<()> {
+    // spec-A: honors state-dir once kbx grows the --root/--state-dir flags; co-located
+    // (single PATH) walk-up discovery for now.
     let kbx_paths = workspace::resolve(args.path);
     // `--lab` overrides only the lab config (endpoints/tuning); prompt files still come from the
     // workspace. Enables cross-model runs (eval on one reader while train runs on another).
@@ -1286,6 +1292,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 /// Pure, deterministic, network-free — it only reads `runs/<tag>/trajectories.jsonl` for each tag
 /// in `--from`, filters/pairs by the joined judge verdict, and writes `--out`.
 fn run_export(args: ExportArgs) -> Result<()> {
+    // spec-A: honors state-dir once kbx grows the --root/--state-dir flags; co-located
+    // (single PATH) walk-up discovery for now.
     let runs_dir = workspace::resolve(args.path).runs;
     let tags: Vec<String> = args
         .from

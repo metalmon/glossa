@@ -320,8 +320,14 @@ pub fn to_html(g: &GraphStore, e: &GraphExport, root: &std::path::Path) -> Strin
         .iter()
         .map(|n| (n.id.clone(), n.prov.source_path.clone(), n.prov.file_sig))
         .collect();
+    // Back-compat single empty-label root: `to_html`'s callers (CLI `graph dump`) pass the state
+    // base, which is the sole root in the common co-located case.
+    let roots = [crate::root::Root {
+        label: String::new(),
+        path: root.to_path_buf(),
+    }];
     let stale: std::collections::HashSet<String> =
-        crate::graph::generalize::hygiene::stale_nodes(root, &stale_input)
+        crate::graph::generalize::hygiene::stale_nodes(&roots, &stale_input)
             .into_iter()
             .collect();
 

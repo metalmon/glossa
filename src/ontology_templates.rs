@@ -140,8 +140,11 @@ pub enum Written {
     Overwritten,
 }
 
-/// Write a preset to `<root>/.glossa/ontology.toml`. On an existing file: `Kept`
-/// unless `force`. Unknown name → error listing the closest presets.
+/// Write a preset to `<root>/.glossa/ontology.toml`. `root` is the **state base** (where `.glossa`
+/// lives), not necessarily the corpus root — the two coincide today (co-located CLI), but callers
+/// must pass the resolved state base once `--state-dir` lands so the preset materializes beside the
+/// index/graph rather than into the corpus. On an existing file: `Kept` unless `force`. Unknown name
+/// → error listing the closest presets.
 pub fn write_template(
     root: &std::path::Path,
     name_or_alias: &str,

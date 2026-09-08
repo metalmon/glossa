@@ -157,9 +157,11 @@ pub fn dangling_nodes(
 
 /// Node ids whose stored source signature no longer matches the file on disk.
 /// `nodes` = (id, source_path, stored_file_sig). A `None` stored sig, a missing
-/// or unreadable source, or an equal sig → not stale.
+/// or unreadable source, or an equal sig → not stale. `source_path` is resolved against `roots`
+/// via the same label-aware `doc_file_in` logic `DocIndex`/`StaleChecker` use, so a node grounded
+/// in a SECONDARY root's document re-stats under that root, not `roots[0]`.
 pub fn stale_nodes(
-    root: &std::path::Path,
+    roots: &[crate::root::Root],
     nodes: &[(String, String, Option<FileSig>)],
 ) -> Vec<String> {
     let mut out = Vec::new();
@@ -167,9 +169,10 @@ pub fn stale_nodes(
     let mut seen: HashMap<&str, Option<FileSig>> = HashMap::new();
     for (id, source_path, stored) in nodes {
         let Some(stored) = stored else { continue };
-        let cur = *seen
-            .entry(source_path.as_str())
-            .or_insert_with(|| crate::index::store::file_sig(&root.join(source_path)).ok());
+        let cur = *seen.entry(source_path.as_str()).or_insert_with(|| {
+            let abs = crate::index::store::doc_file_in(roots, source_path);
+            crate::index::store::file_sig(&abs).ok()
+        });
         match cur {
             Some(cur) if cur != *stored => out.push(id.clone()),
             _ => {} // equal, or file missing/unreadable → not stale
@@ -466,24 +469,62 @@ mod tests {
     fn stale_nodes_detects_drift() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        let roots = [crate::root::Root {
+            label: String::new(),
+            path: root.to_path_buf(),
+        }];
         let p = root.join("doc.md");
         std::fs::write(&p, b"v1").unwrap();
         let sig0 = crate::index::store::file_sig(&p).unwrap();
 
         // same sig → not stale
         let nodes = vec![("n1".to_string(), "doc.md".to_string(), Some(sig0))];
-        assert!(stale_nodes(root, &nodes).is_empty());
+        assert!(stale_nodes(&roots, &nodes).is_empty());
 
         // rewrite with different size → stale
         std::fs::write(&p, b"v2-longer").unwrap();
-        assert_eq!(stale_nodes(root, &nodes), vec!["n1".to_string()]);
+        assert_eq!(stale_nodes(&roots, &nodes), vec!["n1".to_string()]);
 
         // stored None → never stale
         let none_nodes = vec![("n2".to_string(), "doc.md".to_string(), None)];
-        assert!(stale_nodes(root, &none_nodes).is_empty());
+        assert!(stale_nodes(&roots, &none_nodes).is_empty());
 
         // missing source → not stale (ungrounded's job)
         let missing = vec![("n3".to_string(), "gone.md".to_string(), Some(sig0))];
-        assert!(stale_nodes(root, &missing).is_empty());
+        assert!(stale_nodes(&roots, &missing).is_empty());
+    }
+
+    #[test]
+    fn stale_nodes_resolves_secondary_root_via_label() {
+        // Regression for Task 9 carry-forward (c): a node grounded in a doc under a SECONDARY
+        // labeled root must re-stat against THAT root's disk, not roots[0].
+        let primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        let roots = [
+            crate::root::Root {
+                label: "primary".into(),
+                path: primary.path().to_path_buf(),
+            },
+            crate::root::Root {
+                label: "secondary".into(),
+                path: secondary.path().to_path_buf(),
+            },
+        ];
+        let p = secondary.path().join("doc.md");
+        std::fs::write(&p, b"v1").unwrap();
+        let sig0 = crate::index::store::file_sig(&p).unwrap();
+
+        let nodes = vec![("n1".to_string(), "secondary/doc.md".to_string(), Some(sig0))];
+        assert!(
+            stale_nodes(&roots, &nodes).is_empty(),
+            "unchanged secondary-root doc must not be flagged stale"
+        );
+
+        std::fs::write(&p, b"v2-longer").unwrap();
+        assert_eq!(
+            stale_nodes(&roots, &nodes),
+            vec!["n1".to_string()],
+            "edited secondary-root doc must be detected via the label, not roots[0]"
+        );
     }
 }

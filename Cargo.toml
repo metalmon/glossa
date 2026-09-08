@@ -37,7 +37,17 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "signal"] }
 axum = "0.8"
-tower-http = { version = "0.7", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "limit"] }
+# `limit`/`load-shed` back the opt-in /mcp overload guard (§3c); `util` backs the in-process
+# `oneshot`/`ServiceExt` layer-wiring tests (moved here from dev-dependencies since non-test
+# code now uses `tower::limit`/`tower::load_shed` directly).
+tower = { version = "0.5", features = ["util", "limit", "load-shed"] }
+# Opt-in per-IP token-bucket rate-limit on /mcp (§3c); inert unless
+# GLOSSA_MCP_RATE_LIMIT_PER_SEC is set. Registry package name is `tower_governor` (underscore),
+# not the hyphenated `tower-governor` cargo's dependency resolver expects for most crates.
+# 0.4.x pins axum 0.7 (conflicts with our axum 0.8); 0.8.x pins axum 0.8.9. `tonic` is a default
+# feature we don't need (gRPC, not used here) -- only pull in the axum integration.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log", "json"] }
 tokio-util = "0.7"
@@ -50,9 +60,28 @@ sqlparser = "0.53"
 memmap2 = "0.9"
 fst = "0.4"
 arc-swap = "1"
+parking_lot = "0.12"
+futures = "0.3"
+# Native TLS + mTLS behind the opt-in `tls` feature (§3b) -- OFF by default so the standard
+# binary carries zero crypto surface. `rustls`/`tokio-rustls` are already transitively resolved
+# in this workspace's Cargo.lock (aws-lc-rs backend), so enabling this feature doesn't introduce
+# a new crypto stack, only a new call path.
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+# Test-only cert/key generation for `tls.rs`'s handshake/mTLS/reload tests (`#[cfg(test)]` code
+# only). Cargo does not allow an `optional` dev-dependency, so this rides along as an optional
+# NORMAL dependency gated into the `tls` feature instead -- the practical effect is the same
+# (rcgen never builds unless `--features tls` is passed), without paying its build cost on every
+# default `cargo test -p glossa` run.
+rcgen = { version = "0.13", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+sd-notify = "0.4"
 
 [features]
 # `notebook` (the .glossa/notes annotation subsystem) is dependency-free and ships in the
@@ -61,6 +90,10 @@ default = ["notebook"]
 notebook = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
+# Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
+# stays plaintext with no crypto surface (`kb mcp --transport streamable-http` behind a
+# reverse-proxy/TLS-terminator remains the default-supported deployment).
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls", "dep:rcgen"]
 
 [dev-dependencies]
 tempfile = "3"

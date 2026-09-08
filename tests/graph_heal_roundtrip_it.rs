@@ -19,6 +19,16 @@ use glossa::graph::ops::{graph_upsert, id_for, UpsertEdge, UpsertNode};
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
 use glossa::model::Chunk;
+use glossa::root::Root;
+
+/// The single-root, empty-label back-compat shape `doctor::doctor` expects — this test's corpus
+/// root doubles as the state base (co-located, as everywhere else pre-multi-root).
+fn single_root(path: &std::path::Path) -> Vec<Root> {
+    vec![Root {
+        label: String::new(),
+        path: path.to_path_buf(),
+    }]
+}
 
 const ONT: &str = r#"
 [entities.Resolution]
@@ -99,7 +109,7 @@ fn heal_round_trip_through_real_grounding_path() {
     );
 
     // Sanity: not stale immediately after grounding.
-    let rep0 = doctor::doctor(&g, &ont, root).unwrap();
+    let rep0 = doctor::doctor(&g, &ont, &single_root(root)).unwrap();
     assert!(
         !rep0.stale.iter().any(|d| d.id == node_id),
         "freshly grounded node must not be stale: {:?}",
@@ -111,7 +121,7 @@ fn heal_round_trip_through_real_grounding_path() {
     std::fs::write(&doc_path, b"drifted, much longer content now").unwrap();
 
     // 4. The node is now stale, per doctor::doctor's real-root comparison.
-    let rep = doctor::doctor(&g, &ont, root).unwrap();
+    let rep = doctor::doctor(&g, &ont, &single_root(root)).unwrap();
     assert!(
         rep.stale.iter().any(|d| d.id == node_id),
         "node should be stale after its source drifted: {:?}",
@@ -131,7 +141,7 @@ fn heal_round_trip_through_real_grounding_path() {
     );
     assert!(!out2.rejected, "{}", out2.message);
 
-    let rep2 = doctor::doctor(&g, &ont, root).unwrap();
+    let rep2 = doctor::doctor(&g, &ont, &single_root(root)).unwrap();
     assert!(
         !rep2.stale.iter().any(|d| d.id == node_id),
         "re-grounding must clear stale: {:?}",

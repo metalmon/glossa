@@ -32,7 +32,8 @@ jobs:
       - name: cargo test (glossa, no default features — release config)
         run: cargo test -p glossa --release --locked --no-default-features
 
-      # Full build — every feature (notebook + lingua + constraint).
+      # Full build — every feature (notebook + lingua + constraint + tls). Covers the `tls`
+      # feature's handshake/mTLS/reload tests on both matrix OSes (§3b).
       - name: cargo test (glossa, all features)
         run: cargo test -p glossa --release --locked --all-features
 

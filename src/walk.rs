@@ -20,7 +20,7 @@ pub fn extractors() -> Vec<Box<dyn Extractor>> {
 /// Well-known OS/editor junk that must never be indexed as corpus content: Windows thumbnail
 /// caches and folder settings, macOS metadata, and MS Office temp/lock files. Matched by name
 /// (case-insensitive) so they are dropped in any directory, keeping the corpus signature clean.
-fn is_junk_file(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_junk_file(name: &std::ffi::OsStr) -> bool {
     let n = name.to_string_lossy();
     let lower = n.to_ascii_lowercase();
     matches!(lower.as_str(), "thumbs.db" | "desktop.ini" | ".ds_store")

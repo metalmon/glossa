@@ -7,7 +7,6 @@ use crate::graph::ontology::{Ontology, RelationRole};
 use crate::graph::store::GraphStore;
 use crate::index::manifest::FileSig;
 use std::collections::HashSet;
-use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub enum Reason {
@@ -75,7 +74,11 @@ pub struct PruneOpts {
 /// edges) reaches no live grounded terminal — e.g. its terminal's source document was deleted, so
 /// the terminal itself went ungrounded/stale but the query-side nodes leading to it have no
 /// `file_sig` of their own and would otherwise look fresh forever.
-pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<DoctorReport> {
+pub fn doctor(
+    g: &GraphStore,
+    ont: &Ontology,
+    roots: &[crate::root::Root],
+) -> anyhow::Result<DoctorReport> {
     let nodes = g.all_nodes()?; // Vec<Node> with full Provenance
     let edges = g.all_edges()?; // for hygiene fns
 
@@ -107,7 +110,7 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
         .iter()
         .map(|n| (n.id.clone(), n.prov.source_path.clone(), n.prov.file_sig))
         .collect();
-    let stale_ids = hygiene::stale_nodes(root, &stale_input);
+    let stale_ids = hygiene::stale_nodes(roots, &stale_input);
 
     // ── Derived (structural) staleness: a query-side node is dangling if it reaches no LIVE
     // grounded terminal — one whose type requires_grounding, is present, and is not itself
@@ -167,7 +170,11 @@ pub fn doctor(g: &GraphStore, ont: &Ontology, root: &Path) -> anyhow::Result<Doc
     }
     for id in &stale_ids {
         if let Some(n) = by_id.get(id.as_str()) {
-            let current = crate::index::store::file_sig(&root.join(&n.prov.source_path)).ok();
+            let current = crate::index::store::file_sig(&crate::index::store::doc_file_in(
+                roots,
+                &n.prov.source_path,
+            ))
+            .ok();
             rep.stale.push(DoubtfulNode {
                 id: n.id.clone(),
                 node_type: n.node_type.clone(),
@@ -336,6 +343,13 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
             prov: p,
         }
     }
+    /// Back-compat single empty-label root, for tests that only ever had one.
+    fn single_root(root: &std::path::Path) -> Vec<crate::root::Root> {
+        vec![crate::root::Root {
+            label: String::new(),
+            path: root.to_path_buf(),
+        }]
+    }
 
     #[test]
     fn doctor_reports_three_buckets() {
@@ -378,7 +392,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         // Now let the source drift so res:a's stored sig no longer matches disk.
         std::fs::write(&doc_a, b"v2-longer").unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(rep.stale.len(), 1, "res:a's source drifted");
         assert_eq!(rep.ungrounded.len(), 1, "res:b has no live MENTIONS");
         assert_eq!(
@@ -471,7 +485,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         ];
         g.upsert(&ont, &nodes, &[]).unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(
             rep.unverifiable, 2,
             "agent- and distil-origin ungrounded Resolution nodes must both count; curated must not"
@@ -509,7 +523,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         // The Resolution's source drifts → it goes stale.
         std::fs::write(&doc, b"v2-longer").unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(
             rep.stale.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
             vec!["res:1"]
@@ -554,7 +568,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         // The Resolution's source drifts → it goes stale, and sym:1/cau:1 go dangling.
         std::fs::write(&doc, b"v2-longer").unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(rep.stale.len(), 1);
         assert_eq!(rep.dangling.len(), 2);
 
@@ -626,7 +640,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         g.upsert(&ont, &nodes, &edges).unwrap();
         // No drift, live MENTIONS: res:1 stays a live terminal.
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert!(rep.stale.is_empty());
         assert!(rep.ungrounded.is_empty());
         let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
@@ -652,7 +666,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         )];
         g.upsert(&ont, &nodes, &[]).unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
         assert!(dangling.contains(&"sym:orphan"));
     }
@@ -695,7 +709,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         g.upsert(&ont, &nodes, &edges).unwrap();
         std::fs::write(&doc, b"v2-longer").unwrap(); // res:1 -> stale -> zero live terminals
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(rep.live_terminal_count, 0);
         assert!(!rep.dangling.is_empty());
         let risk = dangling_prune_risk(&rep, &g, &ont);
@@ -735,7 +749,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         ];
         g.upsert(&ont, &nodes, &edges).unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert!(rep.live_terminal_count > 0, "res:a must be a live terminal");
         assert_eq!(
             rep.dangling.len(),
@@ -771,7 +785,7 @@ spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
         ];
         g.upsert(&ont, &nodes, &edges).unwrap();
 
-        let rep = doctor(&g, &ont, root).unwrap();
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert!(rep.live_terminal_count > 0);
         assert_eq!(rep.dangling.len(), 1, "only the orphan Symptom must dangle");
         assert!(

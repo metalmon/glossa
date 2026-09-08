@@ -1244,7 +1244,7 @@ pub fn graph_upsert(
         .collect();
 
     // (7) Apply the well-formed items; report any dropped ones so the model resends JUST those.
-    match apply_upsert(g, ont, nodespecs, edgespecs, now, &idx.root, origin) {
+    match apply_upsert(g, ont, nodespecs, edgespecs, now, idx.primary_root(), origin) {
         Ok(result) => {
             // Author node_validity for each node that supplied a bound. `result.merged` is
             // (requested_id → canonical_id) for every node that converged into an EXISTING
@@ -1471,7 +1471,13 @@ pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
 /// on it. Report-only: never mutates the store. Shared by the CLI `graph doctor` command and
 /// the MCP `graph_doctor` tool so both see identical output.
 pub fn graph_doctor(g: &GraphStore, ont: &Ontology, root: &std::path::Path) -> String {
-    match crate::graph::doctor::doctor(g, ont, root) {
+    // Back-compat single empty-label root: this free fn's callers (eval's build finalize) only
+    // ever knew about one co-located root.
+    let roots = [crate::root::Root {
+        label: String::new(),
+        path: root.to_path_buf(),
+    }];
+    match crate::graph::doctor::doctor(g, ont, &roots) {
         Ok(rep) => fmt_doctor_report(&rep),
         Err(e) => format!("graph_doctor error: {e}"),
     }

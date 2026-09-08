@@ -116,6 +116,10 @@ fn fetch_verify_tool_spec() -> anyhow::Result<Option<rmcp::model::Tool>> {
     )
     .with_context(|| format!("write scratch ontology under {}", dir.display()))?;
     let forced_srv = crate::mcp::GlossaServer::new(
+        vec![crate::root::Root {
+            label: String::new(),
+            path: dir.clone(),
+        }],
         dir.clone(),
         crate::mcp::Profile::Full,
         false,
@@ -140,6 +144,10 @@ fn fetch_verify_tool_spec() -> anyhow::Result<Option<rmcp::model::Tool>> {
 /// identical, not just overlapping.
 pub fn reader_tool_names() -> Vec<String> {
     let reader_srv = crate::mcp::GlossaServer::new(
+        vec![crate::root::Root {
+            label: String::new(),
+            path: std::path::PathBuf::from("."),
+        }],
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Reader,
         false,
@@ -176,6 +184,10 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
 
     // 2a. Full profile — DEF set: json files + [tools.*] blocks for every tool.
     let full_srv = crate::mcp::GlossaServer::new(
+        vec![crate::root::Root {
+            label: String::new(),
+            path: std::path::PathBuf::from("."),
+        }],
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Full,
         false,
@@ -202,6 +214,10 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
 
     // 2b. Reader profile — LIST set: names for the answer-function tools = [...] line.
     let reader_srv = crate::mcp::GlossaServer::new(
+        vec![crate::root::Root {
+            label: String::new(),
+            path: std::path::PathBuf::from("."),
+        }],
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Reader,
         false,
@@ -213,6 +229,10 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     // 2c. Editor profile — LIST set for the ENRICH function. The enricher reads AND edits the
     // graph, so its tools are exactly the Editor profile (kept 1:1 with MCP, not hand-maintained).
     let editor_srv = crate::mcp::GlossaServer::new(
+        vec![crate::root::Root {
+            label: String::new(),
+            path: std::path::PathBuf::from("."),
+        }],
         std::path::PathBuf::from("."),
         crate::mcp::Profile::Editor,
         false,

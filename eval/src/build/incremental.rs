@@ -98,7 +98,11 @@ pub fn compute_delta(root: &Path, idx: &DocIndex, g: &GraphStore) -> Result<Delt
 
     // CHANGED: distinct docs of nodes whose stored file_sig drifted from disk — reuse glossa's
     // own staleness detector rather than recomputing/comparing signatures by hand.
-    let stale_ids = glossa::graph::generalize::hygiene::stale_nodes(root, &stale_input);
+    let roots = [glossa::root::Root {
+        label: String::new(),
+        path: root.to_path_buf(),
+    }];
+    let stale_ids = glossa::graph::generalize::hygiene::stale_nodes(&roots, &stale_input);
     let mut changed_set: HashSet<String> = HashSet::new();
     for id in &stale_ids {
         if let Some(docs) = node_docs.get(id) {

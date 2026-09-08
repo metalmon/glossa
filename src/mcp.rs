@@ -1,7 +1,10 @@
 use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
+#[cfg(test)]
 use crate::index::store::index_dir;
+use crate::root::Root;
 use base64::Engine as _;
+use parking_lot::Mutex;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -11,10 +14,15 @@ use rmcp::model::{
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Process-global count of tool-handler panics caught by the dispatch barrier (rare event).
+/// Rendered by `metrics_text` as `glossa_tool_panics_total`. A static (not a server field) so
+/// every cloned per-session `GlossaServer` shares the same count.
+static TOOL_PANICS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
@@ -35,7 +43,12 @@ impl Profile {
 
 #[derive(Clone)]
 pub struct GlossaServer {
-    root: PathBuf,
+    /// The corpus roots this server reads from (content: search/grep/read/glossary evidence).
+    roots: Vec<Root>,
+    /// Base directory for on-disk state: `.glossa/` (index, graph store, notes, locks). May be
+    /// separate from every corpus root (network-share corpus + local state) or, in the back-compat
+    /// co-located default, identical to the single root's path.
+    state_base: PathBuf,
     /// The serving profile (Reader/Editor/Full). Stored because the `verify` handler projects its
     /// response by profile (terse for Reader, full diagnostic for Editor/Full); `new()` also uses it
     /// to gate tool visibility.
@@ -51,6 +64,25 @@ pub struct GlossaServer {
     /// warm-up). A counter, not a flag, so overlapping freshens don't clear each other early —
     /// surfaced as the `glossa_indexing` metrics gauge (1 when any freshen is running).
     indexing: Arc<AtomicUsize>,
+    /// Transient network-read failures observed on the LAST freshen pass (gauge — overwritten each
+    /// pass by `freshen_now`, not accumulated).
+    transient_failures_last_pass: Arc<AtomicU64>,
+    /// Cumulative permanent read/parse skips since process start (counter — monotonically added by
+    /// `freshen_now` from each pass's `IndexStats::permanent_skips`).
+    permanent_skips_total: Arc<AtomicU64>,
+    /// Roots currently held back by the Task 8 empty-mount guard (gauge — overwritten each pass by
+    /// `freshen_now` from `IndexStats::empty_mount_holds`).
+    empty_mount_holds: Arc<AtomicU64>,
+    /// Set true once the FIRST freshen completes; surfaced as `glossa_index_warm` and consumed by
+    /// ops docs (queries may return empty until then).
+    index_warm: Arc<AtomicBool>,
+    /// Epoch-ms of the last `freshen_now` stat-walk attempt (Task 10, D2 min-rescan interval) —
+    /// distinct from `last_change` (which only advances when a freshen actually indexed
+    /// something). Gates re-running the dir-mtime stat-walk on every read-tool call: within
+    /// `min_rescan_ms()` of the last attempt, `freshen_now` serves the current index unchanged
+    /// rather than re-walking. Must never gate `kb index`'s own path (unaffected — CLI-only) or
+    /// mask the T6/T8 dirsig holds (those live in the walk itself, not this outer clock).
+    last_freshen_ms: Arc<AtomicU64>,
     /// When true, `read` tool strips all image content from responses.
     no_image: bool,
     /// In-process cache of `manifest.json`, invalidated by the file's mtime.
@@ -79,6 +111,41 @@ pub struct GlossaServer {
     /// under `engine = mmap`, racing on the CSR file writes). Uncontended after the first build — the
     /// hot path is a lock-free `cell.load_full()` and never touches this mutex.
     build_lock: Arc<Mutex<()>>,
+    /// mtime-gated cache of the parsed `.glossa/ontology.toml` (§3). `mtime` and `ont` are published
+    /// together as ONE `Arc<OntologyCacheEntry>` swap so a concurrent reader can never observe a new
+    /// mtime paired with a stale `Ontology` (or vice versa) — seeing the entry at all means both
+    /// fields came from the same `store()`. See `ontology()` for the re-check-after-parse protocol.
+    ontology_cache: Arc<arc_swap::ArcSwapOption<OntologyCacheEntry>>,
+}
+
+/// One atomically-published snapshot of the ontology cache: the file mtime (secs) a parse observed
+/// immediately BEFORE parsing, paired with the `Ontology` that parse produced. Never published unless
+/// a re-stat immediately AFTER the parse still reads the same mtime (R-C6) — otherwise the file
+/// changed mid-parse and the parsed value is stale, so it is handed to the caller but not cached.
+struct OntologyCacheEntry {
+    mtime: u64,
+    ont: Arc<Ontology>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam (fix-round-1 regression guard): lets a test deterministically simulate "the
+    /// ontology file changed between the pre-parse stat and the post-parse re-stat" — the interleaving
+    /// that used to let a stale parse win the cache — without racing real threads. `None` (the
+    /// default) is a no-op; each test that installs a hook is responsible for clearing it afterward.
+    /// Thread-local because the libtest harness runs every `#[test]` on its own thread, so tests that
+    /// don't touch this never observe another test's hook.
+    static ONTOLOGY_AFTER_PARSE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_ontology_after_parse_hook() {
+    ONTOLOGY_AFTER_PARSE_HOOK.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f();
+        }
+    });
 }
 
 #[derive(Default)]
@@ -137,7 +204,13 @@ pub struct ServerFlags {
 }
 
 impl GlossaServer {
-    pub fn new(root: PathBuf, profile: Profile, trace: bool, flags: ServerFlags) -> Self {
+    pub fn new(
+        roots: Vec<Root>,
+        state_base: PathBuf,
+        profile: Profile,
+        trace: bool,
+        flags: ServerFlags,
+    ) -> Self {
         let mut router = Self::tool_router();
         if profile == Profile::Reader {
             for t in EDITOR_TOOLS
@@ -198,7 +271,7 @@ impl GlossaServer {
         // has a calibrated threshold. An uncalibrated `verify` could only ever return `abstain`
         // (`gate::decide` fails closed), so serving the route would be misleading — hide it instead.
         {
-            let glossa_dir = root.join(".glossa");
+            let glossa_dir = state_base.join(".glossa");
             let cfg = crate::gate::VerifyConfig::resolve(&glossa_dir);
             if !(cfg.enabled && cfg.is_calibrated()) {
                 router.disable_route("verify");
@@ -209,18 +282,24 @@ impl GlossaServer {
             }
         }
         let trace = if trace {
-            crate::trace::TraceLog::to_dir(&root)
+            crate::trace::TraceLog::to_dir(&state_base)
         } else {
             crate::trace::TraceLog::disabled()
         };
         Self {
-            root,
+            roots,
+            state_base,
             profile,
             tool_router: router,
             trace,
             dirty: Arc::new(AtomicBool::new(false)),
             last_change: Arc::new(AtomicU64::new(0)),
             indexing: Arc::new(AtomicUsize::new(0)),
+            transient_failures_last_pass: Arc::new(AtomicU64::new(0)),
+            permanent_skips_total: Arc::new(AtomicU64::new(0)),
+            empty_mount_holds: Arc::new(AtomicU64::new(0)),
+            index_warm: Arc::new(AtomicBool::new(false)),
+            last_freshen_ms: Arc::new(AtomicU64::new(0)),
             no_image: flags.no_image,
             manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
             http: Arc::new(crate::http_metrics::HttpMetrics::default()),
@@ -229,7 +308,23 @@ impl GlossaServer {
             )),
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
+            ontology_cache: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
+    }
+
+    /// The single `.glossa` anchor for all on-disk state (index, graph store, notes, locks) — the
+    /// same value every STATE-side call in this file resolves against.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_base
+    }
+
+    /// The first configured corpus root — used for logging / co-located link scope. Falls back to
+    /// `state_base` if somehow there are none (defensive; every real server has at least one root).
+    pub fn primary_root(&self) -> &Path {
+        self.roots
+            .first()
+            .map(|r| r.path.as_path())
+            .unwrap_or(&self.state_base)
     }
 
     /// The shared retrieval snapshot, built on first use and cached. Every request loads the SAME
@@ -243,11 +338,14 @@ impl GlossaServer {
         // Cold: serialize the one-time build so concurrent first requests don't each open the
         // store/index (or, under mmap, race on the CSR file writes). Double-checked: re-read the cell
         // under the lock in case another thread built it while we waited.
-        let _guard = self.build_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.build_lock.lock();
         if let Some(h) = self.cell.load_full() {
             return Ok(h);
         }
-        let h = Arc::new(crate::graph::handle::GraphHandle::open(&self.root)?);
+        let h = Arc::new(crate::graph::handle::GraphHandle::open_at(
+            &self.roots,
+            &self.state_base,
+        )?);
         self.cell.store(Some(h.clone()));
         Ok(h)
     }
@@ -261,18 +359,15 @@ impl GlossaServer {
     /// Run `f` against the in-process manifest cache, reloading it when `manifest.json`'s mtime advanced
     /// (one `stat`; a full parse only when something reindexed). Backs both baseline lookups.
     fn with_manifest<T>(&self, f: impl FnOnce(&crate::index::manifest::Manifest) -> T) -> T {
-        let p = self.root.join(".glossa").join("manifest.json");
+        let p = self.state_base.join(".glossa").join("manifest.json");
         let cur = std::fs::metadata(&p)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos());
-        let mut cache = self
-            .manifest_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.manifest_cache.lock();
         if cur != cache.mtime_nanos {
-            cache.manifest = crate::index::manifest::Manifest::load(&self.root);
+            cache.manifest = crate::index::manifest::Manifest::load(&self.state_base);
             cache.mtime_nanos = cur;
         }
         f(&cache.manifest)
@@ -293,7 +388,9 @@ impl GlossaServer {
     /// edit will be caught on a later read/explicit index). Cheap: resolves the path, one `stat`, one
     /// cache lookup; only touches the index when the file actually changed.
     fn lazy_reindex_if_changed(&self, path: &str) {
-        let Ok(idx) = crate::index::store::DocIndex::open_or_create(&self.root) else {
+        let Ok(idx) =
+            crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+        else {
             return;
         };
         let Some(rel) = idx.canonical_document_path(path) else {
@@ -302,28 +399,29 @@ impl GlossaServer {
         if idx.file_type_of(&rel).ok().flatten().as_deref() == Some("note") {
             // Notebook note: pick up an external in-place content edit (freshen's dir-mtime gate
             // misses it). Best-effort — skip if another process holds the lock.
-            let abs = self.root.join(".glossa").join("notes").join(&rel);
+            let abs = self.state_base.join(".glossa").join("notes").join(&rel);
             let Ok(cur) = crate::index::store::file_sig(&abs) else {
                 return;
             };
             if self.baseline_note_sig(&rel) == Some(cur) {
                 return; // unchanged
             }
-            if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
-                let _ = crate::index::store::reindex_note_locked(&self.root, &rel);
+            if let Some(_g) = crate::index::lock::try_index_lock(&self.state_base) {
+                let _ = crate::index::store::reindex_note_locked(&self.state_base, &rel);
                 self.mark_dirty();
             }
             return;
         }
-        let abs = self.root.join(&rel);
+        let abs = idx.doc_file(&rel);
         let Ok(cur) = crate::index::store::file_sig(&abs) else {
             return;
         };
         if self.baseline_sig(&rel) == Some(cur) {
             return; // unchanged
         }
-        if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
-            let _ = crate::index::store::index_one_file_locked(&self.root, &rel);
+        if let Some(_g) = crate::index::lock::try_index_lock(&self.state_base) {
+            let _ =
+                crate::index::store::index_one_file_locked_at(&self.roots, &self.state_base, &rel);
             self.mark_dirty();
         }
     }
@@ -346,11 +444,7 @@ impl GlossaServer {
     /// per-id split, so it falls back to appending here too).
     fn apply_signals(&self, tool: &str, key: &str, ids: Vec<String>, body: String) -> String {
         use crate::tools::retrieval_progress::ResultRender;
-        let outcome = self
-            .signals
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .observe(tool, key, &ids);
+        let outcome = self.signals.lock().observe(tool, key, &ids);
         match outcome.render {
             ResultRender::Full => body,
             ResultRender::ReplaceWith { marker } => marker,
@@ -363,18 +457,49 @@ impl GlossaServer {
     /// Best-effort — indexing errors never fail the tool. Runs on the blocking pool so the async
     /// worker is not stalled, but the handler awaits it so the served index reflects the current tree.
     pub async fn freshen_now(&self) {
+        // Task 10 (D2): min-rescan interval — absorbs SMB/NFS attribute-cache lag and caps the
+        // per-query stat-walk cost on this hot read path. A gated call is a pure no-op: it does
+        // not touch `indexing`/the failure gauges, so it never masks the T6 (mid-copy) or T8
+        // (empty-mount) dirsig holds, which live inside the walk this skips entirely.
+        let now = crate::trace::now_ms();
+        let last = self.last_freshen_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < crate::index::store::min_rescan_ms() {
+            return;
+        }
+        self.last_freshen_ms.store(now, Ordering::Relaxed);
         self.indexing.fetch_add(1, Ordering::AcqRel);
-        let root = self.root.clone();
+        let roots = self.roots.clone();
+        let state_base = self.state_base.clone();
         let res = tokio::task::spawn_blocking(move || {
-            crate::index::store::freshen_blocking(&root, std::time::Duration::from_secs(3))
+            crate::index::store::freshen_blocking_at(
+                &roots,
+                &state_base,
+                std::time::Duration::from_secs(3),
+            )
         })
         .await;
         self.indexing.fetch_sub(1, Ordering::AcqRel);
         if let Ok(Ok(stats)) = res {
+            self.transient_failures_last_pass
+                .store(stats.transient_failures as u64, Ordering::Relaxed);
+            if stats.permanent_skips > 0 {
+                self.permanent_skips_total
+                    .fetch_add(stats.permanent_skips as u64, Ordering::Relaxed);
+            }
+            self.empty_mount_holds
+                .store(stats.empty_mount_holds as u64, Ordering::Relaxed);
             if stats.added + stats.removed > 0 {
                 self.mark_dirty();
             }
         }
+        // An attempted freshen means the index is openable/served — unconditional is fine (first
+        // successful pass warms it; later passes are a no-op store of the same value).
+        self.index_warm.store(true, Ordering::Relaxed);
+    }
+
+    /// Set once the first freshen completes — see `index_warm`'s field doc.
+    pub fn mark_index_warm(&self) {
+        self.index_warm.store(true, Ordering::Relaxed);
     }
 
     /// Mark the derived graph layer stale (a freshen reindexed something) and stamp the change time —
@@ -409,7 +534,7 @@ impl GlossaServer {
     /// drops (function exit / process death).
     fn run_generalize(&self) {
         use fs4::FileExt;
-        let lock_path = self.root.join(".glossa").join("generalize.lock");
+        let lock_path = self.state_base.join(".glossa").join("generalize.lock");
         let Ok(_lock) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -422,10 +547,10 @@ impl GlossaServer {
             Ok(()) => {}      // acquired — we are the one editor running the pass this round
             Err(_) => return, // held or lock error → skip
         }
-        let Ok(g) = GraphStore::open(&self.root) else {
+        let Ok(g) = GraphStore::open(&self.state_base) else {
             return;
         };
-        let ont = Ontology::load_or_default(&self.root);
+        let ont = self.ontology();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -437,24 +562,75 @@ impl GlossaServer {
     /// Readiness probe: the index and graph at `root` can be opened (the server can serve). Backs the
     /// streamable-http `/ready` endpoint.
     pub fn readiness(&self) -> bool {
-        crate::index::store::DocIndex::open_or_create(&self.root).is_ok()
-            && GraphStore::open(&self.root).is_ok()
+        crate::index::store::DocIndex::open_or_create(&self.state_base).is_ok()
+            && GraphStore::open(&self.state_base).is_ok()
+    }
+
+    /// Return the parsed ontology, re-parsing only when `ontology.toml`'s mtime advanced (§3).
+    /// Preserves auto-reload (edits picked up on the next access after mtime moves) with no repeat
+    /// parse. `mtime` and the parsed `Ontology` are swapped in together as one `OntologyCacheEntry`
+    /// (never as two separately-updated fields), so a concurrent reader either sees the old pair or
+    /// the new pair — never a new mtime next to a stale `Ontology`.
+    ///
+    /// R-C6: a parse is published to the cache ONLY if a re-stat taken immediately after parsing still
+    /// shows the SAME mtime the parse started from. Without this, two racing accesses — one that reads
+    /// an old mtime and starts a slow parse, one that reads a newer mtime and finishes a fast parse —
+    /// could let the slow (stale) parse overwrite the fast (fresh) one (last-writer-wins). When the
+    /// re-stat disagrees, the file changed mid-parse: this caller still gets the value it just parsed,
+    /// but the cache is left untouched, so the next access reparses the newer content instead of
+    /// serving a torn pairing.
+    pub fn ontology(&self) -> Arc<Ontology> {
+        // Ontology lives under the LOCAL state base (Plan A), never a corpus root.
+        let p = self.state_base.join(".glossa").join("ontology.toml");
+        let stat = |p: &Path| -> u64 {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        };
+        let cur = stat(&p);
+        if let Some(entry) = self.ontology_cache.load_full() {
+            if entry.mtime == cur {
+                return entry.ont.clone();
+            }
+        }
+        let parsed = Arc::new(Ontology::load_or_default(&self.state_base));
+        // Test-only seam: lets a test simulate a writer racing the parse (fix-round-1 regression
+        // guard) without real thread interleaving. No-op (empty hook) in every other test and in
+        // release/production builds, which don't compile this call at all.
+        #[cfg(test)]
+        run_ontology_after_parse_hook();
+        let after = stat(&p);
+        if after == cur {
+            self.ontology_cache.store(Some(Arc::new(OntologyCacheEntry {
+                mtime: after,
+                ont: parsed.clone(),
+            })));
+        }
+        parsed
     }
 
     /// Prometheus text-exposition metrics for `/metrics`. Cheap, computed at scrape time: index size,
     /// graph size, and whether the derived layer is stale. (Request-rate/latency are left to the HTTP
     /// access log / gateway.)
     pub fn metrics_text(&self) -> String {
-        let chunks = crate::index::store::DocIndex::open_or_create(&self.root)
+        let chunks = crate::index::store::DocIndex::open_or_create(&self.state_base)
             .ok()
             .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()))
             .unwrap_or(0);
-        let (nodes, edges) = match GraphStore::open(&self.root) {
+        let (nodes, edges) = match GraphStore::open(&self.state_base) {
             Ok(g) => (g.node_count().unwrap_or(0), g.edge_count().unwrap_or(0)),
             Err(_) => (0, 0),
         };
         let dirty = self.dirty.load(Ordering::Relaxed) as u8;
         let indexing = (self.indexing.load(Ordering::Relaxed) > 0) as u8;
+        let transient = self.transient_failures_last_pass.load(Ordering::Relaxed);
+        let permanent = self.permanent_skips_total.load(Ordering::Relaxed);
+        let empty_mount = self.empty_mount_holds.load(Ordering::Relaxed);
+        let tool_panics = TOOL_PANICS.load(Ordering::Relaxed);
+        let index_warm = self.index_warm.load(Ordering::Relaxed) as u8;
         format!(
             "# HELP glossa_up 1 if the server is running\n\
              # TYPE glossa_up gauge\nglossa_up 1\n\
@@ -467,7 +643,17 @@ impl GlossaServer {
              # HELP glossa_graph_dirty Derived layer stale (1) or fresh (0)\n\
              # TYPE glossa_graph_dirty gauge\nglossa_graph_dirty {dirty}\n\
              # HELP glossa_indexing A freshen (freshen_now) is in progress (1) or idle (0)\n\
-             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n{http}",
+             # TYPE glossa_indexing gauge\nglossa_indexing {indexing}\n\
+             # HELP glossa_index_transient_failures_last_pass Transient network-read failures on the last freshen\n\
+             # TYPE glossa_index_transient_failures_last_pass gauge\nglossa_index_transient_failures_last_pass {transient}\n\
+             # HELP glossa_index_permanent_skips Cumulative permanent read/parse skips since start\n\
+             # TYPE glossa_index_permanent_skips counter\nglossa_index_permanent_skips {permanent}\n\
+             # HELP glossa_index_empty_mount_holds Corpus roots currently held stale by the empty-mount guard\n\
+             # TYPE glossa_index_empty_mount_holds gauge\nglossa_index_empty_mount_holds {empty_mount}\n\
+             # HELP glossa_tool_panics_total Tool-handler panics caught by the dispatch barrier\n\
+             # TYPE glossa_tool_panics_total counter\nglossa_tool_panics_total {tool_panics}\n\
+             # HELP glossa_index_warm 1 once the initial index freshen has completed\n\
+             # TYPE glossa_index_warm gauge\nglossa_index_warm {index_warm}\n{http}",
             http = self.http.render(),
         )
     }
@@ -498,6 +684,23 @@ impl GlossaServer {
         }
     }
 
+    /// Test convenience: the pre-split single-root shape — one co-located root that is both the sole
+    /// corpus root and the state base — so existing test call sites don't each need to spell out a
+    /// `vec![Root { .. }]` for a `roots`/`state_base` split they aren't exercising.
+    #[cfg(test)]
+    fn new_for_test(root: PathBuf, profile: Profile, trace: bool, flags: ServerFlags) -> Self {
+        Self::new(
+            vec![Root {
+                label: String::new(),
+                path: root.clone(),
+            }],
+            root,
+            profile,
+            trace,
+            flags,
+        )
+    }
+
     #[cfg(test)]
     pub fn enabled_tools(&self) -> Vec<String> {
         self.tool_router
@@ -510,6 +713,28 @@ impl GlossaServer {
 
 fn internal(e: anyhow::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// Run a tool-dispatch future under a panic barrier. A panic (from either transport, which both
+/// dispatch through the same `ServerHandler`) is converted to a generic `McpError` — the panic
+/// payload is NEVER surfaced to the client — plus a `warn!` and a `glossa_tool_panics_total` bump.
+/// Paired with `parking_lot` locks (Task 1) so a panic mid-lock does not poison shared state.
+async fn run_with_panic_barrier<F>(
+    name: &str,
+    fut: F,
+) -> Result<rmcp::model::CallToolResponse, McpError>
+where
+    F: std::future::Future<Output = Result<rmcp::model::CallToolResponse, McpError>>,
+{
+    use futures::FutureExt as _;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(res) => res,
+        Err(_panic) => {
+            TOOL_PANICS.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(target: "glossa", tool = %name, "tool handler panicked; returning internal error");
+            Err(McpError::internal_error("internal error", None))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1268,7 +1493,7 @@ impl GlossaServer {
         let key = format!("read:{a:?}");
         let ids = vec![a.path.clone()];
         Ok(read_common(
-            &self.root,
+            &self.state_base,
             &h.idx,
             Some(&h.graph),
             &a.path,
@@ -1289,7 +1514,7 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<VerifyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let glossa_dir = self.root.join(".glossa");
+        let glossa_dir = self.state_base.join(".glossa");
         let paths = a.chunk_paths.unwrap_or_default();
         let (outcome, n_chunks) = crate::gate::verify_outcome(&glossa_dir, &a.answer, &paths)
             .map_err(|e| McpError::internal_error(format!("verify: {e}"), None))?;
@@ -1338,8 +1563,8 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let spec = crate::tools::ChainSpec::from_ontology(&Ontology::load_or_default(&self.root));
-        let stale = crate::tools::StaleChecker::new(self.root.clone());
+        let spec = crate::tools::ChainSpec::from_ontology(&self.ontology());
+        let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("glossary:{a:?}");
         let body = crate::tools::glossary_with_query(
             &h.idx,
@@ -1366,7 +1591,7 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let stale = crate::tools::StaleChecker::new(self.root.clone());
+        let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("related:{a:?}");
         let body = crate::tools::related(
             &h.idx,
@@ -1394,7 +1619,7 @@ impl GlossaServer {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
         let direction = a.direction.as_deref().unwrap_or("both");
-        let stale = crate::tools::StaleChecker::new(self.root.clone());
+        let stale = crate::tools::StaleChecker::new(self.roots.clone());
         let key = format!("neighbors:{a:?}");
         let body = crate::tools::neighbors(
             &h.idx,
@@ -1424,7 +1649,7 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
+        let ont = self.ontology();
         let key = format!("reach:{a:?}");
         let body = crate::tools::reach(
             &h.idx,
@@ -1456,8 +1681,8 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
         if let Some(p) = a.path.as_deref() {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                .map_err(internal)?;
             let Some(rel) = idx.canonical_document_path(p) else {
                 return Ok(CallToolResult::success(vec![Content::text(format!(
                     "not an indexed document: {p}"
@@ -1467,9 +1692,13 @@ impl GlossaServer {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let mut done = false;
             loop {
-                if let Some(_g) = crate::index::lock::try_index_lock(&self.root) {
-                    crate::index::store::index_one_file_locked(&self.root, &rel)
-                        .map_err(internal)?;
+                if let Some(_g) = crate::index::lock::try_index_lock(&self.state_base) {
+                    crate::index::store::index_one_file_locked_at(
+                        &self.roots,
+                        &self.state_base,
+                        &rel,
+                    )
+                    .map_err(internal)?;
                     done = true;
                     break;
                 }
@@ -1490,7 +1719,8 @@ impl GlossaServer {
             ))]));
         }
         let forced = a.force.unwrap_or(false);
-        let s = index_dir(&self.root, forced).map_err(internal)?;
+        let s = crate::index::store::index_dir_at(&self.roots, &self.state_base, forced)
+            .map_err(internal)?;
         self.mark_dirty();
         let mut generalize_note = "";
         if forced {
@@ -1547,7 +1777,7 @@ impl GlossaServer {
         &self,
         Parameters(_): Parameters<Empty>,
     ) -> Result<CallToolResult, McpError> {
-        let ont = Ontology::load_or_default(&self.root);
+        let ont = self.ontology();
         Ok(CallToolResult::success(vec![Content::text(
             crate::graph::ontology_export::export_pretty(&ont),
         )]))
@@ -1564,8 +1794,8 @@ impl GlossaServer {
         #[cfg(feature = "constraint")]
         {
             let a = _a;
-            let g = GraphStore::open(&self.root).map_err(internal)?;
-            let ont = Ontology::load_or_default(&self.root);
+            let g = GraphStore::open(&self.state_base).map_err(internal)?;
+            let ont = self.ontology();
             let problem = crate::constraint_adapter::load_problem(&g, &ont, Some(&a.source_path))
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -1621,12 +1851,12 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_build");
         #[cfg(feature = "constraint")]
         {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-            let g = GraphStore::open(&self.root).map_err(internal)?;
-            let ont = Ontology::load_or_default(&self.root);
+            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                .map_err(internal)?;
+            let g = GraphStore::open(&self.state_base).map_err(internal)?;
+            let ont = self.ontology();
             let tables_dir = args.tables_dir.as_deref().map(std::path::Path::new);
-            let msg = crate::tools::graph_build(&self.root, &idx, &g, &ont, &args.doc, tables_dir);
+            let msg = crate::tools::graph_build(&self.state_base, &idx, &g, &ont, &args.doc, tables_dir);
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
         #[cfg(not(feature = "constraint"))]
@@ -1649,16 +1879,17 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_upsert");
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
+        let ont = self.ontology();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let (nodes, edges, parse_notes) = (a.nodes, a.edges, a.parse_notes);
         let res = crate::graph::lock::with_graph_write_lock(
-            &self.root,
+            &self.state_base,
             std::time::Duration::from_secs(5),
             || {
                 Ok(crate::graph::ops::graph_upsert(
@@ -1683,8 +1914,9 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_delete");
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
         let refs: Vec<crate::graph::agent::EdgeRef> = a
             .edges
             .into_iter()
@@ -1696,7 +1928,7 @@ impl GlossaServer {
             .collect();
         let nodes = a.nodes;
         let msg = match crate::graph::lock::with_graph_write_lock(
-            &self.root,
+            &self.state_base,
             std::time::Duration::from_secs(5),
             || Ok(crate::graph::ops::graph_delete(&idx, &g, nodes, refs)),
         ) {
@@ -1713,10 +1945,10 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphUpdateArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
         let updates = a.into_updates();
         let msg = match crate::graph::lock::with_graph_write_lock(
-            &self.root,
+            &self.state_base,
             std::time::Duration::from_secs(5),
             || Ok(crate::graph::ops::graph_update(&g, updates)),
         ) {
@@ -1733,8 +1965,8 @@ impl GlossaServer {
         &self,
         Parameters(_): Parameters<Empty>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
+        let ont = self.ontology();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1752,9 +1984,9 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<DoctorArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
-        let ont = Ontology::load_or_default(&self.root);
-        let report = crate::graph::doctor::doctor(&g, &ont, &self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
+        let ont = self.ontology();
+        let report = crate::graph::doctor::doctor(&g, &ont, &self.roots).map_err(internal)?;
         let mut out = crate::graph::ops::fmt_doctor_report(&report);
         let prune_incomplete = a.prune_incomplete.unwrap_or(false);
         let prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
@@ -1798,13 +2030,14 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphStatsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
         // Lenient doc resolution: an argument that names a DOCUMENT — whether under
         // `doc` or `node`, and even if slightly mistyped — routes to that document's
         // owned-node inventory (+ MENTIONS), so `graph_stats("<doc>")`
         // works regardless of the arg key. A `node` that is a real graph-node id still
         // gets node-inspection.
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
         let doc = a
             .doc
             .as_deref()
@@ -1842,8 +2075,9 @@ impl GlossaServer {
         &self,
         Parameters(a): Parameters<GraphQueryArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.root).map_err(internal)?;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
         let key = format!("sql:{a:?}");
         let body = crate::tools::sql(&idx, &g, &a.sql, &self.trace);
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
@@ -1857,7 +2091,8 @@ impl GlossaServer {
     )]
     async fn grep(&self, Parameters(a): Parameters<GrepArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
         let opts = crate::grep::GrepOpts {
             ignore_case: a.ignore_case.unwrap_or(false),
             fixed: a.fixed.unwrap_or(false),
@@ -1881,7 +2116,7 @@ impl GlossaServer {
         };
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::grep(
-                &self.root,
+                &self.state_base,
                 &idx,
                 &a.pattern,
                 &opts.with_default_context(),
@@ -1896,7 +2131,8 @@ impl GlossaServer {
     )]
     async fn glob(&self, Parameters(a): Parameters<GlobArgs>) -> Result<CallToolResult, McpError> {
         self.freshen_now().await;
-        let idx = crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+        let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+            .map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(
             crate::tools::glob(&idx, &a.pattern, &self.trace),
         )]))
@@ -1910,10 +2146,10 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "note");
         #[cfg(feature = "notebook")]
         {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
+            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                .map_err(internal)?;
             let msg = crate::tools::note(
-                &self.root,
+                &self.state_base,
                 &idx,
                 &a.doc,
                 &a.file,
@@ -1941,9 +2177,9 @@ impl GlossaServer {
         self.freshen_now().await;
         #[cfg(feature = "notebook")]
         {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-            let msg = crate::tools::ls_notes(&self.root, &idx, a.doc.as_deref());
+            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                .map_err(internal)?;
+            let msg = crate::tools::ls_notes(&self.state_base, &idx, a.doc.as_deref());
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
         #[cfg(not(feature = "notebook"))]
@@ -1966,9 +2202,9 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "del");
         #[cfg(feature = "notebook")]
         {
-            let idx =
-                crate::index::store::DocIndex::open_or_create(&self.root).map_err(internal)?;
-            let msg = crate::tools::del_note(&self.root, &idx, &a.path);
+            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                .map_err(internal)?;
+            let msg = crate::tools::del_note(&self.state_base, &idx, &a.path);
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
         #[cfg(not(feature = "notebook"))]
@@ -1984,7 +2220,7 @@ impl GlossaServer {
 
     #[tool(description = "Delete the index + graph for the knowledge base.")]
     async fn purge(&self, Parameters(_): Parameters<Empty>) -> Result<CallToolResult, McpError> {
-        let g = self.root.join(".glossa");
+        let g = self.state_base.join(".glossa");
         if g.exists() {
             std::fs::remove_dir_all(&g).map_err(|e| internal(e.into()))?;
         }
@@ -2034,6 +2270,20 @@ fn resolve_prompt(name: &str) -> Result<(&'static str, &'static str), McpError> 
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GlossaServer {
+    // Panic barrier (R-C2): hand-written so a tool panic becomes a clean McpError instead of
+    // tearing down stdio / poisoning HTTP session state. Mirrors the rmcp-macros 3.1.2 generated
+    // body (ToolCallContext::new + tool_router.call) — see the compile-guard test below, which
+    // fails loudly if either rmcp internal changes on a version bump.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        let name = request.name.clone(); // capture BEFORE `request` moves into ToolCallContext
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        run_with_panic_barrier(&name, self.tool_router.call(tcc)).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(
             ServerCapabilities::builder()
@@ -2087,6 +2337,80 @@ impl ServerHandler for GlossaServer {
 mod tests {
     use super::*;
 
+    /// Proves parking_lot's `Mutex` does not poison when a panic unwinds while the guard is held —
+    /// this is the exact semantic Task 2's panic barrier depends on (a std `Mutex` would poison here
+    /// and every subsequent `.lock()` behind the barrier would panic forever).
+    #[test]
+    fn parking_lot_mutex_survives_a_panic_while_held() {
+        let m = std::sync::Arc::new(parking_lot::Mutex::new(0u32));
+        let m2 = m.clone();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = m2.lock();
+            *g += 1;
+            panic!("boom while holding the guard");
+        }));
+        assert!(r.is_err(), "the closure must have panicked");
+        // std::sync::Mutex would now be poisoned; parking_lot is not — this must not hang/panic.
+        let g = m.lock();
+        assert_eq!(*g, 1, "the mutation before the panic is visible and the lock is usable");
+    }
+
+    /// Proves the dispatch barrier (R-C2): a panicking tool future yields `Err(McpError)` instead of
+    /// unwinding, a normal future passes through untouched, and only the panic increments the counter.
+    #[tokio::test]
+    async fn panic_barrier_converts_panic_and_counts() {
+        let before = TOOL_PANICS.load(Ordering::Relaxed);
+        // panicking branch
+        let err = run_with_panic_barrier("boom_tool", async { panic!("kaboom") }).await;
+        assert!(err.is_err(), "a panicking tool must yield Err(McpError), not unwind");
+        assert_eq!(TOOL_PANICS.load(Ordering::Relaxed), before + 1);
+        // happy branch passes through untouched and does NOT bump the counter
+        let ok = run_with_panic_barrier("ok_tool", async {
+            Ok::<_, McpError>(rmcp::model::CallToolResult::success(vec![]).into())
+        })
+        .await;
+        assert!(ok.is_ok());
+        assert_eq!(TOOL_PANICS.load(Ordering::Relaxed), before + 1);
+    }
+
+    /// End-to-end no-poisoning proof: a panic mid-`parking_lot`-guard inside the barrier leaves the
+    /// lock usable for the next call — the barrier + Task 1's non-poisoning locks compose safely.
+    #[tokio::test]
+    async fn panic_barrier_does_not_poison_a_parking_lot_lock() {
+        let m = std::sync::Arc::new(parking_lot::Mutex::new(0u32));
+        let m2 = m.clone();
+        let _ = run_with_panic_barrier("locker", async move {
+            let mut g = m2.lock();
+            *g += 1;
+            panic!("panic while holding the guard");
+        })
+        .await;
+        // If parking_lot poisoned (it does not), this would deadlock/panic. It must not.
+        assert_eq!(*m.lock(), 1);
+    }
+
+    /// Compile-guard for the rmcp internals `call_tool` depends on: fails to COMPILE if
+    /// `ToolCallContext::new` or `ToolRouter::call` drift on an rmcp bump. Never actually invoked —
+    /// the two rmcp types can't be constructed here — it exists purely to type-check the signatures.
+    #[test]
+    fn rmcp_dispatch_api_is_stable_compile_guard() {
+        #[allow(dead_code, unreachable_code)]
+        fn _ctx_new(s: &GlossaServer) {
+            let _: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> =
+                rmcp::handler::server::tool::ToolCallContext::new(
+                    s,
+                    unreachable!() as rmcp::model::CallToolRequestParams,
+                    unreachable!() as rmcp::service::RequestContext<rmcp::RoleServer>,
+                );
+        }
+        #[allow(dead_code, unreachable_code)]
+        fn _router_call(r: &ToolRouter<GlossaServer>) {
+            let tcc: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> = unreachable!();
+            let _fut: std::pin::Pin<Box<dyn std::future::Future<
+                Output = Result<rmcp::model::CallToolResponse, McpError>>>> = Box::pin(r.call(tcc));
+        }
+    }
+
     /// Write a `.glossa/ontology.toml` under `root` that both enables the answer-grounding gate and
     /// declares calibrated thresholds, so `GlossaServer::new` keeps the `verify` route live (no env,
     /// no process-global state — race-free across parallel tests).
@@ -2098,6 +2422,232 @@ mod tests {
             "[verify]\nenabled = true\n[verify.threshold]\nsingle = 0.8\nmulti = 0.9\n",
         )
         .unwrap();
+    }
+
+    /// Task 5 spec test (R-C6): `ontology()` parses `.glossa/ontology.toml` once and reuses the same
+    /// `Arc` across repeat accesses while the file's mtime is unchanged, then re-parses into a fresh
+    /// `Arc` reflecting new content once the mtime advances — auto-reload is preserved, but only one
+    /// parse happens per mtime value.
+    #[test]
+    fn ontology_cache_reparses_only_on_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("ontology.toml"), "[verify]\nenabled = true\n").unwrap();
+        // 5-arg ctor (Plan A): single empty-label root, state_base = the temp dir.
+        // (Bind a PathBuf without shadowing `dir` — the TempDir guard must outlive the test.)
+        let base = dir.path().to_path_buf();
+        let s = GlossaServer::new(
+            vec![crate::root::Root { label: String::new(), path: base.clone() }],
+            base.clone(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        );
+        let a = s.ontology();
+        let b = s.ontology();
+        assert!(Arc::ptr_eq(&a, &b), "unchanged mtime → cached Arc reused (no re-parse)");
+        // bump mtime strictly forward (filetime, as the freshen tests do) and change content
+        std::fs::write(g.join("ontology.toml"), "[verify]\nenabled = false\n").unwrap();
+        let future = filetime::FileTime::from_unix_time(
+            filetime::FileTime::now().unix_seconds() + 5, 0);
+        filetime::set_file_mtime(g.join("ontology.toml"), future).unwrap();
+        let c = s.ontology();
+        assert!(!Arc::ptr_eq(&a, &c), "mtime bump → re-parsed into a fresh Arc");
+    }
+
+    /// Fix-round-1 regression guard (R-C6): if the ontology file changes AFTER a parse's pre-stat but
+    /// BEFORE that parse finishes, the cache must not be updated with the now-stale parse — publishing
+    /// it would pair a caller-visible-later mtime with content that was already superseded when it was
+    /// produced (the "last-writer-wins" bug fix-round-1 found: a slow parse of old content overwriting
+    /// a fast parse of new content). Simulates the interleaving deterministically via the
+    /// `ONTOLOGY_AFTER_PARSE_HOOK` seam instead of racing real threads.
+    #[test]
+    fn ontology_cache_does_not_publish_a_parse_the_file_outran() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        let ontology_path = g.join("ontology.toml");
+        std::fs::write(&ontology_path, "[verify]\nenabled = true\n").unwrap();
+        let base = dir.path().to_path_buf();
+        let s = GlossaServer::new_for_test(base, Profile::Reader, false, ServerFlags::default());
+
+        // Capture the ORIGINAL mtime (T0) up front, so it can be forced back after the race below —
+        // reproducing, deterministically, what a wrongly-cached (T0, stale-content) entry would look
+        // like to a LATER, unrelated caller once the OS clock's coarse granularity (or a second write
+        // landing in the same tick) makes the file's real mtime coincide with T0 again despite the
+        // content having moved on. A test that only checks "the very next access reparses" cannot
+        // catch the bug this guards: after a naive (pre-fix) store, the next real stat reads a mtime
+        // that NATURALLY differs from the wrongly-cached one and self-heals by reparsing anyway — the
+        // wrongly-cached entry only bites a caller whose stat happens to land back on the same value,
+        // which this test forces on purpose.
+        let t0 = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(&ontology_path).unwrap(),
+        );
+
+        // Fires once, right after `ontology()` finishes parsing the ORIGINAL ("enabled = true")
+        // content but before it re-stats: rewrite the file with new content and a strictly later
+        // mtime, exactly as a concurrent writer would mid-parse.
+        let hook_path = ontology_path.clone();
+        ONTOLOGY_AFTER_PARSE_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(&hook_path, "[verify]\nenabled = false\n").unwrap();
+                let future = filetime::FileTime::from_unix_time(
+                    filetime::FileTime::now().unix_seconds() + 5,
+                    0,
+                );
+                filetime::set_file_mtime(&hook_path, future).unwrap();
+            }));
+        });
+        let raced = s.ontology();
+        ONTOLOGY_AFTER_PARSE_HOOK.with(|h| *h.borrow_mut() = None);
+        // This caller still gets what it actually parsed (the pre-race content) …
+        assert_eq!(raced.verify_enabled(), Some(true), "caller sees the value it parsed, race or not");
+
+        // … but the race must have left the cache UNTOUCHED (the fix's after != cur re-check refuses
+        // to publish it), rather than a pre-fix build naively storing (T0, "enabled = true") under the
+        // PRE-parse mtime it read before the hook ran. Force the file's real mtime back to T0 — content
+        // stays "enabled = false" from the race — and confirm a fresh access reparses to the CURRENT
+        // content instead of serving whatever the race might have left cached under T0.
+        filetime::set_file_mtime(&ontology_path, t0).unwrap();
+        let next = s.ontology();
+        assert_eq!(
+            next.verify_enabled(),
+            Some(false),
+            "cache must not serve a parse the file outran, even under a later mtime collision"
+        );
+    }
+
+    /// Task 9 spec test: the three failure/hold gauges/counter render into `/metrics` under their
+    /// documented names, independent of `freshen_now` (set directly on the atomics here).
+    #[test]
+    fn metrics_text_reports_failure_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        srv.transient_failures_last_pass.store(2, Ordering::Relaxed);
+        srv.permanent_skips_total.store(5, Ordering::Relaxed);
+        srv.empty_mount_holds.store(1, Ordering::Relaxed);
+        let text = srv.metrics_text();
+        assert!(text.contains("glossa_index_transient_failures_last_pass 2"));
+        assert!(text.contains("glossa_index_permanent_skips 5"));
+        assert!(text.contains("glossa_index_empty_mount_holds 1"));
+    }
+
+    /// Task 7 spec test: `GlossaServer` reads corpus content from `roots` but every on-disk write
+    /// (index, graph store) lands under `state_base` — never under the corpus root.
+    #[test]
+    fn server_reads_corpus_but_writes_only_state() {
+        let corpus = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(corpus.path().join("a.md"), "server body text").unwrap();
+        let roots = vec![Root {
+            label: String::new(),
+            path: corpus.path().into(),
+        }];
+        let srv = GlossaServer::new(
+            roots,
+            state.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        // handle() builds under state_base only
+        let _h = srv.handle().unwrap();
+        assert!(state.path().join(".glossa").join("graph.sqlite").exists());
+        assert!(!corpus.path().join(".glossa").exists());
+        assert_eq!(srv.state_dir(), state.path());
+        assert_eq!(srv.primary_root(), corpus.path());
+    }
+
+    /// Carry-forward (Task 5 left this for Task 7): a live server's `freshen_now` must drive the
+    /// multi-root primitive over EVERY configured root, not just the primary — otherwise a change
+    /// under a SECONDARY root is silently invisible to a running server until the next full
+    /// `index(force=true)`. Two roots, write under the second one, freshen, then confirm the new
+    /// file is searchable.
+    #[tokio::test]
+    async fn freshen_now_picks_up_a_change_under_the_secondary_root() {
+        // This test issues two back-to-back `freshen_now` calls with no elapsed time between
+        // them — disable the Task 10 (D2) min-rescan gate so the second call actually re-walks
+        // rather than being skipped as "too soon since the last attempt".
+        std::env::set_var("GLOSSA_MIN_RESCAN_MS", "0");
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root_a.path().join("a.md"), "alpha content").unwrap();
+        let roots = vec![
+            Root {
+                label: "a".into(),
+                path: root_a.path().into(),
+            },
+            Root {
+                label: "b".into(),
+                path: root_b.path().into(),
+            },
+        ];
+        let srv = GlossaServer::new(
+            roots,
+            state.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        srv.freshen_now().await; // establish the baseline dirsig over both (empty `b`) roots
+                                  // Now write a NEW file under the SECONDARY root only.
+        std::fs::write(root_b.path().join("beta.md"), "beta secondary content").unwrap();
+        srv.freshen_now().await;
+        let h = srv.handle().unwrap();
+        let hits = h.idx.search("beta", 10).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.path.contains("beta.md")),
+            "freshen_now must pick up a change under the secondary root, got: {hits:?}"
+        );
+        std::env::remove_var("GLOSSA_MIN_RESCAN_MS");
+    }
+
+    /// Task 10 (D2) spec test: a second `freshen_now` call within `GLOSSA_MIN_RESCAN_MS` of the
+    /// first must skip the stat-walk entirely (serve the current index, no-op) — proven by
+    /// `last_freshen_ms` staying unchanged across the gated call. Once the window elapses, the
+    /// gate opens again and the next call DOES update the clock.
+    #[tokio::test]
+    async fn freshen_min_rescan_skips_within_window() {
+        // The FIRST call does real (cold) work — open_or_create the index/graph store, walk the
+        // (empty) corpus — which alone can take a couple hundred ms on a loaded CI box. The window
+        // must comfortably exceed that cold-start cost or the "within the window" call below would
+        // spuriously see itself as already past it.
+        std::env::set_var("GLOSSA_MIN_RESCAN_MS", "3000");
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+
+        srv.freshen_now().await;
+        let after_first = srv.last_freshen_ms.load(Ordering::Relaxed);
+        assert_ne!(after_first, 0, "the first (ungated) call stamps last_freshen_ms");
+
+        srv.freshen_now().await; // immediately again — well inside the 3s window
+        assert_eq!(
+            srv.last_freshen_ms.load(Ordering::Relaxed),
+            after_first,
+            "a call within the min-rescan window is gated — the stat-walk clock is untouched"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(3300));
+        srv.freshen_now().await; // now past the window
+        assert_ne!(
+            srv.last_freshen_ms.load(Ordering::Relaxed),
+            after_first,
+            "once the window elapses the gate opens and the next call re-walks"
+        );
+
+        std::env::remove_var("GLOSSA_MIN_RESCAN_MS");
     }
 
     #[test]
@@ -2112,7 +2662,7 @@ mod tests {
         for p in [Profile::Reader, Profile::Editor, Profile::Full] {
             let dir = tempfile::tempdir().unwrap();
             write_verify_enabled_ontology(dir.path());
-            let names = GlossaServer::new(dir.path().to_path_buf(), p, false, ServerFlags::default())
+            let names = GlossaServer::new_for_test(dir.path().to_path_buf(), p, false, ServerFlags::default())
                 .enabled_tools();
             assert!(
                 names.contains(&"verify".to_string()),
@@ -2126,7 +2676,7 @@ mod tests {
         // No [verify.threshold] (a bare tempdir has no ontology) ⇒ withheld from every profile.
         for p in [Profile::Reader, Profile::Editor, Profile::Full] {
             let dir = tempfile::tempdir().unwrap();
-            let names = GlossaServer::new(dir.path().to_path_buf(), p, false, ServerFlags::default())
+            let names = GlossaServer::new_for_test(dir.path().to_path_buf(), p, false, ServerFlags::default())
                 .enabled_tools();
             assert!(
                 !names.contains(&"verify".to_string()),
@@ -2184,7 +2734,7 @@ mod tests {
         // description is duplicated by hand between here and registry::DESC_SQL — this test is
         // the guard that keeps the two copies from silently drifting apart.
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Full,
             false,
@@ -2360,7 +2910,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2386,7 +2936,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2421,7 +2971,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\noldbody\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2456,13 +3006,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn read_picks_up_an_in_place_edit_under_secondary_root() {
+        // Task 9 carry-forward (c): the `read` tool's lazy single-file reindex
+        // (`index_one_file_locked_at`) must resolve a SECONDARY labeled root's doc via its
+        // `<label>/<relpath>` key (`doc_file`), not join the edit onto `roots[0]`.
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root_a.path().join("a.md"), b"# A\nalpha\n").unwrap();
+        std::fs::write(root_b.path().join("b.md"), b"# B\noldbody\n").unwrap();
+        let roots = vec![
+            Root {
+                label: "a".into(),
+                path: root_a.path().into(),
+            },
+            Root {
+                label: "b".into(),
+                path: root_b.path().into(),
+            },
+        ];
+        crate::index::store::index_dir_at(&roots, state.path(), true).unwrap();
+        let srv = GlossaServer::new(
+            roots,
+            state.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        // In-place edit of the SECONDARY root's file (no dir-mtime change — a plain freshen alone
+        // would miss it; only the per-file lazy reindex catches this).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(root_b.path().join("b.md"), b"# B\nnewbody freshtoken\n").unwrap();
+        // Read it by its stored (labeled) key — triggers the lazy per-file reindex.
+        let _ = srv
+            .read(Parameters(ReadArgs {
+                path: "b/b.md".into(),
+                n: 1,
+                page_image: None,
+                include_images: None,
+            }))
+            .await;
+        let out = srv
+            .search(Parameters(SearchArgs {
+                query: "freshtoken".into(),
+                limit: None,
+                glob: None,
+                file_type: None,
+                scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            format!("{out:?}").contains("b.md"),
+            "in-place edit under a SECONDARY root must be picked up after reading the file: {out:?}"
+        );
+    }
+
     #[cfg(feature = "notebook")]
     #[tokio::test]
     async fn read_picks_up_an_external_note_edit() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2521,7 +3128,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2557,7 +3164,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2590,7 +3197,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let base = GlossaServer::new(
+        let base = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2610,7 +3217,7 @@ mod tests {
         // A second "session" built the way the http factory builds one: clone, then swap in a
         // brand-new tracker (NOT `base.signals.clone()`, which would share the Arc).
         let mut session2 = base.clone();
-        session2.signals = std::sync::Arc::new(std::sync::Mutex::new(
+        session2.signals = std::sync::Arc::new(parking_lot::Mutex::new(
             crate::tools::retrieval_progress::ReaderSignals::new(),
         ));
 
@@ -2690,7 +3297,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nalpha\n# B\nbravo\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2720,7 +3327,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("d.md"), b"# A\nmaxTsdr 3000\n# B\nother\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2761,7 +3368,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("Other.md"), "# A\none\n".as_bytes()).unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2790,7 +3397,7 @@ mod tests {
         )
         .unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2823,7 +3430,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nx\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2865,7 +3472,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2884,7 +3491,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nhello world\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2896,6 +3503,30 @@ mod tests {
         assert!(m.contains("glossa_index_chunks"), "metrics: {m}");
         assert!(m.contains("glossa_graph_nodes"), "metrics: {m}");
         assert!(m.contains("glossa_graph_dirty"), "metrics: {m}");
+    }
+
+    #[test]
+    fn index_warm_gauge_flips_on_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new(
+            vec![crate::root::Root {
+                label: String::new(),
+                path: dir.path().to_path_buf(),
+            }],
+            dir.path().to_path_buf(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        );
+        assert!(
+            srv.metrics_text().contains("glossa_index_warm 0"),
+            "cold server: index_warm gauge starts at 0"
+        );
+        srv.mark_index_warm();
+        assert!(
+            srv.metrics_text().contains("glossa_index_warm 1"),
+            "mark_index_warm flips the gauge to 1"
+        );
     }
 
     #[test]
@@ -2923,7 +3554,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -2968,7 +3599,7 @@ mod tests {
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
         let reader =
-            GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default())
+            GlossaServer::new_for_test(root.clone(), Profile::Reader, false, ServerFlags::default())
                 .enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         #[cfg(feature = "notebook")]
@@ -2982,7 +3613,7 @@ mod tests {
         assert!(!reader.contains(&"write".to_string()));
 
         let editor =
-            GlossaServer::new(root.clone(), Profile::Editor, false, ServerFlags::default())
+            GlossaServer::new_for_test(root.clone(), Profile::Editor, false, ServerFlags::default())
                 .enabled_tools();
         #[cfg(feature = "notebook")]
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
@@ -3028,7 +3659,7 @@ mod tests {
             "reader cannot graph_doctor"
         );
 
-        let full = GlossaServer::new(root.clone(), Profile::Full, false, ServerFlags::default())
+        let full = GlossaServer::new_for_test(root.clone(), Profile::Full, false, ServerFlags::default())
             .enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         #[cfg(feature = "notebook")]
@@ -3047,7 +3678,7 @@ mod tests {
             );
         }
 
-        let ng = GlossaServer::new(
+        let ng = GlossaServer::new_for_test(
             root,
             Profile::Editor,
             false,
@@ -3069,14 +3700,14 @@ mod tests {
     fn source_file_flag_gates_get_source_file() {
         let root = std::path::PathBuf::from(".");
         // On by default (every profile) …
-        let on = GlossaServer::new(root.clone(), Profile::Reader, false, ServerFlags::default())
+        let on = GlossaServer::new_for_test(root.clone(), Profile::Reader, false, ServerFlags::default())
             .enabled_tools();
         assert!(
             on.contains(&"get_source_file".to_string()),
             "get_source_file is available by default"
         );
         // … and withheld when the --source-file opt-in is off (no_source_file), any profile.
-        let off = GlossaServer::new(
+        let off = GlossaServer::new_for_test(
             root,
             Profile::Full,
             false,
@@ -3097,7 +3728,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\nalpha\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3130,7 +3761,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\noriginaltoken\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3187,7 +3818,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3235,7 +3866,7 @@ mod tests {
             })
             .unwrap();
         }
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3260,7 +3891,7 @@ mod tests {
     #[test]
     fn path_tool_is_gone_reach_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3288,7 +3919,7 @@ mod tests {
         // Write an ontology that does both so the FULL tool list includes `verify` here — otherwise
         // the byte-match guard could never see (and enforce) its advertised description.
         write_verify_enabled_ontology(dir.path());
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Full,
             false,
@@ -3326,7 +3957,7 @@ mod tests {
     #[test]
     fn reindex_tool_is_gone_index_remains() {
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3352,7 +3983,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\noriginaltoken\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3385,7 +4016,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), b"# A\noriginal\n").unwrap();
         index_dir(dir.path(), true).unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
@@ -3464,7 +4095,7 @@ mod tests {
     #[test]
     fn get_info_advertises_prompts_capability() {
         let dir = tempfile::tempdir().unwrap();
-        let srv = GlossaServer::new(
+        let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
             Profile::Full,
             false,

@@ -41,6 +41,10 @@ pub fn extract_file(path: &Path, sink: &mut dyn FnMut(Chunk)) -> anyhow::Result<
         if ex.file_types().contains(&ext.as_str()) {
             // Skip reading the file body for extractors that don't use it (images → name-only).
             let bytes = if ex.needs_bytes() {
+                #[cfg(test)]
+                if let Some(e) = crate::index::store::read_fault::take_read(path) {
+                    return Err(anyhow::Error::from(e).context("extract_file read (injected)"));
+                }
                 std::fs::read(path)?
             } else {
                 Vec::new()

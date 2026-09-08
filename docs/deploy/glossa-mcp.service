@@ -1,0 +1,106 @@
+# Example production unit for `kb mcp --transport streamable-http`, wired for the Type=notify
+# daemon-hardening in this release: sd_notify READY-after-bind + async-liveness watchdog +
+# STOPPING, the panic barrier (a tool-handler panic never takes the process down), SIGHUP-driven
+# log-level/TLS/freshen reload, and the startup safety interlock. Full operator guide, including
+# native TLS and the opt-in overload guards: docs/deploy/mcp-server.md.
+#
+# Copy this file to /etc/systemd/system/, rename per (base, profile, port) you are running — e.g.
+# glossa-roleA-editor.service — and adjust the paths, bind address, and role name below. One unit
+# per process; see "Topology: one process per (base x profile)" in mcp-server.md for running
+# several (editor + reader-pool) units against the same corpus.
+#
+# NOTE: every non-secret setting for this role lives in the --config file below (copy
+# docs/deploy/glossa.toml to /etc/glossa/roleA.toml and fill in your paths/bind/roots) --
+# ExecStart only needs --config plus the --profile flag (profile is not a config-file setting).
+# ONLY the bearer token goes in EnvironmentFile: unit files are world-readable via `systemctl cat`,
+# and the config file itself REJECTS a token key outright (fails to load) -- the token is the one
+# setting that belongs only in this mode-0600 EnvironmentFile, never in ExecStart or the config file.
+
+[Unit]
+Description=glossa MCP server (roleA, editor)
+Documentation=https://github.com/metalmon/glossa/blob/master/docs/deploy/mcp-server.md
+After=network-online.target
+Wants=network-online.target
+# [corpus] roots in the --config file below can point at a network share (SMB/NFS): wait for it to
+# actually be mounted before starting, instead of racing it and landing in the empty-mount-guard
+# hold (see mcp-server.md). Point this at the mount point itself (or its systemd .mount unit name)
+# for each root configured in the file.
+RequiresMountsFor=/srv/glossa/roleA
+# Unit start-rate limiting (paired with Restart=on-failure below): after StartLimitBurst failed
+# starts inside StartLimitIntervalSec, systemd stops auto-restarting until an operator intervenes
+# (`systemctl reset-failed`) or the interval elapses -- keeps a persistently-crashing process from
+# spinning forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+# REQUIRED with Type=notify: systemd's default (NotifyAccess=none) ignores sd_notify messages
+# entirely, which would make READY=1/WATCHDOG=1/STOPPING=1 all silently no-ops and, combined with
+# TimeoutStartSec=infinity below, hang every start indefinitely.
+NotifyAccess=main
+
+# systemd expects a keepalive ping every WatchdogSec/2; a missed ping past WatchdogSec triggers a
+# restart. The ping is gated on ASYNC-RUNTIME LIVENESS (the watchdog task actually getting
+# scheduled), NOT on the server's readiness check -- a long index/generalize pass on a busy
+# blocking-pool does not by itself cause a false restart, only a truly wedged async runtime does.
+# 120s is a starting point for a modest corpus; on a very large corpus, or a slow network mount
+# where a full generalize pass can run long, raise this well past your worst observed pass
+# duration -- WatchdogSec should be a multiple of that worst case, not close to it.
+WatchdogSec=120
+
+# READY=1 is sent right after the TCP listener binds -- BEFORE the initial index/graph freshen
+# (warm-up) runs in the background -- so a normal start reports ready in well under a second
+# regardless of corpus size. `infinity` here is a safety margin for unusual startup conditions
+# (e.g. binding an address whose interface is not yet configured), not a concession to a slow
+# warm-up: the warm-up is tracked separately by the glossa_index_warm metric (see mcp-server.md,
+# "Two initial-index flows") and never blocks or delays Type=notify READY.
+TimeoutStartSec=infinity
+
+# --config is a global flag (before or interleaved with the `mcp` subcommand); GLOSSA_CONFIG below
+# would work the same way. /etc/glossa/roleA.toml carries [corpus] (roots + state_dir -- state_dir
+# MUST be local disk even when a root is a network share: the tantivy writer lock and the graph
+# store are not reliable over SMB/NFS, see "Separated corpus / state-dir mode" in mcp-server.md),
+# [server] (transport/bind/allowed_hosts/session_idle_secs), and optionally [tls]/[limits]/
+# [retrieval]/[logging]. --profile is not a config-file setting, so it stays an ExecStart flag.
+ExecStart=/usr/local/bin/kb --config /etc/glossa/roleA.toml mcp --profile editor
+
+# Optional automated-provisioning path: build the index/graph once at install time instead of
+# relying on the lazy warm-up that starts automatically on every `kb mcp` launch (see "Two
+# initial-index flows" in mcp-server.md). Gets the FIRST start already warm, at the cost of a slow
+# `systemctl start` -- safe to enable because TimeoutStartSec is infinity above, but note
+# ExecStartPre runs with the same environment/user as ExecStart, so it also needs read access to
+# the corpus root(s) and write access to state_dir named in the config file.
+#ExecStartPre=/usr/local/bin/kb --config /etc/glossa/roleA.toml index
+
+# SIGHUP reloads the log-level control file (<state-dir>/.glossa/loglevel), forces a freshen, and
+# (in a `--features tls` build) re-reads the TLS cert/key/client-CA files -- all WITHOUT dropping
+# the listener or any established session. It does NOT reload the --config file, nor any of
+# bind/transport/state_dir/auth-token/allowed_hosts however they were supplied (flag, env, or
+# config file) -- a structural change to any of those needs a restart (see "Deployment config file
+# (--config)" in mcp-server.md: there is no config-file hot reload).
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5
+
+# ONLY the bearer token belongs in this file -- never in ExecStart or a checked-in config.
+# Contents (mode 0600, owned by the service user):
+#   GLOSSA_MCP_TOKEN=<generate with: openssl rand -hex 32>
+EnvironmentFile=/etc/glossa/roleA.env
+
+User=glossa
+Group=glossa
+
+# Sandboxing. ProtectSystem=strict makes the whole filesystem read-only for this process except
+# the paths in ReadWritePaths -- /etc/glossa/roleA.toml and the network corpus root(s) named in its
+# [corpus] section stay readable (strict is read-only elsewhere, not hidden; kb only ever reads
+# both), only the local state_dir needs write access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/glossa/roleA
+
+[Install]
+WantedBy=multi-user.target

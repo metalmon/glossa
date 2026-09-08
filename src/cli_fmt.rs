@@ -201,6 +201,10 @@ pub fn rel_file(root: &Path, p: &str) -> String {
 }
 
 /// Persist the ordered hits (path<TAB>location) so `kb read <#>` can resolve them later.
+///
+/// `root` is the **state base** (where `.glossa` lives), not necessarily the corpus root — the two
+/// coincide today (co-located CLI), but callers must pass the resolved state base once `--state-dir`
+/// lands so this keeps writing beside the index/graph rather than into the corpus.
 pub fn write_last_search(root: &Path, records: &[(String, String)]) -> std::io::Result<()> {
     let dir = root.join(".glossa");
     std::fs::create_dir_all(&dir)?;
@@ -214,7 +218,8 @@ pub fn write_last_search(root: &Path, records: &[(String, String)]) -> std::io::
     std::fs::write(dir.join("last_search.tsv"), s)
 }
 
-/// Read the raw last-search TSV (None if absent).
+/// Read the raw last-search TSV (None if absent). `root` is the state base — see
+/// [`write_last_search`].
 pub fn read_last_search(root: &Path) -> Option<String> {
     std::fs::read_to_string(root.join(".glossa").join("last_search.tsv")).ok()
 }
@@ -274,6 +279,18 @@ mod tests {
             confidence: 1.0,
             created_at: 0,
         }
+    }
+
+    /// Regression: `write_last_search`/`read_last_search` must key off whatever base they're given —
+    /// pinned so a future refactor can't silently reintroduce a corpus-root assumption once callers
+    /// are fed the resolved state base (which may differ from the corpus root under `--state-dir`).
+    #[test]
+    fn last_search_is_written_under_the_given_base_only() {
+        let state = tempfile::tempdir().unwrap();
+        write_last_search(state.path(), &[("A/x.md".into(), "p.1".into())]).unwrap();
+        assert!(state.path().join(".glossa").join("last_search.tsv").exists());
+        let raw = read_last_search(state.path()).unwrap();
+        assert!(raw.contains("A/x.md\tp.1"));
     }
 
     #[test]

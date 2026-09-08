@@ -132,8 +132,16 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
+    // Corpus content lives at `paths.root`; on-disk state (index/graph/`.glossa`) lives at
+    // `paths.state_base` — identical path in the co-located default, split under `--state-dir`.
+    let roots = [glossa::root::Root {
+        label: String::new(),
+        path: paths.root.clone(),
+    }];
+
     // Ensure the corpus is indexed (structural nodes + chunks) — no-op if already indexed.
-    glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
+    glossa::index::store::index_dir_at(&roots, &paths.state_base, false)
+        .context("indexing corpus")?;
 
     let reason_md = std::fs::read_to_string(&paths.reason)
         .with_context(|| format!("reading {}", paths.reason.display()))?;
@@ -142,7 +150,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     // Opened ONCE for the whole run: every worker in the pool shares this SAME `GraphStore`
     // (reads via `GraphWriter::store()`, writes via `GraphWriter::upsert`) instead of each seed
     // opening its own handle against `graph.sqlite`.
-    let g = Arc::new(glossa::graph::store::GraphStore::open(&paths.root)?);
+    let g = Arc::new(glossa::graph::store::GraphStore::open(&paths.state_base)?);
     let seeds = crate::distil::seed_pool(&g, &ontology, args.seed_type.as_deref())?;
     if seeds.is_empty() {
         bail!(
@@ -180,8 +188,8 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     }
     // The worker pool shares this ONE `GraphStore` (kept alive above for the chainless scan) via
     // the `GraphWriter`; the doc index is opened once and shared read-only.
-    let idx = DocIndex::open_or_create(&paths.root).context("opening doc index")?;
-    let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
+    let idx = DocIndex::open_or_create_at(&roots, &paths.state_base).context("opening doc index")?;
+    let writer = GraphWriter::new(Arc::clone(&g), paths.state_base.clone());
 
     let fanout_max =
         crate::lab::resolve(args.fanout_max, lab.tuning.fanout_max, DEFAULT_FANOUT_MAX);
@@ -266,7 +274,7 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     };
     println!("tokens: {}{footnote}", token_summary());
 
-    let summary = crate::build::finalize(&paths.root).context("finalizing reason")?;
+    let summary = crate::build::finalize(&paths.state_base).context("finalizing reason")?;
     println!("{summary}");
     Ok(())
 }

@@ -336,17 +336,25 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
+    // Corpus content lives at `paths.root`; on-disk state (index/graph/`.glossa`) lives at
+    // `paths.state_base` — identical path in the co-located default, split under `--state-dir`.
+    let roots = [glossa::root::Root {
+        label: String::new(),
+        path: paths.root.clone(),
+    }];
+
     // Ensure the corpus is indexed — mirrors `run_distil`'s own first step; a no-op if already
     // indexed. Needed so `read` calls the generator makes resolve real chunks.
-    glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
+    glossa::index::store::index_dir_at(&roots, &paths.state_base, false)
+        .context("indexing corpus")?;
 
     let golds_md = std::fs::read_to_string(&paths.golds)
         .with_context(|| format!("reading {}", paths.golds.display()))?;
 
-    let g = GraphStore::open(&paths.root)?;
+    let g = GraphStore::open(&paths.state_base)?;
     // Shared read-only index for the code-B (retrieval) hop_type probe on kept golds — opened once,
     // reused every attempt. Distinct from `generate_one`'s own per-call index (it opens its own).
-    let idx = DocIndex::open_or_create(&paths.root)?;
+    let idx = DocIndex::open_or_create_at(&roots, &paths.state_base)?;
     let spec = glossa::tools::ChainSpec::from_ontology(&ontology);
     let seeds = seed_pool(&g, &ontology, args.seed_type.as_deref())?;
     // `--max-chains N`: drop terminals already fed by >= N incoming chaining chains (well-covered),
@@ -553,9 +561,17 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
+    // Corpus content lives at `paths.root`; on-disk state (index/graph/`.glossa`) lives at
+    // `paths.state_base` — identical path in the co-located default, split under `--state-dir`.
+    let roots = [glossa::root::Root {
+        label: String::new(),
+        path: paths.root.clone(),
+    }];
+
     // Ensure the corpus is indexed (structural nodes + chunks) — no-op if already indexed, same
     // first step every `kbx` pipeline entry takes.
-    glossa::index::store::index_dir(&paths.root, false).context("indexing corpus")?;
+    glossa::index::store::index_dir_at(&roots, &paths.state_base, false)
+        .context("indexing corpus")?;
 
     let distil_md = std::fs::read_to_string(&paths.distil)
         .with_context(|| format!("reading {}", paths.distil.display()))?;
@@ -578,7 +594,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // A fresh, short-lived handle: enumerate then drop before densify_doc opens its own
     // per-document GraphStore connection — same reasoning as `run_build`'s extract stage.
     let mut docs = {
-        let g = GraphStore::open(&paths.root).context("open graph store to enumerate docs")?;
+        let g =
+            GraphStore::open(&paths.state_base).context("open graph store to enumerate docs")?;
         crate::build::enumerate_docs(&g)?
     };
     docs = select_docs(docs, args.doc.as_deref());
@@ -617,7 +634,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // Weight the bar by chunk, not by document — identical rationale/mechanism to `run_build`'s
     // extract stage (see `extract_doc_weight`'s doc comment): a huge document is otherwise one
     // tick and the bar/ETA lie on a mixed-size corpus.
-    let idx = DocIndex::open_or_create(&paths.root).context("open doc index for densify")?;
+    let idx =
+        DocIndex::open_or_create_at(&roots, &paths.state_base).context("open doc index for densify")?;
     let mut chunk_counts: HashMap<String, usize> = HashMap::new();
     idx.iter_chunks(|path, _ord, _kind, _text| {
         *chunk_counts.entry(path.to_string()).or_default() += 1;
@@ -632,8 +650,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // (tantivy's `IndexReader` is safe for concurrent readers, no lock needed — unlike
     // `GraphStore`'s reads, which funnel through its own connection mutex; see
     // `GraphWriter::store`'s doc comment).
-    let g = Arc::new(GraphStore::open(&paths.root).context("open graph store for densify")?);
-    let writer = GraphWriter::new(Arc::clone(&g), paths.root.clone());
+    let g = Arc::new(GraphStore::open(&paths.state_base).context("open graph store for densify")?);
+    let writer = GraphWriter::new(Arc::clone(&g), paths.state_base.clone());
 
     // Densify state lives under its own stable `runs/distil/` dir — one corpus has exactly one
     // in-progress densify pass to resume/checkpoint, same convention as `runs/build/`/`runs/reason/`.
@@ -755,7 +773,7 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
 
     // Same hygiene/generalize/node-index finalize `run_reason` runs at the end of `kbx reason`,
     // so the derived layer + node index are refreshed after densify's writes too.
-    let summary = crate::build::finalize(&paths.root).context("finalizing distil")?;
+    let summary = crate::build::finalize(&paths.state_base).context("finalizing distil")?;
     println!("{summary}");
     Ok(())
 }

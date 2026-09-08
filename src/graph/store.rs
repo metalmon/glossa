@@ -348,8 +348,9 @@ impl GraphStore {
     /// when the persisted signature matches (survives the process), else built and persisted. The
     /// signature covers node ids + edge endpoints, so a delete / in-place edit / re-index — anything
     /// that changes the graph topology — forces a rebuild, unlike a count-only key.
-    /// The corpus's `.glossa` directory. PPR reads it to resolve `[retrieval].sim_weight` from the
-    /// sibling `ontology.toml` (`gdir.parent()/.glossa/ontology.toml`).
+    /// The graph's `.glossa` directory, rooted at the state base `GraphStore::open` was called with
+    /// (not necessarily the corpus root). PPR reads it to resolve `[retrieval].sim_weight` from the
+    /// sibling `ontology.toml` (`gdir.parent()/.glossa/ontology.toml`, i.e. `<state_base>/.glossa/ontology.toml`).
     pub(crate) fn gdir(&self) -> &std::path::Path {
         &self.gdir
     }
@@ -362,7 +363,7 @@ impl GraphStore {
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
         let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
-        if let Some((k, t)) = self.ppr_transition.lock().unwrap().as_ref() {
+        if let Some((k, t)) = self.ppr_transition.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if *k == key {
                 return Ok(t.clone());
             }
@@ -371,7 +372,7 @@ impl GraphStore {
         // it, to validate the on-disk cache (which survives across processes, where mtime isn't
         // comparable). Fold both weights into it so a cache built at one pair is a miss at another.
         let csig = {
-            let c = self.conn.lock().unwrap();
+            let c = self.conn();
             crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim, w_spine)
         };
         let arc = if let Some(t) = self.load_ppr_transition(csig) {
@@ -381,7 +382,7 @@ impl GraphStore {
             let _ = self.save_ppr_transition(csig, &built); // best-effort; a failed write just re-builds
             built
         };
-        *self.ppr_transition.lock().unwrap() = Some((key, arc.clone()));
+        *self.ppr_transition.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, arc.clone()));
         Ok(arc)
     }
 
@@ -398,7 +399,7 @@ impl GraphStore {
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
         let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
-        if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
+        if let Some((k, c)) = self.csr.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if *k == key {
                 return Ok(c.clone());
             }
@@ -410,7 +411,7 @@ impl GraphStore {
         // so no cycle.
         let _build = self.csr_build.lock().unwrap_or_else(|e| e.into_inner());
         // Re-check under the build lock: another thread may have just built for this exact key.
-        if let Some((k, c)) = self.csr.lock().unwrap().as_ref() {
+        if let Some((k, c)) = self.csr.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if *k == key {
                 return Ok(c.clone());
             }
@@ -420,7 +421,7 @@ impl GraphStore {
         // else build it from the in-memory transition (which itself loads-or-builds + persists the
         // JSON), then open.
         let csig = {
-            let c = self.conn.lock().unwrap();
+            let c = self.conn();
             crate::graph::ppr::cache_sig(Self::transition_sig(&c)?, w_sim, w_spine)
         };
         let csr = match CsrTransition::open(&self.gdir, csig)? {
@@ -428,7 +429,7 @@ impl GraphStore {
             None => self.build_csr_locked(csig)?,
         };
         let arc = std::sync::Arc::new(csr);
-        *self.csr.lock().unwrap() = Some((key, arc.clone()));
+        *self.csr.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, arc.clone()));
         Ok(arc)
     }
 
@@ -767,23 +768,38 @@ impl GraphStore {
 
     // ── public API ────────────────────────────────────────────────────────────
 
+    /// Locks the sqlite connection, recovering from mutex poisoning.
+    ///
+    /// A tool handler can panic while holding this guard, and Spec C's dispatch panic barrier
+    /// (`mcp::call_tool`'s `catch_unwind`) deliberately keeps the process alive. With a plain
+    /// `.lock().unwrap()` that panic POISONS the `std::sync::Mutex`, and because the server caches
+    /// its [`GraphHandle`](crate::graph::handle::GraphHandle) in an `ArcSwapOption` that is never
+    /// rebuilt on error, EVERY subsequent graph call would fail for the life of the process — the
+    /// exact availability outage the panic barrier exists to prevent. The connection itself stays
+    /// structurally valid: sqlite state is transaction-scoped and a panic mid-write is rolled back
+    /// on the next use, so recovering the guard via `into_inner()` is safe.
+    #[inline]
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn put_node(&self, node: &Node) -> anyhow::Result<()> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::put_node_c(&c, node)
     }
 
     pub fn get_node(&self, id: &str) -> anyhow::Result<Option<Node>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::get_node_c(&c, id)
     }
 
     pub fn put_edge(&self, edge: &Edge) -> anyhow::Result<()> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::put_edge_c(&c, edge)
     }
 
     pub fn node_count(&self) -> anyhow::Result<u64> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
             .context("node_count")?;
@@ -791,7 +807,7 @@ impl GraphStore {
     }
 
     pub fn edge_count(&self) -> anyhow::Result<u64> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
             .context("edge_count")?;
@@ -807,7 +823,7 @@ impl GraphStore {
         if candidates.is_empty() {
             return Ok(None);
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let placeholders = std::iter::repeat_n("?", candidates.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -830,7 +846,7 @@ impl GraphStore {
     /// gated `sql` as read-only before calling — this method does not gate. The row cap is enforced
     /// deterministically by wrapping `sql` as a subquery, not by truncating the fetched result.
     pub fn run_select(&self, sql: &str, max_rows: usize) -> anyhow::Result<Vec<Vec<String>>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let _authz = QueryAuthzGuard::install(&c)?;
         let wrapped = format!("SELECT * FROM ({sql}) LIMIT {max_rows}");
         let mut stmt = c.prepare(&wrapped).context("prepare run_select")?;
@@ -879,7 +895,7 @@ impl GraphStore {
         edge_type: Option<&str>,
         dst_like: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT 1 FROM edges_labeled \
@@ -900,14 +916,14 @@ impl GraphStore {
     /// Column names for `sql`, in order. The caller is responsible for having gated `sql` as
     /// read-only before calling — this method does not gate.
     pub fn select_columns(&self, sql: &str) -> anyhow::Result<Vec<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let _authz = QueryAuthzGuard::install(&c)?;
         let stmt = c.prepare(sql).context("prepare select_columns")?;
         Ok(stmt.column_names().into_iter().map(String::from).collect())
     }
 
     pub fn delete_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         // Cascade first: drop edges that REFERENCE nodes from this source (regardless of the edge's
         // own source_path) so none is left dangling at a deleted node — same as delete_by_type.
         c.execute(
@@ -962,7 +978,7 @@ impl GraphStore {
         if edge_types.is_empty() && node_types.is_empty() {
             return Ok(AgentLayerDeleteStats::default());
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut edges_removed = 0usize;
 
         if !edge_types.is_empty() {
@@ -1032,7 +1048,7 @@ impl GraphStore {
     /// the agent/curated reasoning graph. Used by `index_dir(force=true)` so a reindex rebuilds the
     /// structure from documents without destroying hand/agent-built knowledge. Returns count removed.
     pub fn delete_auto(&self) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         // auto-* nodes never carry authored validity today, but clean up defensively so every
         // node-delete path is covered — no FK cascade in this store, and this stays correct if
         // that assumption ever changes.
@@ -1055,7 +1071,7 @@ impl GraphStore {
     /// edges referencing the same document are preserved. Used by incremental indexing of a
     /// changed/removed file.
     pub fn delete_auto_by_source(&self, source_path: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         // auto-* nodes never carry authored validity today, but clean up defensively so every
         // node-delete path is covered — no FK cascade in this store, and this stays correct if
         // that assumption ever changes.
@@ -1085,7 +1101,7 @@ impl GraphStore {
     /// deletion cleans its own nodes via `delete_auto_by_source`; this cleans inbound REFERENCES that
     /// other docs authored, so no dangling edge points at a removed node.
     pub fn delete_auto_by_target(&self, target: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         c.execute(
             "DELETE FROM edges WHERE eto = ?1 AND origin LIKE 'auto-%'",
             rusqlite::params![target],
@@ -1096,7 +1112,7 @@ impl GraphStore {
 
     /// Delete every node of `node_type` plus all edges touching those nodes. Returns count removed.
     pub fn delete_by_type(&self, node_type: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         c.execute(
             "DELETE FROM edges WHERE efrom IN (SELECT id FROM nodes WHERE node_type = ?1) \
              OR eto IN (SELECT id FROM nodes WHERE node_type = ?1)",
@@ -1127,7 +1143,7 @@ impl GraphStore {
     /// SQLite's Unicode `LIKE`. Delete the returned ids with [`delete_nodes`](Self::delete_nodes).
     /// All node ids of `node_type` (used by `graph prune --dry-run` to count a whole-type wipe).
     pub fn ids_of_type(&self, node_type: &str) -> anyhow::Result<Vec<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare("SELECT id FROM nodes WHERE node_type = ?1")
             .context("prepare ids_of_type")?;
@@ -1143,7 +1159,7 @@ impl GraphStore {
         node_type: &str,
         source_substr: &str,
     ) -> anyhow::Result<Vec<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT DISTINCT n.id FROM nodes n \
@@ -1179,7 +1195,7 @@ impl GraphStore {
 
     /// Every edge in the graph (used by the generalization pass to read topology).
     pub fn all_edges(&self) -> anyhow::Result<Vec<Edge>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::all_edges_c(&c)
     }
 
@@ -1187,7 +1203,7 @@ impl GraphStore {
     /// pass clear ONLY its own derived edges before regenerating, unlike `delete_auto` which also
     /// drops the document-structural `auto-*` layer. Returns count removed.
     pub fn delete_edges_by_origin(&self, origin: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         c.execute(
             "DELETE FROM edges WHERE origin = ?1",
             rusqlite::params![origin],
@@ -1210,7 +1226,7 @@ impl GraphStore {
         if dupset.is_empty() {
             return Ok(0);
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let txn = c.unchecked_transaction().context("begin merge txn")?;
         let mut canon = match Self::get_node_c(&txn, canonical)? {
             Some(n) => n,
@@ -1282,7 +1298,7 @@ impl GraphStore {
         if ids.is_empty() {
             return Ok(0);
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let txn = c
             .unchecked_transaction()
             .context("begin delete_nodes txn")?;
@@ -1310,7 +1326,7 @@ impl GraphStore {
     /// Replace ALL `node_meta` rows (community / centrality) with `rows` in one transaction —
     /// regenerated wholesale by each generalization run.
     pub fn replace_node_meta(&self, rows: &[(String, NodeMeta)]) -> anyhow::Result<()> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let txn = c.unchecked_transaction().context("begin node_meta txn")?;
         txn.execute("DELETE FROM node_meta", [])
             .context("clear node_meta")?;
@@ -1328,7 +1344,7 @@ impl GraphStore {
 
     /// Derived attributes for a node, or None if the generalization pass hasn't recorded any.
     pub fn node_meta(&self, id: &str) -> anyhow::Result<Option<NodeMeta>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare("SELECT community, pagerank, degree FROM node_meta WHERE id = ?1")
             .context("prepare node_meta")?;
@@ -1360,7 +1376,7 @@ impl GraphStore {
         exclude_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<(String, NodeMeta)>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT id, community, pagerank, degree FROM node_meta \
@@ -1389,7 +1405,7 @@ impl GraphStore {
 
     /// Insert or replace the authored validity interval for a node (1:1 by `node_id`).
     pub fn upsert_validity(&self, node_id: &str, v: &NodeValidity) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute(
             "INSERT INTO node_validity (node_id, valid_from, valid_to, valid_from_raw, valid_to_raw) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
@@ -1404,7 +1420,7 @@ impl GraphStore {
 
     /// The authored validity interval for a node, or None if it has none recorded.
     pub fn validity_for(&self, node_id: &str) -> anyhow::Result<Option<NodeValidity>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let row = conn
             .query_row(
                 "SELECT valid_from, valid_to, valid_from_raw, valid_to_raw FROM node_validity WHERE node_id = ?1",
@@ -1437,7 +1453,7 @@ impl GraphStore {
 
     /// Number of rows in `node_meta` (0 until generalize has run).
     pub fn node_meta_count(&self) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM node_meta", [], |r| r.get(0))
             .context("node_meta_count")?;
@@ -1446,7 +1462,7 @@ impl GraphStore {
 
     /// `(community_id, member_count)` sorted by community id ascending.
     pub fn community_sizes(&self) -> anyhow::Result<Vec<(i64, usize)>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT community, COUNT(*) FROM node_meta \
@@ -1471,7 +1487,7 @@ impl GraphStore {
         comm: i64,
         limit: usize,
     ) -> anyhow::Result<Vec<(String, NodeMeta)>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT id, community, pagerank, degree FROM node_meta \
@@ -1498,13 +1514,13 @@ impl GraphStore {
     }
 
     pub fn outgoing(&self, from: &str) -> anyhow::Result<Vec<Edge>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::outgoing_c(&c, from)
     }
 
     /// Edges pointing INTO `to` (`eto = to`). Used by export to capture inbound edges too.
     pub fn incoming(&self, to: &str) -> anyhow::Result<Vec<Edge>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare(
                 "SELECT efrom, eto, edge_type, source_path, range, file_sig, origin, confidence, \
@@ -1522,7 +1538,7 @@ impl GraphStore {
     }
 
     pub fn all_nodes(&self) -> anyhow::Result<Vec<Node>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::all_nodes_c(&c)
     }
 
@@ -1538,7 +1554,7 @@ impl GraphStore {
         if ids.is_empty() {
             return Ok(out);
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         for chunk in ids.chunks(900) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql =
@@ -1561,7 +1577,7 @@ impl GraphStore {
 
     /// Return the id of the first node (any type) whose normalized label matches.
     pub fn find_by_label(&self, label: &str) -> anyhow::Result<Option<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Ok(Self::ids_by_label_norm_c(&c, &normalize_label(label))?
             .into_iter()
             .next())
@@ -1570,7 +1586,7 @@ impl GraphStore {
     /// All node ids whose normalized label equals `normalize_label(label)` — indexed exact lookup
     /// (O(log N)). Lets callers resolve a label to existing node(s) without loading the whole graph.
     pub fn ids_by_label_norm(&self, label: &str) -> anyhow::Result<Vec<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         Self::ids_by_label_norm_c(&c, &normalize_label(label))
     }
 
@@ -1586,7 +1602,7 @@ impl GraphStore {
         if new_label.is_none() && new_type.is_none() {
             return Ok(0);
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         match (new_label, new_type) {
             (Some(lbl), Some(typ)) => {
                 c.execute(
@@ -1652,7 +1668,7 @@ impl GraphStore {
         label: &str,
         node_type: &str,
     ) -> anyhow::Result<Option<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         let mut stmt = c
             .prepare("SELECT id FROM nodes WHERE label_norm = ?1 AND node_type = ?2 LIMIT 1")
             .context("prepare find_by_label_type")?;
@@ -1669,7 +1685,7 @@ impl GraphStore {
     /// row (else graph_stats keeps reporting the node's community as a phantom).
     /// Returns (#nodes + #edges) removed.
     pub fn delete_node(&self, id: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         c.execute(
             "DELETE FROM edges WHERE efrom = ?1 OR eto = ?1",
             rusqlite::params![id],
@@ -1690,7 +1706,7 @@ impl GraphStore {
 
     /// Delete the single edge matching (from, edge_type, to). Returns changes().
     pub fn delete_edge(&self, from: &str, edge_type: &str, to: &str) -> anyhow::Result<usize> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         c.execute(
             "DELETE FROM edges WHERE efrom = ?1 AND edge_type = ?2 AND eto = ?3",
             rusqlite::params![from, edge_type, to],
@@ -1701,7 +1717,7 @@ impl GraphStore {
 
     pub fn upsert(&self, ont: &Ontology, nodes: &[Node], edges: &[Edge]) -> anyhow::Result<()> {
         // Lock ONCE for the entire operation — helpers use _c variants to avoid deadlock.
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
 
         // Validate everything BEFORE writing anything.
         for n in nodes {
@@ -1776,7 +1792,7 @@ impl GraphStore {
     /// NOT transliteration-aware — a phonetic respelling in another script still won't match
     /// the Latin original.
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         // Fast path: exact (normalized) label match via the label_norm index — the common case
         // during enrichment. Returns ALL nodes sharing that normalized label (near-dups expected).
         let exact = Self::ids_by_label_norm_c(&c, &normalize_label(name))?;
@@ -1797,7 +1813,7 @@ impl GraphStore {
     /// so a caller never gates on a stale df. Uses [`node_index::DEFAULT_SALIENCE_MAX_DF_RATIO`] —
     /// callers needing a different ratio should go through `NodeIndex::is_salient` directly.
     pub fn term_is_salient(&self, term: &str) -> anyhow::Result<bool> {
-        let c = self.conn.lock().unwrap();
+        let c = self.conn();
         self.ensure_node_index_fresh(&c)?;
         Ok(self.node_index.is_salient(
             term,
@@ -2242,6 +2258,38 @@ mod tests {
             confidence: 1.0,
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn conn_lock_recovers_after_poisoning_panic() {
+        // Spec C's dispatch panic barrier (`call_tool`'s `catch_unwind`) keeps the process alive when
+        // a tool handler panics. If that panic fires while the connection `Mutex` guard is held, a
+        // `std::sync::Mutex` is POISONED — and the server caches its `GraphHandle` in an
+        // `ArcSwapOption` that is never rebuilt on error, so every later graph call would wedge for
+        // the life of the process. Reproduce the poisoning through the SAME `catch_unwind` barrier the
+        // daemon uses, then assert a subsequent read still succeeds instead of surfacing PoisonError.
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = g.conn.lock().unwrap();
+            panic!("tool panicked mid-transaction while holding the connection lock");
+        }));
+        assert!(
+            poisoned.is_err(),
+            "the closure must have panicked to poison the lock"
+        );
+        assert!(
+            g.conn.is_poisoned(),
+            "a std::sync::Mutex must be poisoned after a panic-while-locked"
+        );
+
+        // The cached handle is reused as-is, so a subsequent graph read must still succeed — not
+        // propagate the poisoned lock as a panic/Err.
+        let n = g
+            .node_count()
+            .expect("node_count must recover from the poisoned lock, not fail");
+        assert_eq!(n, 0, "a freshly opened store has no nodes");
     }
 
     #[test]

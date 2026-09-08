@@ -1,0 +1,55 @@
+# glossa deployment config (Spec E) — the BASE settings for one role. Supply it with
+# `kb mcp --config /etc/glossa/roleA.toml` or `GLOSSA_CONFIG=/etc/glossa/roleA.toml`.
+# Every value here can be overridden per setting by a CLI flag or env var — precedence is
+# flag > env > file > built-in default. `kb index` also reads the [corpus] section from this
+# same file, so one role file drives both provisioning (`kb index`) and serving (`kb mcp`).
+# See "Deployment config file (--config)" in docs/deploy/mcp-server.md for the full operator guide.
+#
+# SECRET RULE: the bearer token is NEVER read from this file. Set GLOSSA_MCP_TOKEN
+# (e.g. via a systemd EnvironmentFile, mode 0600) or --auth-token instead. An `auth_token`/`token`
+# key under [server] makes the file fail to load (fail closed), not silently ignored.
+#
+# STRICTNESS: unknown keys/sections are rejected at load time (typos fail closed, not silently
+# ignored) — this file's keys must match the names below exactly.
+#
+# NO HOT RELOAD: this file is read once, at startup (and by each one-shot `kb index` run). A
+# structural setting changed here (roots, state_dir, bind, transport, tls paths, ...) needs a
+# process restart to take effect — it is not part of the SIGHUP reload (which only covers the
+# log-level file, a forced freshen, and re-reading TLS cert/key/client-CA bytes in a
+# `--features tls` build).
+
+[corpus]                       # Spec A — this role's source folder(s) + local state directory
+roots = ["docs=/mnt/store/a", "specs=/mnt/store/b"]   # same "[LABEL=]PATH" grammar as --root
+state_dir = "/var/lib/glossa/roleA"                   # local disk — required when a root is a network mount
+
+[server]                       # Spec C — transport & session (kb mcp only; ignored by kb index)
+transport = "streamable-http"        # "stdio" | "streamable-http"; default: stdio
+bind = "127.0.0.1:8080"              # default: 127.0.0.1:8080
+session_idle_secs = 900              # opt-in idle timeout; 0 = disabled (default)
+allowed_hosts = ["kb.example.com"]   # extra allowed Host header value(s); default: loopback only
+# insecure = false                   # override the non-loopback+no-auth startup interlock (loud warn + audit event)
+# auth_token / token are intentionally NOT valid keys here — see the SECRET RULE above.
+
+[tls]                          # Spec C — requires a `--features tls` build; omit this whole
+                                # section when terminating TLS at a reverse proxy instead
+cert = "/etc/glossa/roleA/tls/cert.pem"
+key  = "/etc/glossa/roleA/tls/key.pem"
+client_ca = "/etc/glossa/roleA/tls/clients-ca.pem"   # optional: enables mTLS (requires client certs)
+
+[limits]                       # Spec C — opt-in serving guards; each is OFF unless set here (or via env)
+request_timeout_secs = 120     # default: 120
+max_body_bytes = 4000000       # default: 4000000
+# max_concurrency = 32          # opt-in overload guard; unset = off
+# rate_limit_per_sec = 50       # opt-in per-IP token-bucket guard; unset = off
+# connection_cap = 256          # opt-in max concurrently open connections; unset = off
+# max_handshakes = 256          # tls feature builds only: pre-auth handshake bound; default: 256
+
+[retrieval]                    # Spec B — network-corpus read resilience knobs (kb index and kb mcp)
+read_retries = 3                 # default: 3
+read_retry_backoff_ms = 200      # default: 200
+freshen_deadline_ms = 3000       # default: 3000
+min_rescan_ms = 2000             # default: 2000 — minimum spacing between freshen stat-walks
+
+[logging]                      # Spec C
+format = "json"                # "json" (one object per line) or "text" (default)
+level  = "info"                # RUST_LOG-style directive; env RUST_LOG still overrides this
