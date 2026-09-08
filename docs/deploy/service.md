@@ -24,7 +24,7 @@ All scripts download a pinned version from GitHub Releases — **no `cargo build
 ```bash
 cd deploy/ansible
 ansible-playbook -i inventory playbook.yml \
-  -e glossa_version=1.0.0 \
+  -e glossa_version=0.4.5 \
   -e glossa_corpus_path=/srv/glossa/corpus
 ```
 
@@ -34,7 +34,7 @@ ansible-playbook -i inventory playbook.yml \
 
 ```powershell
 .\deploy\windows\install-service.ps1 `
-  -Version 1.0.0 `
+  -Version 0.4.5 `
   -CorpusPath "C:\glossa\corpus" `
   -Profile reader `
   -Bind "127.0.0.1:8080"
@@ -46,7 +46,7 @@ ansible-playbook -i inventory playbook.yml \
 
 ```bash
 ./deploy/macos/install-service.sh \
-  --version 1.0.0 \
+  --version 0.4.5 \
   --corpus "$HOME/Documents/my-kb" \
   --profile reader \
   --bind 127.0.0.1:8080

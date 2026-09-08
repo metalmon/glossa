@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-08-30**. Version **0.4.0** (unreleased; last tag `v0.3.4`).
+Status as of **2026-08-30**. Version **0.4.5** (last tag `v0.4.5`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
