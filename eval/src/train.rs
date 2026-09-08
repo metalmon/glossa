@@ -142,6 +142,12 @@ pub struct TrainArgs {
     /// cross-model run point train at its own lab (e.g. a 35B reader) while a concurrent `kbx eval`
     /// uses a different one (a 9B reader) — the prompt files still come from the workspace.
     pub lab: Option<PathBuf>,
+    /// Resume an interrupted run from its on-disk GEPA checkpoint — even if the run's fingerprint no
+    /// longer matches the current config. Mutually exclusive with `force` (enforced by clap).
+    pub resume: bool,
+    /// Discard any existing GEPA checkpoint and start a fresh run (overwrites it as it proceeds).
+    /// Mutually exclusive with `resume` (enforced by clap).
+    pub force: bool,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only when GEPA's
@@ -320,11 +326,11 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         user_sim_prompt,
         credit_abstention: policy.credit_abstention(),
         fp_gate: policy.fp_gate(),
-        // A later task wires the real checkpoint path/flags here; keep checkpointing disabled
-        // on this path for now.
-        checkpoint_path: None,
-        resume: false,
-        force: false,
+        // Stable, timestamp-free checkpoint path under the workspace's kbx dir — `run` owns
+        // load/decide/delete via `gepa_checkpoint::decide_resume`, honoring `resume`/`force`.
+        checkpoint_path: Some(paths.kbx_dir.join("gepa.checkpoint.json")),
+        resume: args.resume,
+        force: args.force,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.
@@ -459,6 +465,15 @@ mod tests {
         assert!(should_apply(true, false)); // full-set gate passed -> apply
         assert!(!should_apply(false, false)); // winner regressed on full set -> keep seed
         assert!(!should_apply(true, true)); // --no-apply -> never write answer.md
+    }
+
+    /// The stable, timestamp-free checkpoint path `run_train` feeds `GepaGraphConfig` lives under
+    /// the workspace's `kbx` dir, matching every other kbx-owned file (lab.toml, dataset.toml, ...).
+    #[test]
+    fn checkpoint_path_is_under_kbx_dir() {
+        let paths = crate::workspace::KbxPaths::for_root(std::path::PathBuf::from("/corp"));
+        let ckpt = paths.kbx_dir.join("gepa.checkpoint.json");
+        assert!(ckpt.ends_with(".glossa/kbx/gepa.checkpoint.json"));
     }
 
     /// `jobs`' own precedence mirrors every other stage's tuning knob: CLI > lab.toml `[tuning]

@@ -265,6 +265,13 @@ enum Cmd {
         /// `lab.9b.toml`. Prompt files still come from the workspace.
         #[arg(long)]
         lab: Option<PathBuf>,
+        /// Resume an interrupted run from its on-disk GEPA checkpoint — even if the run's fingerprint
+        /// no longer matches the current config. Errors if there is no checkpoint to resume.
+        #[arg(long, conflicts_with = "force")]
+        resume: bool,
+        /// Discard any existing GEPA checkpoint and start a fresh run (overwrites it as it proceeds).
+        #[arg(long, conflicts_with = "resume")]
+        force: bool,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -554,6 +561,8 @@ fn main() -> Result<()> {
             no_progress,
             jobs,
             lab,
+            resume,
+            force,
         } => train::run_train(
             path,
             TrainArgs {
@@ -574,6 +583,8 @@ fn main() -> Result<()> {
                 jobs,
                 metric,
                 lab,
+                resume,
+                force,
             },
         ),
         Cmd::Reason {
@@ -1950,6 +1961,19 @@ mod tests {
         let cli = Cli::try_parse_from(["kbx", "train"]).unwrap();
         match cli.cmd {
             Cmd::Train { jobs, .. } => assert!(jobs.is_none()),
+            _ => panic!("expected Cmd::Train"),
+        }
+    }
+
+    #[test]
+    fn train_force_and_resume_conflict() {
+        // both set => usage error
+        assert!(Cli::try_parse_from(["kbx", "train", "--force", "--resume"]).is_err());
+        // each alone parses
+        let ok = Cli::try_parse_from(["kbx", "train", "--resume"]);
+        assert!(ok.is_ok());
+        match ok.unwrap().cmd {
+            Cmd::Train { resume, force, .. } => assert!(resume && !force),
             _ => panic!("expected Cmd::Train"),
         }
     }
