@@ -45,6 +45,14 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Serializes tests that mutate process-global environment variables (`std::env::set_var`/
+/// `remove_var`). Rust runs tests concurrently in one process, so without this they race.
+/// `into_inner()` recovers the guard if a holder panicked (a failed test must not poison it).
+/// Every env-mutating test must hold this for its whole body:
+/// `let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());`
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -292,6 +292,7 @@ level = "info"
 
     #[test]
     fn config_path_prefers_flag_over_env() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Flag wins even when the env is set.
         std::env::set_var("GLOSSA_CONFIG", "/from/env.toml");
         let got = config_path(Some(PathBuf::from("/from/flag.toml")));
@@ -301,12 +302,14 @@ level = "info"
 
     #[test]
     fn config_path_none_when_unset() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_CONFIG");
         assert_eq!(config_path(None), None);
     }
 
     #[test]
     fn config_path_falls_back_to_env_when_no_flag() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // No flag given: the env var must actually be read, not ignored.
         std::env::set_var("GLOSSA_CONFIG", "/from/env.toml");
         let got = config_path(None);

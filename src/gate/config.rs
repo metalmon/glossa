@@ -62,17 +62,10 @@ impl VerifyConfig {
 mod tests {
     use super::VerifyConfig;
     use crate::gate::score::Bucket;
-    use std::sync::Mutex;
-
-    // `defaults_when_no_ontology` and `env_overrides_default` both touch the process-global
-    // GLOSSA_VERIFY_RARE_DF_FRAC env var. Rust runs tests in parallel by default, so without
-    // serializing them the default-assertion test can observe the other test's override (or vice
-    // versa) — a race. This mutex forces the two env-touching tests to run one at a time.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn defaults_when_no_ontology() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_RARE_DF_FRAC");
         let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
         let c = VerifyConfig::resolve(dir.path());
@@ -85,7 +78,7 @@ mod tests {
 
     #[test]
     fn env_overrides_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GLOSSA_VERIFY_RARE_DF_FRAC", "0.10");
         let dir = tempfile::tempdir().unwrap();
         let c = VerifyConfig::resolve(dir.path());

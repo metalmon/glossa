@@ -2523,6 +2523,7 @@ mod tests {
     /// file is searchable.
     #[tokio::test]
     async fn freshen_now_picks_up_a_change_under_the_secondary_root() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // This test issues two back-to-back `freshen_now` calls with no elapsed time between
         // them — disable the Task 10 (D2) min-rescan gate so the second call actually re-walks
         // rather than being skipped as "too soon since the last attempt".
@@ -2569,6 +2570,7 @@ mod tests {
     /// building the handle AFTER the write; here we open it BEFORE, exactly as a daemon does.
     #[tokio::test]
     async fn search_same_handle_sees_file_added_after_open() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Two back-to-back freshens with no elapsed time — open the min-rescan gate so the second
         // actually re-walks instead of being skipped as "too soon".
         std::env::set_var("GLOSSA_MIN_RESCAN_MS", "0");
@@ -2614,6 +2616,7 @@ mod tests {
     /// gate opens again and the next call DOES update the clock.
     #[tokio::test]
     async fn freshen_min_rescan_skips_within_window() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The FIRST call does real (cold) work — open_or_create the index/graph store, walk the
         // (empty) corpus — which alone can take a couple hundred ms on a loaded CI box. The window
         // must comfortably exceed that cold-start cost or the "within the window" call below would
