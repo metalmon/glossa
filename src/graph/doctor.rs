@@ -268,12 +268,15 @@ pub fn prune(
 
 /// Returns `Some(reason)` when pruning the `dangling` bucket would be a mass-wipe — the signal of
 /// an ontology mismatch (e.g. a missing/changed `ontology.toml`) rather than genuine per-node rot.
-/// `None` = safe to prune. Two triggers:
+/// `None` = safe to prune. Three triggers:
 ///   1. the graph has non-structural nodes but the ontology recognizes NO live grounded terminal
 ///      (`report.live_terminal_count == 0`) — every non-structural node is trivially "dangling";
-///   2. dangling nodes exceed ~50% of the non-structural (reasoning) layer.
+///   2. dangling nodes exceed ~50% of the non-structural (reasoning) layer;
+///   3. a large dangling set (≥ `NEVER_BUILT_FLOOD`) that is mostly "never-built" — anchors with no
+///      outgoing chaining edge at all — i.e. a mid-construction graph (`kbx reason` unfinished) or a
+///      just-changed ontology, not per-node rot.
 ///
-/// This only gates the DELETE — `doctor()` keeps reporting `dangling` regardless.
+/// This only gates the DELETE — `doctor()` keeps reporting `dangling` regardless. `--force` overrides.
 pub fn dangling_prune_risk(
     report: &DoctorReport,
     g: &GraphStore,
@@ -304,6 +307,38 @@ pub fn dangling_prune_risk(
             "dangling ({}) is over half the reasoning layer ({non_structural}) — refusing a mass delete",
             report.dangling.len()
         ));
+    }
+    // 3. A large dangling set that is mostly "never-built" — query-side anchors with no outgoing
+    //    reasoning (chaining) edge at all — is the signature of a graph `kbx reason` hasn't finished
+    //    wiring, or whose ontology shape just changed, NOT per-node rot ("the answer's source is
+    //    gone"). Deleting here discards anchors reason is about to connect. A few orphan anchors in
+    //    a built graph are normal prunable junk, so require a non-trivial absolute count first so
+    //    only a genuine flood trips this.
+    const NEVER_BUILT_FLOOD: usize = 16;
+    if report.dangling.len() >= NEVER_BUILT_FLOOD {
+        let chaining_srcs: HashSet<String> = g
+            .all_edges()
+            .map(|edges| {
+                edges
+                    .into_iter()
+                    .filter(|e| ont.relation_role(&e.edge_type) == RelationRole::Chaining)
+                    .map(|e| e.from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let never_built = report
+            .dangling
+            .iter()
+            .filter(|d| !chaining_srcs.contains(&d.id))
+            .count();
+        if never_built * 2 > report.dangling.len() {
+            return Some(format!(
+                "{never_built} of {} dangling nodes were never chained to a terminal (no outgoing \
+                 reasoning edge) — the graph looks mid-construction or its ontology just changed, \
+                 not rotted; run `kbx reason` / rebuild before pruning, or --force to override",
+                report.dangling.len()
+            ));
+        }
     }
     None
 }
@@ -872,6 +907,58 @@ strict = false
         assert!(
             dangling_prune_risk(&rep, &g, &ont).is_none(),
             "a single dangling node in an otherwise-healthy graph must be safe to prune"
+        );
+    }
+
+    #[test]
+    fn dangling_prune_risk_refuses_never_built_flood_below_the_over_half_line() {
+        // Mid-construction / just-changed-ontology graph: many query-side anchors have NO outgoing
+        // reasoning edge yet (reason hasn't wired them) → they dangle, but they are a MINORITY of
+        // the whole reasoning layer (plenty of live terminals), so neither the zero-live-terminal
+        // nor the over-half trigger fires. Without the never-built trigger, `--prune-dangling` would
+        // silently delete anchors `kbx reason` is about to connect. The guard must refuse (→ --force).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let mut nodes = vec![node("sec:1", "Section", "Sec", prov("doc.md", None))];
+        let mut edges = vec![];
+        // 21 live, grounded Resolution terminals (live MENTIONS + fresh sig) — the reasoning layer
+        // is mostly healthy terminals, so the 20 dangling orphans stay well under half of it.
+        for i in 0..21 {
+            let id = format!("res:{i}");
+            nodes.push(node(&id, "Resolution", "R", prov("doc.md", Some(sig0))));
+            edges.push(edge(&id, "MENTIONS", "sec:1", prov("doc.md", None)));
+        }
+        // 20 never-built orphan Symptoms: no outgoing chaining edge → dangling, but NOT rot.
+        for i in 0..20 {
+            nodes.push(node(
+                &format!("sym:orphan{i}"),
+                "Symptom",
+                "Orphan",
+                prov("doc.md", None),
+            ));
+        }
+        g.upsert(&ont, &nodes, &edges).unwrap();
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert_eq!(rep.dangling.len(), 20, "the 20 orphan Symptoms dangle");
+        assert!(rep.live_terminal_count >= 21, "21 live Resolution terminals");
+        let risk = dangling_prune_risk(&rep, &g, &ont);
+        assert!(risk.is_some(), "a never-built flood must refuse the prune");
+        let msg = risk.unwrap();
+        assert!(
+            msg.contains("never chained") || msg.contains("mid-construction"),
+            "expected the never-built reason, got: {msg}"
+        );
+        assert!(
+            !msg.contains("over half"),
+            "must be the never-built trigger, not over-half: {msg}"
         );
     }
 }
