@@ -191,7 +191,14 @@ pub(crate) fn chat_http(
     // Back-compat entry point: keeps the historical retry defaults (its callers don't carry an
     // `Endpoint`/`RateLimit`); the `Endpoint`-aware paths go through `chat_http_full` with a policy.
     // No `Endpoint` here either -> no extra headers (`&[]`), same as before this feature existed.
-    let full = chat_http_full(endpoint, api_key, body, timeout, RetryPolicy::default(), &[])?;
+    let full = chat_http_full(
+        endpoint,
+        api_key,
+        body,
+        timeout,
+        RetryPolicy::default(),
+        &[],
+    )?;
     full.pointer("/choices/0/message")
         .cloned()
         .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
@@ -507,7 +514,10 @@ mod tests {
     #[test]
     fn resolve_headers_substitutes_session_placeholder() {
         let mut headers = BTreeMap::new();
-        headers.insert("x-opencode-session".to_string(), SESSION_PLACEHOLDER.to_string());
+        headers.insert(
+            "x-opencode-session".to_string(),
+            SESSION_PLACEHOLDER.to_string(),
+        );
         headers.insert(
             "x-prefixed".to_string(),
             format!("sess-{SESSION_PLACEHOLDER}-suffix"),
@@ -527,7 +537,10 @@ mod tests {
     #[test]
     fn resolve_headers_drops_placeholder_header_when_session_is_none() {
         let mut headers = BTreeMap::new();
-        headers.insert("x-opencode-session".to_string(), SESSION_PLACEHOLDER.to_string());
+        headers.insert(
+            "x-opencode-session".to_string(),
+            SESSION_PLACEHOLDER.to_string(),
+        );
         let out = resolve_headers(&headers, None);
         assert!(
             out.is_empty(),
@@ -783,7 +796,8 @@ mod tests {
 
         let req = server.join().unwrap();
         assert!(
-            req.to_lowercase().contains("x-fallback-only: fallback-value"),
+            req.to_lowercase()
+                .contains("x-fallback-only: fallback-value"),
             "fallback must send its OWN header; got request:\n{req}"
         );
         assert!(
