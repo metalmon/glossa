@@ -179,6 +179,8 @@ fn main() -> anyhow::Result<()> {
                         shared: None,
                         // Legacy CLI has no lab config -> the default round cap.
                         max_rounds: backend::openai::DEFAULT_MAX_ROUNDS,
+                        // Legacy `kb-eval run` CLI has no lab endpoint -> no extra headers.
+                        headers: std::collections::BTreeMap::new(),
                     })
                 }
                 BackendKind::Cli => {

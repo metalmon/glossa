@@ -398,6 +398,10 @@ pub struct OpenAiBackend {
     /// max_rounds` (so an operator's config actually bounds the eval reader, not just reason/build);
     /// callers without a lab config use [`DEFAULT_MAX_ROUNDS`].
     pub max_rounds: usize,
+    /// Opt-in extra request headers carried from the reader's `[model]` endpoint, folded back into
+    /// the `Endpoint` handed to the agent loop (see `crate::lab::Endpoint::headers`). Empty (the
+    /// default) reproduces today's behavior exactly (no extra headers).
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// Fallback agent-loop round cap for the eval reader when `lab.toml`'s `[tuning] max_rounds` is
@@ -634,6 +638,7 @@ impl OpenAiBackend {
             feedback_bool_metric: None,
             shared: None,
             max_rounds: DEFAULT_MAX_ROUNDS,
+            headers: std::collections::BTreeMap::new(),
         }
     }
 
@@ -654,6 +659,7 @@ impl OpenAiBackend {
             function_name: self.function_name.clone(),
             feedback_score_metric: self.feedback_score_metric.clone(),
             feedback_bool_metric: self.feedback_bool_metric.clone(),
+            headers: self.headers.clone(),
         }
     }
 
@@ -999,6 +1005,7 @@ where
         function_name: None,
         feedback_score_metric: None,
         feedback_bool_metric: None,
+        headers: std::collections::BTreeMap::new(),
     };
     crate::backend::agent_loop::run_agent_loop(
         &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds, user_sim,

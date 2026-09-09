@@ -198,6 +198,7 @@ mod tests {
             function_name: Some("f".to_string()),
             feedback_score_metric: None,
             feedback_bool_metric: None,
+            headers: std::collections::BTreeMap::new(),
         }
     }
 

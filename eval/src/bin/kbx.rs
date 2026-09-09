@@ -984,6 +984,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // Bound the eval reader by the operator's [tuning] max_rounds (was hardcoded 50);
                 // unset -> the engine default.
                 max_rounds: lab.tuning.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
+                headers: lab.model.headers.clone(),
             };
 
             // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader

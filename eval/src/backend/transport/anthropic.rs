@@ -516,6 +516,7 @@ mod tests {
             function_name: None,
             feedback_score_metric: None,
             feedback_bool_metric: None,
+            headers: std::collections::BTreeMap::new(),
         };
 
         let transport = AnthropicTransport;

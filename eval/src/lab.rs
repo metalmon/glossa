@@ -88,6 +88,14 @@ pub struct Endpoint {
     /// Defaults to `"correct"` (see [`Endpoint::feedback_bool_metric`]) when absent.
     #[serde(default)]
     pub feedback_bool_metric: Option<String>,
+    /// Optional extra request headers sent with every call to THIS endpoint. Absent / empty = none
+    /// sent — byte-identical to today (same opt-in-and-default-off pattern as `rate_limit`/
+    /// `fallback`/`temperature`). Values may contain the `${{session}}` placeholder, resolved
+    /// per-link inside `OpenAiTransport::call` (see `backend::transport::openai::resolve_headers`)
+    /// to a per-episode session id — for gateways (e.g. OpenCode) that require a prompt-cache /
+    /// session header.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// Opt-in per-endpoint rate-limit + retry policy. Every field is optional so a partial `[<stage>]`
@@ -358,6 +366,28 @@ mod tests {
         assert!(c.reflect.is_none());
         assert!(c.distil.is_none());
         assert_eq!(c.model.timeout_secs, 120); // d120 default
+        assert!(
+            c.model.headers.is_empty(),
+            "headers absent from lab.toml must default to an empty map"
+        );
+    }
+
+    /// Task 1: `headers` parses when present, preserving key/value pairs verbatim (substitution
+    /// happens later, at call time — see `resolve_headers`).
+    #[test]
+    fn lab_config_parses_headers_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lab.toml"),
+            "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n\n[judge]\nendpoint=\"http://x\"\nmodel=\"m\"\nheaders = { \"x-opencode-session\" = \"${{session}}\" }\n",
+        )
+        .unwrap();
+        let c = LabConfig::load(dir.path()).unwrap();
+        let judge = c.judge.expect("judge section present");
+        assert_eq!(
+            judge.headers.get("x-opencode-session").map(String::as_str),
+            Some("${{session}}")
+        );
     }
 
     #[test]
