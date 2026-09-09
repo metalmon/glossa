@@ -14,7 +14,40 @@ use crate::backend::resilience::RetryPolicy;
 use crate::lab::Endpoint;
 use anyhow::anyhow;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::time::Duration;
+
+/// The ONLY header-value placeholder: `$` + double-brace. Recognized exclusively by
+/// [`resolve_headers`] — header values never pass through `sop::substitute_placeholders`'s
+/// `{key}` resolver, so the lexical overlap (`${{session}}` contains `{session}`) is harmless.
+const SESSION_PLACEHOLDER: &str = "${{session}}";
+
+/// Resolve one endpoint's configured `headers` (raw, as parsed from `lab.toml`) into the
+/// `Vec<(name, value)>` actually sent on the wire for THIS call: every occurrence of
+/// [`SESSION_PLACEHOLDER`] in a value is replaced with `session`; a header whose value still
+/// contains the placeholder after substitution — i.e. `session` was `None` — is DROPPED rather
+/// than sent with a literal, unresolved placeholder. A static header (no placeholder) passes
+/// through unchanged regardless of `session`. Iterates a `BTreeMap` so output order is
+/// deterministic (handy for tests and stable request byte-shape).
+pub(crate) fn resolve_headers(
+    headers: &BTreeMap<String, String>,
+    session: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::with_capacity(headers.len());
+    for (k, v) in headers {
+        let resolved = match session {
+            Some(sid) => v.replace(SESSION_PLACEHOLDER, sid),
+            None => v.clone(),
+        };
+        if resolved.contains(SESSION_PLACEHOLDER) {
+            // Placeholder present but no session to fill it with (session was None) -> drop this
+            // header rather than send a literal "${{session}}" the provider can't use.
+            continue;
+        }
+        out.push((k.clone(), resolved));
+    }
+    out
+}
 
 /// Default `min_p` nucleus-sampling floor for an agent-loop chat call, overridable via
 /// `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that otherwise widens at high
@@ -423,6 +456,78 @@ mod tests {
         let core = &resolved.iter().find(|r| r.name == "search").unwrap().core_schema;
         assert_eq!(&search["function"]["parameters"], core);
     }
+
+    /// Task 2 (RED-then-GREEN): `${{session}}` is replaced by the given session id when `Some`;
+    /// surrounding text is preserved; multiple headers are each resolved independently.
+    #[test]
+    fn resolve_headers_substitutes_session_placeholder() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-opencode-session".to_string(), SESSION_PLACEHOLDER.to_string());
+        headers.insert(
+            "x-prefixed".to_string(),
+            format!("sess-{SESSION_PLACEHOLDER}-suffix"),
+        );
+        let out = resolve_headers(&headers, Some("abc123"));
+        assert_eq!(
+            out,
+            vec![
+                ("x-opencode-session".to_string(), "abc123".to_string()),
+                ("x-prefixed".to_string(), "sess-abc123-suffix".to_string()),
+            ]
+        );
+    }
+
+    /// `session = None` AND a value still contains `${{session}}` after substitution -> that
+    /// header is DROPPED (not sent with a literal unresolved placeholder).
+    #[test]
+    fn resolve_headers_drops_placeholder_header_when_session_is_none() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-opencode-session".to_string(), SESSION_PLACEHOLDER.to_string());
+        let out = resolve_headers(&headers, None);
+        assert!(
+            out.is_empty(),
+            "a placeholder header with no session must be dropped, got: {out:?}"
+        );
+    }
+
+    /// A static header (no placeholder) passes through regardless of `session` — both when a
+    /// session IS available and when it is not.
+    #[test]
+    fn resolve_headers_static_header_passes_through_regardless_of_session() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-static".to_string(), "fixed-value".to_string());
+        assert_eq!(
+            resolve_headers(&headers, Some("abc123")),
+            vec![("x-static".to_string(), "fixed-value".to_string())]
+        );
+        assert_eq!(
+            resolve_headers(&headers, None),
+            vec![("x-static".to_string(), "fixed-value".to_string())]
+        );
+    }
+
+    /// An empty map resolves to an empty result regardless of `session`.
+    #[test]
+    fn resolve_headers_empty_map_is_empty_result() {
+        let headers = BTreeMap::new();
+        assert!(resolve_headers(&headers, Some("abc123")).is_empty());
+        assert!(resolve_headers(&headers, None).is_empty());
+    }
+
+    /// A mixed map: one static header + one placeholder header with `session = None` -> only the
+    /// static header survives.
+    #[test]
+    fn resolve_headers_mixed_map_drops_only_the_unresolved_one() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-static".to_string(), "fixed".to_string());
+        headers.insert(
+            "x-opencode-session".to_string(),
+            SESSION_PLACEHOLDER.to_string(),
+        );
+        let out = resolve_headers(&headers, None);
+        assert_eq!(out, vec![("x-static".to_string(), "fixed".to_string())]);
+    }
+
     /// The configured `endpoint` is POSTed VERBATIM — nothing is appended (no `/v1/chat/completions`)
     /// and nothing is stripped. A distinctive path that any rewriting would corrupt proves it, and
     /// guards the old footgun where a `.../v1` endpoint got a second `/v1` on the chat_once path.
