@@ -70,6 +70,8 @@ ctrlc = "3"
 indicatif = "0.17"
 # Port of Python json_repair — heal truncated / messy LLM tool-call arguments.
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
+# `tracing::warn!` — the endpoint-headers ${{session}}-missing warn-once (transport/openai.rs).
+tracing = "0.1"
 
 [dev-dependencies]
 assert_cmd = "2"

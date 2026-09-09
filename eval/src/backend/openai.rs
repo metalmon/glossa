@@ -712,6 +712,8 @@ pub(crate) fn chat_once(
         &body,
         Duration::from_secs(timeout_secs),
         crate::backend::resilience::RetryPolicy::default(),
+        // Test-only strict-provider one-shot helper: no `Endpoint` here, so no headers to resolve.
+        &[],
     )
     .map(|v| {
         v.pointer("/choices/0/message")

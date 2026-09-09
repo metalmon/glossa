@@ -49,6 +49,23 @@ pub(crate) fn resolve_headers(
     out
 }
 
+/// Warn (ONCE per process — not once per call) that an endpoint configured a `${{session}}`
+/// header but no active trace session was available to fill it, so that header was dropped. In
+/// `kbx eval`, `to_dir` is unconditional, so `session` is effectively always `Some` — this makes a
+/// tracing-off misconfiguration visible instead of silently voiding a header-dependent gateway
+/// (e.g. OpenCode's `x-opencode-session`, whose absence is a hard HTTP 400) run after run.
+fn warn_missing_session_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "endpoint header uses ${{{{session}}}} but no active trace session was found \
+             (glossa::trace::last_trace_path() returned None); that header was dropped from the \
+             request. If the target endpoint requires it (e.g. OpenCode's x-opencode-session), \
+             calls to it will fail."
+        );
+    });
+}
+
 /// Default `min_p` nucleus-sampling floor for an agent-loop chat call, overridable via
 /// `KB_EVAL_MIN_P`. Trims the tail of low-probability tokens that otherwise widens at high
 /// temperature, cutting down on degenerate generation loops without forcing low-temperature
@@ -112,12 +129,28 @@ impl ChatTransport for OpenAiTransport {
         // Retry/backoff comes from this endpoint's opt-in `rate_limit`; absent -> the historical
         // 4-attempt / 400ms*attempt defaults (see `RetryPolicy::from_rate_limit`).
         let retry = RetryPolicy::from_rate_limit(ep.rate_limit.as_ref());
+
+        // Resolve THIS link's `headers` (opt-in, absent -> empty -> `&[]`, byte-identical to
+        // today). PER-LINK, not pre-resolved at the backend: `call` runs once per endpoint the
+        // resilience layer tries (primary + each `fallback`, via `call_resilient`), and each link
+        // carries its OWN `ep` — so a fallback never inherits the primary's headers. `session` is
+        // the current episode's identity: the trace file `TraceLog::to_dir` created on THIS
+        // thread for THIS episode (reader and, later, the judge on the same worker thread), so
+        // it's unique per episode/sample and distinct per parallel worker.
+        let session = glossa::trace::last_trace_path()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+        if session.is_none() && ep.headers.values().any(|v| v.contains(SESSION_PLACEHOLDER)) {
+            warn_missing_session_once();
+        }
+        let extra_headers = resolve_headers(&ep.headers, session.as_deref());
+
         let full = chat_http_full(
             &ep.endpoint,
             ep.resolve_key().as_deref(),
             &body,
             Duration::from_secs(ep.timeout_secs),
             retry,
+            &extra_headers,
         )?;
         reply_from_response(&full)
     }
@@ -157,7 +190,8 @@ pub(crate) fn chat_http(
 ) -> anyhow::Result<Value> {
     // Back-compat entry point: keeps the historical retry defaults (its callers don't carry an
     // `Endpoint`/`RateLimit`); the `Endpoint`-aware paths go through `chat_http_full` with a policy.
-    let full = chat_http_full(endpoint, api_key, body, timeout, RetryPolicy::default())?;
+    // No `Endpoint` here either -> no extra headers (`&[]`), same as before this feature existed.
+    let full = chat_http_full(endpoint, api_key, body, timeout, RetryPolicy::default(), &[])?;
     full.pointer("/choices/0/message")
         .cloned()
         .ok_or_else(|| anyhow!("chat response had no choices[0].message"))
@@ -183,12 +217,18 @@ pub(crate) fn chat_http(
 /// POSTed verbatim — this function appends nothing. Callers configure the complete URL in
 /// `lab.toml`'s `endpoint`, so the reader/judge/build/reflect paths all hit the URL as given with
 /// no hidden path-rewriting (which previously double-appended `/v1` on the non-normalizing path).
+///
+/// `extra_headers` are applied AFTER `bearer_auth` via `rb.header(k, v)` — the already-resolved
+/// (placeholder-substituted) per-link headers from [`resolve_headers`]. Every caller that doesn't
+/// carry an `Endpoint`/opt in to custom headers passes `&[]`, reproducing today's request shape
+/// byte-identically (just `Content-Type` + `Authorization: Bearer`, no extra headers).
 pub(crate) fn chat_http_full(
     endpoint: &str,
     api_key: Option<&str>,
     body: &Value,
     timeout: Duration,
     retry: RetryPolicy,
+    extra_headers: &[(String, String)],
 ) -> anyhow::Result<Value> {
     use crate::backend::openai::{is_transient_upstream, record_usage};
     let url = endpoint.to_string();
@@ -215,6 +255,9 @@ pub(crate) fn chat_http_full(
             let mut rb = http_client().post(&url).timeout(timeout).json(&body);
             if let Some(key) = api_key.filter(|k| !k.is_empty()) {
                 rb = rb.bearer_auth(key);
+            }
+            for (k, v) in extra_headers {
+                rb = rb.header(k, v);
             }
             let resp = match rb.send().await {
                 Ok(r) => r,
@@ -409,7 +452,9 @@ pub(crate) fn agent_chat_full(
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
         let _ = std::fs::write(&p, serde_json::to_string(&body)?);
     }
-    chat_http_full(url, api_key, &body, timeout, RetryPolicy::default())
+    // Closure-based callers (build/distil/reason) capture only endpoint/model/api_key, not a full
+    // `Endpoint` — so there is no `headers` config to resolve here (`&[]`, unchanged today).
+    chat_http_full(url, api_key, &body, timeout, RetryPolicy::default(), &[])
 }
 
 #[cfg(test)]
