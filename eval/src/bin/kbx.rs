@@ -1976,6 +1976,12 @@ mod tests {
             Cmd::Train { resume, force, .. } => assert!(resume && !force),
             _ => panic!("expected Cmd::Train"),
         }
+        let okf = Cli::try_parse_from(["kbx", "train", "--force"]);
+        assert!(okf.is_ok());
+        match okf.unwrap().cmd {
+            Cmd::Train { resume, force, .. } => assert!(force && !resume),
+            _ => panic!("expected Cmd::Train"),
+        }
     }
 
     #[test]

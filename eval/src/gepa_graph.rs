@@ -1143,6 +1143,11 @@ pub fn run(
 
     match decision {
         crate::gepa_checkpoint::ResumeDecision::Fresh => {
+            // Fresh start: eagerly remove any stale/foreign checkpoint up-front, so a crash DURING the baseline
+            // pass (before the first checkpoint write) can't leave a mismatched checkpoint blocking the next auto-run.
+            if let Some(p) = &ckpt_path {
+                crate::gepa_checkpoint::delete(p)?;
+            }
             // PHASE 1 (baseline + pareto): tick the bar per validation case so the long baseline pass
             // shows real progress instead of sitting frozen. Length starts at the baseline val size
             // and is extended to cover the pareto pass once that set is sampled (below). `reset`
@@ -1252,6 +1257,9 @@ pub fn run(
             val = subset_by_ids(&questions, &ckpt.val_ids)?;
             pareto_set = subset_by_ids(&questions, &ckpt.pareto_ids)?;
             pool = ckpt.pool.clone();
+            // mb_cache is deliberately NOT persisted (spec §10 non-goal: keep the checkpoint small); it starts
+            // empty on resume and refills lazily. Under minibatch-cache ON this makes a resumed run not
+            // bit-identical to an uninterrupted one (extra re-samples); cache is OFF by default, so nil impact.
             mb_cache = vec![None; pool.len()];
             best_pareto_so_far = ckpt.best_pareto_so_far;
             blocked_train = ckpt.blocked_train.iter().cloned().collect();
@@ -1489,6 +1497,10 @@ pub fn run(
     pb.set_prefix(format!(
         "training · final-val · best={best_pareto_so_far:.3}"
     ));
+    // Resume: already-scored candidates are skipped in the loop below and never tick the bar, so
+    // pre-advance past their share of the length — otherwise a resumed final-val bar under-fills.
+    let already_scored = final_scores.iter().filter(|s| s.is_some()).count();
+    pb.inc((already_scored * val.len()) as u64);
     // Candidate-granular + checkpointed: score each pool candidate on the full val set, skipping any
     // already scored on a resume (`final_scores[c_idx]` is `Some`), and checkpoint after each so a
     // crash mid-final-val resumes without re-scoring completed candidates. A fresh run initializes
@@ -2101,7 +2113,12 @@ mod tests {
         let pareto = vec![q("a", "qa", "x", &[])];
         let mut blocked = std::collections::HashSet::new();
         blocked.insert("z".to_string());
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(5);
+        // advance so word_pos != 0 → proves build_checkpoint captures the REAL state, not a hardcoded 0
+        use rand::Rng as _;
+        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(5);
+        for _ in 0..3 {
+            let _: u64 = rng.gen();
+        }
         let c = build_checkpoint(
             "FP", &pool, 0.5, 0.4, &val, &pareto, &blocked, 3, 30, &rng,
             Some(vec![None]),
@@ -2112,6 +2129,7 @@ mod tests {
         assert_eq!(c.blocked_train, vec!["z".to_string()]);
         assert_eq!(c.iter, 3);
         assert_eq!(c.rng_word_pos, rng.get_word_pos());
+        assert_ne!(c.rng_word_pos, 0);
         assert_eq!(c.rng_seed, rng.get_seed());
     }
 }

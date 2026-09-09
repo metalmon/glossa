@@ -50,26 +50,25 @@ pub(crate) fn fingerprint(
     fp_gate: bool,
     question_ids_sorted: &[String],
 ) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    seed_prompt.hash(&mut h);
-    model.hash(&mut h);
-    endpoint.hash(&mut h);
-    max_metric_calls.hash(&mut h);
-    max_candidates.hash(&mut h);
-    minibatch.hash(&mut h);
-    pareto_size.hash(&mut h);
-    val_frac.to_bits().hash(&mut h);
-    seed.hash(&mut h);
-    rollout_samples.hash(&mut h);
-    judge.hash(&mut h);
-    credit_abstention.hash(&mut h);
-    fp_gate.hash(&mut h);
-    question_ids_sorted.len().hash(&mut h);
+    // FNV-1a 64-bit over a canonical field string — deterministic across Rust versions/builds, unlike
+    // std's DefaultHasher/SipHash (only stable within one build). A checkpoint written by one build
+    // then resumes under another instead of spuriously mismatching.
+    let mut s = String::new();
+    use std::fmt::Write as _;
+    let _ = write!(
+        s, "{seed_prompt}\u{1}{model}\u{1}{endpoint}\u{1}{max_metric_calls}\u{1}{max_candidates}\u{1}{minibatch}\u{1}{pareto_size}\u{1}{}\u{1}{seed}\u{1}{rollout_samples}\u{1}{judge}\u{1}{credit_abstention}\u{1}{fp_gate}\u{1}{}",
+        val_frac.to_bits(), question_ids_sorted.len()
+    );
     for id in question_ids_sorted {
-        id.hash(&mut h);
+        s.push('\u{1}');
+        s.push_str(id);
     }
-    format!("{:016x}", h.finish())
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 #[allow(dead_code)]
