@@ -131,6 +131,10 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   Messages), `openai_responses`, or `tensorzero` (native `/inference` with episode grouping and
   judge feedback for TZ observability).
 - **Rate-limit resilience** — opt-in per-endpoint retry/backoff + throttle and an ordered fallback chain.
+- **Custom per-endpoint request headers** — an endpoint may carry extra headers, with a
+  `${{session}}` placeholder resolved to a per-case/per-worker session id. For gateways that
+  require a cache/session header (e.g. OpenCode's `x-opencode-session`); absent by default, so
+  other providers are unaffected.
 - **Per-endpoint temperature**; **parallel workers** per stage via `[tuning] jobs_*`.
 - **GEPA minibatch mode** — `kbx train` defaults to **canonical GEPA**: every proposal samples a
   fresh reflect minibatch and re-scores the parent on it (an unbiased paired accept with the best

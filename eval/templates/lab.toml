@@ -61,6 +61,11 @@ timeout_secs = 120
 # [model.fallback.rate_limit]      # each fallback link may carry its own rate-limit/retry policy
 # retry = 2
 
+# Optional extra request headers for THIS endpoint (opt-in; absent = none sent).
+# `${{session}}` -> per-case session id (unique per case and per parallel worker) — for gateways
+# needing a prompt-cache/session header, e.g. OpenCode:
+# headers = { "x-opencode-session" = "${{session}}" }
+
 # [build]                              # override the harvest model for `kbx build`; falls back to [model]
 # endpoint = "http://localhost:1234/v1/chat/completions"
 # model = "qwen3.5-4b"
