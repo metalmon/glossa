@@ -691,4 +691,104 @@ mod tests {
             vec![json!({ "role": "tool", "tool_call_id": "id1", "content": "body1" })]
         );
     }
+
+    /// Minimal `Endpoint` builder for the fallback-correctness test below — mirrors the `ep()`
+    /// helper in `backend::resilience`'s own tests (that module can't reach a live HTTP layer;
+    /// this one can, since it IS the transport).
+    fn test_ep(endpoint: &str) -> Endpoint {
+        Endpoint {
+            endpoint: endpoint.to_string(),
+            model: "m".to_string(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            timeout_secs: 2,
+            api: crate::lab::ApiKind::default(),
+            temperature: None,
+            rate_limit: None,
+            fallback: Vec::new(),
+            function_name: None,
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
+            headers: BTreeMap::new(),
+        }
+    }
+
+    /// Task 4 (fallback correctness): a primary endpoint with its OWN header + a fallback endpoint
+    /// with a DIFFERENT header must each send only their own — resolution happens PER LINK inside
+    /// `OpenAiTransport::call`, not once at the backend and threaded down (which would pin the
+    /// primary's headers onto every fallback). The primary here points at a closed local port —
+    /// `send()` fails immediately (connection refused), a HARD failure — so `call_resilient`
+    /// advances to the fallback, whose mock server captures the actual request headers.
+    #[test]
+    fn fallback_link_gets_its_own_headers_not_the_primarys() {
+        use crate::backend::resilience::call_resilient;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // A port nothing is listening on: bind then immediately drop, so the OS still knows the
+        // port and refuses the next connection outright (no listen backlog, no slow timeout).
+        let dead_port = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+
+        // The fallback: a REAL mock server that captures the request it receives.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fb_port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+            req
+        });
+
+        let mut primary = test_ep(&format!("http://127.0.0.1:{dead_port}/v1/chat/completions"));
+        primary
+            .headers
+            .insert("x-primary-only".to_string(), "primary-value".to_string());
+        // Fail fast: 1 attempt, no backoff, so the hard failure over the dead port doesn't stall
+        // the test with the historical 4-attempt/400ms*n retry loop.
+        primary.rate_limit = Some(crate::lab::RateLimit {
+            rpm: None,
+            max_inflight: None,
+            retry: Some(1),
+            backoff_ms: Some(1),
+        });
+
+        let mut fallback = test_ep(&format!("http://127.0.0.1:{fb_port}/v1/chat/completions"));
+        fallback
+            .headers
+            .insert("x-fallback-only".to_string(), "fallback-value".to_string());
+        primary.fallback = vec![fallback];
+
+        let reply = call_resilient(&primary, |link| {
+            OpenAiTransport.call(
+                link,
+                None,
+                &[json!({"role": "user", "content": "hi"})],
+                None,
+                None,
+            )
+        })
+        .expect("primary hard-fails, fallback succeeds");
+        assert_eq!(reply.text.as_deref(), Some("ok"));
+
+        let req = server.join().unwrap();
+        assert!(
+            req.to_lowercase().contains("x-fallback-only: fallback-value"),
+            "fallback must send its OWN header; got request:\n{req}"
+        );
+        assert!(
+            !req.to_lowercase().contains("x-primary-only"),
+            "fallback must NOT receive the primary's header; got request:\n{req}"
+        );
+    }
 }
