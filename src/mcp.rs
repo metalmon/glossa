@@ -154,43 +154,6 @@ struct ManifestCache {
     mtime_nanos: Option<u128>,
 }
 
-#[allow(dead_code)] // read tools stay enabled for Reader; listed for profile documentation
-const NOTEBOOK_READ_TOOLS: &[&str] = &["ls"];
-const NOTEBOOK_WRITE_TOOLS: &[&str] = &["note", "del"];
-const EDITOR_TOOLS: &[&str] = &[
-    "index",
-    "graph_build",
-    "graph_upsert",
-    "graph_delete",
-    "graph_update",
-    "graph_generalize",
-    "graph_stats",
-    "graph_doctor",
-    // Read-only, but withheld from Reader: low-level or rarely-reached navigation the weak reader
-    // never calls in practice (measured over many runs: resolve 0%, constraint_solve 0%, neighbors
-    // ~2%, related ~2-8% and correlating with wrong answers), so it is clutter that muddies tool
-    // choice. `sql` is NOT here — it moved into the reader set.
-    "resolve",
-    "neighbors",
-    "constraint_solve",
-    "related",
-];
-const FULL_TOOLS: &[&str] = &["purge"];
-const GRAPH_TOOLS: &[&str] = &[
-    "glossary",
-    "related",
-    "neighbors",
-    "reach",
-    "graph_upsert",
-    "graph_delete",
-    "graph_update",
-    "graph_generalize",
-    "graph_doctor",
-    "resolve",
-    "index",
-    "purge",
-];
-
 /// Launch-time tool-gating flags, bundled so `GlossaServer::new` doesn't grow a tail of positional
 /// bools. All default off (every capability on); each `no_*` withholds one. Set from CLI args.
 #[derive(Clone, Copy, Default)]
@@ -212,73 +175,57 @@ impl GlossaServer {
         flags: ServerFlags,
     ) -> Self {
         let mut router = Self::tool_router();
-        if profile == Profile::Reader {
-            for t in EDITOR_TOOLS
-                .iter()
-                .chain(FULL_TOOLS)
-                .chain(NOTEBOOK_WRITE_TOOLS)
-            {
-                router.disable_route(*t);
-            }
-        } else if profile == Profile::Editor {
-            for t in FULL_TOOLS {
-                router.disable_route(*t);
-            }
-        }
-        if flags.no_graph {
-            for t in GRAPH_TOOLS {
-                router.disable_route(*t);
-            }
-        }
-        if flags.no_source_file {
-            router.disable_route("get_source_file");
-        }
-        if flags.no_image {
-            if let Some(route) = router.map.get_mut("read") {
-                let mut schema: serde_json::Value = serde_json::to_value(&*route.attr.input_schema)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                if let Some(obj) = schema.as_object_mut() {
-                    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
-                        props.remove("page_image");
-                        props.remove("include_images");
-                    }
-                    if let Some(req) = obj.get_mut("required").and_then(|r| r.as_array_mut()) {
-                        req.retain(|v| {
-                            v.as_str()
-                                .map(|s| s != "page_image" && s != "include_images")
-                                .unwrap_or(true)
-                        });
-                    }
-                }
-                let new_schema: rmcp::model::JsonObject =
-                    serde_json::from_value(schema).unwrap_or_default();
-                route.attr.input_schema = Arc::new(new_schema);
-            }
-        }
-        #[cfg(not(feature = "notebook"))]
-        {
-            for t in NOTEBOOK_READ_TOOLS.iter().chain(NOTEBOOK_WRITE_TOOLS) {
-                router.disable_route(*t);
-            }
-        }
-        #[cfg(not(feature = "constraint"))]
-        {
-            router.disable_route("constraint_solve");
-            router.disable_route("graph_build");
-        }
-        // Fail-closed exposure for the answer-grounding gate: `verify` is in the registry (advertised
-        // in every profile) but WITHHELD from the live router until the corpus both enables it and
-        // has a calibrated threshold. An uncalibrated `verify` could only ever return `abstain`
-        // (`gate::decide` fails closed), so serving the route would be misleading — hide it instead.
-        {
+        // Single source of truth for the advertised surface: build the launch context and let the
+        // tool catalog (src/tools/registry.rs) decide which routes stay and how their schemas are
+        // shaped. This replaces the per-site profile / no_graph / no_source_file / no_image / verify /
+        // notebook-cfg / constraint-cfg disable blocks and the tool-set constants that used to live
+        // here — every gate below is now encoded in the catalog's `Gate`/`Shape` metadata.
+        let ctx = {
+            use crate::tools::registry::{FeatureSet, Tier, ToolContext};
             let glossa_dir = state_base.join(".glossa");
             let cfg = crate::gate::VerifyConfig::resolve(&glossa_dir);
-            if !(cfg.enabled && cfg.is_calibrated()) {
-                router.disable_route("verify");
-                tracing::warn!(
-                    "[verify] disabled: enable it (`[verify].enabled`) and calibrate a threshold \
-                     (`[verify.threshold]`) first"
-                );
+            ToolContext {
+                profile: match profile {
+                    Profile::Reader => Tier::Reader,
+                    Profile::Editor => Tier::Editor,
+                    Profile::Full => Tier::Full,
+                },
+                graph_on: !flags.no_graph,
+                verify_available: cfg.enabled && cfg.is_calibrated(),
+                no_source_file: flags.no_source_file,
+                no_image: flags.no_image,
+                features: FeatureSet {
+                    notebook: cfg!(feature = "notebook"),
+                    constraint: cfg!(feature = "constraint"),
+                },
+            }
+        };
+        // Fail-closed exposure for the answer-grounding gate: `verify` is in the catalog (advertised
+        // in every profile) but the catalog's Verify gate WITHHOLDS it until the corpus both enables
+        // it and has a calibrated threshold. An uncalibrated `verify` could only ever return
+        // `abstain` (`gate::decide` fails closed), so serving the route would be misleading — keep
+        // the operator-facing warning here so the reason is still logged.
+        if !ctx.verify_available {
+            tracing::warn!(
+                "[verify] disabled: enable it (`[verify].enabled`) and calibrate a threshold \
+                 (`[verify.threshold]`) first"
+            );
+        }
+        // Disable every compiled route the catalog does not keep for this context …
+        let keep = crate::tools::registry::available_names(&ctx);
+        let all: Vec<String> = router.map.keys().cloned().collect();
+        for name in all {
+            if !keep.contains(name.as_str()) {
+                router.disable_route(&name);
+            }
+        }
+        // … then override each kept Reader-tier route's input schema with the shaped CORE schema
+        // (this subsumes the old one-off `no_image` patch that dropped `read`'s image fields).
+        for rt in crate::tools::registry::resolve_tools(&ctx) {
+            if let Some(route) = router.map.get_mut(rt.name) {
+                let new_schema: rmcp::model::JsonObject =
+                    serde_json::from_value(rt.core_schema).unwrap_or_default();
+                route.attr.input_schema = Arc::new(new_schema);
             }
         }
         let trace = if trace {
@@ -1458,7 +1405,7 @@ fn project_verify(
 #[tool_router]
 impl GlossaServer {
     // keep in sync with registry::DESC_SEARCH (rmcp's #[tool(description=…)] rejects a
-    // non-literal path expr; the mcp_tool_list_matches_registry test enforces byte-equality).
+    // non-literal path expr; the mcp_advertised_set_matches_catalog_full_profile test enforces byte-equality).
     #[tool(
         description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
     )]
@@ -1509,7 +1456,7 @@ impl GlossaServer {
     }
 
     // keep in sync with registry::DESC_VERIFY (see search's comment above for why this is a literal;
-    // the mcp_tool_list_matches_registry test enforces byte-equality with the registry constant).
+    // the mcp_advertised_set_matches_catalog_full_profile test enforces byte-equality with the catalog constant).
     #[tool(
         description = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on."
     )]
@@ -3957,17 +3904,17 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_list_matches_registry() {
-        // Names + descriptions the MCP server advertises for every agent-facing (registry) tool
-        // must equal `crate::tools::registry::registry()` byte-for-byte — the single guard that
-        // keeps mcp.rs and the registry from drifting apart. Profile::Full is the superset profile
-        // (keeps resolve/related/neighbors that Reader withholds as clutter), so it is a strict
-        // superset of the registry names; the extra admin/structural tools (index, purge, resolve,
-        // graph_upsert, ...) are expected and NOT compared.
+    fn mcp_advertised_set_matches_catalog_full_profile() {
+        // The single guard that keeps `src/mcp.rs` and the tool catalog (src/tools/registry.rs)
+        // from drifting: what the live server advertises must be EXACTLY what the catalog resolves
+        // for the same context (not merely a superset), and every schema-bearing (Reader-tier)
+        // catalog tool must match the advertised route's description and CORE schema.
+        use crate::tools::registry::{
+            available_names, catalog, normalize_for_test, FeatureSet, Tier, ToolContext,
+        };
         let dir = tempfile::tempdir().unwrap();
-        // `verify` is fail-closed: hidden from the live router until the corpus enables+calibrates it.
-        // Write an ontology that does both so the FULL tool list includes `verify` here — otherwise
-        // the byte-match guard could never see (and enforce) its advertised description.
+        // `verify` is fail-closed: hidden from the live router until the corpus enables+calibrates
+        // it. Write an ontology that does both so the FULL surface includes `verify` here.
         write_verify_enabled_ontology(dir.path());
         let srv = GlossaServer::new_for_test(
             dir.path().to_path_buf(),
@@ -3975,33 +3922,63 @@ mod tests {
             false,
             ServerFlags::default(),
         );
-        let mcp: std::collections::BTreeMap<String, String> = srv
+
+        // (a) advertised name set == catalog resolution for the matching context, EXACTLY.
+        let advertised: std::collections::BTreeSet<String> = srv
             .tool_specs()
             .into_iter()
-            .map(|t| {
-                (
-                    t.name.to_string(),
-                    t.description.unwrap_or_default().to_string(),
-                )
-            })
+            .map(|t| t.name.to_string())
             .collect();
-        let reg = crate::tools::registry::registry();
-        for d in &reg {
-            let mcp_desc = mcp
-                .get(d.name)
-                .unwrap_or_else(|| panic!("MCP does not advertise registry tool {}", d.name));
-            assert_eq!(
-                mcp_desc, d.description,
-                "description drift between mcp.rs and registry for {}",
-                d.name
-            );
-        }
-        let reg_names: std::collections::BTreeSet<_> = reg.iter().map(|d| d.name).collect();
-        let mcp_names: std::collections::BTreeSet<_> = mcp.keys().map(String::as_str).collect();
-        assert!(
-            reg_names.is_subset(&mcp_names),
-            "registry tool set must be a subset of what MCP advertises: reg={reg_names:?} mcp={mcp_names:?}"
+        // Full profile, graph on, verify on/calibrated (ontology above), no flags withheld,
+        // features per this build.
+        let ctx = ToolContext {
+            profile: Tier::Full,
+            graph_on: true,
+            verify_available: true,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet {
+                notebook: cfg!(feature = "notebook"),
+                constraint: cfg!(feature = "constraint"),
+            },
+        };
+        let expected: std::collections::BTreeSet<String> = available_names(&ctx)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            advertised, expected,
+            "MCP advertised set must equal the catalog's resolution"
         );
+
+        // (b)+(c) description + CORE-schema parity for every schema-bearing catalog tool.
+        let specs: std::collections::HashMap<String, rmcp::model::Tool> = srv
+            .tool_specs()
+            .into_iter()
+            .map(|t| (t.name.to_string(), t))
+            .collect();
+        for m in catalog() {
+            if let (Some(schema), Some(desc)) = (m.schema.as_ref(), m.desc) {
+                let spec = specs
+                    .get(m.name)
+                    .unwrap_or_else(|| panic!("MCP missing {}", m.name));
+                assert_eq!(
+                    spec.description.as_deref(),
+                    Some(desc),
+                    "desc drift for {}",
+                    m.name
+                );
+                // rmcp carries `input_schema` as an `Arc<JsonObject>`; normalize it the same way
+                // the catalog normalizes a `schemars` schema, then compare the CORE shapes.
+                let route_schema = serde_json::Value::Object((*spec.input_schema).clone());
+                assert_eq!(
+                    &normalize_for_test(&route_schema),
+                    schema,
+                    "core-schema drift for {}",
+                    m.name
+                );
+            }
+        }
     }
 
     #[test]
