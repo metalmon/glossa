@@ -213,7 +213,7 @@ impl GlossaServer {
         }
         // Disable every compiled route the catalog does not keep for this context …
         let keep = crate::tools::registry::available_names(&ctx);
-        let all: Vec<String> = router.map.keys().cloned().collect();
+        let all: Vec<String> = router.map.keys().map(|k| k.to_string()).collect();
         for name in all {
             if !keep.contains(name.as_str()) {
                 router.disable_route(&name);
