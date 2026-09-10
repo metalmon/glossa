@@ -96,6 +96,7 @@ fn full_cycle_never_writes_into_corpus_roots() {
         state.path().join(".glossa").join("traces").is_dir(),
         "traces under state_base"
     );
+    #[cfg(feature = "notebook")]
     assert!(
         state
             .path()
