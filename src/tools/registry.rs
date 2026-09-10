@@ -171,6 +171,78 @@ pub fn catalog() -> Vec<ToolMeta> {
     ]
 }
 
+/// A single resolved agent-facing tool: name, description, and its CORE schema after
+/// per-context shaping (e.g. image fields dropped when `no_image` is set).
+pub struct ResolvedTool {
+    pub name: &'static str,
+    pub desc: &'static str,
+    pub core_schema: serde_json::Value,
+}
+
+fn gate_ok(g: &Gate, ctx: &ToolContext) -> bool {
+    match g {
+        Gate::Graph => ctx.graph_on,
+        Gate::Verify => ctx.verify_available,
+        Gate::SourceFile => !ctx.no_source_file,
+        Gate::Feature(f) => ctx.features.has(f),
+    }
+}
+
+fn is_available(m: &ToolMeta, ctx: &ToolContext) -> bool {
+    ctx.profile.allows(m.tier) && m.gates.iter().all(|g| gate_ok(g, ctx))
+}
+
+fn shape_active(flag: ShapeFlag, ctx: &ToolContext) -> bool {
+    match flag {
+        ShapeFlag::NoImage => ctx.no_image,
+    }
+}
+
+fn apply_shape(schema: &mut serde_json::Value, shape: &Shape) {
+    match shape {
+        Shape::DropProps(props) => {
+            if let Some(obj) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                for p in *props {
+                    obj.remove(*p);
+                }
+            }
+            if let Some(req) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
+                req.retain(|v| v.as_str().map(|s| !props.contains(&s)).unwrap_or(true));
+            }
+        }
+    }
+}
+
+/// Available Reader-tier (schema-bearing) tools, with per-context schema shaping applied.
+pub fn resolve_tools(ctx: &ToolContext) -> Vec<ResolvedTool> {
+    catalog()
+        .into_iter()
+        .filter(|m| is_available(m, ctx) && m.schema.is_some())
+        .map(|m| {
+            let mut schema = m.schema.clone().unwrap();
+            for (flag, shape) in m.shapes {
+                if shape_active(*flag, ctx) {
+                    apply_shape(&mut schema, shape);
+                }
+            }
+            ResolvedTool {
+                name: m.name,
+                desc: m.desc.unwrap(),
+                core_schema: schema,
+            }
+        })
+        .collect()
+}
+
+/// All available tool NAMES for the context (every tier) — the MCP router's keep-set.
+pub fn available_names(ctx: &ToolContext) -> std::collections::HashSet<&'static str> {
+    catalog()
+        .into_iter()
+        .filter(|m| is_available(m, ctx))
+        .map(|m| m.name)
+        .collect()
+}
+
 /// A single agent tool declaration: name, model-facing description, JSON-Schema for its
 /// arguments (OpenAI-function core shape), and whether it requires the reasoning graph.
 pub struct ToolDescriptor {
@@ -335,5 +407,83 @@ mod tests {
         assert!(by("purge").schema.is_none(), "purge is MCP-only Full-tier");
         assert!(matches!(by("purge").tier, Tier::Full));
         assert!(matches!(by("sql").tier, Tier::Reader));
+    }
+
+    fn reader_ctx() -> ToolContext {
+        ToolContext {
+            profile: Tier::Reader,
+            graph_on: true,
+            verify_available: true,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        }
+    }
+
+    #[test]
+    fn resolve_reader_full_gates_open() {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<&str> = resolve_tools(&reader_ctx()).iter().map(|t| t.name).collect();
+        let expected: BTreeSet<&str> = [
+            "search", "read", "grep", "glob", "glossary", "reach", "sql", "verify",
+            "get_source_file", "get_ontology",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn verify_hidden_when_unavailable() {
+        let mut ctx = reader_ctx();
+        ctx.verify_available = false;
+        assert!(!resolve_tools(&ctx).iter().any(|t| t.name == "verify"));
+        assert!(!available_names(&ctx).contains("verify"));
+    }
+
+    #[test]
+    fn sql_hidden_when_no_graph() {
+        let mut ctx = reader_ctx();
+        ctx.graph_on = false;
+        let names: Vec<&str> = resolve_tools(&ctx).iter().map(|t| t.name).collect();
+        assert!(!names.contains(&"sql"), "D1: sql is graph-gated");
+        assert!(!names.contains(&"glossary") && !names.contains(&"reach"));
+        assert!(names.contains(&"search") && names.contains(&"get_source_file"));
+    }
+
+    #[test]
+    fn no_image_strips_read_page_fields() {
+        let mut ctx = reader_ctx();
+        ctx.no_image = true;
+        let read = resolve_tools(&ctx).into_iter().find(|t| t.name == "read").unwrap();
+        let props = read.core_schema.get("properties").unwrap().as_object().unwrap();
+        assert!(!props.contains_key("page_image") && !props.contains_key("include_images"));
+        // and default (no_image=false) keeps them
+        let keep = resolve_tools(&reader_ctx()).into_iter().find(|t| t.name == "read").unwrap();
+        let kprops = keep.core_schema.get("properties").unwrap().as_object().unwrap();
+        assert!(kprops.contains_key("page_image"));
+    }
+
+    #[test]
+    fn editor_profile_adds_editor_tools_in_available_names() {
+        let mut ctx = reader_ctx();
+        ctx.profile = Tier::Editor;
+        let a = available_names(&ctx);
+        assert!(a.contains("graph_upsert") && a.contains("resolve"));
+        assert!(!a.contains("purge"), "purge is Full-tier");
+        let r = available_names(&reader_ctx());
+        assert!(!r.contains("graph_upsert"), "Reader profile excludes editor tools");
+    }
+
+    #[test]
+    fn source_file_gate_and_feature_gate() {
+        let mut ctx = reader_ctx();
+        ctx.no_source_file = true;
+        assert!(!available_names(&ctx).contains("get_source_file"));
+        let mut ctx2 = reader_ctx();
+        ctx2.profile = Tier::Editor; // notebook off by default
+        assert!(!available_names(&ctx2).contains("note"));
+        ctx2.features.notebook = true;
+        assert!(available_names(&ctx2).contains("note"));
     }
 }
