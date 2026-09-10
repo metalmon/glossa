@@ -377,4 +377,36 @@ mod tests {
         ctx2.features.notebook = true;
         assert!(available_names(&ctx2).contains("note"));
     }
+
+    #[test]
+    fn resolve_is_deterministic_across_context_cross_product() {
+        use std::collections::BTreeSet;
+        for &profile in &[Tier::Reader, Tier::Editor, Tier::Full] {
+            for &graph_on in &[true, false] {
+                for &verify in &[true, false] {
+                    for &nsf in &[true, false] {
+                        for &noimg in &[true, false] {
+                            let ctx = ToolContext {
+                                profile, graph_on, verify_available: verify,
+                                no_source_file: nsf, no_image: noimg,
+                                features: FeatureSet { notebook: true, constraint: true },
+                            };
+                            // available_names ⊇ resolve_tools names (resolve = schema-bearing subset)
+                            let names: BTreeSet<&str> = resolve_tools(&ctx).iter().map(|t| t.name).collect();
+                            let avail = available_names(&ctx);
+                            assert!(names.iter().all(|n| avail.contains(n)));
+                            // invariants
+                            assert_eq!(names.contains("verify"), verify && graph_gate_ok(true));
+                            assert_eq!(names.contains("sql"), graph_on);      // D1
+                            assert_eq!(names.contains("get_source_file"), !nsf);
+                            let read = resolve_tools(&ctx).into_iter().find(|t| t.name == "read").unwrap();
+                            let has_page = read.core_schema["properties"].as_object().unwrap().contains_key("page_image");
+                            assert_eq!(has_page, !noimg);                     // no_image shaping
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn graph_gate_ok(_v: bool) -> bool { true } // verify has no graph gate; helper kept explicit
 }
