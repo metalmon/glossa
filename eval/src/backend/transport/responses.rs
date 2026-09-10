@@ -325,7 +325,8 @@ mod tests {
     /// Task-3 serving parity: `verify` is withheld from the flat Responses envelope when
     /// `verify_available` is false, and present when true — mirrors
     /// `transport::openai::tests::verify_absent_from_schema_when_unavailable`, catching a
-    /// copy-paste that dropped this transport's `verify_gated` filter line.
+    /// copy-paste that failed to resolve this transport's tool list through the catalog's
+    /// `Verify` gate (`resolve_tools`).
     #[test]
     fn verify_absent_from_schema_when_unavailable() {
         let names_of = |v: &Value| -> Vec<String> {

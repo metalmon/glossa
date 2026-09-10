@@ -1,8 +1,8 @@
 //! Cross-surface tool-name parity guard.
 //!
-//! `glossa::tools::registry::registry()` is the single source of truth for the 7
-//! agent-facing reasoning tools (search, read, glossary, reach, grep, glob, graph_query).
-//! Every surface that hands tools to a model must expose a superset of that registry:
+//! `glossa::tools::registry::resolve_tools()` (with a Reader `ToolContext`) is the single source
+//! of truth for the agent-facing reasoning tools (search, read, glossary, reach, grep, glob, sql).
+//! Every surface that hands tools to a model must expose a superset of that catalog resolution:
 //!
 //!   - MCP Reader profile   — the live `GlossaServer` tool_specs() an MCP client sees.
 //!   - TZ reader dump       — the tool list `kb dump-tz-tools` splices into the

@@ -473,7 +473,13 @@ impl OpenAiBackend {
         // gate is disabled/uncalibrated for this corpus — mirrors the live MCP server's fail-closed
         // advertisement (the `exec` arm already withholds the diagnostic; this also stops the model
         // from being offered a tool call that can't do anything).
-        let ctx = answer_tool_context(work, graph.is_some(), self.vision);
+        // Advertise `read(page_image)` only for the api kinds that can actually FEED images back to
+        // the model — i.e. the same gate the `VisionTransport` install uses below (OpenAiChat).
+        // Non-OpenAiChat transports have no image side channel, so advertising the capability would
+        // offer a field they silently ignore; fold the api gate into the advertised surface here so
+        // advertise and feed stay in lockstep.
+        let effective_vision = self.vision && matches!(self.api, crate::lab::ApiKind::OpenAiChat);
+        let ctx = answer_tool_context(work, graph.is_some(), effective_vision);
         let tools = transport.tools_schema(&ctx);
 
         let trace = TraceLog::to_dir(work);

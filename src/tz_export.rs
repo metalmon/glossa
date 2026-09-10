@@ -139,8 +139,9 @@ fn fetch_verify_tool_spec() -> anyhow::Result<Option<rmcp::model::Tool>> {
 /// Sorted tool names the TZ **Reader**-profile dump would emit — i.e. the same
 /// `GlossaServer::tool_specs()` call `dump()` uses for the `answer_hotpot` tool-list region
 /// (step 2b above), exposed standalone so a test (here, and the Task 5 cross-surface test) can
-/// assert it stays equal to `crate::tools::registry::registry()`'s names. The registry was
-/// deliberately trimmed to mirror the Reader MCP surface, so these two lists are expected to be
+/// assert it stays equal to the catalog's Reader-profile resolution
+/// (`crate::tools::registry::resolve_tools` with a Reader `ToolContext`). The catalog's
+/// schema-bearing Reader tools mirror the Reader MCP surface, so these two lists are expected to be
 /// identical, not just overlapping.
 pub fn reader_tool_names() -> Vec<String> {
     let reader_srv = crate::mcp::GlossaServer::new(
@@ -196,9 +197,9 @@ pub fn dump(config_dir: &Path) -> anyhow::Result<usize> {
     let mut full_tools = full_srv.tool_specs();
     full_tools.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // `verify` is fail-closed for EVERY profile (`disable_route("verify")` in `GlossaServer::new`
-    // applies regardless of `profile` — src/mcp.rs) whenever the CWD's `.glossa` isn't
-    // `enabled && is_calibrated`. This generator's own working tree is the common uncalibrated
+    // `verify` is fail-closed for EVERY profile (the catalog's `Verify` gate withholds it in
+    // `GlossaServer::new` regardless of `profile` — src/tools/registry.rs) whenever the CWD's
+    // `.glossa` isn't `enabled && is_calibrated`. This generator's own working tree is the common uncalibrated
     // case, so `full_tools` legitimately drops `verify` here too — which would silently delete the
     // `[tools.verify]` block (and stop refreshing `tools/verify.json`) this splice writes below,
     // even though the `answer_hotpot` tools-list region (built further down) is about to be made to
@@ -565,8 +566,9 @@ type = \"boolean\"\n";
 
     #[test]
     fn reader_profile_tool_names_match_registry() {
-        // The registry (`crate::tools::registry::registry()`) is the 7 answer-finding/reasoning
-        // tools an eval agent actually drives. The Reader MCP profile carries a few MORE tools
+        // The catalog's Reader-profile resolution (`resolve_tools` with a Reader `ToolContext`,
+        // built below) is the answer-finding/reasoning tools an eval agent actually drives. The
+        // Reader MCP profile carries a few MORE tools
         // than that on purpose — non-reasoning surfaces the answer-loop never calls and that have
         // no `glossa_tools::exec` executor:
         //   - get_source_file — delivers the original file as a resource, for citation/download,
@@ -574,10 +576,10 @@ type = \"boolean\"\n";
         //   - get_ontology    — schema introspection for graph_upsert authors, not the reader
         //     prompt.
         //   - ls              — lists notebook notes; notebook is an editor/enrich-loop concern.
-        // So the relationship is registry ⊆ reader-profile dump, not equality: every registry
-        // tool must be exposed by the Reader profile, but the Reader profile may (and does)
-        // expose a few more. If this ever fails, either a registry tool silently dropped out of
-        // the Reader profile (real drift — investigate), or the registry grew a name the MCP
+        // So the relationship is catalog-Reader ⊆ reader-profile dump, not equality: every
+        // catalog Reader tool must be exposed by the Reader profile, but the Reader profile may
+        // (and does) expose a few more. If this ever fails, either a catalog tool silently dropped
+        // out of the Reader profile (real drift — investigate), or the catalog grew a name the MCP
         // surface doesn't have (typo/rename).
         let reg: Vec<String> = {
             use crate::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
@@ -596,10 +598,11 @@ type = \"boolean\"\n";
         };
         let reader = reader_tool_names();
         for name in &reg {
-            // `verify` is fail-closed: it lives in the registry (advertised in every profile) but is
+            // `verify` is fail-closed: it lives in the catalog (advertised in every profile) but is
             // WITHHELD from the live router until the corpus enables+calibrates the gate, so a
             // default-config Reader dump legitimately lacks it. Its description byte-match is enforced
-            // (with the gate enabled) by mcp::tests::mcp_tool_list_matches_registry instead.
+            // (with the gate enabled) by mcp::tests::mcp_advertised_set_matches_catalog_full_profile
+            // instead.
             if name == "verify" {
                 continue;
             }

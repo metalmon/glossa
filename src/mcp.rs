@@ -3984,6 +3984,31 @@ mod tests {
     }
 
     #[test]
+    fn every_compiled_route_is_in_catalog() {
+        // Completeness in the OTHER direction from the equality check above: that test compares the
+        // LIVE (post-disable) advertised set against the catalog, so a compiled `#[tool]` route that
+        // is missing from the catalog would be silently disabled in `new()` and vanish from BOTH
+        // sides of the equality — undetected. Here we take the FULL compiled route set from a fresh
+        // `GlossaServer::tool_router()` (before any disabling) and assert each route name is present
+        // in `catalog()`, so a newly added route that nobody registered in the catalog fails loudly.
+        use crate::tools::registry::catalog;
+        use std::collections::HashSet;
+        let catalog_names: HashSet<&'static str> = catalog().iter().map(|m| m.name).collect();
+        let router = GlossaServer::tool_router();
+        for k in router.map.keys() {
+            // `k` is a `Cow<'static, str>`; deref to `&str` so `HashSet<&'static str>::contains`
+            // (T = `&'static str`, Q = `str`, `&str: Borrow<str>`) matches on the string value.
+            let name: &str = &**k;
+            assert!(
+                catalog_names.contains(name),
+                "compiled route `{name}` is missing from catalog() — add it to \
+                 src/tools/registry.rs (otherwise it is silently disabled and drops out of the \
+                 parity check)"
+            );
+        }
+    }
+
+    #[test]
     fn reindex_tool_is_gone_index_remains() {
         let dir = tempfile::tempdir().unwrap();
         let srv = GlossaServer::new_for_test(
