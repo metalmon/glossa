@@ -7,7 +7,8 @@
 //! to the OpenAI-function core `{ "type": "object", "properties": {…}, "required": […] }`.
 
 use crate::mcp::{
-    GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs, VerifyArgs,
+    Empty, GlobArgs, GlossaryArgs, GraphQueryArgs, GrepArgs, ReachArgs, ReadArgs, SearchArgs,
+    SourceFileArgs, VerifyArgs,
 };
 
 pub const DESC_SEARCH: &str = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches.";
@@ -25,6 +26,150 @@ pub const DESC_GLOB: &str = "List knowledge-base documents whose path matches a 
 pub const DESC_VERIFY: &str = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on.";
 
 pub const DESC_SQL: &str = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed.";
+
+pub const DESC_GET_SOURCE_FILE: &str = "Deliver the ORIGINAL source file behind a citation to the user for source attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a search/grep result and, for a PDF, the cited page `n`. Returns the file as an embedded resource the client can preview or download, plus a one-line note of what was delivered. A large PDF is delivered as just the cited page (still a real, text-bearing PDF); an oversize non-PDF, or an oversize ref with no page, returns guidance to cite a specific PDF page. Read-only; available in every profile. A DOCX is delivered as PDF by default (source format renders inconsistently across clients); pass `raw: true` to get the original .docx.";
+
+pub const DESC_GET_ONTOLOGY: &str = "Return the knowledge-base ontology as JSON: parameters, constraints, relations, and graph-building patterns. Call first to learn valid node/edge shapes before graph_upsert.";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Reader,
+    Editor,
+    Full,
+}
+
+impl Tier {
+    /// Does a server running `self` profile expose a tool declared at `tool_tier`?
+    fn allows(self, tool_tier: Tier) -> bool {
+        matches!(
+            (self, tool_tier),
+            (Tier::Full, _)
+                | (Tier::Editor, Tier::Reader | Tier::Editor)
+                | (Tier::Reader, Tier::Reader)
+        )
+    }
+}
+
+/// A gate a tool must pass for the active context. Gates AND together.
+pub enum Gate {
+    Graph,
+    Verify,
+    SourceFile,
+    Feature(&'static str),
+}
+
+#[derive(Clone, Copy)]
+pub enum ShapeFlag {
+    NoImage,
+}
+
+/// Flag-driven CORE-schema shaping applied after a tool is available.
+pub enum Shape {
+    DropProps(&'static [&'static str]),
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct FeatureSet {
+    pub notebook: bool,
+    pub constraint: bool,
+}
+impl FeatureSet {
+    fn has(&self, name: &str) -> bool {
+        match name {
+            "notebook" => self.notebook,
+            "constraint" => self.constraint,
+            _ => false,
+        }
+    }
+}
+
+/// The launch/corpus inputs that decide the advertised surface. Built identically
+/// by the MCP server and by the eval run that represents a given deployment.
+pub struct ToolContext {
+    pub profile: Tier,
+    pub graph_on: bool,
+    pub verify_available: bool,
+    pub no_source_file: bool,
+    pub no_image: bool,
+    pub features: FeatureSet,
+}
+
+pub struct ToolMeta {
+    pub name: &'static str,
+    pub tier: Tier,
+    pub gates: &'static [Gate],
+    pub shapes: &'static [(ShapeFlag, Shape)],
+    /// Some for Reader-tier tools eval renders; None for MCP-only (schema in the macro).
+    pub schema: Option<serde_json::Value>,
+    pub desc: Option<&'static str>,
+}
+
+/// The single catalog of EVERY MCP route with its gate metadata. Replaces the
+/// per-site constants in `src/mcp.rs` and the `graph_gated`/`verify_gated` bools here.
+pub fn catalog() -> Vec<ToolMeta> {
+    // helper to keep entries terse
+    fn agent(
+        name: &'static str,
+        tier: Tier,
+        gates: &'static [Gate],
+        shapes: &'static [(ShapeFlag, Shape)],
+        schema: serde_json::Value,
+        desc: &'static str,
+    ) -> ToolMeta {
+        ToolMeta {
+            name,
+            tier,
+            gates,
+            shapes,
+            schema: Some(schema),
+            desc: Some(desc),
+        }
+    }
+    fn mcp_only(name: &'static str, tier: Tier, gates: &'static [Gate]) -> ToolMeta {
+        ToolMeta {
+            name,
+            tier,
+            gates,
+            shapes: &[],
+            schema: None,
+            desc: None,
+        }
+    }
+    const READ_SHAPE: &[(ShapeFlag, Shape)] =
+        &[(ShapeFlag::NoImage, Shape::DropProps(&["page_image", "include_images"]))];
+    vec![
+        // Reader-tier, agent-facing (eval renders these)
+        agent("search", Tier::Reader, &[], &[], schema_of::<SearchArgs>(), DESC_SEARCH),
+        agent("read", Tier::Reader, &[], READ_SHAPE, schema_of::<ReadArgs>(), DESC_READ),
+        agent("grep", Tier::Reader, &[], &[], schema_of::<GrepArgs>(), DESC_GREP),
+        agent("glob", Tier::Reader, &[], &[], schema_of::<GlobArgs>(), DESC_GLOB),
+        agent("glossary", Tier::Reader, &[Gate::Graph], &[], schema_of::<GlossaryArgs>(), DESC_GLOSSARY),
+        agent("reach", Tier::Reader, &[Gate::Graph], &[], schema_of::<ReachArgs>(), DESC_REACH),
+        agent("sql", Tier::Reader, &[Gate::Graph], &[], schema_of::<GraphQueryArgs>(), DESC_SQL),
+        agent("verify", Tier::Reader, &[Gate::Verify], &[], schema_of::<VerifyArgs>(), DESC_VERIFY),
+        agent("get_source_file", Tier::Reader, &[Gate::SourceFile], &[], schema_of::<SourceFileArgs>(), DESC_GET_SOURCE_FILE),
+        agent("get_ontology", Tier::Reader, &[], &[], schema_of::<Empty>(), DESC_GET_ONTOLOGY),
+        // MCP-only Reader (notebook-read)
+        mcp_only("ls", Tier::Reader, &[Gate::Feature("notebook")]),
+        // MCP-only Editor
+        mcp_only("note", Tier::Editor, &[Gate::Feature("notebook")]),
+        mcp_only("del", Tier::Editor, &[Gate::Feature("notebook")]),
+        mcp_only("index", Tier::Editor, &[Gate::Graph]),
+        mcp_only("resolve", Tier::Editor, &[Gate::Graph]),
+        mcp_only("neighbors", Tier::Editor, &[Gate::Graph]),
+        mcp_only("related", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_upsert", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_delete", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_update", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_generalize", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_doctor", Tier::Editor, &[Gate::Graph]),
+        mcp_only("graph_stats", Tier::Editor, &[]),
+        mcp_only("constraint_solve", Tier::Editor, &[Gate::Feature("constraint")]),
+        mcp_only("graph_build", Tier::Editor, &[Gate::Feature("constraint")]),
+        // MCP-only Full
+        mcp_only("purge", Tier::Full, &[Gate::Graph]),
+    ]
+}
 
 /// A single agent tool declaration: name, model-facing description, JSON-Schema for its
 /// arguments (OpenAI-function core shape), and whether it requires the reasoning graph.
@@ -168,5 +313,27 @@ mod tests {
             s["properties"]["query"].is_object(),
             "search.query schema present"
         );
+    }
+
+    #[test]
+    fn catalog_has_all_26_routes_with_expected_tiers() {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<&str> = catalog().iter().map(|m| m.name).collect();
+        let expected: BTreeSet<&str> = [
+            "search","read","grep","glob","glossary","reach","sql","verify",
+            "get_source_file","get_ontology","ls","note","del","index","resolve",
+            "neighbors","related","graph_upsert","graph_delete","graph_update",
+            "graph_generalize","graph_doctor","graph_stats","constraint_solve",
+            "graph_build","purge",
+        ].into_iter().collect();
+        assert_eq!(names, expected, "catalog must list exactly the 26 MCP routes");
+
+        let by = |n: &str| catalog().into_iter().find(|m| m.name == n).unwrap();
+        // Reader-tier agent tools carry Some(schema)+Some(desc); MCP-only carry None.
+        assert!(by("search").schema.is_some() && by("search").desc.is_some());
+        assert!(by("get_ontology").schema.is_some(), "get_ontology is Reader-tier, eval renders it");
+        assert!(by("purge").schema.is_none(), "purge is MCP-only Full-tier");
+        assert!(matches!(by("purge").tier, Tier::Full));
+        assert!(matches!(by("sql").tier, Tier::Reader));
     }
 }

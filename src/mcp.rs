@@ -854,7 +854,7 @@ pub(crate) struct ReadArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SourceFileArgs {
+pub(crate) struct SourceFileArgs {
     #[schemars(description = "document path, exactly as shown in a search/grep result")]
     path: String,
     #[serde(
@@ -1091,7 +1091,7 @@ pub(crate) struct GraphQueryArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct Empty {}
+pub(crate) struct Empty {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[allow(dead_code)]
