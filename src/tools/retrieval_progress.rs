@@ -281,11 +281,31 @@ impl ReaderSignals {
     pub fn observe(&mut self, tool: &str, key: &str, ids: &[String]) -> Outcome {
         let _ = tool; // caller already gated with `is_retrieval_tool`; not otherwise needed here.
 
-        // 1. Repeat: identical (tool,args) key as last time. Don't touch seen/window/streak with
-        // this call's ids — an identical call can't surface anything genuinely new.
+        // 1. Repeat: identical (tool,args) key as last time. An identical call USUALLY surfaces
+        // nothing new — but it CAN when the corpus changed between calls (an on-read freshen
+        // indexed a new file that now matches this exact query). So fold in this call's ids: if any
+        // are genuinely new, the repeat DID surface fresh ground — re-arm and render Full so the
+        // new result reaches the caller (a live daemon serving a repeated poll must not hide a
+        // just-appeared file). Only a repeat that surfaces NOTHING new is a true redundant repeat
+        // worth replacing with the nudge marker.
         if self.last_key.as_deref() == Some(key) {
             self.calls += 1;
             self.last_key = Some(key.to_string());
+            let mut new_count = 0usize;
+            for id in ids {
+                if self.seen.insert(id.clone()) {
+                    new_count += 1;
+                }
+            }
+            if new_count > 0 {
+                self.fired_plateau = false;
+                self.streak = 0;
+                return Outcome {
+                    kind: None,
+                    render: ResultRender::Full,
+                    marker: None,
+                };
+            }
             let marker = repeat_marker();
             return Outcome {
                 kind: Some(SignalKind::Repeat),
@@ -603,6 +623,38 @@ mod tests {
         let out3 = r.observe("search", "search:q2", &ids(&["a", "b"]));
         assert_eq!(out3.kind, None, "genuinely new ids -> no signal");
         assert_eq!(out3.render, ResultRender::Full);
+    }
+
+    /// A repeated identical query that surfaces a GENUINELY NEW id — the corpus changed between two
+    /// identical polls (an on-read freshen indexed a file that now matches) — must render Full, NOT
+    /// the repeat marker: a live daemon serving a repeated search must never hide a just-appeared
+    /// result behind the "you already ran this" nudge. Regression guard for
+    /// e2e_spec_b_freshness::on_read_freshen_picks_up_a_newly_added_file (CI-only failure where the
+    /// polled query kept returning the repeat marker even after the new file became searchable).
+    #[test]
+    fn reader_signals_repeat_that_surfaces_a_new_id_renders_full() {
+        let mut r = ReaderSignals::new();
+        // First poll: the file is not indexed yet, nothing surfaces.
+        let out1 = r.observe("search", "search:term_two", &ids(&[]));
+        assert_eq!(out1.render, ResultRender::Full);
+        // Repeated identical poll, still nothing new -> the redundant-repeat nudge.
+        let out2 = r.observe("search", "search:term_two", &ids(&[]));
+        assert_eq!(
+            out2.render,
+            ResultRender::ReplaceWith {
+                marker: repeat_marker()
+            },
+            "a repeat that surfaces nothing new is still a redundant repeat"
+        );
+        // The freshen has now indexed the file: the SAME query surfaces a new id. Even though the
+        // key repeats, the fresh result MUST be shown in full (this is the bug that was fixed).
+        let out3 = r.observe("search", "search:term_two", &ids(&["b.md#1"]));
+        assert_eq!(
+            out3.render,
+            ResultRender::Full,
+            "a repeated query that surfaces a genuinely new id must render Full, not the marker"
+        );
+        assert_eq!(out3.kind, None);
     }
 
     /// Streak fires at exactly STREAK_K consecutive zero-new VARIED calls, exactly once, then
