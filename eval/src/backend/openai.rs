@@ -339,12 +339,15 @@ pub struct OpenAiBackend {
     /// graph-ON arm when true (opens the graph and advertises the graph tools); graph-OFF
     /// baseline when false (flat search/read only). The A/B knob for the graph-transfer eval.
     pub use_graph: bool,
-    /// Enable vision: advertise `read(page_image)` in the tool schema — mirrors an MCP server
-    /// started with `--vision`. Plumbed from the `kbx eval --vision` CLI flag (`false`/off by
-    /// default, matching today's behavior exactly) into `answer_tool_context`'s
-    /// `no_image: !vision`. Advertisement-only here: the answer path never feeds returned page
-    /// images back to the model regardless (see the comment above `execute_tool`'s vision-discard
-    /// in `answer_capturing`), unlike `build --vision`'s extract path.
+    /// Enable vision: advertise `read(page_image)` in the tool schema AND feed the images a tool
+    /// call returns back to the model — mirrors an MCP server started with `--vision`. Plumbed from
+    /// the `kbx eval --vision` CLI flag (`false`/off by default, matching today's behavior exactly)
+    /// into `answer_tool_context`'s `no_image: !vision`. When on (and the reader speaks the
+    /// OpenAI-compatible chat API), `answer_capturing` wraps the transport in `VisionTransport`, so
+    /// page images a `read` surfaces ride to the model in a follow-up `role:"user"` image message
+    /// right after the tool result (via `vision_user_message`) — the same mechanism `build
+    /// --vision`'s extract path uses. Off, the answer path is byte-identical to before (no image
+    /// message emitted).
     pub vision: bool,
     /// Runtime-injected system prompt (e.g. loaded from an editable `.md` file at launch), used
     /// VERBATIM as the system message when `Some`. `None` preserves today's behavior exactly:
@@ -486,8 +489,18 @@ impl OpenAiBackend {
         // here too would double up. Owned here so it resets per question; the POLICY (what to do
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
         let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
+        // Under `--vision`, the images each `read`/tool call surfaces are buffered here and drained
+        // by `VisionTransport::push_tool_results` into a follow-up `role:"user"` image message right
+        // after the round's tool results — the same seam the build/extract path uses via
+        // `ClosureTransport`. The generic agent loop's `exec` is `(String, Vec<String>)` (image-
+        // agnostic on purpose), so the images ride this side channel instead of the loop's return.
+        // Off `--vision` the buffer is never drained (the wrapper isn't installed), so the transcript
+        // is byte-identical to before.
+        let pending_images: Rc<std::cell::RefCell<Vec<DocImage>>> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
+        let image_sink = Rc::clone(&pending_images);
         let exec = |name: &str, args: &Value| {
-            let (mut body, ids) = execute_tool(name, args, work, idx, graph, &spec, &trace);
+            let (mut body, ids, images) = execute_tool(name, args, work, idx, graph, &spec, &trace);
             // Diagnostics: KB_EVAL_DUMP_TOOLS=1 prints each tool call + a truncated body to
             // stderr, so a smoke run doubles as an episode transcript (why the reader searches).
             if std::env::var("KB_EVAL_DUMP_TOOLS").is_ok() {
@@ -509,11 +522,12 @@ impl OpenAiBackend {
                     body,
                 );
             }
-            // The reader path never feeds vision input — `execute_tool` already discards whatever
-            // images `glossa_tools::exec` surfaced (e.g. from `read`); only `build::extract::
-            // extract_doc`'s `--vision` path threads images (through the closure-based shim, whose
-            // `exec` is 3-tuple). This `answer` drives the generic loop DIRECTLY, whose `exec` is
-            // 2-tuple, so no image slot is needed here.
+            // Buffer any images this call surfaced for the vision side channel (drained by
+            // `VisionTransport` under `--vision`; left untouched otherwise). Empty for every
+            // non-image call, so nothing accumulates on the text-only reader path.
+            if !images.is_empty() {
+                image_sink.borrow_mut().extend(images);
+            }
             (body, ids)
         };
 
@@ -540,8 +554,25 @@ impl OpenAiBackend {
         let user_sim = gate
             .as_ref()
             .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
+        // Under `--vision`, wrap the reader's real transport so images the round's `exec` surfaced
+        // (buffered in `pending_images`) ride to the model in a follow-up `role:"user"` image
+        // message right after the tool results — matching a vision-enabled MCP server. Gated to the
+        // OpenAI-compatible transport, since `vision_user_message` emits the OpenAI `image_url`
+        // data-URI shape; every other api kind (and every non-vision run) drives the inner transport
+        // directly, byte-identical to before.
+        let vision_wrap;
+        let loop_transport: &dyn ChatTransport =
+            if self.vision && matches!(self.api, crate::lab::ApiKind::OpenAiChat) {
+                vision_wrap = VisionTransport {
+                    inner: transport.as_ref(),
+                    pending_images: Rc::clone(&pending_images),
+                };
+                &vision_wrap
+            } else {
+                transport.as_ref()
+            };
         let raw = crate::backend::agent_loop::run_agent_loop_capturing(
-            transport.as_ref(),
+            loop_transport,
             &ep,
             None,
             seed_messages,
@@ -848,6 +879,56 @@ fn vision_user_message(images: &[DocImage]) -> Option<Value> {
     Some(json!({ "role": "user", "content": Value::Array(content) }))
 }
 
+/// Answer-path `--vision` wrapper around the reader's real `ChatTransport`. Mirrors the
+/// build/extract path's `ClosureTransport`: images the round's `exec` surfaced are buffered in
+/// `pending_images`, and — right after the inner transport pushes its `role:"tool"` result(s) —
+/// drained into ONE follow-up `role:"user"` image message (`vision_user_message`), because the
+/// OpenAI-compatible endpoint has no image slot on a tool message. Every other method delegates to
+/// `inner` unchanged, so behavior is identical apart from that appended image message.
+///
+/// Constructed ONLY when `--vision` is on AND the reader speaks the OpenAI-compatible chat API
+/// (`vision_user_message` emits that provider's `image_url` data-URI shape). The non-vision answer
+/// path — and any non-OpenAI api kind — drives the inner transport directly, so the transcript is
+/// byte-identical to before this wrapper existed.
+struct VisionTransport<'a> {
+    inner: &'a dyn ChatTransport,
+    pending_images: Rc<std::cell::RefCell<Vec<DocImage>>>,
+}
+
+impl ChatTransport for VisionTransport<'_> {
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
+        self.inner.tools_schema(ctx)
+    }
+
+    fn call(
+        &self,
+        ep: &crate::lab::Endpoint,
+        system: Option<&str>,
+        messages: &[Value],
+        tools: Option<&Value>,
+        temperature: Option<f64>,
+    ) -> anyhow::Result<TurnReply> {
+        self.inner.call(ep, system, messages, tools, temperature)
+    }
+
+    fn push_assistant_turn(&self, messages: &mut Vec<Value>, reply: &TurnReply) {
+        self.inner.push_assistant_turn(messages, reply);
+    }
+
+    fn push_tool_results(&self, messages: &mut Vec<Value>, results: &[(String, String)]) {
+        // Inner transport owns the `role:"tool"` result shape; we only append the vision message.
+        self.inner.push_tool_results(messages, results);
+        let images: Vec<DocImage> = self.pending_images.borrow_mut().drain(..).collect();
+        if let Some(img_msg) = vision_user_message(&images) {
+            messages.push(img_msg);
+        }
+    }
+
+    fn post_feedback(&self, episode_id: &str, metrics: &[(&str, Value)]) {
+        self.inner.post_feedback(episode_id, metrics);
+    }
+}
+
 /// Thin backward-compatible shim over `agent_loop::run_agent_loop`: adapts the pre-transport
 /// calling convention (`chat: Fn(&[Value]) -> Result<Value>`, returning the assistant `message`
 /// object already extracted from `choices[0].message`) onto the generic, transport-driven loop.
@@ -1025,13 +1106,19 @@ where
 /// Execute one glossa tool in-process against the corpus in `work`, logging it to the trace
 /// (same shape as the MCP server: search → array of {path,location,score}; read → {path}).
 ///
-/// Returns `(body, ids)` — `ids` are the identifiers this call surfaced (what a session-aware MCP
-/// server would track for novelty), from `glossa_tools::exec`'s second return value: `search`'s hit
-/// locations, and the graph tools' (glossary/related/neighbors/reach/sql) `path#ord`
-/// read-anchor ids scraped from their rendered bodies. `read` itself surfaces no ids there, so it's
-/// special-cased here to the `path` argument instead. `run_agent_loop` uses these to detect an
-/// unproductive streak — many varied calls (including varied graph navigation) that surface
-/// nothing new — without falsely tripping on a reader that IS making real graph progress.
+/// Returns `(body, ids, images)` — `ids` are the identifiers this call surfaced (what a
+/// session-aware MCP server would track for novelty), from `glossa_tools::exec`'s second return
+/// value: `search`'s hit locations, and the graph tools' (glossary/related/neighbors/reach/sql)
+/// `path#ord` read-anchor ids scraped from their rendered bodies. `read` itself surfaces no ids
+/// there, so it's special-cased here to the `path` argument instead. `run_agent_loop` uses these to
+/// detect an unproductive streak — many varied calls (including varied graph navigation) that
+/// surface nothing new — without falsely tripping on a reader that IS making real graph progress.
+///
+/// `images` are the page images `glossa_tools::exec` surfaced (e.g. a `read(page_image)` on a
+/// scanned page), forwarded verbatim — never dropped here. The caller decides whether to feed them:
+/// under `--vision` the answer path rides them to the model in a follow-up `role:"user"` image
+/// message (see `vision_user_message` / `VisionTransport`); a non-vision caller simply ignores this
+/// element, so the transcript is byte-identical to before.
 fn execute_tool(
     name: &str,
     args: &Value,
@@ -1040,13 +1127,13 @@ fn execute_tool(
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, Vec<DocImage>) {
     // No registry-membership pre-check here: `registry()` is the ADVERTISING source (what
     // `tools_schema` puts in front of the model); execution dispatches whatever
     // `glossa_tools::exec` supports, which is a superset (it also serves non-agent-facing
     // callers, e.g. related/neighbors for MCP's Editor/Full profiles). `exec` already returns
     // its own "unknown tool" body for names it genuinely doesn't handle, so it is the sole gate.
-    let (body, ids, _images) =
+    let (body, ids, images) =
         crate::backend::glossa_tools::exec(name, args, root, idx, graph, spec, trace);
     let ids = if name == "read" {
         // Mirror glossa_tools::exec's own raw_arguments fallback so a stringified args object
@@ -1066,7 +1153,7 @@ fn execute_tool(
     } else {
         ids
     };
-    (body, ids)
+    (body, ids, images)
 }
 
 #[cfg(test)]
@@ -1639,7 +1726,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids, _images) =
+                execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1685,7 +1773,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids, _images) =
+                execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1802,7 +1891,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids, _images) =
+                execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -1847,7 +1937,8 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
         let exec = |name: &str, args: &Value| {
-            let (body, ids) = execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
+            let (body, ids, _images) =
+                execute_tool(name, args, dir.path(), &idx, Some(&g), &spec, &trace);
             (body, ids, Vec::new())
         };
 
@@ -2059,6 +2150,65 @@ mod tests {
         };
         let out = run_agent_loop(chat, vec![], exec, nudge, 3, None).unwrap();
         assert_eq!(out, "ANSWER: done");
+    }
+
+    /// Answer-path per-round assembly (Task 7): the reader's real transport pushes its `role:"tool"`
+    /// result, then — under `--vision` — `VisionTransport` appends the follow-up `role:"user"` image
+    /// message. This is the exact production wrapper the answer loop installs; testing it directly
+    /// mirrors how `vision_user_message` itself is unit-tested (the live loop is transport-driven).
+    fn build_round_messages_with_tool_images(images: &[DocImage], vision: bool) -> Vec<Value> {
+        use crate::backend::transport::openai::OpenAiTransport;
+        let results = [("call_1".to_string(), "(scanned page text)".to_string())];
+        let mut messages: Vec<Value> = Vec::new();
+        if vision {
+            // The same wrapper `answer_capturing` installs under `--vision`: inner transport pushes
+            // the tool result, then the buffered images ride in a follow-up user message.
+            let vt = VisionTransport {
+                inner: &OpenAiTransport,
+                pending_images: Rc::new(std::cell::RefCell::new(images.to_vec())),
+            };
+            vt.push_tool_results(&mut messages, &results);
+        } else {
+            // Off `--vision`: the raw transport, no wrapper — the pre-vision transcript shape.
+            OpenAiTransport.push_tool_results(&mut messages, &results);
+        }
+        messages
+    }
+
+    #[test]
+    fn answering_loop_emits_vision_user_message_when_vision_on() {
+        // Vision on: a `read` that returns an image produces a following `role:"user"` message
+        // carrying an `image_url` data URI, right after the tool result.
+        let img = stub_image(7);
+        let msgs = build_round_messages_with_tool_images(std::slice::from_ref(&img), true);
+        let user_img = msgs
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .expect("vision-on must append a role:\"user\" image message");
+        let parts = user_img["content"]
+            .as_array()
+            .expect("image message content must be an array");
+        assert!(
+            parts.iter().any(|p| p["type"] == "image_url"
+                && p["image_url"]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("data:image/jpeg;base64,")),
+            "expected an image_url data URI part, got: {parts:?}"
+        );
+
+        // Vision off: no image message is emitted (byte-identical to the pre-vision transcript).
+        let msgs_off =
+            build_round_messages_with_tool_images(std::slice::from_ref(&stub_image(7)), false);
+        assert!(
+            !msgs_off.iter().any(|m| m["role"] == "user"
+                && m["content"]
+                    .as_array()
+                    .map(|a| a.iter().any(|p| p["type"] == "image_url"))
+                    .unwrap_or(false)),
+            "vision-off must not emit any image_url user message: {msgs_off:?}"
+        );
     }
 }
 
