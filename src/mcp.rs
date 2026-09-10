@@ -216,7 +216,9 @@ impl GlossaServer {
         let all: Vec<String> = router.map.keys().map(|k| k.to_string()).collect();
         for name in all {
             if !keep.contains(name.as_str()) {
-                router.disable_route(&name);
+                // disable_route takes `impl Into<Cow<'static, str>>`; pass the owned
+                // String by value (Cow::Owned) — a &String borrow isn't 'static.
+                router.disable_route(name);
             }
         }
         // … then override each kept Reader-tier route's input schema with the shaped CORE schema
