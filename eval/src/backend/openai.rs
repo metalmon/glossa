@@ -463,12 +463,10 @@ impl OpenAiBackend {
         // gate is disabled/uncalibrated for this corpus — mirrors the live MCP server's fail-closed
         // advertisement (the `exec` arm already withholds the diagnostic; this also stops the model
         // from being offered a tool call that can't do anything).
-        let verify_available = {
-            let glossa_dir = work.join(".glossa");
-            let c = glossa::gate::VerifyConfig::resolve(&glossa_dir);
-            c.enabled && c.is_calibrated()
-        };
-        let tools = transport.tools_schema(graph.is_some(), verify_available);
+        // TODO(Task 6): thread --vision (Task 6 replaces this hardcoded flag with the plumbed one).
+        let vision = false;
+        let ctx = answer_tool_context(work, graph.is_some(), vision);
+        let tools = transport.tools_schema(&ctx);
 
         let trace = TraceLog::to_dir(work);
         // Ontology-driven chain spec so glossary/related render identically to the MCP surface.
@@ -755,12 +753,39 @@ pub(crate) fn record_usage(resp: &Value) {
 /// `chat_once` can extract the message itself. Both record token usage exactly once via
 /// `record_usage`. (The retired `lmstudio_chat` is gone — its body-building lives in
 /// `transport::openai::agent_chat_full` and its resample loop in `backend::resample`.)
-pub(crate) use crate::backend::transport::openai::{content_of, parse_tool_args, tools_schema};
+pub(crate) use crate::backend::transport::openai::{
+    content_of, parse_tool_args, tools_schema_from_ctx,
+};
 // `chat_http`/`chat_http_full` are now consumed only by this module's (cfg(test)) `chat_once` and
 // its integration tests; re-export them under `cfg(test)` so the non-test build doesn't see an
 // unused import.
 #[cfg(test)]
 pub(crate) use crate::backend::transport::openai::{chat_http, chat_http_full};
+
+/// Build the `ToolContext` an eval answering run advertises tools from — the prod Reader
+/// deployment surface. `verify_available` is resolved from the corpus's `.glossa` gate config
+/// (`enabled && is_calibrated`), matching the live MCP server's fail-closed advertisement;
+/// `no_source_file` is always false (eval delivers provenance, never withholds the tool);
+/// `no_image` is `!vision`; notebook/constraint features are off in the answering eval. Shared by
+/// the reader (`backend::openai`) and GEPA graph reflection (`gepa_graph`) so both describe the
+/// SAME tool set the reader will actually be offered.
+pub(crate) fn answer_tool_context(
+    work: &std::path::Path,
+    graph_on: bool,
+    vision: bool,
+) -> glossa::tools::registry::ToolContext {
+    use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+    let glossa_dir = work.join(".glossa");
+    let cfg = glossa::gate::VerifyConfig::resolve(&glossa_dir);
+    ToolContext {
+        profile: Tier::Reader,
+        graph_on,
+        verify_available: cfg.enabled && cfg.is_calibrated(),
+        no_source_file: false,
+        no_image: !vision,
+        features: FeatureSet::default(),
+    }
+}
 
 /// Unproductive-streak threshold. MOVED to `backend::agent_loop` (Task 3 of the multi-api-
 /// transport plan) along with the loop's dedup/streak/NBA logic; re-exported here so this
@@ -918,8 +943,8 @@ impl<C> ChatTransport for ClosureTransport<C>
 where
     C: FnMut(&[Value]) -> anyhow::Result<Value>,
 {
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
-        tools_schema(graph_on, verify_available)
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
+        tools_schema_from_ctx(ctx)
     }
 
     fn call(
@@ -2038,37 +2063,51 @@ mod schema_tests {
             .collect()
     }
 
+    /// Test-only `ToolContext` builder mirroring `transport::openai::tests::ctx`.
+    fn schema_ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
+        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+        ToolContext {
+            profile: Tier::Reader,
+            graph_on,
+            verify_available,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        }
+    }
+
     #[test]
     fn grep_is_advertised_in_both_arms() {
-        // grep is ungated in the registry, so it must appear in both graph-OFF and graph-ON.
+        // grep is ungated in the catalog, so it must appear in both graph-OFF and graph-ON.
         assert!(
-            tool_names(&tools_schema(false, true)).contains(&"grep".into()),
+            tool_names(&tools_schema_from_ctx(&schema_ctx(false, true))).contains(&"grep".into()),
             "graph-OFF must advertise grep"
         );
         assert!(
-            tool_names(&tools_schema(true, true)).contains(&"grep".into()),
+            tool_names(&tools_schema_from_ctx(&schema_ctx(true, true))).contains(&"grep".into()),
             "graph-ON must advertise grep"
         );
     }
 
     /// `tools_schema`/`exec` parity guard (mirrors [[mcp-tool-add-rename-eval-sites]]): when BOTH
     /// gates are open (graph-ON, verify available) the advertised schema must equal the FULL
-    /// registry, in registry order — no hand-curated subset or reordering; MCP and the eval agent
-    /// render from the same source of truth, and `verify`'s exec arm (`glossa_tools::exec`) is
-    /// only exercised for a name the model was actually offered.
+    /// resolved Reader catalog, in catalog order — no hand-curated subset or reordering; MCP and the
+    /// eval agent render from the same source of truth (`resolve_tools`), and `verify`'s exec arm
+    /// (`glossa_tools::exec`) is only exercised for a name the model was actually offered.
     #[test]
     fn openai_tools_match_registry_graph_on() {
-        let names = tool_names(&tools_schema(true, true));
-        let reg: Vec<_> = glossa::tools::registry::registry()
+        let ctx = schema_ctx(true, true);
+        let names = tool_names(&tools_schema_from_ctx(&ctx));
+        let reg: Vec<_> = glossa::tools::registry::resolve_tools(&ctx)
             .iter()
-            .map(|d| d.name.to_string())
+            .map(|t| t.name.to_string())
             .collect();
-        assert_eq!(names, reg, "graph-ON tool set must equal registry order");
+        assert_eq!(names, reg, "graph-ON tool set must equal resolver order");
     }
 
     #[test]
     fn openai_tools_hide_graph_gated_when_off() {
-        let names = tool_names(&tools_schema(false, true));
+        let names = tool_names(&tools_schema_from_ctx(&schema_ctx(false, true)));
         // related/neighbors aren't in the registry at all (withheld from the Reader profile as
         // measured clutter) — only glossary/reach/sql are graph-gated now.
         for gated in ["glossary", "reach", "sql"] {
@@ -2089,12 +2128,12 @@ mod schema_tests {
     /// `verify_available` is false, and present (graph tools notwithstanding) when true.
     #[test]
     fn openai_tools_hide_verify_when_unavailable() {
-        let names = tool_names(&tools_schema(true, false));
+        let names = tool_names(&tools_schema_from_ctx(&schema_ctx(true, false)));
         assert!(
             !names.contains(&"verify".to_string()),
             "verify must be withheld when unavailable; got {names:?}"
         );
-        let names_on = tool_names(&tools_schema(true, true));
+        let names_on = tool_names(&tools_schema_from_ctx(&schema_ctx(true, true)));
         assert!(
             names_on.contains(&"verify".to_string()),
             "verify must be advertised when available; got {names_on:?}"

@@ -2651,9 +2651,9 @@ mod tests {
 
     #[test]
     fn verify_in_registry() {
-        assert!(crate::tools::registry::registry()
+        assert!(crate::tools::registry::catalog()
             .iter()
-            .any(|d| d.name == "verify"));
+            .any(|m| m.name == "verify"));
     }
 
     #[test]

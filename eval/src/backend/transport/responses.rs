@@ -21,8 +21,8 @@ use std::time::Duration;
 pub struct ResponsesTransport;
 
 impl ChatTransport for ResponsesTransport {
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
-        tools_schema(graph_on, verify_available)
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
+        tools_schema_from_ctx(ctx)
     }
 
     fn call(
@@ -112,24 +112,21 @@ fn reconstruct_output_items(reply: &TurnReply) -> Vec<Value> {
     items
 }
 
-/// Responses API tool schema for glossa's agent-facing tools, rendered from the same shared
-/// registry (`glossa::tools::registry::registry()`) the other transports use — same
-/// name/description/params_schema per tool, but Responses' FLAT function shape
+/// Responses API tool schema for glossa's agent-facing tools, rendered from the same shared catalog
+/// (`glossa::tools::registry::resolve_tools`) the other transports use — same name/description/core
+/// schema per tool, but Responses' FLAT function shape
 /// (`{type:"function",name,description,parameters}` at the top level, NOT OpenAI Chat's nested
-/// `{type:"function",function:{...}}`). Graph-gated descriptors are included only when
-/// `graph_on`; `verify` is included only when `verify_available` (serving parity — see
-/// `transport::openai::tools_schema`).
-pub(crate) fn tools_schema(graph_on: bool, verify_available: bool) -> Value {
-    let tools: Vec<Value> = glossa::tools::registry::registry()
-        .iter()
-        .filter(|d| !d.graph_gated || graph_on)
-        .filter(|d| !d.verify_gated || verify_available)
-        .map(|d| {
+/// `{type:"function",function:{...}}`). `resolve_tools(ctx)` applies every gate; this only maps each
+/// resolved tool into the Responses flat-function envelope.
+pub(crate) fn tools_schema_from_ctx(ctx: &glossa::tools::registry::ToolContext) -> Value {
+    let tools: Vec<Value> = glossa::tools::registry::resolve_tools(ctx)
+        .into_iter()
+        .map(|t| {
             json!({
                 "type": "function",
-                "name": d.name,
-                "description": d.description,
-                "parameters": d.params_schema,
+                "name": t.name,
+                "description": t.desc,
+                "parameters": t.core_schema,
             })
         })
         .collect();
@@ -289,9 +286,22 @@ fn responses_http(
 mod tests {
     use super::*;
 
+    /// Test-only `ToolContext` builder mirroring `transport::openai::tests::ctx`.
+    fn ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
+        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+        ToolContext {
+            profile: Tier::Reader,
+            graph_on,
+            verify_available,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        }
+    }
+
     #[test]
     fn tools_schema_is_flat_function_form() {
-        let schema = ResponsesTransport.tools_schema(true, true);
+        let schema = ResponsesTransport.tools_schema(&ctx(true, true));
         let s = serde_json::to_string(&schema).unwrap();
         assert!(
             !s.contains("\"function\":{"),
@@ -325,8 +335,8 @@ mod tests {
                 .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
                 .collect()
         };
-        let with = names_of(&ResponsesTransport.tools_schema(true, true));
-        let without = names_of(&ResponsesTransport.tools_schema(true, false));
+        let with = names_of(&ResponsesTransport.tools_schema(&ctx(true, true)));
+        let without = names_of(&ResponsesTransport.tools_schema(&ctx(true, false)));
         assert!(
             with.iter().any(|n| n == "verify"),
             "verify present when available; got {with:?}"
@@ -339,7 +349,7 @@ mod tests {
 
     #[test]
     fn tools_schema_graph_off_omits_graph_tool() {
-        let schema = ResponsesTransport.tools_schema(false, true);
+        let schema = ResponsesTransport.tools_schema(&ctx(false, true));
         let names: Vec<&str> = schema
             .as_array()
             .unwrap()
@@ -531,7 +541,7 @@ mod tests {
         };
 
         let transport = ResponsesTransport;
-        let tools = tools_schema(true, true);
+        let tools = tools_schema_from_ctx(&ctx(true, true));
         let exec = |name: &str, args: &Value| {
             assert_eq!(name, "search");
             assert_eq!(args["query"], "x");

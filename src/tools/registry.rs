@@ -1,7 +1,7 @@
 //! Single source of truth for agent tool DECLARATIONS (name, description, JSON schema,
-//! graph-gated flag). MCP (src/mcp.rs), and later the OpenAI/TZ surfaces, build their
-//! tool listings from `registry()` instead of hand-duplicating them, so the three
-//! surfaces cannot drift apart. Descriptions are extracted here verbatim from the
+//! gate metadata). MCP (src/mcp.rs) and the eval OpenAI/Anthropic/Responses/TZ surfaces
+//! build their tool listings from `catalog()`/`resolve_tools` instead of hand-duplicating
+//! them, so the surfaces cannot drift apart. Descriptions are extracted here verbatim from the
 //! current MCP `#[tool(description = …)]` attributes; schemas come from the SAME arg
 //! structs `src/mcp.rs` already deserializes into (`schemars::schema_for!`), normalized
 //! to the OpenAI-function core `{ "type": "object", "properties": {…}, "required": […] }`.
@@ -243,19 +243,6 @@ pub fn available_names(ctx: &ToolContext) -> std::collections::HashSet<&'static 
         .collect()
 }
 
-/// A single agent tool declaration: name, model-facing description, JSON-Schema for its
-/// arguments (OpenAI-function core shape), and whether it requires the reasoning graph.
-pub struct ToolDescriptor {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub params_schema: serde_json::Value,
-    pub graph_gated: bool,
-    /// Withheld from the advertised tool schema when the answer-grounding gate is
-    /// disabled/uncalibrated for the corpus (`glossa::gate::VerifyConfig`) — serving parity with
-    /// the live MCP server's fail-closed advertisement. Set only on `verify`.
-    pub verify_gated: bool,
-}
-
 /// Normalize a `schemars::schema_for!` result to the OpenAI-function core schema:
 /// `{ "type": "object", "properties": {…}, "required": […] }` — strips the schemars
 /// `$schema`/`title`/`$defs` root-schema wrapper that tool-calling APIs don't expect.
@@ -287,112 +274,9 @@ fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
     normalize_schema(serde_json::to_value(schema).expect("schema serializes to JSON"))
 }
 
-/// The canonical set of agent tool descriptors — retrieval tools first (ungated), then
-/// the graph tools (gated on a reasoning graph existing for the corpus).
-pub fn registry() -> Vec<ToolDescriptor> {
-    vec![
-        ToolDescriptor {
-            name: "search",
-            description: DESC_SEARCH,
-            params_schema: schema_of::<SearchArgs>(),
-            graph_gated: false,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "read",
-            description: DESC_READ,
-            params_schema: schema_of::<ReadArgs>(),
-            graph_gated: false,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "grep",
-            description: DESC_GREP,
-            params_schema: schema_of::<GrepArgs>(),
-            graph_gated: false,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "glob",
-            description: DESC_GLOB,
-            params_schema: schema_of::<GlobArgs>(),
-            graph_gated: false,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "verify",
-            description: DESC_VERIFY,
-            params_schema: schema_of::<VerifyArgs>(),
-            graph_gated: false,
-            verify_gated: true,
-        },
-        ToolDescriptor {
-            name: "glossary",
-            description: DESC_GLOSSARY,
-            params_schema: schema_of::<GlossaryArgs>(),
-            graph_gated: true,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "reach",
-            description: DESC_REACH,
-            params_schema: schema_of::<ReachArgs>(),
-            graph_gated: true,
-            verify_gated: false,
-        },
-        ToolDescriptor {
-            name: "sql",
-            description: DESC_SQL,
-            params_schema: schema_of::<GraphQueryArgs>(),
-            graph_gated: true,
-            verify_gated: false,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn registry_lists_core_tools_with_schemas() {
-        let r = registry();
-        let names: Vec<_> = r.iter().map(|d| d.name).collect();
-        for t in ["search", "read", "grep", "glob", "verify", "glossary", "reach", "sql"] {
-            assert!(names.contains(&t), "registry missing {t}");
-        }
-        // withheld from the Reader profile: measured clutter (related/neighbors)
-        for t in ["related", "neighbors"] {
-            assert!(!names.contains(&t), "registry must NOT contain {t}");
-        }
-        assert_eq!(
-            names.len(),
-            8,
-            "registry must contain exactly the Reader profile's 8 tools"
-        );
-        // graph tools gated; retrieval + the model-free grounding gate are not
-        let g = |n| r.iter().find(|d| d.name == n).unwrap();
-        assert!(g("glossary").graph_gated && g("reach").graph_gated && g("sql").graph_gated);
-        assert!(
-            !g("search").graph_gated
-                && !g("read").graph_gated
-                && !g("grep").graph_gated
-                && !g("glob").graph_gated
-                && !g("verify").graph_gated
-        );
-        // verify alone is gated on the answer-grounding gate being enabled/calibrated
-        assert!(g("verify").verify_gated, "verify must be verify_gated");
-        for t in ["search", "read", "grep", "glob", "glossary", "reach", "sql"] {
-            assert!(!g(t).verify_gated, "{t} must NOT be verify_gated");
-        }
-        // schema is a valid object with properties for a known arg
-        let s = &g("search").params_schema;
-        assert_eq!(s["type"], "object");
-        assert!(
-            s["properties"]["query"].is_object(),
-            "search.query schema present"
-        );
-    }
 
     #[test]
     fn catalog_has_all_26_routes_with_expected_tiers() {

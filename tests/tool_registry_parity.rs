@@ -23,11 +23,22 @@
 
 #[test]
 fn all_glossa_surfaces_expose_at_least_the_registry_tools() {
-    let reg: Vec<String> = glossa::tools::registry::registry()
-        .iter()
-        .map(|d| d.name.to_string())
-        .collect();
-    assert!(!reg.is_empty(), "registry() returned no tools");
+    let reg: Vec<String> = {
+        use glossa::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
+        let ctx = ToolContext {
+            profile: Tier::Reader,
+            graph_on: true,
+            verify_available: true,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        };
+        resolve_tools(&ctx)
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    };
+    assert!(!reg.is_empty(), "resolve_tools returned no tools");
 
     // TZ side: the tool-name list `kb dump-tz-tools` would splice into the reader
     // (`answer_hotpot`) function's `tools = [...]` line.

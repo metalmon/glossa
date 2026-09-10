@@ -192,16 +192,16 @@ fn graph_upsert_tool_value(desc: &str) -> Value {
 /// `<path>#<n>` section ref). `search`/`read`/`grep` descriptors come straight from the shared
 /// registry (`glossa::tools::registry`).
 pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
-    let mut tools: Vec<Value> = glossa::tools::registry::registry()
+    let mut tools: Vec<Value> = resolve_reader_tools()
         .into_iter()
-        .filter(|d| matches!(d.name, "search" | "read" | "grep"))
-        .map(|d| {
+        .filter(|t| matches!(t.name, "search" | "read" | "grep"))
+        .map(|t| {
             json!({
                 "type": "function",
                 "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
+                    "name": t.name,
+                    "description": t.desc,
+                    "parameters": t.core_schema,
                 }
             })
         })
@@ -210,19 +210,35 @@ pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
     Value::Array(tools)
 }
 
+/// The full Reader-tier resolved tool set (all gates open) — the shared source `extract_tools_schema`
+/// and `build_tools_schema` filter by name for the build/reason retrieval tools. `no_image` is false
+/// so `read` keeps its page_image/include_images fields, byte-identical to the pre-`resolve_tools`
+/// build schema.
+fn resolve_reader_tools() -> Vec<glossa::tools::registry::ResolvedTool> {
+    use glossa::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
+    resolve_tools(&ToolContext {
+        profile: Tier::Reader,
+        graph_on: true,
+        verify_available: true,
+        no_source_file: false,
+        no_image: false,
+        features: FeatureSet::default(),
+    })
+}
+
 /// Build-path tool schema: only `read` for document access plus `graph_upsert` for writing the
 /// reasoning graph. No `search` or `grep` — the builder operates on a single document at a time.
 pub(crate) fn build_tools_schema(graph_upsert_description: &str) -> Value {
-    let mut tools: Vec<Value> = glossa::tools::registry::registry()
+    let mut tools: Vec<Value> = resolve_reader_tools()
         .into_iter()
-        .filter(|d| d.name == "read")
-        .map(|d| {
+        .filter(|t| t.name == "read")
+        .map(|t| {
             json!({
                 "type": "function",
                 "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
+                    "name": t.name,
+                    "description": t.desc,
+                    "parameters": t.core_schema,
                 }
             })
         })

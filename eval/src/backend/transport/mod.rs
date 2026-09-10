@@ -67,13 +67,13 @@ pub struct TurnReply {
 /// identically. Object-safe by construction (no generic methods, no `Self` by value) — the design
 /// is meant to be driven through `&dyn ChatTransport`.
 pub trait ChatTransport {
-    /// Render the tool registry into this provider's tool-schema shape (OpenAI's
-    /// `{type:function,function:{...}}` envelope vs. Anthropic's flat `{name,input_schema}`).
-    /// `graph_on` gates the graph-only tools (glossary/reach/sql/…) the same way both arms of the
-    /// eval do today. `verify_available` gates `verify` — withheld from the advertised schema when
-    /// the answer-grounding gate is disabled/uncalibrated for the corpus, mirroring the live MCP
-    /// server's fail-closed advertisement (see `glossa::gate::VerifyConfig`).
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> serde_json::Value;
+    /// Render the resolved tool set for `ctx` into this provider's tool-schema shape (OpenAI's
+    /// `{type:function,function:{...}}` envelope vs. Anthropic's flat `{name,input_schema}`). The
+    /// single `glossa::tools::registry::resolve_tools(ctx)` catalog decides WHICH tools are
+    /// advertised (graph gating, `verify` fail-closed, `get_source_file`, per-context schema
+    /// shaping); each transport only wraps that resolved set in its own envelope, so MCP and every
+    /// eval transport advertise from one source of truth.
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> serde_json::Value;
 
     /// One request/response round-trip: POST `messages` (+ optional `system`, `tools`) to `ep` and
     /// return the normalized `TurnReply`. `temperature` is `Some(t)` to sample at `t`, or `None` to

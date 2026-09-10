@@ -38,14 +38,14 @@ impl TzTransport {
 }
 
 impl ChatTransport for TzTransport {
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
         // TensorZero's function config owns tool wiring server-side (a variant's `tools` list in
         // `tensorzero.toml`), so this schema is never sent over `/inference` — `call()` below
         // ignores its `tools` argument entirely. It still needs SOME shape to hand back to the
         // agent loop (which advertises it via `Some(&tools)` regardless of transport), so this
         // reuses the OpenAI-shape schema for consistency with the other transports rather than
         // inventing a TZ-specific — but unused — envelope.
-        super::openai::tools_schema(graph_on, verify_available)
+        super::openai::tools_schema_from_ctx(ctx)
     }
 
     fn call(
@@ -362,7 +362,15 @@ mod tests {
     fn tools_schema_returns_a_nonempty_schema() {
         let ep = test_endpoint("http://x", Some("f"));
         let transport = TzTransport::new(&ep);
-        let schema = transport.tools_schema(true, true);
+        let ctx = glossa::tools::registry::ToolContext {
+            profile: glossa::tools::registry::Tier::Reader,
+            graph_on: true,
+            verify_available: true,
+            no_source_file: false,
+            no_image: false,
+            features: glossa::tools::registry::FeatureSet::default(),
+        };
+        let schema = transport.tools_schema(&ctx);
         assert!(schema.as_array().is_some_and(|a| !a.is_empty()));
     }
 

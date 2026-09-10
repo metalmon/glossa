@@ -17,8 +17,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct AnthropicTransport;
 
 impl ChatTransport for AnthropicTransport {
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
-        tools_schema(graph_on, verify_available)
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
+        tools_schema_from_ctx(ctx)
     }
 
     fn call(
@@ -102,22 +102,19 @@ fn reconstruct_assistant_content(reply: &TurnReply) -> Vec<Value> {
     content
 }
 
-/// Anthropic tool schema for glossa's agent-facing tools, rendered from the same shared registry
-/// (`glossa::tools::registry::registry()`) `OpenAiTransport::tools_schema` uses — same
-/// name/description/params_schema per tool, but the flat Anthropic envelope (`input_schema`, no
-/// `type:"function"` wrapper). Graph-gated descriptors (glossary/reach/sql/…) are included only
-/// when `graph_on`; `verify` is included only when `verify_available` (serving parity — see
-/// `transport::openai::tools_schema`).
-pub(crate) fn tools_schema(graph_on: bool, verify_available: bool) -> Value {
-    let tools: Vec<Value> = glossa::tools::registry::registry()
-        .iter()
-        .filter(|d| !d.graph_gated || graph_on)
-        .filter(|d| !d.verify_gated || verify_available)
-        .map(|d| {
+/// Anthropic tool schema for glossa's agent-facing tools, rendered from the same shared catalog
+/// (`glossa::tools::registry::resolve_tools`) `OpenAiTransport` uses — same name/description/core
+/// schema per tool, but the flat Anthropic envelope (`input_schema`, no `type:"function"` wrapper).
+/// `resolve_tools(ctx)` applies every gate (graph tools, `verify` fail-closed, `get_source_file`,
+/// `no_image` shaping); this only maps each resolved tool into the Anthropic envelope.
+pub(crate) fn tools_schema_from_ctx(ctx: &glossa::tools::registry::ToolContext) -> Value {
+    let tools: Vec<Value> = glossa::tools::registry::resolve_tools(ctx)
+        .into_iter()
+        .map(|t| {
             json!({
-                "name": d.name,
-                "description": d.description,
-                "input_schema": d.params_schema,
+                "name": t.name,
+                "description": t.desc,
+                "input_schema": t.core_schema,
             })
         })
         .collect();
@@ -262,9 +259,22 @@ fn messages_http(
 mod tests {
     use super::*;
 
+    /// Test-only `ToolContext` builder mirroring `transport::openai::tests::ctx`.
+    fn ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
+        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+        ToolContext {
+            profile: Tier::Reader,
+            graph_on,
+            verify_available,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        }
+    }
+
     #[test]
     fn tools_schema_has_flat_envelope_and_graph_tool() {
-        let schema = AnthropicTransport.tools_schema(true, true);
+        let schema = AnthropicTransport.tools_schema(&ctx(true, true));
         let s = serde_json::to_string(&schema).unwrap();
         assert!(
             !s.contains("\"type\":\"function\""),
@@ -299,8 +309,8 @@ mod tests {
                 .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
                 .collect()
         };
-        let with = names_of(&AnthropicTransport.tools_schema(true, true));
-        let without = names_of(&AnthropicTransport.tools_schema(true, false));
+        let with = names_of(&AnthropicTransport.tools_schema(&ctx(true, true)));
+        let without = names_of(&AnthropicTransport.tools_schema(&ctx(true, false)));
         assert!(
             with.iter().any(|n| n == "verify"),
             "verify present when available; got {with:?}"
@@ -313,7 +323,7 @@ mod tests {
 
     #[test]
     fn tools_schema_graph_off_omits_graph_tool() {
-        let schema = AnthropicTransport.tools_schema(false, true);
+        let schema = AnthropicTransport.tools_schema(&ctx(false, true));
         let names: Vec<&str> = schema
             .as_array()
             .unwrap()
@@ -508,7 +518,7 @@ mod tests {
         };
 
         let transport = AnthropicTransport;
-        let tools = tools_schema(true, true);
+        let tools = tools_schema_from_ctx(&ctx(true, true));
         let exec = |name: &str, args: &Value| {
             assert_eq!(name, "search");
             assert_eq!(args["query"], "x");

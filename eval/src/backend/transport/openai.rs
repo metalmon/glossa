@@ -36,8 +36,8 @@ pub(crate) fn agent_min_p() -> f64 {
 pub struct OpenAiTransport;
 
 impl ChatTransport for OpenAiTransport {
-    fn tools_schema(&self, graph_on: bool, verify_available: bool) -> Value {
-        tools_schema(graph_on, verify_available)
+    fn tools_schema(&self, ctx: &glossa::tools::registry::ToolContext) -> Value {
+        tools_schema_from_ctx(ctx)
     }
 
     fn call(
@@ -251,26 +251,23 @@ pub(crate) fn chat_http_full(
     Err(last_err.unwrap())
 }
 
-/// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single
-/// shared registry (`glossa::tools::registry::registry()`) instead of a hand-written per-tool
-/// JSON block — MCP and the eval agent can no longer drift apart on name/description/schema.
-/// Graph-gated descriptors (glossary/reach/sql) are included only when `graph_on`; `verify` is
-/// included only when `verify_available` (serving parity — an uncalibrated/disabled answer-
-/// grounding gate is withheld from the advertised schema, not just the exec arm). Registry order
-/// is preserved as-is (search/read/grep/glob first, then the graph tools), so ordering here is a
-/// byproduct of the registry, not a curated hand-order.
-pub(crate) fn tools_schema(graph_on: bool, verify_available: bool) -> Value {
-    let tools: Vec<Value> = glossa::tools::registry::registry()
-        .iter()
-        .filter(|d| !d.graph_gated || graph_on)
-        .filter(|d| !d.verify_gated || verify_available)
-        .map(|d| {
+/// OpenAI function-tool schema for glossa's agent-facing tools, rendered from the single shared
+/// catalog (`glossa::tools::registry::resolve_tools`) instead of a hand-written per-tool JSON block
+/// — MCP and the eval agent can no longer drift apart on name/description/schema. `resolve_tools`
+/// already applies every gate for `ctx` (graph tools when `graph_on`, `verify` only when
+/// `verify_available`, `get_source_file` unless `no_source_file`, image fields dropped when
+/// `no_image`), so this function only maps each resolved tool into the OpenAI
+/// `{type:"function",function:{name,description,parameters}}` envelope. Catalog order is preserved.
+pub(crate) fn tools_schema_from_ctx(ctx: &glossa::tools::registry::ToolContext) -> Value {
+    let tools: Vec<Value> = glossa::tools::registry::resolve_tools(ctx)
+        .into_iter()
+        .map(|t| {
             json!({
                 "type": "function",
                 "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.params_schema,
+                    "name": t.name,
+                    "description": t.desc,
+                    "parameters": t.core_schema,
                 }
             })
         })
@@ -386,6 +383,46 @@ pub(crate) fn agent_chat_full(
 mod tests {
     use super::*;
 
+    /// Test-only `ToolContext` builder: a Reader-profile deployment with `graph_on`/`verify_available`
+    /// toggled and every other gate open (`get_source_file` on, image fields kept), so the old
+    /// `tools_schema(graph_on, verify_available)` call sites map cleanly onto the resolver.
+    fn ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
+        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+        ToolContext {
+            profile: Tier::Reader,
+            graph_on,
+            verify_available,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        }
+    }
+
+    /// Task 5: the OpenAI envelope wraps EXACTLY the resolver's core schema per tool, hides `verify`
+    /// when unavailable, and now advertises the full Reader surface (incl. `get_source_file`,
+    /// `get_ontology`) that `resolve_tools` returns.
+    #[test]
+    fn openai_tools_schema_wraps_resolved_core_schema() {
+        use glossa::tools::registry::resolve_tools;
+        let c = ctx(true, false);
+        let v = tools_schema_from_ctx(&c);
+        let arr = v.as_array().unwrap();
+        let names: Vec<&str> = arr
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"verify"), "verify hidden when unavailable");
+        assert!(names.contains(&"get_source_file") && names.contains(&"get_ontology"));
+        // envelope shape + core schema passthrough
+        let resolved = resolve_tools(&c);
+        let search = arr
+            .iter()
+            .find(|t| t["function"]["name"] == "search")
+            .unwrap();
+        assert_eq!(search["type"], "function");
+        let core = &resolved.iter().find(|r| r.name == "search").unwrap().core_schema;
+        assert_eq!(&search["function"]["parameters"], core);
+    }
     /// The configured `endpoint` is POSTed VERBATIM — nothing is appended (no `/v1/chat/completions`)
     /// and nothing is stripped. A distinctive path that any rewriting would corrupt proves it, and
     /// guards the old footgun where a `.../v1` endpoint got a second `/v1` on the chat_once path.
@@ -446,7 +483,7 @@ mod tests {
     /// envelope and includes a graph-gated tool name (only advertised when `graph_on`).
     #[test]
     fn transport_tools_schema_graph_on_has_function_envelope_and_graph_tool() {
-        let schema = OpenAiTransport.tools_schema(true, true);
+        let schema = OpenAiTransport.tools_schema(&ctx(true, true));
         let s = serde_json::to_string(&schema).unwrap();
         assert!(
             s.contains("\"type\":\"function\""),
@@ -480,8 +517,8 @@ mod tests {
                 })
                 .collect()
         };
-        let with = names_of(&tools_schema(true, true));
-        let without = names_of(&tools_schema(true, false));
+        let with = names_of(&tools_schema_from_ctx(&ctx(true, true)));
+        let without = names_of(&tools_schema_from_ctx(&ctx(true, false)));
         assert!(
             with.iter().any(|n| n == "verify"),
             "verify present when available"

@@ -579,10 +579,21 @@ type = \"boolean\"\n";
         // expose a few more. If this ever fails, either a registry tool silently dropped out of
         // the Reader profile (real drift — investigate), or the registry grew a name the MCP
         // surface doesn't have (typo/rename).
-        let reg: Vec<String> = crate::tools::registry::registry()
-            .iter()
-            .map(|d| d.name.to_string())
-            .collect();
+        let reg: Vec<String> = {
+            use crate::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
+            let ctx = ToolContext {
+                profile: Tier::Reader,
+                graph_on: true,
+                verify_available: true,
+                no_source_file: false,
+                no_image: false,
+                features: FeatureSet::default(),
+            };
+            resolve_tools(&ctx)
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
         let reader = reader_tool_names();
         for name in &reg {
             // `verify` is fail-closed: it lives in the registry (advertised in every profile) but is

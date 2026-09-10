@@ -504,7 +504,7 @@ mod tests {
     }
 
     impl ChatTransport for MockTransport {
-        fn tools_schema(&self, _graph_on: bool, _verify_available: bool) -> Value {
+        fn tools_schema(&self, _ctx: &glossa::tools::registry::ToolContext) -> Value {
             json!([])
         }
 
@@ -1123,7 +1123,7 @@ mod tests {
         calls: RefCell<usize>,
     }
     impl ChatTransport for OverflowMock {
-        fn tools_schema(&self, _g: bool, _verify_available: bool) -> Value {
+        fn tools_schema(&self, _ctx: &glossa::tools::registry::ToolContext) -> Value {
             json!([])
         }
         fn call(
@@ -1185,7 +1185,7 @@ mod tests {
     fn context_retry_propagates_non_overflow_error() {
         struct AlwaysRateLimited;
         impl ChatTransport for AlwaysRateLimited {
-            fn tools_schema(&self, _g: bool, _verify_available: bool) -> Value {
+            fn tools_schema(&self, _ctx: &glossa::tools::registry::ToolContext) -> Value {
                 json!([])
             }
             fn call(
