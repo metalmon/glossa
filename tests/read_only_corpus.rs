@@ -78,6 +78,9 @@ fn full_cycle_never_writes_into_corpus_roots() {
     glossa::cli_fmt::write_last_search(state.path(), &[("a.md".into(), "p.1".into())]).unwrap();
     // Traces and notebook notes must ALSO land under state_base, not the corpus.
     glossa::trace::TraceLog::to_dir(state.path()).log("read", serde_json::json!({}), serde_json::json!({}));
+    // `notebook` is a cargo feature (default-on, off under --no-default-features); gate the
+    // note-write step so this test also compiles in the lean release config CI.
+    #[cfg(feature = "notebook")]
     glossa::notebook::with_notebook_write_lock(state.path(), || {
         let dir = glossa::notebook::notes_root(state.path()).join("a.md");
         std::fs::create_dir_all(&dir).unwrap();
