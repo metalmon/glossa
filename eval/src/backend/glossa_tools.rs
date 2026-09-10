@@ -528,6 +528,15 @@ pub fn exec(
             };
             (body, Vec::new(), Vec::new())
         }
+        "get_ontology" => {
+            // Mirrors src/mcp.rs's `get_ontology` handler: pretty-print the corpus ontology.
+            let ont = glossa::graph::ontology::Ontology::load_or_default(root);
+            (
+                glossa::graph::ontology_export::export_pretty(&ont),
+                Vec::new(),
+                Vec::new(),
+            )
+        }
         "sql" => {
             // `sql` is inherently a string (mirrors the real MCP `GraphQueryArgs`); empty/absent
             // returns the schema instead of running a query.
@@ -1050,6 +1059,92 @@ mod tests {
             !missing.starts_with("unknown tool"),
             "must dispatch, not fall through: {missing}"
         );
+    }
+
+    /// `.glossa/ontology.toml` enabling `[verify]` with calibrated thresholds — mirrors
+    /// `src/mcp.rs`'s test helper of the same name, so `verify` resolves as available and its
+    /// exec arm doesn't withhold on the uncalibrated path.
+    fn write_verify_enabled_ontology(root: &std::path::Path) {
+        let g = root.join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled = true\n[verify.threshold]\nsingle = 0.8\nmulti = 0.9\n",
+        )
+        .unwrap();
+    }
+
+    /// `get_ontology` was advertised in Task 3 as a Reader-tier agent-facing tool (the catalog
+    /// entry in `glossa::tools::registry`) but `exec` had no arm for it — it fell through to
+    /// "unknown tool: get_ontology". Confirm it now returns the same pretty-printed ontology
+    /// JSON the MCP `get_ontology` handler returns.
+    #[test]
+    fn get_ontology_via_exec_returns_pretty_ontology() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let trace = TraceLog::disabled();
+
+        let (body, ids, imgs) = exec(
+            "get_ontology",
+            &json!({}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        );
+        assert!(ids.is_empty());
+        assert!(imgs.is_empty());
+        assert!(!body.starts_with("unknown tool"), "got: {body}");
+        // export_pretty of the default ontology is valid, structured JSON.
+        let v: serde_json::Value = serde_json::from_str(&body).expect("ontology is JSON");
+        assert!(
+            v.is_object() || v.is_array(),
+            "ontology export is structured JSON, got: {body}"
+        );
+    }
+
+    /// Executor-coverage guard: every Reader-tier tool `resolve_tools` advertises for a
+    /// graph-on, verify-calibrated deployment (the same surface Task 3 wired the catalog for)
+    /// must have a real `exec` arm. This is what would have caught the `get_ontology` gap
+    /// before it shipped, and catches the next one the same way.
+    #[test]
+    fn every_reader_tool_has_an_exec_arm() {
+        use glossa::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
+
+        let dir = tempfile::tempdir().unwrap();
+        write_verify_enabled_ontology(dir.path()); // so `verify` is in the set
+        std::fs::write(dir.path().join("note.md"), "# Hello\n\nsome content\n").unwrap();
+        glossa::index::store::index_dir(dir.path(), true).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let g = glossa::graph::store::GraphStore::open(dir.path()).unwrap();
+        let spec = glossa::tools::ChainSpec::default();
+        let trace = TraceLog::disabled();
+
+        let ctx = ToolContext {
+            profile: Tier::Reader,
+            graph_on: true,
+            verify_available: true,
+            no_source_file: false,
+            no_image: false,
+            features: FeatureSet::default(),
+        };
+        for t in resolve_tools(&ctx) {
+            let (body, _ids, _imgs) = exec(
+                t.name,
+                &json!({}),
+                dir.path(),
+                &idx,
+                Some(&g),
+                &spec,
+                &trace,
+            );
+            assert!(
+                !body.starts_with("unknown tool:"),
+                "no exec arm for advertised tool {}",
+                t.name
+            );
+        }
     }
 
     fn prov() -> glossa::graph::store::Provenance {
