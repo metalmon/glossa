@@ -339,6 +339,13 @@ pub struct OpenAiBackend {
     /// graph-ON arm when true (opens the graph and advertises the graph tools); graph-OFF
     /// baseline when false (flat search/read only). The A/B knob for the graph-transfer eval.
     pub use_graph: bool,
+    /// Enable vision: advertise `read(page_image)` in the tool schema — mirrors an MCP server
+    /// started with `--vision`. Plumbed from the `kbx eval --vision` CLI flag (`false`/off by
+    /// default, matching today's behavior exactly) into `answer_tool_context`'s
+    /// `no_image: !vision`. Advertisement-only here: the answer path never feeds returned page
+    /// images back to the model regardless (see the comment above `execute_tool`'s vision-discard
+    /// in `answer_capturing`), unlike `build --vision`'s extract path.
+    pub vision: bool,
     /// Runtime-injected system prompt (e.g. loaded from an editable `.md` file at launch), used
     /// VERBATIM as the system message when `Some`. `None` preserves today's behavior exactly:
     /// the compiled `prompt::system_prompt(self.use_graph)`. This is what lets the reader's
@@ -463,9 +470,7 @@ impl OpenAiBackend {
         // gate is disabled/uncalibrated for this corpus — mirrors the live MCP server's fail-closed
         // advertisement (the `exec` arm already withholds the diagnostic; this also stops the model
         // from being offered a tool call that can't do anything).
-        // TODO(Task 6): thread --vision (Task 6 replaces this hardcoded flag with the plumbed one).
-        let vision = false;
-        let ctx = answer_tool_context(work, graph.is_some(), vision);
+        let ctx = answer_tool_context(work, graph.is_some(), self.vision);
         let tools = transport.tools_schema(&ctx);
 
         let trace = TraceLog::to_dir(work);
@@ -579,6 +584,7 @@ impl OpenAiBackend {
             api_key: None,
             timeout: Duration::from_secs(1),
             use_graph: false,
+            vision: false,
             system_prompt: Some(s.to_string()),
             temperature: None,
             user_sim: None,
@@ -1122,6 +1128,15 @@ mod tests {
         ));
         // With no shared handle the backend falls back to per-question open (today's behavior).
         assert!(OpenAiBackend::for_test_with_prompt("x").shared.is_none());
+    }
+
+    #[test]
+    fn answer_tool_context_maps_vision_to_no_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx_on = answer_tool_context(dir.path(), true, true);
+        let ctx_off = answer_tool_context(dir.path(), true, false);
+        assert_eq!(ctx_on.no_image, false);
+        assert_eq!(ctx_off.no_image, true);
     }
 
     #[test]

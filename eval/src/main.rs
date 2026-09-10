@@ -157,6 +157,8 @@ fn main() -> anyhow::Result<()> {
                         api_key,
                         timeout,
                         use_graph: !no_graph,
+                        // Legacy `kb-eval run` CLI has no `--vision` flag -> off (today's behavior).
+                        vision: false,
                         system_prompt: None,
                         // Legacy `kb-eval run` CLI: no lab endpoint here, so per-endpoint
                         // temperature is env-only (`KB_EVAL_TEMP` via `resolve_temperature`).

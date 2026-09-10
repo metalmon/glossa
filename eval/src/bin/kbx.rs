@@ -724,6 +724,10 @@ struct EvalArgs {
     /// `lab.35b.toml`. Prompt files still come from the workspace.
     #[arg(long)]
     lab: Option<PathBuf>,
+    /// Enable vision: advertise read(page_image) and feed returned page images to the model
+    /// (matches an MCP server launched with --vision). Off by default.
+    #[arg(long)]
+    vision: bool,
 }
 
 struct ExportArgs {
@@ -963,6 +967,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 api_key: api_key.clone(),
                 timeout,
                 use_graph: true,
+                vision: args.vision,
                 system_prompt: Some(answer_md.clone()),
                 temperature: lab.model.temperature,
                 user_sim: lab.user_sim.clone(),
