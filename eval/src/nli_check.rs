@@ -8,9 +8,9 @@
 //! IO); [`nli_check`] is the thin wrapper that gathers the facts (config resolution, filesystem
 //! probes, an optional model load + sanity entailment) and prints the report.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use glossa::gate::config::VerifyConfig;
 
@@ -210,6 +210,94 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...]`: resolve
+/// the glossa dir the same way [`nli_check`] does, then write `[verify.nli]` into the corpus
+/// `ontology.toml` via [`write_nli_config`] and print what was written + a `kbx nli check` hint.
+/// Completes the `download` -> `set` -> `check` workflow so a user never hand-edits TOML.
+pub fn nli_set(
+    path: Option<PathBuf>,
+    model_dir: PathBuf,
+    scorer: String,
+    entail_index: Option<usize>,
+    mode: Option<String>,
+) -> Result<()> {
+    let kbx_paths = crate::workspace::resolve(path);
+    let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
+    write_nli_config(
+        &glossa_dir,
+        &model_dir,
+        &scorer,
+        entail_index,
+        mode.as_deref(),
+    )?;
+
+    let ontology_path = glossa_dir.join("ontology.toml");
+    println!(
+        "wrote [verify.nli] scorer = {scorer:?}, model_dir = {} -> {}",
+        model_dir.display(),
+        ontology_path.display()
+    );
+    if let Some(ei) = entail_index {
+        println!("wrote [verify.nli] entail_index = {ei}");
+    }
+    if let Some(m) = &mode {
+        println!("wrote [verify] mode = {m:?}");
+    }
+    println!("run `kbx nli check` to confirm readiness.");
+    Ok(())
+}
+
+/// Write `[verify.nli].{scorer,model_dir}` (+ `entail_index` when given, + `[verify].mode` when
+/// given) into `<glossa_dir>/ontology.toml`, preserving every other table/comment. Mirrors
+/// `calibrate::write_threshold`'s established preserve-other-keys pattern: parse the existing file
+/// (or start from an empty document when absent) into a `toml_edit::DocumentMut`, mutate only the
+/// keys this function owns, then write the whole document back. Does NOT touch
+/// `[verify.nli.threshold]` (calibration's own keys) or any other table.
+pub fn write_nli_config(
+    glossa_dir: &Path,
+    model_dir: &Path,
+    scorer: &str,
+    entail_index: Option<usize>,
+    mode: Option<&str>,
+) -> Result<()> {
+    use toml_edit::{value, DocumentMut, Item, Table};
+
+    let path = glossa_dir.join("ontology.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: DocumentMut = existing
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    if doc.get("verify").is_none() {
+        doc["verify"] = Item::Table(Table::new());
+    }
+    let verify = doc["verify"]
+        .as_table_mut()
+        .context("[verify] is not a table")?;
+
+    if let Some(m) = mode {
+        verify["mode"] = value(m);
+    }
+
+    if verify.get("nli").is_none() {
+        verify["nli"] = Item::Table(Table::new());
+    }
+    let nli = verify["nli"]
+        .as_table_mut()
+        .context("[verify.nli] is not a table")?;
+    nli["scorer"] = value(scorer);
+    // toml_edit escapes Windows backslashes in the emitted string; this round-trips back through
+    // `VerifyConfig::resolve`'s `String` -> `PathBuf` unchanged.
+    nli["model_dir"] = value(model_dir.display().to_string());
+    if let Some(ei) = entail_index {
+        nli["entail_index"] = value(ei as i64);
+    }
+
+    std::fs::create_dir_all(glossa_dir)?;
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +417,76 @@ mod tests {
             line.contains("sanity probe did not run"),
             "line was: {line}"
         );
+    }
+
+    /// `write_nli_config` round-trips model_dir/scorer/entail_index/mode into a fresh
+    /// `ontology.toml` (mirrors `calibrate::write_threshold_roundtrips_into_ontology`).
+    #[test]
+    fn write_nli_config_roundtrips_into_ontology() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa"); // write_nli_config writes <glossa_dir>/ontology.toml
+        write_nli_config(
+            &glossa,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            Some(2),
+            Some("nli"),
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("[verify.nli]"));
+        assert!(o.contains("scorer = \"in_process\""));
+        assert!(o.contains("model_dir"));
+        assert!(o.contains("rubert-nli"));
+        assert!(o.contains("entail_index = 2"));
+        assert!(o.contains("mode = \"nli\""));
+        // Not touched.
+        assert!(!o.contains("[verify.nli.threshold]"));
+    }
+
+    /// Omitting `entail_index`/`mode` writes neither key — `set` only wires what was given.
+    #[test]
+    fn write_nli_config_omits_unset_optional_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        write_nli_config(&glossa, Path::new("/models/x"), "in_process", None, None).unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("scorer = \"in_process\""));
+        assert!(!o.contains("entail_index"));
+        assert!(!o.contains("mode ="));
+    }
+
+    /// `write_nli_config` must preserve unrelated existing content in `ontology.toml`, not clobber
+    /// it — same rationale as `calibrate::write_threshold_preserves_other_tables`.
+    #[test]
+    fn write_nli_config_preserves_other_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        std::fs::create_dir_all(&glossa).unwrap();
+        std::fs::write(
+            glossa.join("ontology.toml"),
+            "# a hand-authored comment\n[types.symptom]\nlabel = \"Symptom\"\n\
+             [verify.nli.threshold]\nsingle = 0.5\nmulti = 0.6\n",
+        )
+        .unwrap();
+        write_nli_config(
+            &glossa,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            None,
+            None,
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("a hand-authored comment"));
+        assert!(o.contains("[types.symptom]"));
+        assert!(o.contains("label = \"Symptom\""));
+        // Existing calibrated NLI thresholds must survive a `set` write untouched.
+        assert!(o.contains("[verify.nli.threshold]"));
+        assert!(o.contains("single = 0.5"));
+        assert!(o.contains("multi = 0.6"));
+        // And the new keys landed alongside them.
+        assert!(o.contains("scorer = \"in_process\""));
+        assert!(o.contains("rubert-nli"));
     }
 }
