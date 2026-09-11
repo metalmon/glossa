@@ -2,6 +2,7 @@
 pub mod token;
 pub mod df;
 pub mod df_cache;
+pub mod nli;
 pub mod score;
 pub mod config;
 
