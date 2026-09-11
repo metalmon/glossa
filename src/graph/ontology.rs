@@ -105,11 +105,21 @@ struct RawVerifyAc {
     threshold: Option<RawVerifyThreshold>,
 }
 
-/// `[verify.nli]` overlay: the NLI support-verifier's calibrated thresholds by bucket.
+/// `[verify.nli]` overlay: the NLI support-verifier's calibrated thresholds by bucket, plus
+/// runtime scorer selection (`scorer`/`model_dir`/`entail_index` — Plan 2 Task 3).
 #[derive(Debug, Deserialize, Default, Clone)]
 struct RawVerifyNli {
     #[serde(default)]
     threshold: Option<RawVerifyThreshold>,
+    /// Runtime NLI scorer implementation: "in_process" | "http" (http not built yet).
+    #[serde(default)]
+    scorer: Option<String>,
+    /// Filesystem path to the exported NLI model directory (in-process scorer only).
+    #[serde(default)]
+    model_dir: Option<String>,
+    /// Softmax index of the entailment class in the model's output; model-export-specific.
+    #[serde(default)]
+    entail_index: Option<usize>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -382,6 +392,13 @@ pub struct Ontology {
     /// Per-corpus `[verify.nli.threshold]` override. See [`Ontology::verify_nli_threshold_single`].
     verify_nli_threshold_single: Option<f32>,
     verify_nli_threshold_multi: Option<f32>,
+    /// Per-corpus `[verify.nli]` runtime scorer selection (Plan 2 Task 3). `None` per field when
+    /// unset → `gate::config::VerifyConfig` applies its engine default (no scorer ⇒ AC-only). See
+    /// [`Ontology::verify_nli_scorer`], [`Ontology::verify_nli_model_dir`],
+    /// [`Ontology::verify_nli_entail_index`].
+    verify_nli_scorer: Option<String>,
+    verify_nli_model_dir: Option<String>,
+    verify_nli_entail_index: Option<usize>,
     /// Per-corpus `[verify.combined.<bucket>]` z-score consensus calibration (Task CZ-2's output).
     /// `None` when the bucket's table is absent OR only partially populated — see
     /// [`Ontology::verify_combined_single`].
@@ -557,6 +574,9 @@ impl Ontology {
                 .as_ref()
                 .and_then(|n| n.threshold.as_ref())
                 .and_then(|t| t.multi),
+            verify_nli_scorer: raw.verify.nli.as_ref().and_then(|n| n.scorer.clone()),
+            verify_nli_model_dir: raw.verify.nli.as_ref().and_then(|n| n.model_dir.clone()),
+            verify_nli_entail_index: raw.verify.nli.as_ref().and_then(|n| n.entail_index),
             verify_combined_single: raw
                 .verify
                 .combined
@@ -792,6 +812,24 @@ impl Ontology {
     /// Per-corpus `[verify.nli.threshold].multi` override, or `None` when uncalibrated.
     pub fn verify_nli_threshold_multi(&self) -> Option<f32> {
         self.verify_nli_threshold_multi
+    }
+
+    /// Per-corpus `[verify.nli].scorer` override ("in_process" | "http"), or `None` when the
+    /// ontology declares none — in which case `gate::config::VerifyConfig` leaves it unset and
+    /// `gate::resolve_scorer` returns `None` (AC-only, fail-open).
+    pub fn verify_nli_scorer(&self) -> Option<&str> {
+        self.verify_nli_scorer.as_deref()
+    }
+
+    /// Per-corpus `[verify.nli].model_dir` override (in-process scorer only), or `None` when unset.
+    pub fn verify_nli_model_dir(&self) -> Option<&str> {
+        self.verify_nli_model_dir.as_deref()
+    }
+
+    /// Per-corpus `[verify.nli].entail_index` override, or `None` when unset — in which case
+    /// `gate::config::VerifyConfig` applies its engine default (`0`).
+    pub fn verify_nli_entail_index(&self) -> Option<usize> {
+        self.verify_nli_entail_index
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the

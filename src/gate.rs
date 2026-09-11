@@ -44,7 +44,36 @@ pub fn verify_outcome(
     answer: &str,
     chunk_paths: &[String],
 ) -> anyhow::Result<(GateOutcome, usize)> {
-    verify_outcome_with_scorer(glossa_dir, answer, chunk_paths, None)
+    let cfg = VerifyConfig::resolve(glossa_dir);
+    let scorer = resolve_scorer(&cfg);
+    verify_outcome_with_scorer(glossa_dir, answer, chunk_paths, scorer.as_deref())
+}
+
+/// Build the runtime NLI scorer from `[verify.nli]`, or `None` (=> AC-only, fail-open — spec 4).
+/// `scorer = "in_process"` + feature `nli` compiled in + `model_dir` set => a real `InProcessNli`;
+/// any load error (bad path, corrupt export, missing ort runtime) is logged and downgraded to
+/// `None` rather than propagated, so a broken model directory never takes the gate down — it just
+/// falls back to AC-only. With the `nli` feature off this is the stub below, so `verify_outcome`'s
+/// behaviour is byte-for-byte unchanged from before this scorer existed.
+#[cfg(feature = "nli")]
+pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    if cfg.scorer.as_deref() != Some("in_process") {
+        return None;
+    }
+    let dir = cfg.model_dir.as_ref()?;
+    match glossa_nli::InProcessNli::load(dir, cfg.entail_index) {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            eprintln!("nli scorer load failed ({}): {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// `nli` feature off => no in-process scorer is even compiled; always `None` (AC-only).
+#[cfg(not(feature = "nli"))]
+pub fn resolve_scorer(_cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    None
 }
 
 /// Same as [`verify_outcome`], plus an optional NLI scorer. `None` ⇒ model-free (today's
@@ -165,6 +194,58 @@ pub(crate) fn reader_reason_short(o: &GateOutcome) -> &'static str {
                 "below threshold"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_scorer_tests {
+    use super::*;
+
+    fn base_cfg() -> VerifyConfig {
+        VerifyConfig {
+            enabled: true,
+            rare_df_frac: 0.03,
+            min_answer_tokens: 10,
+            threshold_single: None,
+            threshold_multi: None,
+            mode: VerifyMode::Ac,
+            nli_threshold_single: None,
+            nli_threshold_multi: None,
+            combined_single: None,
+            combined_multi: None,
+            scorer: None,
+            model_dir: None,
+            entail_index: 0,
+        }
+    }
+
+    // Runs identically with the `nli` feature ON or OFF: with it off `resolve_scorer` is the
+    // always-`None` stub; with it on, `cfg.scorer.is_none()` hits the function's own early return.
+    // Either way this proves the fail-open default (no scorer configured => AC-only).
+    #[test]
+    fn none_scorer_yields_no_runtime_scorer() {
+        let cfg = base_cfg();
+        assert!(resolve_scorer(&cfg).is_none());
+    }
+
+    // Same reasoning as above, but for an unrecognised (or not-yet-built, e.g. "http") scorer
+    // name: never a runtime scorer regardless of feature state.
+    #[test]
+    fn unrecognized_scorer_name_yields_no_runtime_scorer() {
+        let mut cfg = base_cfg();
+        cfg.scorer = Some("http".to_string());
+        assert!(resolve_scorer(&cfg).is_none());
+    }
+
+    // With the `nli` feature ON, `scorer = "in_process"` but no `model_dir` must still fail open
+    // rather than panic on the `?` — this is the "configured wrong" fail-open path (vs. simply
+    // unconfigured above).
+    #[cfg(feature = "nli")]
+    #[test]
+    fn in_process_without_model_dir_yields_no_runtime_scorer() {
+        let mut cfg = base_cfg();
+        cfg.scorer = Some("in_process".to_string());
+        assert!(resolve_scorer(&cfg).is_none());
     }
 }
 

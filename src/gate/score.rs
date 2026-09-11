@@ -239,6 +239,9 @@ mod tests {
             nli_threshold_multi: None,
             combined_single: None,
             combined_multi: None,
+            scorer: None,
+            model_dir: None,
+            entail_index: 0,
         };
         let mut df = DfTable::new();
         df.add_chunk(&tokenize("pp.19.00.00.00 text"));
@@ -287,6 +290,9 @@ mod tests {
             nli_threshold_multi: Some(nli_thr),
             combined_single: None,
             combined_multi: None,
+            scorer: None,
+            model_dir: None,
+            entail_index: 0,
         }
     }
 
@@ -307,6 +313,9 @@ mod tests {
             nli_threshold_multi: Some(0.5),
             combined_single: Some(st),
             combined_multi: Some(st),
+            scorer: None,
+            model_dir: None,
+            entail_index: 0,
         }
     }
 
