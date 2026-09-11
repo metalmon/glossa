@@ -413,6 +413,8 @@ fn rollout_one(
                 q.answerable,
                 cfg.credit_abstention,
                 Some(idx),
+                &[],
+                1,
             ) {
                 // Keep the judge's reason alongside the score — the reflector surfaces it to the
                 // teacher as WHY this case was wrong (signal B). Dropping it here is what left the

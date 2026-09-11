@@ -865,6 +865,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // how the judge scores a decline on an ANSWERABLE question (safety_first credits it `partial`).
     let policy = AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref());
     let credit_abstention = policy.credit_abstention();
+    // Judge samples per case (majority vote); the judge model is non-deterministic even at temp 0.
+    let n_votes = lab.tuning.judge_votes.unwrap_or(5);
     if n_unanswerable > 0 {
         if use_judge {
             println!(
@@ -1044,6 +1046,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                         Some(p) => parse_trace_file(&p),
                         None => (Vec::new(), Vec::new(), Vec::new(), String::new()),
                     };
+                // Same worker thread as answer(): drain the reader↔user_sim text dialogue so the judge
+                // grades the reader's actual answer, not a closing pleasantry. Empty when no user_sim ran.
+                let reader_dialogue = kb_eval::backend::openai::take_reader_dialogue();
 
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the
@@ -1080,6 +1085,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                             q.answerable,
                             credit_abstention,
                             judge_idx.as_ref(),
+                            &reader_dialogue,
+                            n_votes,
                         ) {
                             Ok(Judgement {
                                 verdict,

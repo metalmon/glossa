@@ -9,7 +9,7 @@ use glossa::index::store::DocIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Verdict {
     Correct,
     Partial,
