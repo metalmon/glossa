@@ -99,7 +99,7 @@ The report lists four kinds of doubt:
 
 | Doubt | What it means | What it asks of you |
 |---|---|---|
-| `ungrounded` | An answer node lost its link to a source section. | Re-ground it, or prune it if the source is gone. |
+| `ungrounded` | An answer node lost its link to a source section. | Re-ground it, prune it if the source is gone, or — if the document just moved/relabeled — `kb graph doctor --relink` (see below). |
 | `stale` | An answer's source **document was edited** since it was built. | **Re-ground** (re-build that doc); `--prune-stale` only as a last resort. |
 | `incomplete` | A node sits on no complete reasoning chain. | Finish the chain, or prune it. |
 | `dangling` | A query-side node can no longer reach any live answer (its terminal went stale/ungrounded/deleted). | Fix/restore the terminal, or prune the orphaned branch. |
@@ -198,6 +198,76 @@ kb graph doctor --prune-ungrounded   # removes the orphaned answer nodes
 unreachable query-side chains in one pass. Combine the whole clean-up in one command:
 `kb graph doctor --prune-ungrounded --prune-dangling`. Both prunes are guarded against a mass-wipe
 (they refuse an ontology-mismatch or whole-layer wipe unless you pass `--force`).
+
+### You relabeled the corpus, or moved a document between folders
+
+A reasoning node is *grounded* while its `MENTIONS` edge points at a structural node
+(`Document`/`Section`) that still exists. Two changes leave a document's **content** untouched but
+break that link anyway, because the target's **key** changes even though nothing was deleted:
+
+- **Relabeling** — the same corpus, addressed a different way. As covered in
+  [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys),
+  discovery yields label-free keys and an explicit path/`--root` yields basename-labeled ones.
+  Index once by discovery and once with `kb index /data/plc`, and every key gains (or loses) a
+  `plc/` prefix — `manual.pdf` ↔ `plc/manual.pdf`.
+- **Moving a file between folders** inside the corpus — `plc/manual.pdf` becomes
+  `arch/2024/manual.pdf`. The filename and section are unchanged; only the leading folder path is.
+
+Either way, a fresh `kb index` updates the *structural* layer to the new keys immediately — but the
+*reasoning* layer's `MENTIONS` edges still point at the old ones, so their terminals suddenly report
+`ungrounded` even though the source document is right there, just addressed under a different key:
+
+```
+$ kb graph doctor
+ungrounded: 517  (relocated/relabeled docs, not orphans)
+   -> plc  (498)
+  plc -> arch/2024  (14)
+  → non-destructive fix:  kb graph doctor --relink   (full list: --verbose)
+  ambiguous: 2   (same filename in several folders — resolve by hand)
+  real orphans: 3
+  res:gone  [Resolution]  power-cycle sequence  plc/deleted.pdf#1  ungrounded
+  ...
+```
+
+That grouped block — `old_prefix -> new_prefix (N)` — replaces the old flat per-node listing once
+any node in the `ungrounded` bucket is recoverable this way: of the 517 nodes reported, 498 lost
+their label prefix, 14 followed a folder move (512 relinkable in total), 2 are ambiguous (the same
+`filename#section` now exists under more than one live document — the doctor won't guess, resolve
+those by hand), and 3 are **real orphans** (no live document matches at all — their source is
+genuinely gone).
+
+The cure is `kb graph doctor --relink`: it finds each affected node's document at its **current**
+key — matched by filename + section against the graph's own live structural nodes, not against a
+separate index or manifest — and re-points the `MENTIONS` edge (and the node's provenance) at it.
+It's non-destructive: nothing is deleted, and it backs up `.glossa/graph.sqlite` (as
+`graph.sqlite.pre-relink`) before writing. Run it, then confirm:
+
+```
+$ kb graph doctor --relink
+relinked: 512
+$ kb graph doctor
+ungrounded: 5
+  res:gone  [Resolution]  power-cycle sequence  plc/deleted.pdf#1  ungrounded
+  ...
+```
+
+Once the 512 relinkable nodes are fixed, nothing is relinkable anymore, so the report falls back to
+a plain `ungrounded: 5` listing (the 3 real orphans plus the 2 still-ambiguous nodes) — the
+`(relocated/relabeled docs, not orphans)` framing and the `real orphans:` split only appear while
+the report still has a relinkable group to summarize.
+
+**`--prune-ungrounded` refuses while relinkable nodes exist.** Those 512 nodes are relocated
+documents, not orphans, so pruning them would silently destroy recoverable reasoning — the command
+exits with an error pointing at `kb graph doctor --relink` instead of deleting. Run `--relink`
+first; `--force` overrides the refusal only if you genuinely intend to delete relocatable nodes
+without recovering them.
+
+**Current limit: relink follows a relabel or a folder move, not a rename.** The match key is
+filename + section, so as long as `manual.pdf#12` keeps that name somewhere under the corpus,
+`--relink` finds it regardless of which folder or label it's under. If the file itself is renamed
+(`manual.pdf` → `manual-v2.pdf`), its key stops matching by filename and `--relink` can't follow it
+automatically — those nodes remain genuine `ungrounded` doubts until re-grounded by hand (or the
+old filename is restored).
 
 ---
 

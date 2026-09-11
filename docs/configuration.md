@@ -57,6 +57,29 @@ ontology `[retrieval]` table rather than here: `GLOSSA_PPR_SIM_WEIGHT` and
 `GLOSSA_PPR_SPINE_WEIGHT` — see
 [graph-and-ontology.md § Retrieval tuning](graph-and-ontology.md#retrieval-tuning).
 
+## Corpus roots and document keys
+
+A document's **key** — the identifier the index stores, that search results reference, and that a
+graph node's grounding (`source_path`) points at — is its path **relative to the corpus root**,
+not its absolute filesystem path. How you address the root decides whether that key carries a
+label prefix:
+
+- **Discovery** — no path given; `kb` walks up from the current directory to find `.glossa/` — keys
+  come out **label-free**: `manual.pdf`, `guide/intro.pdf`.
+- **An explicit path** — a positional `PATH` (`kb index /data/plc`) or `--root PATH` — keys are
+  prefixed with the corpus's **basename** label: `plc/manual.pdf`, `plc/guide/intro.pdf`.
+  `--root LABEL=PATH` sets the label explicitly instead of deriving it from the basename.
+
+**Pick one way to address a given corpus and stay consistent.** Discovery today and an explicit
+path tomorrow (or vice versa) changes every document's key — `manual.pdf` becomes `plc/manual.pdf`
+or back again — which breaks any reasoning-layer grounding built under the old key form, even
+though the file itself never moved. If that happens, it's non-destructively recoverable: see
+[graph-lifecycle.md § You relabeled the corpus, or moved a document between
+folders](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders).
+
+**Multiple roots** each need a distinct label — a key is `label/relpath` — since two roots sharing
+a label would collide on the same keys.
+
 ## Config-file keys (`--config` TOML)
 
 The `--config <path>` file (also `GLOSSA_CONFIG`) holds the base settings for one deployment

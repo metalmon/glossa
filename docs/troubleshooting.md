@@ -64,6 +64,25 @@ Known extraction limits, not a bug to work around with a different flag:
 
 Full list: [architecture.md § Known extraction limitations](architecture.md#known-extraction-limitations).
 
+## Many nodes report `ungrounded` after reindexing or re-addressing a corpus
+
+The documents are still there — what changed is their **key**. A document's key is its path
+relative to the corpus root, and the key's label form depends on how you addressed the root:
+discovery (no path given) is label-free, a positional `PATH` or `--root PATH` prefixes it with the
+corpus's basename. Index the same corpus once by discovery and once with an explicit path (or move
+a file between folders inside the corpus), and the reasoning layer's `MENTIONS` edges still point
+at the old key — its terminals now report `ungrounded` even though the source document didn't go
+anywhere. See [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys)
+for the label rule.
+
+Fix it non-destructively with `kb graph doctor --relink` — it matches each affected node's
+document at its current key by filename + section and re-points the grounding, backing up
+`graph.sqlite` first. Do **not** reach for `--prune-ungrounded` here: it refuses while relinkable
+nodes exist, precisely to stop this from being mistaken for real data loss. Full walkthrough,
+collapsed-output example, and the rename limitation:
+[graph-lifecycle.md § You relabeled the corpus, or moved a document between
+folders](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders).
+
 ## `[tls]` section rejected / TLS flags have no effect
 
 The **default build has no TLS crypto surface** (smaller binary, no extra CVE exposure) — it

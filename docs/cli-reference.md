@@ -19,7 +19,7 @@ These apply to every subcommand (clap `global = true`):
 
 | Flag | Env | Meaning |
 |------|-----|---------|
-| `--root [LABEL=]PATH` (repeatable) | `GLOSSA_ROOTS` (newline-separated) | Corpus source folder(s). A bare `--root PATH` auto-labels from the basename. A single positional `PATH` (no `--root`) is the empty-label back-compat form. An explicit `--root` flag list wins outright over `GLOSSA_ROOTS` — never merged. |
+| `--root [LABEL=]PATH` (repeatable) | `GLOSSA_ROOTS` (newline-separated) | Corpus source folder(s). Both a bare `--root PATH` and a positional `PATH` auto-label from the basename (`LABEL=PATH` sets the label explicitly instead). Give neither — run from inside the corpus and let `.glossa/` be found by walking up — and keys come out label-free. An explicit `--root` flag list wins outright over `GLOSSA_ROOTS` — never merged. See [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys) for how this shapes document keys. |
 | `--state-dir <PATH>` | `GLOSSA_STATE_DIR` | Local directory holding `.glossa/` state. Defaults to the (sole) corpus root. Point at local disk when the corpus is a network share. |
 | `--config <PATH>` | `GLOSSA_CONFIG` | TOML deployment config file — see [configuration.md](configuration.md). Flags and env vars override its settings per-key. |
 
@@ -131,7 +131,7 @@ kb graph <action> ...
 | `query` | Read-only SQL `SELECT` over the graph (the `sql` MCP tool); empty SQL prints the schema. `[sql] [path]` |
 | `ls` | Browse nodes: per-type summary, or `--type T` to list that type. `[path]`; `-t/--type <TYPE>`; `-l/--limit <N>` (default `50`); `--as-of <DATE>`; `--now <DATE>` |
 | `generalize` | Run the deterministic derived-layer pass (closure, `SIMILAR`, communities, centrality). `[path]`; `-m/--merge` also collapses near-duplicate nodes (destructive) |
-| `doctor` | Diagnose graph health: ungrounded/stale/incomplete/dangling. `[path]`; `--prune-incomplete`; `--prune-ungrounded`; `--prune-dangling`; `--prune-stale`; `--force` (override the mass-wipe guard on `--prune-dangling`; CLI-only, not exposed over MCP) |
+| `doctor` | Diagnose graph health: ungrounded/stale/incomplete/dangling. `[path]`; `--prune-incomplete`; `--prune-ungrounded`; `--prune-dangling`; `--prune-stale`; `--force` (override the mass-wipe guard on `--prune-dangling`; CLI-only, not exposed over MCP); `--relink` (non-destructive: re-points `MENTIONS`+provenance for documents that were relabeled or moved between folders, matched by filename+section; backs up `graph.sqlite` first — see [graph-lifecycle.md](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders)). `--prune-ungrounded` refuses while relinkable nodes exist — run `--relink` first, or `--force` to prune anyway |
 | `near` (alias `neighbors`) | Nodes reachable from a node id. `<node_id> [path]`; `-d/--depth <N>` (default `1`); `-t/--type <TYPE>` (repeatable); `--as-of <DATE>`; `--now <DATE>`; `--scope <DOC-OR-GLOB>` |
 | `node` | Show one node: type, label, provenance, outgoing edges. `<node_id> [path]`; `--as-of <DATE>`; `--now <DATE>` |
 | `reach` | Cross-document reasoning bridge (the `reach` MCP tool). `--from <ID>`; `-r/--relation <REL>`; `--to <ID>` (omit for discovery); `[path]`; `--no-bridge`; `-d/--max-depth <N>` (default `6`); `--scope <DOC-OR-GLOB>` |
