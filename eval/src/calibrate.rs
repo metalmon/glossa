@@ -127,7 +127,14 @@ pub fn load_cases(
     let df =
         glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
             .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
-    let rare_df_frac = VerifyConfig::resolve(corpus_glossa).rare_df_frac;
+    let cfg = VerifyConfig::resolve(corpus_glossa);
+    let rare_df_frac = cfg.rare_df_frac;
+    // Plan 2: resolve the runtime NLI scorer from `[verify.nli]`. `None` when the `nli` feature is
+    // off, no `model_dir` is configured, or the model fails to load — fail-open, exactly like the
+    // live verify path. When present, each case gets its shadow NLI score below so `select_mode`
+    // can weigh `nli`/`combined`. In default builds / unit fixtures (no `model_dir`) this is `None`,
+    // so `load_cases` stays pure and its behavior is unchanged from Plan 1.
+    let scorer = glossa::gate::resolve_scorer(&cfg);
     let raw = crate::report::load_cases(&run_dir.join("cases"))?;
     let pb = mk_bar(raw.len() as u64);
     pb.set_prefix("scoring cases");
@@ -147,11 +154,15 @@ pub fn load_cases(
             .filter_map(|p| glossa::gate::read_chunk_text(corpus_glossa, p).ok())
             .collect();
         let s = score(&c.final_answer, &chunks, &df, rare_df_frac);
+        // Shadow NLI score for this case (None unless a scorer resolved — see `scorer` above).
+        let nli = scorer
+            .as_deref()
+            .and_then(|sc| glossa::gate::nli::nli_score(&c.final_answer, &chunks, &df, &cfg, sc));
         out.push(Case {
             grounding: s.grounding,
             bucket: s.bucket,
             cell,
-            nli: None, // Plan 1 has no NLI scorer wired in yet; Plan 2 fills this shadow slot.
+            nli,
         });
     }
     pb.finish_and_clear();
