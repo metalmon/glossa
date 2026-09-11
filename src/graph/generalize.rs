@@ -15,6 +15,7 @@ pub mod community;
 pub mod hygiene;
 pub mod linkpred;
 pub mod merge;
+pub mod relink;
 pub mod similarity;
 
 /// A directed edge as `(from_id, edge_type, to_id)` — the decoupled shape these passes operate on,
