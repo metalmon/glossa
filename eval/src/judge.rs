@@ -24,37 +24,34 @@ pub struct Judgement {
     pub raw: String,
 }
 
-/// Parse the LAST `VERDICT:` line in `reply` (case-insensitive), whatever precedes it becomes the
-/// `reason`. No `VERDICT:` line at all → `Unscored`. An unrecognized value after `VERDICT:` also
-/// falls back to `Unscored` (but still carries the raw reply so a caller can see what happened).
+/// Parse the LAST `VERDICT:` occurrence in `reply` (case-insensitive), whatever precedes it becomes
+/// the `reason`. The marker is matched ANYWHERE — not only at the start of a line — because models
+/// frequently inline it after the reason on the same line ("reason. VERDICT: wrong"); requiring a
+/// line start silently dropped those to `Unscored`. No `VERDICT:` at all → `Unscored`. An
+/// unrecognized value after `VERDICT:` also falls back to `Unscored` (raw reply is always carried).
 pub fn parse_verdict(reply: &str) -> Judgement {
-    let mut verdict = Verdict::Unscored;
-    for line in reply.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_lowercase();
-        if let Some(rest) = lower.strip_prefix("verdict:") {
-            verdict = match rest.trim() {
+    const MARKER: &str = "verdict:";
+    let lower = reply.to_lowercase();
+    let (verdict, reason) = match lower.rfind(MARKER) {
+        Some(pos) => {
+            // The verdict word is the first alphabetic token after the marker (stops at the newline
+            // / punctuation / the `correct|partial|wrong` menu separators the prompt uses).
+            let after = &reply[pos + MARKER.len()..];
+            let token: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphabetic())
+                .flat_map(char::to_lowercase)
+                .collect();
+            let v = match token.as_str() {
                 "correct" => Verdict::Correct,
                 "partial" => Verdict::Partial,
                 "wrong" => Verdict::Wrong,
                 _ => Verdict::Unscored,
             };
+            (v, reply[..pos].trim().to_string())
         }
-    }
-    // Reason: everything before the first VERDICT: line, joined, trimmed. Falls back to the
-    // whole reply when there's no VERDICT: line to anchor on.
-    let cut = reply
-        .lines()
-        .position(|l| l.trim().to_lowercase().starts_with("verdict:"));
-    let reason = match cut {
-        Some(i) => reply
-            .lines()
-            .take(i)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        None => reply.trim().to_string(),
+        None => (Verdict::Unscored, reply.trim().to_string()),
     };
     Judgement {
         verdict,
@@ -352,6 +349,13 @@ mod tests {
             parse_verdict("VERDICT: wrong\nVERDICT: correct").verdict,
             Verdict::Correct
         ));
+        // INLINE verdict on the same line as the reason (the empty-answer regression): must still
+        // parse, and the reason is everything before the marker.
+        let inline = parse_verdict("The answer is empty, providing no information. VERDICT: wrong");
+        assert!(matches!(inline.verdict, Verdict::Wrong));
+        assert_eq!(inline.reason, "The answer is empty, providing no information.");
+        // trailing punctuation / menu separators after the word don't break it
+        assert!(matches!(parse_verdict("ok. Verdict: correct.").verdict, Verdict::Correct));
     }
 
     #[test]
