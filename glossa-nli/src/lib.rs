@@ -27,10 +27,17 @@ const DEFAULT_MAX_SEQ_LEN: usize = 512;
 /// Default per-batch token budget for the batched inference planner (`plan_batches`): a batch is
 /// filled greedily while `rows_in_batch * max_len_in_batch <= NLI_BATCH_TOKENS`. Overridable via
 /// the `GLOSSA_NLI_BATCH_TOKENS` env var (see `parse_batch_budget_tokens`); a missing/zero/
-/// unparsable value falls back to this constant. This targets killing per-`session.run` overhead,
-/// not maximizing batch size — onnxruntime already parallelizes one forward across intra-op
-/// threads, so past a moderate budget a bigger batch only adds padding and latency.
-const NLI_BATCH_TOKENS: usize = 8192;
+/// unparsable value falls back to this constant.
+///
+/// Default = one max-length row per batch (`DEFAULT_MAX_SEQ_LEN`), i.e. **effectively sequential**.
+/// This is deliberate for the CPU execution provider: `entail` already receives all hypotheses at
+/// once, so batching merges *k* forwards into one `[k, seq]` forward with the SAME total FLOPs —
+/// and on CPU that bigger tensor is a net loss (cache pressure + allocation) that outweighs the
+/// per-call overhead it saves (measured: a 207-case calibrate went ~47min→~70min at budget 8192).
+/// The k-fold win is a GPU property (one kernel over the batch). To enable real batching on a GPU
+/// build, raise the budget, e.g. `GLOSSA_NLI_BATCH_TOKENS=16384`. The batching code path stays
+/// correct at any budget (parity-tested); only the default is tuned to not regress CPU.
+const NLI_BATCH_TOKENS: usize = DEFAULT_MAX_SEQ_LEN;
 
 /// Hard cap on rows per batch, independent of the token budget (secondary guard against
 /// pathologically many short rows building one huge batch).
@@ -607,6 +614,10 @@ mod tests {
             return;
         };
         const ENTAIL_IDX: usize = 0;
+        // Force a large budget so `entail` actually forms multi-row batches (the default budget is
+        // one-row-per-batch / sequential — see NLI_BATCH_TOKENS). This is what makes the
+        // entail-vs-per-row assertion below exercise the real batched path rather than a batch of 1.
+        std::env::set_var("GLOSSA_NLI_BATCH_TOKENS", "16384");
         let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX)
             .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
 
