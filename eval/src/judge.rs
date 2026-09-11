@@ -431,11 +431,26 @@ mod tests {
     #[test]
     fn build_user_unanswerable_uses_abstention_section_no_gold() {
         let s = test_sections();
-        let u = build_user("Q?", "", "not in the knowledge base", None, false, false, &[], &s);
-        assert!(u.contains("CANNOT be answered"), "carries the unanswerable note");
+        let u = build_user(
+            "Q?",
+            "",
+            "not in the knowledge base",
+            None,
+            false,
+            false,
+            &[],
+            &s,
+        );
+        assert!(
+            u.contains("CANNOT be answered"),
+            "carries the unanswerable note"
+        );
         assert!(u.contains("ABSTENTION-RULE"), "uses the abstention section");
         assert!(!u.contains("ANSWERABLE-RULE"));
-        assert!(!u.contains("GOLD:"), "unanswerable prompt must not carry a GOLD line");
+        assert!(
+            !u.contains("GOLD:"),
+            "unanswerable prompt must not carry a GOLD line"
+        );
         assert!(u.contains("ANSWER: not in the knowledge base"));
         // answerable=true still emits the gold-anchored form.
         let a = build_user("Q?", "G", "A", None, true, false, &[], &s);

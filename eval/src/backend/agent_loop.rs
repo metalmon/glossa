@@ -937,7 +937,10 @@ mod tests {
             reply_text("thinking, restating the question"),
             reply_text("FINAL ANSWER"),
         ]);
-        let gate = MockGate::new(vec![Ok(Some("keep going, step by step".to_string())), Ok(None)]);
+        let gate = MockGate::new(vec![
+            Ok(Some("keep going, step by step".to_string())),
+            Ok(None),
+        ]);
         let out = run_agent_loop(
             &transport,
             &ep,
@@ -954,7 +957,10 @@ mod tests {
         assert_eq!(
             take_reader_dialogue(),
             vec![
-                ("assistant".to_string(), "thinking, restating the question".to_string()),
+                (
+                    "assistant".to_string(),
+                    "thinking, restating the question".to_string()
+                ),
                 ("user".to_string(), "keep going, step by step".to_string()),
                 ("assistant".to_string(), "FINAL ANSWER".to_string()),
             ]
