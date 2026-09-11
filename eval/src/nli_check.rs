@@ -33,18 +33,34 @@ pub struct NliFacts {
     pub dylib_set: bool,
     /// `glossa::gate::resolve_scorer(&cfg).is_some()` — a scorer actually loaded.
     pub scorer_built: bool,
-    /// `Some(true)` when a loaded scorer's canned English sanity probe passed
-    /// (`entail(support) > entail(contra)`), `Some(false)` when it ran and failed (or errored),
-    /// `None` when no scorer loaded so the probe never ran.
-    pub sanity_ok: Option<bool>,
+    /// Outcome of the canned English sanity probe run against a loaded scorer (see [`Probe`]).
+    pub probe: Probe,
+}
+
+/// Outcome of `nli_check`'s canned English sanity probe (`entail(support)` vs `entail(contra)`
+/// against one hard-coded English premise/hypothesis pair). `NotRun` when no scorer resolved, so
+/// the probe never fired. `Errored` when the `entail()` call itself returned `Err` (session,
+/// tokenizer, or output-shape failure) — this DOES block READY, since it proves a loaded scorer
+/// can't actually run inference. `Ran { support_ge_contra }` proves the opposite: session,
+/// tokenizer, and 3-way output all work end to end. The bool inside `Ran` does NOT gate READY (see
+/// [`nli_verdict`]) — the probe text is English while the deployed model may be trained on another
+/// language (the shipped target is Russian), so a healthy non-English model can legitimately score
+/// this specific pair either way; the comparison is surfaced as an advisory line only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Probe {
+    NotRun,
+    Errored(String),
+    Ran { support_ge_contra: bool },
 }
 
 /// Judge [`NliFacts`] into a `(ready, verdict_line)` pair. READY only when every gate passes, in
 /// this order (the returned line names the FIRST one that fails): mode isn't `ac` -> feature `nli`
 /// is built -> scorer is `"in_process"` -> `model_dir` is configured -> `model_dir` has both model
-/// files -> `ORT_DYLIB_PATH` is set and exists -> a scorer actually loaded -> the sanity probe
-/// passed. Pure — no IO, no panics; safe to call with any combination of facts (including ones that
-/// couldn't co-occur in practice, e.g. `sanity_ok: Some(true)` with `scorer_built: false`).
+/// files -> `ORT_DYLIB_PATH` is set and exists -> a scorer actually loaded -> the sanity probe RAN
+/// without error. The probe's internal support-vs-contra comparison is advisory only and never
+/// blocks READY (see [`Probe`]'s doc comment for why: the probe is English text, the target model
+/// may not be). Pure — no IO, no panics; safe to call with any combination of facts (including ones
+/// that couldn't co-occur in practice, e.g. `probe: Probe::Ran { .. }` with `scorer_built: false`).
 pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
     if f.mode == "ac" {
         return (
@@ -98,13 +114,13 @@ pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
             "not ready: scorer failed to load (see the load-failure log line above)".to_string(),
         );
     }
-    match f.sanity_ok {
-        Some(true) => (true, "READY".to_string()),
-        Some(false) => (
+    match &f.probe {
+        Probe::Ran { .. } => (true, "READY".to_string()),
+        Probe::Errored(msg) => (
             false,
-            "not ready: sanity failed (entail(support) did not exceed entail(contra))".to_string(),
+            format!("not ready: scorer loaded but inference failed: {msg}"),
         ),
-        None => (
+        Probe::NotRun => (
             false,
             "not ready: sanity probe did not run (no scorer loaded)".to_string(),
         ),
@@ -137,15 +153,25 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 
     let scorer = glossa::gate::resolve_scorer(&cfg);
     let scorer_built = scorer.is_some();
-    let sanity_ok = scorer.as_ref().map(|s| {
-        match s.entail(
+    let probe = match &scorer {
+        None => Probe::NotRun,
+        Some(s) => match s.entail(
             "A dog is sleeping on the couch.",
             &["An animal is resting.", "The room is empty."],
         ) {
-            Ok(scores) if scores.len() >= 2 => scores[0] > scores[1],
-            _ => false,
-        }
-    });
+            Ok(scores) if scores.len() >= 2 => Probe::Ran {
+                support_ge_contra: scores[0] > scores[1],
+            },
+            // `entail()` returns one score per hypothesis (2 here); an `Ok` with fewer values
+            // would mean the crate's own length contract broke — treat it like an error rather
+            // than silently guess a comparison result.
+            Ok(scores) => Probe::Errored(format!(
+                "sanity probe returned {} score(s), expected 2",
+                scores.len()
+            )),
+            Err(e) => Probe::Errored(e.to_string()),
+        },
+    };
 
     let facts = NliFacts {
         mode,
@@ -155,7 +181,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         model_dir_exists,
         dylib_set,
         scorer_built,
-        sanity_ok,
+        probe,
     };
 
     println!("mode           = {}", facts.mode);
@@ -199,10 +225,13 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
             "not loaded"
         }
     );
-    match facts.sanity_ok {
-        Some(true) => println!("sanity         = pass"),
-        Some(false) => println!("sanity         = FAIL"),
-        None => println!("sanity         = (skipped — no scorer loaded)"),
+    match &facts.probe {
+        Probe::Ran { support_ge_contra } => println!(
+            "sanity         = ran (support>=contra: {support_ge_contra})  [advisory: probe is \
+             English; a non-English model may score low]"
+        ),
+        Probe::Errored(msg) => println!("sanity         = ERRORED: {msg}"),
+        Probe::NotRun => println!("sanity         = (skipped — no scorer loaded)"),
     }
 
     let (_, verdict) = nli_verdict(&facts);
@@ -311,12 +340,14 @@ mod tests {
             model_dir_exists: true,
             dylib_set: true,
             scorer_built: true,
-            sanity_ok: Some(true),
+            probe: Probe::Ran {
+                support_ge_contra: true,
+            },
         }
     }
 
     #[test]
-    fn all_good_and_sanity_true_is_ready() {
+    fn all_good_and_probe_ran_is_ready() {
         let (ready, line) = nli_verdict(&ready_facts());
         assert!(ready);
         assert_eq!(line, "READY");
@@ -390,27 +421,45 @@ mod tests {
     fn scorer_failed_to_load_blocks() {
         let mut f = ready_facts();
         f.scorer_built = false;
-        f.sanity_ok = None;
+        f.probe = Probe::NotRun;
         let (ready, line) = nli_verdict(&f);
         assert!(!ready);
         assert!(line.contains("scorer failed to load"), "line was: {line}");
     }
 
+    /// `Probe::Ran { support_ge_contra: false }` proves the scorer loaded and ran real inference
+    /// end to end (session + tokenizer + 3-way output) — the comparison itself is advisory only
+    /// (the probe is English, the target model may not be), so it must NOT block READY.
     #[test]
-    fn sanity_false_blocks() {
+    fn probe_ran_with_false_comparison_is_still_ready() {
         let mut f = ready_facts();
-        f.sanity_ok = Some(false);
+        f.probe = Probe::Ran {
+            support_ge_contra: false,
+        };
         let (ready, line) = nli_verdict(&f);
-        assert!(!ready);
-        assert!(line.contains("sanity failed"), "line was: {line}");
+        assert!(ready, "line was: {line}");
+        assert_eq!(line, "READY");
     }
 
     #[test]
-    fn sanity_none_blocks_when_scorer_somehow_not_built() {
-        // Synthetic combination (wouldn't occur via nli_check's own wiring, since sanity is only
-        // probed when a scorer loaded) — the pure function still handles it deterministically.
+    fn probe_errored_blocks() {
         let mut f = ready_facts();
-        f.sanity_ok = None;
+        f.probe = Probe::Errored("onnx session returned no outputs".to_string());
+        let (ready, line) = nli_verdict(&f);
+        assert!(!ready);
+        assert!(line.contains("inference failed"), "line was: {line}");
+        assert!(
+            line.contains("onnx session returned no outputs"),
+            "line was: {line}"
+        );
+    }
+
+    #[test]
+    fn probe_not_run_blocks_when_scorer_somehow_built() {
+        // Synthetic combination (wouldn't occur via nli_check's own wiring, since the probe only
+        // runs when a scorer loaded) — the pure function still handles it deterministically.
+        let mut f = ready_facts();
+        f.probe = Probe::NotRun;
         let (ready, line) = nli_verdict(&f);
         assert!(!ready);
         assert!(
@@ -420,7 +469,10 @@ mod tests {
     }
 
     /// `write_nli_config` round-trips model_dir/scorer/entail_index/mode into a fresh
-    /// `ontology.toml` (mirrors `calibrate::write_threshold_roundtrips_into_ontology`).
+    /// `ontology.toml` (mirrors `calibrate::write_threshold_roundtrips_into_ontology`) — and, since
+    /// substring-checking the raw TOML doesn't prove the RUNTIME gate can read it back, this also
+    /// resolves the written config the same way `nli_check`/the runtime gate do
+    /// (`VerifyConfig::resolve`) and asserts the parsed fields match what was written.
     #[test]
     fn write_nli_config_roundtrips_into_ontology() {
         let dir = tempfile::tempdir().unwrap();
@@ -442,6 +494,27 @@ mod tests {
         assert!(o.contains("mode = \"nli\""));
         // Not touched.
         assert!(!o.contains("[verify.nli.threshold]"));
+
+        // Real round-trip: resolve through the same path the runtime gate uses.
+        let cfg = VerifyConfig::resolve(&glossa);
+        assert_eq!(cfg.scorer.as_deref(), Some("in_process"));
+        assert_eq!(cfg.model_dir, Some(PathBuf::from("/models/rubert-nli")));
+        assert_eq!(cfg.entail_index, 2);
+        assert_eq!(cfg.mode, glossa::gate::VerifyMode::Nli);
+    }
+
+    /// `model_dir` written as a literal Windows path (backslashes) round-trips unchanged through
+    /// `toml_edit`'s string escaping and back out through `VerifyConfig::resolve`'s `PathBuf`
+    /// parsing — this is a path-string test, not a locale/Cyrillic one (kept English-only).
+    #[test]
+    fn write_nli_config_roundtrips_windows_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        let win_path = PathBuf::from(r"C:\models\rubert-nli");
+        write_nli_config(&glossa, &win_path, "in_process", None, None).unwrap();
+
+        let cfg = VerifyConfig::resolve(&glossa);
+        assert_eq!(cfg.model_dir, Some(win_path));
     }
 
     /// Omitting `entail_index`/`mode` writes neither key — `set` only wires what was given.
