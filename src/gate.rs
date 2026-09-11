@@ -3,6 +3,8 @@ pub mod config;
 pub mod df;
 pub mod df_cache;
 pub mod nli;
+#[cfg(feature = "nli")]
+pub mod nli_engine;
 pub mod score;
 pub mod token;
 

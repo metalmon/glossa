@@ -66,3 +66,7 @@ grapth.html
 
 # Local git worktrees (never publish)
 .worktrees/
+
+# NLI model artifacts (never commit — fetched/exported locally, see docs)
+*.onnx
+/models/

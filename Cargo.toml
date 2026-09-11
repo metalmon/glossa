@@ -55,6 +55,7 @@ chardetng = "1.0"
 encoding_rs = "0.8"
 fs4 = "1.1"
 glossa-constraint = { path = "constraint", optional = true }
+glossa-nli = { path = "glossa-nli", optional = true }
 quick-xml = "0.41"
 sqlparser = "0.53"
 memmap2 = "0.9"
@@ -94,6 +95,11 @@ notebook = []
 e2e = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
+# In-process NLI (entailment) scorer for the answer-grounding gate (opt-in — the default build
+# carries zero ML deps). Exposes ONE feature, never engine toggles, so `--all-features` can only
+# ever turn on a single inference engine inside glossa-nli (nli-ort); see glossa-nli/src/lib.rs's
+# compile_error! XOR guard, which this can never trip.
+nli = ["dep:glossa-nli", "glossa-nli/nli-ort"]
 # Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
 # stays plaintext with no crypto surface (`kb mcp --transport streamable-http` behind a
 # reverse-proxy/TLS-terminator remains the default-supported deployment).
@@ -108,4 +114,4 @@ predicates = "3"
 filetime = "0.2"
 
 [workspace]
-members = ["eval", "constraint"]
+members = ["eval", "constraint", "glossa-nli"]
