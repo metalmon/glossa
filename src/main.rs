@@ -896,6 +896,7 @@ async fn shutdown_signal() {
 /// public host. TLS + auth are expected to be terminated by a reverse proxy in front. Ctrl-C
 /// triggers a graceful shutdown: active sessions are terminated, the listener drains, and `cancel`
 /// (shared with the maintenance loop) fires so the whole server stops together.
+#[allow(clippy::too_many_arguments)] // wide runtime-config surface; a params struct would just move these same fields one indirection away for a single call site
 async fn serve_streamable_http(
     server: glossa::mcp::GlossaServer,
     bind: &str,
