@@ -61,19 +61,23 @@ ontology `[retrieval]` table rather than here: `GLOSSA_PPR_SIM_WEIGHT` and
 
 A document's **key** — the identifier the index stores, that search results reference, and that a
 graph node's grounding (`source_path`) points at — is its path **relative to the corpus root**,
-not its absolute filesystem path. How you address the root decides whether that key carries a
-label prefix:
+not its absolute filesystem path. Keys are **bare by default** — no label prefix — and a label
+appears only when you opt into one via `--root`:
 
 - **Discovery** — no path given; `kb` walks up from the current directory to find `.glossa/` — keys
   come out **label-free**: `manual.pdf`, `guide/intro.pdf`.
-- **An explicit path** — a positional `PATH` (`kb index /data/plc`) or `--root PATH` — keys are
-  prefixed with the corpus's **basename** label: `plc/manual.pdf`, `plc/guide/intro.pdf`.
-  `--root LABEL=PATH` sets the label explicitly instead of deriving it from the basename.
+- **A positional path** — `kb index /data/plc` — is exactly the same as discovery rooted at that
+  path: keys are still **label-free**: `manual.pdf`, `guide/intro.pdf`.
+- **`--root PATH`** — attaches a corpus as a *named* root, auto-labeled from the path's basename —
+  keys come out prefixed: `plc/manual.pdf`, `plc/guide/intro.pdf`. `--root LABEL=PATH` sets the
+  label explicitly instead of deriving it from the basename. This exists for multi-root setups and
+  network/shared corpora where a stable, explicit name matters more than brevity.
 
-**Pick one way to address a given corpus and stay consistent.** Discovery today and an explicit
-path tomorrow (or vice versa) changes every document's key — `manual.pdf` becomes `plc/manual.pdf`
-or back again — which breaks any reasoning-layer grounding built under the old key form, even
-though the file itself never moved. If that happens, it's non-destructively recoverable: see
+**Pick one way to address a given corpus and stay consistent.** Switching a corpus between bare
+addressing (discovery or a positional path) and labeled addressing (`--root`) changes every
+document's key — `manual.pdf` becomes `plc/manual.pdf` or back again — which breaks any
+reasoning-layer grounding built under the old key form, even though the file itself never moved. If
+that happens, it's non-destructively recoverable: see
 [graph-lifecycle.md § You relabeled the corpus, or moved a document between
 folders](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders).
 

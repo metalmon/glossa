@@ -207,9 +207,10 @@ break that link anyway, because the target's **key** changes even though nothing
 
 - **Relabeling** — the same corpus, addressed a different way. As covered in
   [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys),
-  discovery yields label-free keys and an explicit path/`--root` yields basename-labeled ones.
-  Index once by discovery and once with `kb index /data/plc`, and every key gains (or loses) a
-  `plc/` prefix — `manual.pdf` ↔ `plc/manual.pdf`.
+  discovery and a positional `PATH` both yield label-free keys; only `--root` yields a labeled one
+  (basename-derived, or explicit via `LABEL=PATH`). Index once by discovery (or `kb index
+  /data/plc`) and once with `--root /data/plc`, and every key gains (or loses) a `plc/` prefix —
+  `manual.pdf` ↔ `plc/manual.pdf`.
 - **Moving a file between folders** inside the corpus — `plc/manual.pdf` becomes
   `arch/2024/manual.pdf`. The filename and section are unchanged; only the leading folder path is.
 

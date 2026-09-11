@@ -19,7 +19,7 @@ These apply to every subcommand (clap `global = true`):
 
 | Flag | Env | Meaning |
 |------|-----|---------|
-| `--root [LABEL=]PATH` (repeatable) | `GLOSSA_ROOTS` (newline-separated) | Corpus source folder(s). Both a bare `--root PATH` and a positional `PATH` auto-label from the basename (`LABEL=PATH` sets the label explicitly instead). Give neither — run from inside the corpus and let `.glossa/` be found by walking up — and keys come out label-free. An explicit `--root` flag list wins outright over `GLOSSA_ROOTS` — never merged. See [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys) for how this shapes document keys. |
+| `--root [LABEL=]PATH` (repeatable) | `GLOSSA_ROOTS` (newline-separated) | Corpus source folder(s). A bare `--root PATH` auto-labels from the basename (`LABEL=PATH` sets the label explicitly instead). Give neither — either a positional `PATH`, or run from inside the corpus and let `.glossa/` be found by walking up — and keys come out label-free. An explicit `--root` flag list wins outright over `GLOSSA_ROOTS` — never merged. See [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys) for how this shapes document keys. |
 | `--state-dir <PATH>` | `GLOSSA_STATE_DIR` | Local directory holding `.glossa/` state. Defaults to the (sole) corpus root. Point at local disk when the corpus is a network share. |
 | `--config <PATH>` | `GLOSSA_CONFIG` | TOML deployment config file — see [configuration.md](configuration.md). Flags and env vars override its settings per-key. |
 

@@ -68,11 +68,12 @@ Full list: [architecture.md § Known extraction limitations](architecture.md#kno
 
 The documents are still there — what changed is their **key**. A document's key is its path
 relative to the corpus root, and the key's label form depends on how you addressed the root:
-discovery (no path given) is label-free, a positional `PATH` or `--root PATH` prefixes it with the
-corpus's basename. Index the same corpus once by discovery and once with an explicit path (or move
-a file between folders inside the corpus), and the reasoning layer's `MENTIONS` edges still point
-at the old key — its terminals now report `ungrounded` even though the source document didn't go
-anywhere. See [configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys)
+discovery (no path given) and a positional `PATH` are both label-free; only `--root PATH` prefixes
+the key with the corpus's basename (or an explicit `LABEL=PATH`). Index the same corpus once by
+discovery/positional path and once with `--root` (or move a file between folders inside the
+corpus), and the reasoning layer's `MENTIONS` edges still point at the old key — its terminals now
+report `ungrounded` even though the source document didn't go anywhere. See
+[configuration.md § Corpus roots and document keys](configuration.md#corpus-roots-and-document-keys)
 for the label rule.
 
 Fix it non-destructively with `kb graph doctor --relink` — it matches each affected node's

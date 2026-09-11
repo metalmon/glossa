@@ -1,14 +1,6 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
-/// Basename of an explicit corpus path, used as its stable label. `None` when the path has no
-/// final component (root/`.`/`..`) — caller falls back to an empty label (discovery-like).
-fn basename_label(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 /// Where the resolved root came from — surfaced so the CLI/MCP can warn when the choice is
 /// implicit (walked up to an ancestor) instead of what the caller likely meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,12 +16,13 @@ pub enum RootOrigin {
 }
 
 /// One named corpus root: a stable label paired with a filesystem path. For the single positional
-/// root, the label follows how the corpus was reached: empty on discovery (no `.glossa` in cwd,
-/// walked up or fell back), basename of the path when given explicitly (positional `PATH` or
-/// `--root PATH`). See [`parse_root_arg`] for the multi-root `--root`/`GLOSSA_ROOTS` token format.
+/// root, the label is ALWAYS empty — whether the corpus was reached by discovery (no `.glossa` in
+/// cwd, walked up or fell back) or given explicitly as a positional `PATH`. A label only appears
+/// for a corpus attached via `--root [LABEL=]PATH`. See [`parse_root_arg`] for that token format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Root {
-    /// "" on discovery; basename of the explicit path otherwise — a stable label persisted in keys.
+    /// "" for discovery and positional `PATH`; set only for a `--root` entry — a stable label
+    /// persisted in keys.
     pub label: String,
     pub path: PathBuf,
 }
@@ -105,7 +98,7 @@ pub fn resolve_root_from(explicit: Option<PathBuf>, cwd: &Path) -> ResolvedRoot 
     if let Some(p) = explicit {
         let nested_ancestor = ancestor_glossa_above(&p);
         let roots = vec![Root {
-            label: basename_label(&p),
+            label: String::new(),
             path: p.clone(),
         }];
         let state_base = p.clone();
@@ -207,7 +200,7 @@ pub fn resolve_roots_from(inputs: RootInputs, cwd: &Path) -> anyhow::Result<Reso
         inputs.roots.clone()
     } else if let Some(p) = &inputs.positional {
         vec![Root {
-            label: basename_label(p),
+            label: String::new(),
             path: p.clone(),
         }]
     } else {
@@ -419,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_positional_gets_basename_label() {
+    fn explicit_positional_stays_empty_label() {
         let base = tempfile::tempdir().unwrap();
         let corpus = base.path().join("plc");
         std::fs::create_dir_all(&corpus).unwrap();
@@ -428,7 +421,7 @@ mod tests {
         assert_eq!(
             r.roots,
             vec![Root {
-                label: "plc".into(),
+                label: String::new(),
                 path: corpus.clone()
             }]
         );
@@ -451,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn positional_with_state_dir_is_basename_labeled() {
+    fn positional_with_state_dir_stays_empty_label() {
         let corpus = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let corpus_named = corpus.path().join("ivk");
@@ -465,7 +458,7 @@ mod tests {
         assert_eq!(
             r.roots,
             vec![Root {
-                label: "ivk".into(),
+                label: String::new(),
                 path: corpus_named
             }]
         );
@@ -501,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn positional_root_via_root_inputs_gets_basename_label() {
+    fn positional_root_via_root_inputs_stays_empty_label() {
         let base = tempfile::tempdir().unwrap();
         let corpus = base.path().join("plc");
         std::fs::create_dir_all(&corpus).unwrap();
@@ -515,7 +508,7 @@ mod tests {
         assert_eq!(
             r.roots,
             vec![Root {
-                label: "plc".into(),
+                label: String::new(),
                 path: corpus.clone()
             }]
         );
@@ -525,9 +518,8 @@ mod tests {
 
     #[test]
     fn state_dir_sets_state_base_and_keeps_roots() {
-        // Named subdirectory (not the tempdir's own random name) so the expected label is a
-        // hardcoded literal, not something re-derived via `.file_name()` — which would just
-        // restate what the code under test does.
+        // Named subdirectory (not the tempdir's own random name) so this doesn't read as
+        // coincidentally passing for an empty-label assertion.
         let corpus_tmp = tempfile::tempdir().unwrap();
         let corpus = corpus_tmp.path().join("ivk");
         std::fs::create_dir_all(&corpus).unwrap();
@@ -542,20 +534,10 @@ mod tests {
         assert_eq!(
             r.roots,
             vec![Root {
-                label: "ivk".into(),
+                label: String::new(),
                 path: corpus
             }]
         );
-    }
-
-    #[test]
-    fn positional_dot_with_no_basename_gets_empty_label() {
-        // Edge case: a path whose `file_name()` is `None` (e.g. `.`) yields an empty label by
-        // design — same as discovery — rather than panicking or inventing a label. Documented
-        // here so it reads as intentional, not an accident.
-        assert_eq!(basename_label(Path::new(".")), "");
-        assert_eq!(basename_label(Path::new("..")), "");
-        assert_eq!(basename_label(Path::new("/")), "");
     }
 
     #[test]
