@@ -87,7 +87,7 @@ pub fn decide_modes(ac: GateScore, nli: Option<f32>, cfg: &VerifyConfig, answer_
 
 #[cfg(test)]
 mod tests {
-    use super::{score, Bucket};
+    use super::{score, Bucket, GateScore};
     use crate::gate::{df::DfTable, token::tokenize};
     fn df_of(pages: &[&str]) -> DfTable {
         let mut t = DfTable::new();

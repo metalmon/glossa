@@ -106,7 +106,7 @@ pub fn nli_score(
 /// model. Quality feeds `mean_filt`; keep it deterministic and fixture-tested.
 fn split_claims(answer: &str) -> Vec<String> {
     answer
-        .split(|c| matches!(c, '.' | '!' | '?' | '\n'))
+        .split(['.', '!', '?', '\n'])
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()

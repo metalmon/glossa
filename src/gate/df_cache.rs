@@ -10,9 +10,10 @@ use std::time::SystemTime;
 use crate::gate::df::DfTable;
 
 type Sig = (Option<SystemTime>, u64);
+type DfCache = HashMap<PathBuf, (Sig, Arc<DfTable>)>;
 
-fn cache() -> &'static RwLock<HashMap<PathBuf, (Sig, Arc<DfTable>)>> {
-    static C: OnceLock<RwLock<HashMap<PathBuf, (Sig, Arc<DfTable>)>>> = OnceLock::new();
+fn cache() -> &'static RwLock<DfCache> {
+    static C: OnceLock<RwLock<DfCache>> = OnceLock::new();
     C.get_or_init(|| RwLock::new(HashMap::new()))
 }
 

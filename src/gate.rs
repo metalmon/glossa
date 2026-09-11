@@ -59,7 +59,7 @@ pub fn verify_outcome_with_scorer(
         .iter()
         .map(|p| read_chunk_text(glossa_dir, p))
         .collect::<anyhow::Result<_>>()?;
-    let ac = score(answer, &chunks, &*df, cfg.rare_df_frac);
+    let ac = score(answer, &chunks, &df, cfg.rare_df_frac);
     let answer_tokens = token::tokenize(answer).len();
     let need_nli = cfg.is_nli_ready()
         && scorer.is_some()
