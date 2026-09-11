@@ -1459,14 +1459,83 @@ fn fmt_bucket(name: &str, nodes: &[crate::graph::doctor::DoubtfulNode], limit: u
     out
 }
 
+/// Strip the common trailing path segments of `old` and `new` (split on `/`), returning the
+/// differing leading parts. Used to collapse a batch of relinked `MENTIONS` targets that all
+/// shifted the same way (a label added/changed, or a folder move) into one `old -> new` group
+/// instead of one line per node. E.g. `("a.pdf#1", "plc/a.pdf#1")` (label added) -> `("", "plc")`;
+/// `("plc/a.pdf#1", "arch/a.pdf#1")` (folder move) -> `("plc", "arch")`.
+fn group_prefix_delta(old: &str, new: &str) -> (String, String) {
+    let old_segs: Vec<&str> = old.split('/').collect();
+    let new_segs: Vec<&str> = new.split('/').collect();
+    let mut oi = old_segs.len();
+    let mut ni = new_segs.len();
+    while oi > 0 && ni > 0 && old_segs[oi - 1] == new_segs[ni - 1] {
+        oi -= 1;
+        ni -= 1;
+    }
+    (old_segs[..oi].join("/"), new_segs[..ni].join("/"))
+}
+
+/// Render the `ungrounded` bucket. When nothing in it is relinkable, this is byte-identical to
+/// plain `fmt_bucket("ungrounded", …)` — no behavior change from before `--relink` existed.
+/// Otherwise the relinkable nodes are collapsed into grouped `old -> new` shift summaries (instead
+/// of one line per node — a large relabel/move can otherwise bury the fix under hundreds of
+/// identical-looking entries), the `--relink` command is surfaced, and only genuine orphans (and
+/// ambiguous matches, as a count) keep the per-node listing.
+fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize) -> String {
+    let relink = &rep.relink;
+    if relink.relinkable.is_empty() {
+        return fmt_bucket("ungrounded", &rep.ungrounded, limit);
+    }
+
+    let mut groups: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for (_from, old_to, new_to) in &relink.relinkable {
+        *groups.entry(group_prefix_delta(old_to, new_to)).or_insert(0) += 1;
+    }
+
+    let mut out = format!(
+        "ungrounded: {}  (relocated/relabeled docs, not orphans)\n",
+        rep.ungrounded.len()
+    );
+    for ((old_prefix, new_prefix), count) in &groups {
+        out.push_str(&format!("  {old_prefix} -> {new_prefix}  ({count})\n"));
+    }
+    out.push_str("  → non-destructive fix:  kb graph doctor --relink   (full list: --verbose)\n");
+    if !relink.ambiguous.is_empty() {
+        out.push_str(&format!(
+            "  ambiguous: {}   (same filename in several folders — resolve by hand)\n",
+            relink.ambiguous.len()
+        ));
+    }
+
+    let by_id: std::collections::HashMap<&str, &crate::graph::doctor::DoubtfulNode> =
+        rep.ungrounded.iter().map(|d| (d.id.as_str(), d)).collect();
+    let orphan_nodes: Vec<&crate::graph::doctor::DoubtfulNode> = relink
+        .orphans
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()).copied())
+        .collect();
+    out.push_str(&format!("  real orphans: {}\n", orphan_nodes.len()));
+    for d in orphan_nodes.iter().copied().take(limit) {
+        out.push_str(&fmt_doubtful_line(d));
+        out.push('\n');
+    }
+    if orphan_nodes.len() > limit {
+        out.push_str(&format!("    … {} more\n", orphan_nodes.len() - limit));
+    }
+    out
+}
+
 /// Render a `DoctorReport` as text — id/type/label/source_path/reason per doubtful node (stale
 /// includes `stored→current` file signatures), bounded per bucket. Shared by the CLI
 /// `graph doctor` command (which also needs the raw `DoctorReport` to drive `--prune-*`) and
-/// `graph_doctor` below (report-only, for MCP).
+/// `graph_doctor` below (report-only, for MCP). The `ungrounded` bucket collapses into a grouped
+/// `--relink` summary when the report has relinkable nodes — see `fmt_ungrounded_bucket`.
 pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
     const LIMIT: usize = 50;
     let mut out = String::new();
-    out.push_str(&fmt_bucket("ungrounded", &rep.ungrounded, LIMIT));
+    out.push_str(&fmt_ungrounded_bucket(rep, LIMIT));
     out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
     // `incomplete`/`dangling` can be structurally inert for some ontologies (no spines; no
     // query-side types). Print `n/a — <reason>` rather than a bare `0` that reads as a clean check.
@@ -4105,5 +4174,101 @@ strict = true
             g.validity_for(&pre_merge_id).unwrap().is_none(),
             "no orphan row under the pre-merge id"
         );
+    }
+
+    #[test]
+    fn group_prefix_delta_strips_common_tail() {
+        // Label added in front (discovery -> explicit-path relabel): old has no prefix.
+        assert_eq!(
+            group_prefix_delta("a.pdf#1", "plc/a.pdf#1"),
+            (String::new(), "plc".to_string())
+        );
+        // Folder move: filename+section identical, only the leading folder differs.
+        assert_eq!(
+            group_prefix_delta("plc/a.pdf#1", "arch/a.pdf#1"),
+            ("plc".to_string(), "arch".to_string())
+        );
+        // Deeper folder move, still one differing leading segment each side.
+        assert_eq!(
+            group_prefix_delta("plc/manual.pdf#3", "arch/2024/manual.pdf#3"),
+            ("plc".to_string(), "arch/2024".to_string())
+        );
+        // Identical paths: nothing differs, both prefixes empty.
+        assert_eq!(
+            group_prefix_delta("plc/a.pdf#1", "plc/a.pdf#1"),
+            (String::new(), String::new())
+        );
+    }
+
+    /// A `DoctorReport` with a relinkable ungrounded node and a genuine orphan: the relinkable
+    /// node must collapse into a grouped summary carrying the `--relink` fix command, NOT a
+    /// per-node line; the orphan must still be listed individually.
+    #[test]
+    fn doctor_report_collapses_relinkable_and_shows_command() {
+        use crate::graph::doctor::{DoctorReport, DoubtfulNode, Reason};
+        use crate::graph::generalize::relink::RelinkPlan;
+
+        let relinked = DoubtfulNode {
+            id: "res:a".into(),
+            node_type: "Resolution".into(),
+            label: "a resolution".into(),
+            source_path: "a.pdf".into(),
+            reason: Reason::Ungrounded,
+        };
+        let orphan = DoubtfulNode {
+            id: "res:orphan".into(),
+            node_type: "Resolution".into(),
+            label: "orphan resolution".into(),
+            source_path: "plc/deleted.pdf".into(),
+            reason: Reason::Ungrounded,
+        };
+        let report = DoctorReport {
+            ungrounded: vec![relinked, orphan],
+            relink: RelinkPlan {
+                relinkable: vec![("res:a".into(), "a.pdf#1".into(), "plc/a.pdf#1".into())],
+                ambiguous: Vec::new(),
+                orphans: vec!["res:orphan".into()],
+            },
+            ..Default::default()
+        };
+
+        let s = fmt_doctor_report(&report);
+        assert!(
+            s.contains("kb graph doctor --relink"),
+            "must surface the fix command:\n{s}"
+        );
+        assert!(s.contains("relink"), "must summarize the shift:\n{s}");
+        assert!(
+            !s.contains("res:a  ["),
+            "relinkable node must not be listed line-by-line:\n{s}"
+        );
+        assert!(s.contains("res:orphan"), "true orphan still listed:\n{s}");
+    }
+
+    /// When nothing is relinkable, the ungrounded bucket renders exactly as it did before
+    /// `--relink` existed — no behavior change for corpora with genuine orphans/stale nodes only.
+    #[test]
+    fn doctor_report_ungrounded_unchanged_when_nothing_relinkable() {
+        use crate::graph::doctor::{DoctorReport, DoubtfulNode, Reason};
+
+        let orphan = DoubtfulNode {
+            id: "res:orphan".into(),
+            node_type: "Resolution".into(),
+            label: "orphan resolution".into(),
+            source_path: "plc/deleted.pdf".into(),
+            reason: Reason::Ungrounded,
+        };
+        let report = DoctorReport {
+            ungrounded: vec![orphan.clone()],
+            ..Default::default()
+        };
+
+        let s = fmt_doctor_report(&report);
+        let expected_bucket = fmt_bucket("ungrounded", &[orphan], 50);
+        assert!(
+            s.starts_with(&expected_bucket),
+            "empty-relink path must match the old plain bucket rendering exactly:\n{s}"
+        );
+        assert!(!s.contains("--relink"));
     }
 }
