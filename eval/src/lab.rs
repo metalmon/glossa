@@ -278,6 +278,11 @@ pub struct Tuning {
     /// (credit_abstention) and `gepa_graph` (fp_gate).
     #[serde(default)]
     pub abstention_policy: Option<String>,
+    /// How many times `kbx eval` samples the judge per case, taking the majority verdict (see
+    /// `judge::majority_verdict`). The judge model is non-deterministic even at temp 0, so a single
+    /// sample flaps on borderline cases. `None` -> the built-in default (5) at the call site.
+    #[serde(default)]
+    pub judge_votes: Option<usize>,
 }
 
 /// The FP-vs-FN operating point, parsed from `[tuning] abstention_policy`. `Off` is the default and
@@ -525,6 +530,17 @@ mod tests {
         let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
         let lab2: LabConfig = toml::from_str(toml2).unwrap();
         assert_eq!(lab2.tuning.jobs_eval, None);
+    }
+
+    #[test]
+    fn tuning_parses_judge_votes_and_defaults_to_none() {
+        let toml = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n[tuning]\njudge_votes = 3\n";
+        let lab: LabConfig = toml::from_str(toml).unwrap();
+        assert_eq!(lab.tuning.judge_votes, Some(3));
+
+        let toml2 = "[model]\nendpoint=\"http://x\"\nmodel=\"m\"\n";
+        let lab2: LabConfig = toml::from_str(toml2).unwrap();
+        assert_eq!(lab2.tuning.judge_votes, None);
     }
 
     #[test]

@@ -112,14 +112,78 @@ fn evidence_block(snippets: &[(String, String)]) -> Option<String> {
     Some(s)
 }
 
-/// Build the judge user message. With `evidence`, the block is injected between `GOLD:` and
-/// `ANSWER:`. Without it (`None`), the message is byte-identical to the historical gold-only form.
-///
-/// When `answerable` is `false` the case is an ABSTENTION test: the question cannot be answered from
-/// the knowledge base (out of scope / not covered / a routing or non-technical request), so there is
-/// no gold text to compare against. The correct behavior is for the reader to DECLINE — say it has no
-/// answer / the info isn't in the KB / route to a human — without inventing a technical answer. The
-/// message then carries the abstention rubric instead of GOLD/EVIDENCE.
+/// The grading rules parsed out of a sectioned `judge.md`. `preamble` is light framing sent as the
+/// SYSTEM message; the other three are the per-case rule blocks placed in the USER message next to
+/// the data (the judge model reliably follows a rule in the user message, not one buried in the
+/// system prompt — see the design notes on the plan).
+struct Sections {
+    preamble: String,
+    dialogue: String,
+    answerable: String,
+    abstention: String,
+}
+
+/// Split a sectioned `judge.md` on the marker lines `[[DIALOGUE]]`, `[[ANSWERABLE]]`, `[[ABSTENTION]]`.
+/// Text before the first marker is the PREAMBLE. Missing markers yield empty sections, so a legacy
+/// un-sectioned `judge.md` still parses (all its text lands in `preamble`, the user-side rule blocks
+/// are empty, and grading falls back to whatever the preamble says).
+fn split_judge_sections(md: &str) -> Sections {
+    let mut cur = 0u8; // 0=preamble 1=dialogue 2=answerable 3=abstention
+    let (mut pre, mut dlg, mut ans, mut abs) =
+        (String::new(), String::new(), String::new(), String::new());
+    for line in md.lines() {
+        match line.trim() {
+            "[[DIALOGUE]]" => {
+                cur = 1;
+                continue;
+            }
+            "[[ANSWERABLE]]" => {
+                cur = 2;
+                continue;
+            }
+            "[[ABSTENTION]]" => {
+                cur = 3;
+                continue;
+            }
+            _ => {}
+        }
+        let bucket = match cur {
+            1 => &mut dlg,
+            2 => &mut ans,
+            3 => &mut abs,
+            _ => &mut pre,
+        };
+        bucket.push_str(line);
+        bucket.push('\n');
+    }
+    Sections {
+        preamble: pre.trim().to_string(),
+        dialogue: dlg.trim().to_string(),
+        answerable: ans.trim().to_string(),
+        abstention: abs.trim().to_string(),
+    }
+}
+
+/// Format the captured reader↔user_sim `(role, text)` turns into a `DIALOGUE:` block. Empty input →
+/// `None`, so the caller omits the block and the message is byte-identical to a no-dialogue case.
+fn dialogue_block(dialogue: &[(String, String)]) -> Option<String> {
+    if dialogue.is_empty() {
+        return None;
+    }
+    let mut s = String::from("DIALOGUE:");
+    for (role, text) in dialogue {
+        s.push_str(&format!("\n[{role}] {}", text.trim()));
+    }
+    Some(s)
+}
+
+/// Build the judge user message: the case DATA first, then (optionally) a `DIALOGUE:` block, then
+/// the case's grading RULE (`sections.answerable` or `sections.abstention`), then the reply line.
+/// The rule sits AFTER the data on purpose — the judge model follows a rule placed there, not one
+/// left only in the system prompt. When `evidence` is present it is injected between `GOLD:` and
+/// `ANSWER:`. When `answerable` is `false` there is no GOLD/EVIDENCE and the abstention rule applies.
+/// When `dialogue` is non-empty (a user_sim conversation happened) the `DIALOGUE:` block and the
+/// dialogue rule are added so the judge grades the reader's actual answer, not a closing pleasantry.
 fn build_user(
     question: &str,
     gold: &str,
@@ -127,26 +191,35 @@ fn build_user(
     evidence: Option<&str>,
     answerable: bool,
     credit_abstention: bool,
+    dialogue: &[(String, String)],
+    sections: &Sections,
 ) -> String {
+    let reply = "Reply with one line reason then `VERDICT: correct|partial|wrong`.";
+    // DIALOGUE block goes right after the ANSWER; its grading rule (if the section is present) trails
+    // the case rule. Both appear only when a dialogue was actually captured.
+    let dlg_data = match dialogue_block(dialogue) {
+        Some(d) => format!("{d}\n"),
+        None => String::new(),
+    };
+    let dlg_rule = if dialogue.is_empty() || sections.dialogue.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", sections.dialogue)
+    };
+
     if !answerable {
+        let abs_rule = &sections.abstention;
         return format!(
             "QUESTION: {question}\n\
-             NOTE: This question CANNOT be answered from the knowledge base — it is out of scope, not \
-             covered by the corpus, or a non-technical / routing request. There is no gold answer.\n\
-             The CORRECT behavior is for the assistant to state it has no answer / the information is \
-             not in the knowledge base, or to decline or route to a human — WITHOUT inventing a \
-             technical answer.\n\
+             NOTE: This question CANNOT be answered from the knowledge base; there is no GOLD.\n\
              ANSWER: {answer}\n\
-             Grade `correct` if the ANSWER appropriately declines or states there is no answer; \
-             `wrong` if it gives a substantive or fabricated technical answer as if it knew; \
-             `partial` if it declines but still adds unsupported specific claims.\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`."
+             {dlg_data}{abs_rule}{dlg_rule}\n\
+             {reply}"
         );
     }
+
     // Safety-first only: a decline on an ANSWERABLE question is a SAFE miss, not a fabrication — grade
-    // it `partial` rather than `wrong`, so the reward teaches "decline when unsure" over "guess wrong".
-    // Under the default (balanced) policy this note is omitted and a decline grades `wrong` (a miss),
-    // byte-identical to the historical prompt.
+    // it `partial` rather than `wrong`. Under the default (balanced) policy this note is omitted.
     let abstain_note = if credit_abstention {
         "\nNote: if the ANSWER declines / says the information is not in the knowledge base instead of \
          answering, grade `partial` (a safe miss), NOT `wrong`; reserve `wrong` for an INCORRECT \
@@ -154,24 +227,26 @@ fn build_user(
     } else {
         ""
     };
-    match evidence {
-        Some(ev) => format!(
-            "QUESTION: {question}\nGOLD: {gold}\n{ev}\nANSWER: {answer}\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`.{abstain_note}"
-        ),
-        None => format!(
-            "QUESTION: {question}\nGOLD: {gold}\nANSWER: {answer}\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`.{abstain_note}"
-        ),
-    }
+    let gold_ev = match evidence {
+        Some(ev) => format!("GOLD: {gold}\n{ev}\n"),
+        None => format!("GOLD: {gold}\n"),
+    };
+    let ans_rule = &sections.answerable;
+    format!(
+        "QUESTION: {question}\n{gold_ev}ANSWER: {answer}\n\
+         {dlg_data}{ans_rule}{abstain_note}{dlg_rule}\n\
+         {reply}"
+    )
 }
 
-/// Judge one case: system = `judge_md` (the file-prompt), user = the fixed QUESTION/GOLD/ANSWER
-/// block. When `source` names corpus chunks and `idx` is supplied, their text is injected as an
+/// Judge one case. The sectioned `judge_md` (see `split_judge_sections`) supplies the system
+/// PREAMBLE plus the per-case grading RULE that `build_user` places in the USER message next to the
+/// data. When `source` names corpus chunks and `idx` is supplied, their text is injected as an
 /// `EVIDENCE:` block between GOLD and ANSWER so a correct answer that EXCEEDS the terse gold is
-/// credited, not penalized (see `evidence_block`). When `source` is empty, `idx` is `None`, or no
-/// ref loads, the EVIDENCE block is omitted and the prompt is byte-identical to the gold-only form.
-/// Posts to `ep` via `chat_once` and parses the reply with `parse_verdict`.
+/// credited, not penalized (see `evidence_block`). `dialogue` (empty unless a user_sim conversation
+/// happened) adds a `DIALOGUE:` block so the judge grades the reader's actual answer. The endpoint
+/// is sampled `votes` times and the majority verdict is returned (see `majority_verdict`), taming
+/// the judge's run-to-run non-determinism.
 #[allow(clippy::too_many_arguments)]
 pub fn judge(
     ep: &Endpoint,
@@ -183,10 +258,13 @@ pub fn judge(
     answerable: bool,
     credit_abstention: bool,
     idx: Option<&DocIndex>,
+    dialogue: &[(String, String)],
+    votes: usize,
 ) -> anyhow::Result<Judgement> {
     // Trim the embedded fields so the judge message stays tidy and never ends on a stray newline
     // (some strict providers reject a message ending in `\n` — see prompt::user_prompt).
     let (question, gold, answer) = (question.trim(), gold.trim(), answer.trim());
+    let sections = split_judge_sections(judge_md);
     let snippets = load_evidence(source, idx);
     let evidence = evidence_block(&snippets);
     let user = build_user(
@@ -196,15 +274,54 @@ pub fn judge(
         evidence.as_deref(),
         answerable,
         credit_abstention,
+        dialogue,
+        &sections,
     );
+    // The grading rule now lives in the USER message (next to the data); the system message carries
+    // only the preamble framing. Vote over `votes` samples to tame the judge's run-to-run noise
+    // (the model is non-deterministic even at temp 0); a single sample flaps on borderline cases.
     let messages = vec![
-        json!({ "role": "system", "content": judge_md }),
+        json!({ "role": "system", "content": sections.preamble }),
         json!({ "role": "user", "content": user }),
     ];
-    let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
-        .context("judge endpoint request failed")?;
-    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-    Ok(parse_verdict(content))
+    let mut ballots = Vec::with_capacity(votes.max(1));
+    for _ in 0..votes.max(1) {
+        let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
+            .context("judge endpoint request failed")?;
+        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        ballots.push(parse_verdict(content));
+    }
+    Ok(majority_verdict(&ballots))
+}
+
+/// The majority `Judgement` over `ballots`: the verdict with the most votes wins; ties break by
+/// severity (`Wrong > Partial > Correct > Unscored`) so a split never silently favors a pass. The
+/// returned reason is that of the first ballot carrying the winning verdict. Empty input → `Unscored`.
+fn majority_verdict(ballots: &[Judgement]) -> Judgement {
+    use std::collections::HashMap;
+    if ballots.is_empty() {
+        return parse_verdict("");
+    }
+    let mut counts: HashMap<Verdict, usize> = HashMap::new();
+    for j in ballots {
+        *counts.entry(j.verdict).or_default() += 1;
+    }
+    let severity = |v: &Verdict| match v {
+        Verdict::Wrong => 3,
+        Verdict::Partial => 2,
+        Verdict::Correct => 1,
+        Verdict::Unscored => 0,
+    };
+    let winner = *counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| severity(a.0).cmp(&severity(b.0))))
+        .map(|(v, _)| v)
+        .expect("non-empty counts");
+    ballots
+        .iter()
+        .find(|j| j.verdict == winner)
+        .cloned()
+        .expect("winner came from the ballots")
 }
 
 #[cfg(test)]
@@ -264,12 +381,33 @@ mod tests {
         );
     }
 
+    /// A minimal sectioned judge.md for build_user tests — each section a distinct sentinel so
+    /// tests can assert which one landed in the message.
+    fn test_sections() -> Sections {
+        split_judge_sections(
+            "PREAMBLE-TEXT\n[[DIALOGUE]]\nDIALOGUE-RULE\n[[ANSWERABLE]]\nANSWERABLE-RULE\n[[ABSTENTION]]\nABSTENTION-RULE\n",
+        )
+    }
+
+    #[test]
+    fn split_judge_sections_extracts_four_parts() {
+        let s = test_sections();
+        assert_eq!(s.preamble, "PREAMBLE-TEXT");
+        assert_eq!(s.dialogue, "DIALOGUE-RULE");
+        assert_eq!(s.answerable, "ANSWERABLE-RULE");
+        assert_eq!(s.abstention, "ABSTENTION-RULE");
+        // Missing markers -> everything is preamble, rule sections empty (legacy prompt still parses).
+        let legacy = split_judge_sections("just one blob of rules");
+        assert_eq!(legacy.preamble, "just one blob of rules");
+        assert!(legacy.answerable.is_empty() && legacy.abstention.is_empty());
+    }
+
     #[test]
     fn user_prompt_with_evidence_injects_block_between_gold_and_answer() {
-        // Stubbed chunk text (mock) — no corpus, no network.
+        let s = test_sections();
         let snippets = vec![("a.pdf#p.1".to_string(), "stub evidence text".to_string())];
         let ev = evidence_block(&snippets);
-        let prompt = build_user("Q?", "G", "A", ev.as_deref(), true, false);
+        let prompt = build_user("Q?", "G", "A", ev.as_deref(), true, false, &[], &s);
         assert!(prompt.contains("EVIDENCE:\n[a.pdf#p.1]\nstub evidence text"));
         // Block sits between GOLD and ANSWER.
         let gold_at = prompt.find("GOLD: G").unwrap();
@@ -279,55 +417,76 @@ mod tests {
     }
 
     #[test]
-    fn build_user_unanswerable_uses_abstention_rubric_not_gold() {
-        // answerable=false → abstention rubric, no GOLD/EVIDENCE (there is no gold to compare).
-        let u = build_user("Q?", "", "not in the knowledge base", None, false, false);
-        assert!(
-            u.contains("CANNOT be answered"),
-            "carries the abstention note"
-        );
-        assert!(
-            u.contains("declines"),
-            "grades on declining, not on gold match"
-        );
-        assert!(
-            !u.contains("GOLD:"),
-            "unanswerable prompt must not carry a GOLD line"
-        );
+    fn build_user_answerable_uses_answerable_section_after_data() {
+        let s = test_sections();
+        let u = build_user("Q?", "G", "A", None, true, false, &[], &s);
+        assert!(u.contains("GOLD: G"));
+        assert!(u.contains("ANSWERABLE-RULE"));
+        assert!(!u.contains("ABSTENTION-RULE"));
+        // The rule sits AFTER the data (that placement is what the judge model actually follows).
+        assert!(u.find("ANSWER: A").unwrap() < u.find("ANSWERABLE-RULE").unwrap());
+    }
+
+    #[test]
+    fn build_user_unanswerable_uses_abstention_section_no_gold() {
+        let s = test_sections();
+        let u = build_user("Q?", "", "not in the knowledge base", None, false, false, &[], &s);
+        assert!(u.contains("CANNOT be answered"), "carries the unanswerable note");
+        assert!(u.contains("ABSTENTION-RULE"), "uses the abstention section");
+        assert!(!u.contains("ANSWERABLE-RULE"));
+        assert!(!u.contains("GOLD:"), "unanswerable prompt must not carry a GOLD line");
         assert!(u.contains("ANSWER: not in the knowledge base"));
         // answerable=true still emits the gold-anchored form.
-        let a = build_user("Q?", "G", "A", None, true, false);
+        let a = build_user("Q?", "G", "A", None, true, false, &[], &s);
         assert!(a.contains("GOLD: G"));
         assert!(!a.contains("CANNOT be answered"));
     }
 
     #[test]
+    fn build_user_injects_dialogue_block_and_rule_when_present() {
+        let s = test_sections();
+        let dlg = vec![
+            ("assistant".to_string(), "real answer here".to_string()),
+            ("user".to_string(), "thanks".to_string()),
+        ];
+        let u = build_user("Q?", "G", "A", None, true, false, &dlg, &s);
+        assert!(u.contains("DIALOGUE:"));
+        assert!(u.contains("[assistant] real answer here"));
+        assert!(u.contains("DIALOGUE-RULE"));
+        // No dialogue -> neither the block nor its rule appear.
+        let u2 = build_user("Q?", "G", "A", None, true, false, &[], &s);
+        assert!(!u2.contains("DIALOGUE:"));
+        assert!(!u2.contains("DIALOGUE-RULE"));
+    }
+
+    #[test]
     fn build_user_credit_abstention_adds_safe_miss_note_only_when_enabled() {
-        // Off (credit_abstention=false): no safe-miss note — a decline stays a miss (`wrong`).
-        let balanced = build_user("Q?", "G", "A", None, true, false);
+        let s = test_sections();
+        let balanced = build_user("Q?", "G", "A", None, true, false, &[], &s);
         assert!(!balanced.contains("safe miss"));
-        // On (credit_abstention=true): the answerable prompt tells the judge to grade a
-        // decline as `partial`, not `wrong`.
-        let safety = build_user("Q?", "G", "A", None, true, true);
+        let safety = build_user("Q?", "G", "A", None, true, true, &[], &s);
         assert!(safety.contains("safe miss"));
         // The note is answerable-only: an unanswerable prompt is unaffected by credit_abstention.
         assert_eq!(
-            build_user("Q?", "", "A", None, false, false),
-            build_user("Q?", "", "A", None, false, true)
+            build_user("Q?", "", "A", None, false, false, &[], &s),
+            build_user("Q?", "", "A", None, false, true, &[], &s)
         );
     }
 
     #[test]
-    fn user_prompt_without_source_is_byte_identical_to_gold_only() {
-        // With no evidence, build_user must reproduce the historical gold-only message byte-for-byte.
-        let got = build_user("Q?", "G", "A", None, true, false);
-        let expected = format!(
-            "QUESTION: {}\nGOLD: {}\nANSWER: {}\n\
-             Reply with one line reason then `VERDICT: correct|partial|wrong`.",
-            "Q?", "G", "A"
+    fn majority_verdict_takes_mode_then_severity_on_tie() {
+        let j = |v: &str| parse_verdict(&format!("reason\nVERDICT: {v}"));
+        // Clear mode: 2 correct beats 1 wrong.
+        assert_eq!(
+            majority_verdict(&[j("correct"), j("correct"), j("wrong")]).verdict,
+            Verdict::Correct
         );
-        assert_eq!(got, expected);
-        // An empty `source` with no index loads no evidence → block omitted → gold-only path.
-        assert!(evidence_block(&load_evidence(&[], None)).is_none());
+        // Three-way tie -> severity: Wrong wins.
+        assert_eq!(
+            majority_verdict(&[j("correct"), j("partial"), j("wrong")]).verdict,
+            Verdict::Wrong
+        );
+        // Empty -> Unscored.
+        assert_eq!(majority_verdict(&[]).verdict, Verdict::Unscored);
     }
 }
