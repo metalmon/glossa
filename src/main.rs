@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use glossa::query::{compile, QueryOpts};
 use glossa::search::search_chunks;
@@ -536,6 +537,11 @@ enum GraphAction {
         /// not exposed over MCP.
         #[arg(long = "force")]
         force: bool,
+        /// Apply the non-destructive relink plan: re-point relocated/relabeled docs' groundings
+        /// (MENTIONS + provenance) instead of leaving them reported as ungrounded. Backs up
+        /// graph.sqlite first. See the `relinkable` group in the report.
+        #[arg(long = "relink")]
+        relink: bool,
     },
     /// Print nodes reachable from NODE_ID.
     #[command(visible_alias = "neighbors")]
@@ -2148,12 +2154,39 @@ fn main() -> anyhow::Result<()> {
                 mut prune_dangling,
                 prune_stale,
                 force,
+                relink,
             } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let report = glossa::graph::doctor::doctor(&g, &ont, &rr.roots)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
+                // Relocated/relabeled docs are not orphans — refuse a `--prune-ungrounded` that
+                // would destroy their (recoverable) reasoning nodes until `--relink` has run, or
+                // the human overrides with `--force`.
+                if prune_ungrounded && !report.relink.relinkable.is_empty() && !force {
+                    anyhow::bail!(
+                        "{} nodes are relocated docs, not orphans — run `kb graph doctor --relink` \
+                         first (or --force to prune anyway)",
+                        report.relink.relinkable.len()
+                    );
+                }
+                if relink && !report.relink.relinkable.is_empty() {
+                    // Non-destructive, but back up the DB first anyway — this rewrites edges/nodes
+                    // in place and there's no undo command yet.
+                    let gdir = rr.state_base.join(".glossa");
+                    for ext in ["", "-wal", "-shm"] {
+                        let src = gdir.join(format!("graph.sqlite{ext}"));
+                        if src.exists() {
+                            let dst = gdir.join(format!("graph.sqlite{ext}.pre-relink"));
+                            std::fs::copy(&src, &dst).with_context(|| {
+                                format!("backup {src:?} -> {dst:?} before --relink")
+                            })?;
+                        }
+                    }
+                    let n = glossa::graph::doctor::apply_relink(&g, &report.relink)?;
+                    println!("relinked: {n}");
+                }
                 if prune_dangling && !force {
                     if let Some(reason) =
                         glossa::graph::doctor::dangling_prune_risk(&report, &g, &ont)

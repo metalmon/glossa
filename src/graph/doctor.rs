@@ -279,6 +279,55 @@ pub fn prune(
     Ok((inc, ung, dang, stale))
 }
 
+/// Apply a `RelinkPlan` (as computed into `DoctorReport.relink` by [`doctor`]) to the store:
+/// non-destructively re-point each relinkable reasoning node's `MENTIONS` edge from its dead target
+/// to the live structural node `classify_relink` matched it to, and keep provenance's `source_path`
+/// consistent (so the staleness/`file_sig` check keeps looking at the right file). Never touches
+/// `ambiguous` or `orphans` — those need a human or stay genuinely unresolved.
+///
+/// Collision guard: the `edges` table's primary key is `(efrom, edge_type, eto)`. Two DIFFERENT
+/// dead `MENTIONS` targets under the SAME `from` node can both resolve to the SAME `new_to` (e.g.
+/// the doc was renamed/relabeled more than once, leaving two stale rows that both point at today's
+/// one live section). Naively calling `repoint_mentions` for both would have the second UPDATE
+/// collide with the edge the first one just created. So this function tracks which `(from, new_to)`
+/// MENTIONS edges are already live — pre-existing in the DB, or created earlier in this same call —
+/// and for any later `relinkable` entry that targets an already-live pair, it DELETEs the stale
+/// `(from, MENTIONS, old_to)` row instead of repointing it (the row is now a redundant duplicate of
+/// the live edge, not something to keep). Returns the number of `relinkable` entries applied
+/// (repoint + delete both count — both fully resolve that entry; callers that need the split can
+/// walk `plan.relinkable` and re-check `live` themselves, which this crate doesn't currently need).
+pub fn apply_relink(
+    g: &GraphStore,
+    plan: &crate::graph::generalize::relink::RelinkPlan,
+) -> anyhow::Result<usize> {
+    // Pre-load current MENTIONS edges as (from,to) pairs once, instead of re-querying the DB on
+    // every loop iteration — cheap at doctor's scale and keeps the collision check O(1) per entry.
+    let mut live: HashSet<(String, String)> = g
+        .all_edges()?
+        .into_iter()
+        .filter(|e| e.edge_type == crate::graph::MENTIONS)
+        .map(|e| (e.from, e.to))
+        .collect();
+
+    let mut applied = 0usize;
+    for (from, old_to, new_to) in &plan.relinkable {
+        let key = (from.clone(), new_to.clone());
+        if live.contains(&key) {
+            // (from, MENTIONS, new_to) is already live — repointing old_to onto it would collide
+            // on the PK. The old row is now a redundant duplicate: delete it.
+            g.delete_edge(from, crate::graph::MENTIONS, old_to)?;
+        } else {
+            g.repoint_mentions(from, old_to, new_to)?;
+            live.insert(key);
+        }
+        // Keep provenance's source_path pointing at the doc's current key (strip "#section").
+        let new_doc = new_to.split_once('#').map(|(d, _)| d).unwrap_or(new_to.as_str());
+        let _ = g.set_source_path(from, new_doc);
+        applied += 1;
+    }
+    Ok(applied)
+}
+
 /// Returns `Some(reason)` when pruning the `dangling` bucket would be a mass-wipe — the signal of
 /// an ontology mismatch (e.g. a missing/changed `ontology.toml`) rather than genuine per-node rot.
 /// `None` = safe to prune. Three triggers:
@@ -798,6 +847,129 @@ strict = false
         let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
         assert!(dangling.contains(&"sym:orphan"));
+    }
+
+    #[test]
+    fn apply_relink_repoints_the_simple_case() {
+        use crate::graph::generalize::relink::RelinkPlan;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        // Seed via put_node/put_edge directly (not upsert): the dead MENTIONS target
+        // ("m.pdf#1") has no backing node, and `upsert`'s ontology edge-type validation would
+        // reject that — but that's exactly the "ungrounded" shape doctor/relink exist to fix, so
+        // bypass validation the same way the store's own repoint_mentions test does.
+        g.put_node(&node("res:a", "Resolution", "A res", prov("m.pdf", None)))
+            .unwrap();
+        g.put_node(&node(
+            "plc/m.pdf#1",
+            "Section",
+            "sec 1",
+            prov("plc/m.pdf", None),
+        ))
+        .unwrap();
+        g.put_edge(&edge("res:a", "MENTIONS", "m.pdf#1", prov("m.pdf", None)))
+            .unwrap();
+
+        let plan = RelinkPlan {
+            relinkable: vec![("res:a".into(), "m.pdf#1".into(), "plc/m.pdf#1".into())],
+            ambiguous: vec![],
+            orphans: vec![],
+        };
+        let applied = apply_relink(&g, &plan).unwrap();
+        assert_eq!(applied, 1);
+
+        let edges = g.all_edges().unwrap();
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from == "res:a" && e.to == "plc/m.pdf#1" && e.edge_type == crate::graph::MENTIONS),
+            "MENTIONS must now point at the live target"
+        );
+        assert!(
+            !edges.iter().any(|e| e.to == "m.pdf#1"),
+            "the dead edge must be gone"
+        );
+        let n = g.get_node("res:a").unwrap().unwrap();
+        assert_eq!(
+            n.prov.source_path, "plc/m.pdf",
+            "provenance source_path follows the new key, section stripped"
+        );
+
+        // Re-run doctor's own ungrounded check over the post-relink graph: res:a must no longer
+        // be ungrounded.
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert!(
+            !rep.ungrounded.iter().any(|d| d.id == "res:a"),
+            "res:a must be grounded after relink"
+        );
+    }
+
+    #[test]
+    fn apply_relink_handles_two_dead_edges_collapsing_onto_the_same_live_target() {
+        // res:a has TWO stale MENTIONS rows (e.g. relabeled twice) that both resolve to the SAME
+        // live target plc/m.pdf#1. The edges table's PK is (efrom, edge_type, eto), so naively
+        // repointing both would collide on the second UPDATE. apply_relink must repoint the first
+        // and DELETE the second (now-redundant) stale row instead of erroring/panicking.
+        use crate::graph::generalize::relink::RelinkPlan;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        g.put_node(&node("res:a", "Resolution", "A res", prov("m.pdf", None)))
+            .unwrap();
+        g.put_node(&node(
+            "plc/m.pdf#1",
+            "Section",
+            "sec 1",
+            prov("plc/m.pdf", None),
+        ))
+        .unwrap();
+        g.put_edge(&edge("res:a", "MENTIONS", "m.pdf#1", prov("m.pdf", None)))
+            .unwrap();
+        g.put_edge(&edge(
+            "res:a",
+            "MENTIONS",
+            "old/m.pdf#1",
+            prov("m.pdf", None),
+        ))
+        .unwrap();
+
+        let plan = RelinkPlan {
+            relinkable: vec![
+                ("res:a".into(), "m.pdf#1".into(), "plc/m.pdf#1".into()),
+                ("res:a".into(), "old/m.pdf#1".into(), "plc/m.pdf#1".into()),
+            ],
+            ambiguous: vec![],
+            orphans: vec![],
+        };
+        // Must not panic or error on the collision.
+        let applied = apply_relink(&g, &plan).unwrap();
+        assert_eq!(applied, 2, "both plan entries are resolved (1 repoint + 1 delete)");
+
+        let edges = g.all_edges().unwrap();
+        let mentions_live: Vec<_> = edges
+            .iter()
+            .filter(|e| e.from == "res:a" && e.edge_type == crate::graph::MENTIONS)
+            .collect();
+        assert_eq!(
+            mentions_live.len(),
+            1,
+            "exactly one live MENTIONS edge must survive, no duplicate/collision row: {mentions_live:?}"
+        );
+        assert_eq!(mentions_live[0].to, "plc/m.pdf#1");
+        assert!(!edges.iter().any(|e| e.to == "m.pdf#1" || e.to == "old/m.pdf#1"));
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert!(
+            !rep.ungrounded.iter().any(|d| d.id == "res:a"),
+            "res:a must be grounded after relink, collision case included"
+        );
     }
 
     #[test]
