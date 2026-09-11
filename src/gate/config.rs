@@ -36,6 +36,44 @@ pub struct VerifyConfig {
     pub mode: VerifyMode,
     pub nli_threshold_single: Option<f32>,
     pub nli_threshold_multi: Option<f32>,
+    pub combined_single: Option<CombinedStats>,
+    pub combined_multi: Option<CombinedStats>,
+}
+
+/// Calibrated z-score consensus stats for `combined` mode (spec §4 rev.5): AC and NLI are each
+/// standardized by their own calibrated per-bucket mean/std, summed, and compared against a
+/// calibrated z-threshold. Written by calibration (Task CZ-2); this side only reads and applies
+/// them. `threshold` is a z-score, not a raw [0,1] score, so it may legitimately be negative.
+#[derive(Clone, Copy, Debug)]
+pub struct CombinedStats {
+    pub mean_ac: f32,
+    pub std_ac: f32,
+    pub mean_nli: f32,
+    pub std_nli: f32,
+    pub threshold: f32,
+}
+
+impl CombinedStats {
+    /// Sum of the two standardized scores. A zero calibrated std means that signal never varied
+    /// during calibration (or wasn't observed) — its z-contribution is defined as 0 rather than
+    /// dividing by zero, so it neither serves nor blocks on its own.
+    pub fn z(&self, ac: f32, nli: f32) -> f32 {
+        let zac = if self.std_ac == 0.0 {
+            0.0
+        } else {
+            (ac - self.mean_ac) / self.std_ac
+        };
+        let znli = if self.std_nli == 0.0 {
+            0.0
+        } else {
+            (nli - self.mean_nli) / self.std_nli
+        };
+        zac + znli
+    }
+
+    pub fn serves(&self, ac: f32, nli: f32) -> bool {
+        self.z(ac, nli) > self.threshold
+    }
 }
 
 fn env_f32(key: &str) -> Option<f32> {
@@ -87,6 +125,10 @@ impl VerifyConfig {
                 .or_else(|| og(Ontology::verify_nli_threshold_single)),
             nli_threshold_multi: env_f32("GLOSSA_VERIFY_NLI_THRESHOLD_MULTI")
                 .or_else(|| og(Ontology::verify_nli_threshold_multi)),
+            // Combined z-score consensus stats: ontology ONLY, no env override — these are
+            // calibrated (Task CZ-2's output), not a knob a deployment hand-sets.
+            combined_single: ont.as_ref().and_then(|o| o.verify_combined_single()),
+            combined_multi: ont.as_ref().and_then(|o| o.verify_combined_multi()),
         }
     }
 
@@ -114,6 +156,24 @@ impl VerifyConfig {
         self.mode != VerifyMode::Ac
             && self.nli_threshold_single.is_some()
             && self.nli_threshold_multi.is_some()
+    }
+
+    /// Calibrated combined-mode stats for the given bucket, or `None` when uncalibrated.
+    pub fn combined_stats(&self, b: Bucket) -> Option<CombinedStats> {
+        match b {
+            Bucket::Single => self.combined_single,
+            Bucket::Multi => self.combined_multi,
+        }
+    }
+
+    /// Combined-mode readiness: the mode asks for it AND both buckets are calibrated. Mirrors
+    /// `is_nli_ready`'s shape; `decide_modes` also fails open per-call via `combined_stats(..)`
+    /// being `None`, so this is for callers (e.g. `gate::verify_outcome_with_scorer`) that need a
+    /// single up-front readiness check.
+    pub fn is_combined_ready(&self) -> bool {
+        self.mode == VerifyMode::Combined
+            && self.combined_single.is_some()
+            && self.combined_multi.is_some()
     }
 }
 
@@ -237,5 +297,32 @@ mod tests {
             VerifyConfig::resolve(&g).mode,
             VerifyMode::Combined
         ));
+    }
+
+    #[test]
+    fn combined_stats_round_trip_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\nmode=\"combined\"\n\
+             [verify.combined.single]\nmean_ac=0.5\nstd_ac=0.1\nmean_nli=0.6\nstd_nli=0.2\nthreshold=0.1\n\
+             [verify.combined.multi]\nmean_ac=0.4\nstd_ac=0.15\nmean_nli=0.55\nstd_nli=0.25\nthreshold=-0.2\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert!(c.is_combined_ready());
+        let single = c.combined_stats(Bucket::Single).unwrap();
+        assert!((single.mean_ac - 0.5).abs() < 1e-6);
+        assert!((single.std_nli - 0.2).abs() < 1e-6);
+        assert!((single.threshold - 0.1).abs() < 1e-6);
+        let multi = c.combined_stats(Bucket::Multi).unwrap();
+        assert!((multi.mean_nli - 0.55).abs() < 1e-6);
+        assert!((multi.threshold - (-0.2)).abs() < 1e-6);
     }
 }

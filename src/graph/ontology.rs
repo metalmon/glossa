@@ -1,3 +1,4 @@
+use crate::gate::config::CombinedStats;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -92,6 +93,9 @@ struct RawVerify {
     /// `[verify.nli]`: the NLI support-verifier's threshold table.
     #[serde(default)]
     nli: Option<RawVerifyNli>,
+    /// `[verify.combined]`: the z-score consensus calibration (Task CZ-2's output) by bucket.
+    #[serde(default)]
+    combined: Option<RawVerifyCombined>,
 }
 
 /// `[verify.ac]` overlay: currently just the alias threshold table (see `RawVerify::ac`).
@@ -106,6 +110,34 @@ struct RawVerifyAc {
 struct RawVerifyNli {
     #[serde(default)]
     threshold: Option<RawVerifyThreshold>,
+}
+
+/// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
+/// `RawVerify::combined` and [`Ontology::verify_combined_single`]).
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawVerifyCombined {
+    #[serde(default)]
+    single: Option<RawCombinedStats>,
+    #[serde(default)]
+    multi: Option<RawCombinedStats>,
+}
+
+/// One bucket's calibrated z-score consensus stats. All five keys are optional at the TOML level
+/// (so a partial/in-progress calibration round-trips without a parse error); [`Ontology`] only
+/// promotes a bucket to `Some(CombinedStats)` when ALL FIVE are present — see
+/// [`Ontology::verify_combined_single`].
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawCombinedStats {
+    #[serde(default)]
+    mean_ac: Option<f32>,
+    #[serde(default)]
+    std_ac: Option<f32>,
+    #[serde(default)]
+    mean_nli: Option<f32>,
+    #[serde(default)]
+    std_nli: Option<f32>,
+    #[serde(default)]
+    threshold: Option<f32>,
 }
 
 /// Calibrated grounding thresholds by [`crate::gate::score::Bucket`]. `None` (either field, or the
@@ -350,12 +382,30 @@ pub struct Ontology {
     /// Per-corpus `[verify.nli.threshold]` override. See [`Ontology::verify_nli_threshold_single`].
     verify_nli_threshold_single: Option<f32>,
     verify_nli_threshold_multi: Option<f32>,
+    /// Per-corpus `[verify.combined.<bucket>]` z-score consensus calibration (Task CZ-2's output).
+    /// `None` when the bucket's table is absent OR only partially populated — see
+    /// [`Ontology::verify_combined_single`].
+    verify_combined_single: Option<CombinedStats>,
+    verify_combined_multi: Option<CombinedStats>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
     v.get("id_prefix")
         .and_then(|p| p.as_str())
         .map(str::to_string)
+}
+
+/// Promotes a `[verify.combined.<bucket>]` table to `CombinedStats` only when ALL FIVE keys are
+/// present — a partial table (calibration mid-run, or a typo) is treated as not-calibrated rather
+/// than guessing missing stats as zero. See [`Ontology::verify_combined_single`].
+fn combined_stats_from_raw(r: &RawCombinedStats) -> Option<CombinedStats> {
+    Some(CombinedStats {
+        mean_ac: r.mean_ac?,
+        std_ac: r.std_ac?,
+        mean_nli: r.mean_nli?,
+        std_nli: r.std_nli?,
+        threshold: r.threshold?,
+    })
 }
 
 impl Ontology {
@@ -507,6 +557,18 @@ impl Ontology {
                 .as_ref()
                 .and_then(|n| n.threshold.as_ref())
                 .and_then(|t| t.multi),
+            verify_combined_single: raw
+                .verify
+                .combined
+                .as_ref()
+                .and_then(|c| c.single.as_ref())
+                .and_then(combined_stats_from_raw),
+            verify_combined_multi: raw
+                .verify
+                .combined
+                .as_ref()
+                .and_then(|c| c.multi.as_ref())
+                .and_then(combined_stats_from_raw),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -730,6 +792,19 @@ impl Ontology {
     /// Per-corpus `[verify.nli.threshold].multi` override, or `None` when uncalibrated.
     pub fn verify_nli_threshold_multi(&self) -> Option<f32> {
         self.verify_nli_threshold_multi
+    }
+
+    /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the
+    /// table is absent OR only partially populated (any of `mean_ac, std_ac, mean_nli, std_nli,
+    /// threshold` missing) — a partial table is treated as not-calibrated, never as zero-filled.
+    pub fn verify_combined_single(&self) -> Option<CombinedStats> {
+        self.verify_combined_single
+    }
+
+    /// Per-corpus `[verify.combined.multi]` z-score consensus calibration, or `None` when the
+    /// table is absent OR only partially populated. See [`Ontology::verify_combined_single`].
+    pub fn verify_combined_multi(&self) -> Option<CombinedStats> {
+        self.verify_combined_multi
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {

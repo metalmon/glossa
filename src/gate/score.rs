@@ -130,7 +130,6 @@ pub fn decide_modes(
 ) -> GateOutcome {
     let base = decide(ac, cfg, answer_tokens); // existing AC-only outcome (thresholds, empty guard, etc.)
     let bucket = base.score.bucket;
-    let ac_serves = matches!(base.decision, Decision::Serve);
     let nli_serves = |s: f32| cfg.nli_threshold(bucket).map(|t| s > t).unwrap_or(false);
     let (decision, reason) = match (cfg.mode, nli) {
         (VerifyMode::Ac, _) | (_, None) => (base.decision, base.reason.clone()),
@@ -141,15 +140,20 @@ pub fn decide_modes(
                 (Decision::Abstain, "unentailed".to_string())
             }
         }
-        (VerifyMode::Combined, Some(s)) => {
-            if ac_serves && nli_serves(s) {
-                (Decision::Serve, "grounded".to_string())
-            } else if ac_serves {
-                (Decision::Abstain, "unentailed".to_string())
-            } else {
-                (base.decision, base.reason.clone())
+        // Z-SCORE CONSENSUS (spec §4 rev.5): standardize AC and NLI by their calibrated
+        // per-bucket mean/std, sum, and compare against the calibrated z-threshold — replaces
+        // the old AND-of-two-thresholds. No calibrated stats for this bucket ⇒ fall back to the
+        // AC-only outcome (fail-open): uncalibrated combined mode must not behave worse than Ac.
+        (VerifyMode::Combined, Some(s)) => match cfg.combined_stats(bucket) {
+            Some(st) => {
+                if st.serves(base.score.grounding, s) {
+                    (Decision::Serve, "grounded".to_string())
+                } else {
+                    (Decision::Abstain, "unentailed".to_string())
+                }
             }
-        }
+            None => (base.decision, base.reason.clone()),
+        },
     };
     GateOutcome {
         decision,
@@ -233,6 +237,8 @@ mod tests {
             mode: VerifyMode::Ac,
             nli_threshold_single: None,
             nli_threshold_multi: None,
+            combined_single: None,
+            combined_multi: None,
         };
         let mut df = DfTable::new();
         df.add_chunk(&tokenize("pp.19.00.00.00 text"));
@@ -279,24 +285,87 @@ mod tests {
             mode,
             nli_threshold_single: Some(nli_thr),
             nli_threshold_multi: Some(nli_thr),
+            combined_single: None,
+            combined_multi: None,
+        }
+    }
+
+    /// A `VerifyConfig` for the z-score consensus `decide_modes` tests: `mode: Combined` with
+    /// `st` calibrated for BOTH buckets, `threshold_single/multi: Some(0.3)` so the AC-only
+    /// fallback path (no combined stats, or `nli == None`) serves at grounding 0.9, and
+    /// `nli_threshold_single/multi: Some(0.5)` (unused by the combined arm itself, but kept
+    /// populated so `is_nli_ready`-style callers see a consistent config).
+    fn cfg_combined(st: crate::gate::config::CombinedStats) -> crate::gate::config::VerifyConfig {
+        crate::gate::config::VerifyConfig {
+            enabled: true,
+            rare_df_frac: 0.03,
+            min_answer_tokens: 1,
+            threshold_single: Some(0.3),
+            threshold_multi: Some(0.3),
+            mode: crate::gate::config::VerifyMode::Combined,
+            nli_threshold_single: Some(0.5),
+            nli_threshold_multi: Some(0.5),
+            combined_single: Some(st),
+            combined_multi: Some(st),
         }
     }
 
     #[test]
-    fn combined_requires_both_signals() {
+    fn combined_z_serves_above_threshold_abstains_below() {
         use super::{decide_modes, Decision};
-        use crate::gate::config::VerifyMode;
-        let cfg = cfg_for(VerifyMode::Combined, /*ac*/ 0.3, /*nli*/ 0.5);
-        let ac = gscore(0.9, Bucket::Single); // AC grounding above ac threshold ⇒ AC serves
+        use crate::gate::config::CombinedStats;
+        // stats: mean_ac=0.5,std_ac=0.1, mean_nli=0.5,std_nli=0.1, z-threshold=0.0.
+        // ac=0.6,nli=0.6 -> zac=1.0, znli=1.0, z=2.0 > 0 -> serve.
+        // ac=0.4,nli=0.4 -> z=-2.0 < 0 -> abstain (reason "unentailed").
+        let st = CombinedStats {
+            mean_ac: 0.5,
+            std_ac: 0.1,
+            mean_nli: 0.5,
+            std_nli: 0.1,
+            threshold: 0.0,
+        };
+        let cfg = cfg_combined(st);
         assert_eq!(
-            decide_modes(ac.clone(), Some(0.8), &cfg, 20).decision,
+            decide_modes(gscore(0.6, Bucket::Single), Some(0.6), &cfg, 20).decision,
             Decision::Serve
         );
+        let o = decide_modes(gscore(0.4, Bucket::Single), Some(0.4), &cfg, 20);
+        assert_eq!(o.decision, Decision::Abstain);
+        assert_eq!(o.reason, "unentailed");
+    }
+
+    #[test]
+    fn combined_z_none_nli_or_no_stats_falls_back_to_ac() {
+        use super::{decide_modes, Decision};
+        use crate::gate::config::CombinedStats;
+        let st = CombinedStats {
+            mean_ac: 0.5,
+            std_ac: 0.1,
+            mean_nli: 0.5,
+            std_nli: 0.1,
+            threshold: 0.0,
+        };
+        let cfg = cfg_combined(st);
+        // nli None -> AC-only (AC serves when grounding > its threshold; set cfg's ac threshold
+        // so it serves).
         assert_eq!(
-            decide_modes(ac.clone(), Some(0.4), &cfg, 20).decision,
-            Decision::Abstain
-        ); // NLI fails
-        assert_eq!(decide_modes(ac, None, &cfg, 20).decision, Decision::Serve); // None ⇒ AC-only serves
+            decide_modes(gscore(0.9, Bucket::Single), None, &cfg, 20).decision,
+            Decision::Serve
+        );
+        // std==0 guard: zero-std stats contribute 0; construct stats with std_ac=0,std_nli=0,
+        // threshold=-0.1 -> z=0 > -0.1 -> serve.
+        let zero = CombinedStats {
+            mean_ac: 0.5,
+            std_ac: 0.0,
+            mean_nli: 0.5,
+            std_nli: 0.0,
+            threshold: -0.1,
+        };
+        let cfgz = cfg_combined(zero);
+        assert_eq!(
+            decide_modes(gscore(0.9, Bucket::Single), Some(0.9), &cfgz, 20).decision,
+            Decision::Serve
+        );
     }
 
     #[test]
