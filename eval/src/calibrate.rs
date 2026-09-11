@@ -91,6 +91,10 @@ pub struct Case {
     pub grounding: f32,
     pub bucket: Bucket,
     pub cell: Cell,
+    /// NLI entailment shadow score, when a scorer ran. Plan 1 has no NLI scorer wired into
+    /// [`load_cases`] — it always sets `None` here; this is the slot Plan 2 fills. Unit tests
+    /// construct `Case`s with `Some(_)` directly to exercise [`select_mode`]'s `nli` branch.
+    pub nli: Option<f32>,
 }
 
 /// Reuse `report.rs`'s `confusion_text` cell classification under abstention_policy
@@ -120,10 +124,9 @@ pub fn load_cases(
     corpus_glossa: &std::path::Path,
     credit_abstention: bool,
 ) -> anyhow::Result<Vec<Case>> {
-    let df = glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(
-        corpus_glossa,
-    ))
-    .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
+    let df =
+        glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
+            .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
     let rare_df_frac = VerifyConfig::resolve(corpus_glossa).rare_df_frac;
     let raw = crate::report::load_cases(&run_dir.join("cases"))?;
     let pb = mk_bar(raw.len() as u64);
@@ -148,6 +151,7 @@ pub fn load_cases(
             grounding: s.grounding,
             bucket: s.bucket,
             cell,
+            nli: None, // Plan 1 has no NLI scorer wired in yet; Plan 2 fills this shadow slot.
         });
     }
     pb.finish_and_clear();
@@ -215,13 +219,20 @@ fn sweep_over<'a>(cases: impl Iterator<Item = &'a Case> + Clone, n: usize) -> Bu
         .into_iter()
         .map(|t| {
             let served: Vec<&Case> = cases.clone().filter(|c| c.grounding > t).collect();
-            let wrong = served.iter().filter(|c| c.cell == Cell::ShouldAbstain).count();
+            let wrong = served
+                .iter()
+                .filter(|c| c.cell == Cell::ShouldAbstain)
+                .count();
             // spec §10: "answers X%" = served / universe (all served, correct+wrong); error =
             // wrong / served.
             Point {
                 threshold: t,
                 served: served.len(),
-                answered_pct: if n == 0 { 0.0 } else { served.len() as f32 / n as f32 },
+                answered_pct: if n == 0 {
+                    0.0
+                } else {
+                    served.len() as f32 / n as f32
+                },
                 error_pct: if served.is_empty() {
                     0.0
                 } else {
@@ -240,6 +251,109 @@ fn sweep_over<'a>(cases: impl Iterator<Item = &'a Case> + Clone, n: usize) -> Bu
 /// curve.
 pub fn sweep(cases: &[Case], _folds: usize) -> BucketReport {
     sweep_over(cases.iter(), cases.len())
+}
+
+/// The calibrated verify combination policy for one corpus: which signal decides, plus the AC and
+/// (when chosen) NLI per-bucket thresholds. Plan 1 selects between `ac` and `nli`; `combined` is
+/// deferred to Plan 2 (needs real labeled nli).
+pub struct ModeSelection {
+    pub mode: glossa::gate::config::VerifyMode,
+    pub ac_single: f32,
+    pub ac_multi: f32,
+    pub nli_single: Option<f32>,
+    pub nli_multi: Option<f32>,
+}
+
+/// The recommended threshold for one bucket via the existing sweep, or None if that bucket is empty.
+fn bucket_threshold(cases: &[Case], bucket: Bucket, folds: usize, budget: f32) -> Option<f32> {
+    let bucket_cases: Vec<Case> = cases
+        .iter()
+        .copied()
+        .filter(|c| c.bucket == bucket)
+        .collect();
+    if bucket_cases.is_empty() {
+        return None;
+    }
+    sweep(&bucket_cases, folds).recommended_for(budget)
+}
+
+/// Fraction of the whole pool that would be SERVED at the given per-bucket thresholds using `score`
+/// (a case is served when its score > its bucket threshold). Used to compare ac vs nli coverage.
+fn coverage_at(
+    cases: &[Case],
+    score: impl Fn(&Case) -> f32,
+    single_thr: f32,
+    multi_thr: f32,
+) -> f32 {
+    if cases.is_empty() {
+        return 0.0;
+    }
+    let served = cases
+        .iter()
+        .filter(|c| {
+            let thr = if matches!(c.bucket, Bucket::Single) {
+                single_thr
+            } else {
+                multi_thr
+            };
+            score(c) > thr
+        })
+        .count();
+    served as f32 / cases.len() as f32
+}
+
+/// Choose `ac` vs `nli` from the labeled pool by max served-coverage subject to `error <= budget`,
+/// tie-break `ac > nli` (a model-free gate beats a model gate that only ties it). `nli` is a
+/// candidate only when enough cases carry a score (`nli.is_some()`); otherwise `ac` wins by default.
+/// `combined` is intentionally not considered here (Plan 1 scope ruling).
+pub fn select_mode(
+    cases: &[Case],
+    budget: f32,
+    folds: usize,
+    existing_ac: (f32, f32),
+) -> ModeSelection {
+    // AC operating point per bucket (reuse the existing sweep on `grounding`).
+    let ac_single = bucket_threshold(cases, Bucket::Single, folds, budget).unwrap_or(existing_ac.0);
+    let ac_multi = bucket_threshold(cases, Bucket::Multi, folds, budget).unwrap_or(existing_ac.1);
+    let ac_cov = coverage_at(cases, |c| c.grounding, ac_single, ac_multi);
+
+    // NLI operating point: sweep on the nli value, over cases that HAVE one. If none carry nli, NLI
+    // is unavailable -> ac wins.
+    let nli_cases: Vec<Case> = cases
+        .iter()
+        .filter(|c| c.nli.is_some())
+        .map(|c| Case {
+            grounding: c.nli.unwrap(),
+            bucket: c.bucket,
+            cell: c.cell,
+            nli: c.nli,
+        })
+        .collect();
+    let (mode, nli_single, nli_multi) = if nli_cases.is_empty() {
+        (glossa::gate::config::VerifyMode::Ac, None, None)
+    } else {
+        let ns = bucket_threshold(&nli_cases, Bucket::Single, folds, budget);
+        let nm = bucket_threshold(&nli_cases, Bucket::Multi, folds, budget);
+        match (ns, nm) {
+            (Some(s), Some(m)) => {
+                let nli_cov = coverage_at(cases, |c| c.nli.unwrap_or(f32::NEG_INFINITY), s, m);
+                // tie-break ac > nli: nli wins only if strictly higher coverage at the budget.
+                if nli_cov > ac_cov {
+                    (glossa::gate::config::VerifyMode::Nli, Some(s), Some(m))
+                } else {
+                    (glossa::gate::config::VerifyMode::Ac, Some(s), Some(m))
+                }
+            }
+            _ => (glossa::gate::config::VerifyMode::Ac, ns, nm),
+        }
+    };
+    ModeSelection {
+        mode,
+        ac_single,
+        ac_multi,
+        nli_single,
+        nli_multi,
+    }
 }
 
 /// Deterministic FNV-1a hash of a case index, used only to assign k-fold membership. Never
@@ -325,17 +439,15 @@ pub fn render_svg(bucket: &str, rep: &BucketReport) -> String {
     )
 }
 
-/// Set `[verify.threshold]` and `[verify.calibration]` in `<glossa_dir>/ontology.toml`, preserving
-/// every other table/comment via `toml_edit`. `toml_edit` does not auto-vivify intermediate tables
-/// on assignment, so each level (`verify`, `verify.threshold`, `verify.calibration`) is created
-/// explicitly when absent before its keys are set.
-#[allow(clippy::too_many_arguments)] // interface fixed by spec §10/§11: one call writes the whole
-// `[verify.threshold]` + `[verify.calibration]` operating point atomically; a params struct would
-// just move these same 8 fields one level of indirection away for a single call site.
+/// Set `[verify].mode`, `[verify.ac.threshold]` (canonical), `[verify.threshold]` (legacy sync —
+/// keeps the currently-deployed binary working for one release), `[verify.nli.threshold]` (only
+/// when `sel` carries both nli thresholds), and `[verify.calibration]` in
+/// `<glossa_dir>/ontology.toml`, preserving every other table/comment via `toml_edit`. `toml_edit`
+/// does not auto-vivify intermediate tables on assignment, so each level is created explicitly
+/// when absent before its keys are set.
 pub fn write_threshold(
     glossa_dir: &std::path::Path,
-    single: f32,
-    multi: f32,
+    sel: &ModeSelection,
     run: &str,
     max_error: Option<f32>,
     answered: f32,
@@ -347,7 +459,11 @@ pub fn write_threshold(
     // nearest f64 to 0.42), so `toml_edit`'s float formatter would print a long, ugly decimal
     // instead of "0.42". Round-tripping through the f32's own shortest `Display` string first
     // recovers the clean decimal before widening to the f64 `value()` wants.
-    let f = |v: f32| -> f64 { v.to_string().parse().expect("f32 Display always parses as f64") };
+    let f = |v: f32| -> f64 {
+        v.to_string()
+            .parse()
+            .expect("f32 Display always parses as f64")
+    };
     let path = glossa_dir.join("ontology.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: DocumentMut = existing
@@ -366,9 +482,50 @@ pub fn write_threshold(
     if verify.get("calibration").is_none() {
         verify["calibration"] = Item::Table(Table::new());
     }
+    if verify.get("ac").is_none() {
+        verify["ac"] = Item::Table(Table::new());
+    }
 
-    verify["threshold"]["single"] = value(f(single));
-    verify["threshold"]["multi"] = value(f(multi));
+    let mode_str = match sel.mode {
+        glossa::gate::config::VerifyMode::Ac => "ac",
+        glossa::gate::config::VerifyMode::Nli => "nli",
+        glossa::gate::config::VerifyMode::Combined => "combined",
+    };
+    verify["mode"] = value(mode_str);
+
+    if verify["ac"]
+        .as_table_mut()
+        .context("[verify.ac] is not a table")?
+        .get("threshold")
+        .is_none()
+    {
+        verify["ac"]["threshold"] = Item::Table(Table::new());
+    }
+    verify["ac"]["threshold"]["single"] = value(f(sel.ac_single));
+    verify["ac"]["threshold"]["multi"] = value(f(sel.ac_multi));
+
+    // Legacy sync (spec 2.5): keep the currently-deployed binary (which only reads
+    // `[verify.threshold]`) working for one release after `[verify.ac.threshold]` becomes
+    // canonical.
+    verify["threshold"]["single"] = value(f(sel.ac_single));
+    verify["threshold"]["multi"] = value(f(sel.ac_multi));
+
+    if let (Some(s), Some(m)) = (sel.nli_single, sel.nli_multi) {
+        if verify.get("nli").is_none() {
+            verify["nli"] = Item::Table(Table::new());
+        }
+        if verify["nli"]
+            .as_table_mut()
+            .context("[verify.nli] is not a table")?
+            .get("threshold")
+            .is_none()
+        {
+            verify["nli"]["threshold"] = Item::Table(Table::new());
+        }
+        verify["nli"]["threshold"]["single"] = value(f(s));
+        verify["nli"]["threshold"]["multi"] = value(f(m));
+    }
+
     verify["calibration"]["run"] = value(run);
     if let Some(me) = max_error {
         verify["calibration"]["max_error"] = value(f(me));
@@ -444,7 +601,11 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         if !wanted {
             continue;
         }
-        let bucket_cases: Vec<Case> = cases.iter().copied().filter(|c| c.bucket == bucket).collect();
+        let bucket_cases: Vec<Case> = cases
+            .iter()
+            .copied()
+            .filter(|c| c.bucket == bucket)
+            .collect();
         let rep = sweep(&bucket_cases, args.folds);
         let cv = sweep_cv(&bucket_cases, args.folds, budget);
         svg_report.push_str(&render_svg(name, &rep));
@@ -522,18 +683,30 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         } else {
             0.0
         };
+        let sel = select_mode(
+            &cases,
+            budget,
+            args.folds,
+            (single_threshold, multi_threshold),
+        );
         write_threshold(
             &corpus_glossa,
-            single_threshold,
-            multi_threshold,
+            &sel,
             &tag,
             args.max_error,
             answered_pct,
             error_pct,
             args.folds,
         )?;
+        let mode_str = match sel.mode {
+            glossa::gate::config::VerifyMode::Ac => "ac",
+            glossa::gate::config::VerifyMode::Nli => "nli",
+            glossa::gate::config::VerifyMode::Combined => "combined",
+        };
         println!(
-            "written to ontology.toml: single={single_threshold:.2} multi={multi_threshold:.2}   (weighted: answers {:.0}% at {:.0}% error)",
+            "written to ontology.toml: mode={mode_str} single={:.2} multi={:.2}   (weighted: answers {:.0}% at {:.0}% error)",
+            sel.ac_single,
+            sel.ac_multi,
             answered_pct * 100.0,
             error_pct * 100.0,
         );
@@ -669,6 +842,7 @@ mod tests {
             grounding: g,
             bucket: Bucket::Single,
             cell,
+            nli: None,
         };
         let cases = vec![
             mk(0.9, Cell::ShouldServe),
@@ -677,7 +851,7 @@ mod tests {
             mk(0.85, Cell::ShouldAbstain), // one high-scoring wrong
         ];
         let rep = sweep(&cases, 1); // folds=1 = whole-set
-        // raising threshold cannot increase error_pct at the recommended point
+                                    // raising threshold cannot increase error_pct at the recommended point
         let rec = rep.recommended_for(0.0).unwrap(); // 0 error ⇒ threshold above 0.85
         assert!(rec > 0.85);
     }
@@ -692,6 +866,7 @@ mod tests {
             grounding: g,
             bucket: Bucket::Single,
             cell,
+            nli: None,
         };
         let cases = vec![
             mk(0.95, Cell::ShouldServe),
@@ -712,8 +887,18 @@ mod tests {
         let rep = super::BucketReport {
             n: 4,
             points: vec![
-                super::Point { threshold: 0.4, answered_pct: 0.5, error_pct: 0.2, served: 2 },
-                super::Point { threshold: 0.9, answered_pct: 0.25, error_pct: 0.0, served: 1 },
+                super::Point {
+                    threshold: 0.4,
+                    answered_pct: 0.5,
+                    error_pct: 0.2,
+                    served: 2,
+                },
+                super::Point {
+                    threshold: 0.9,
+                    answered_pct: 0.25,
+                    error_pct: 0.0,
+                    served: 1,
+                },
             ],
         };
         let s = super::render_ascii("single", &rep);
@@ -724,7 +909,12 @@ mod tests {
     fn svg_is_self_contained() {
         let rep = super::BucketReport {
             n: 1,
-            points: vec![super::Point { threshold: 0.4, answered_pct: 0.5, error_pct: 0.1, served: 1 }],
+            points: vec![super::Point {
+                threshold: 0.4,
+                answered_pct: 0.5,
+                error_pct: 0.1,
+                served: 1,
+            }],
         };
         let svg = super::render_svg("single", &rep);
         assert!(svg.starts_with("<svg") && svg.contains("</svg>"));
@@ -736,13 +926,30 @@ mod tests {
         assert!(!without_namespace.contains("http://") && !without_namespace.contains("https://"));
     }
 
+    /// A `ModeSelection` fixture for `write_threshold` tests: `ac` mode, no nli thresholds (the
+    /// Plan 1 runtime default — `select_mode` always picks `ac` with `Case.nli == None`).
+    fn ac_sel(ac_single: f32, ac_multi: f32) -> super::ModeSelection {
+        super::ModeSelection {
+            mode: glossa::gate::config::VerifyMode::Ac,
+            ac_single,
+            ac_multi,
+            nli_single: None,
+            nli_multi: None,
+        }
+    }
+
     #[test]
     fn write_threshold_roundtrips_into_ontology() {
         let dir = tempfile::tempdir().unwrap();
         let glossa = dir.path().join(".glossa"); // write_threshold writes <glossa_dir>/ontology.toml
-        super::write_threshold(&glossa, 0.42, 0.55, "runX", Some(0.02), 0.18, 0.015, 5).unwrap();
+        let sel = ac_sel(0.42, 0.55);
+        super::write_threshold(&glossa, &sel, "runX", Some(0.02), 0.18, 0.015, 5).unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
         assert!(o.contains("[verify.threshold]") && o.contains("single = 0.42"));
+        assert!(o.contains("[verify.ac.threshold]") && o.contains("single = 0.42"));
+        assert!(o.contains("mode = \"ac\""));
+        // No nli data in this fixture -> no [verify.nli.threshold] block written.
+        assert!(!o.contains("[verify.nli.threshold]"));
     }
 
     /// `write_threshold` must preserve unrelated existing content in `ontology.toml`, not clobber
@@ -757,7 +964,8 @@ mod tests {
             "# a hand-authored comment\n[types.symptom]\nlabel = \"Symptom\"\n",
         )
         .unwrap();
-        super::write_threshold(&glossa, 0.3, 0.6, "runY", None, 0.5, 0.01, 3).unwrap();
+        let sel = ac_sel(0.3, 0.6);
+        super::write_threshold(&glossa, &sel, "runY", None, 0.5, 0.01, 3).unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
         assert!(o.contains("a hand-authored comment"));
         assert!(o.contains("[types.symptom]"));
@@ -781,5 +989,64 @@ mod tests {
         filetime::set_file_mtime(&new, filetime::FileTime::from_unix_time(2_000_000, 0)).unwrap();
         filetime::set_file_mtime(&stray, filetime::FileTime::from_unix_time(3_000_000, 0)).unwrap();
         assert_eq!(super::latest_run(&runs).unwrap(), "new");
+    }
+
+    /// Build a synthetic `Case` for `select_mode` tests directly (all fields `pub`).
+    fn case(grounding: f32, bucket: super::Bucket, nli: Option<f32>, cell: Cell) -> super::Case {
+        super::Case {
+            grounding,
+            bucket,
+            cell,
+            nli,
+        }
+    }
+
+    #[test]
+    fn select_mode_picks_ac_when_no_nli_data() {
+        use super::{select_mode, Bucket};
+        // All nli None -> ac chosen regardless of grounding distribution.
+        let cases = vec![
+            case(0.9, Bucket::Single, None, Cell::ShouldServe),
+            case(0.1, Bucket::Single, None, Cell::ShouldAbstain),
+        ];
+        let sel = select_mode(&cases, 0.5, 5, (1.0, 1.0));
+        assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Ac));
+        assert_eq!(sel.nli_single, None);
+    }
+
+    /// Proves "nli strictly beats ac at the budget -> nli chosen", not just "nli data present".
+    ///
+    /// Traced against `sweep_over`/`recommended_for` (both bucket-agnostic — the same math runs
+    /// per bucket): candidate thresholds are midpoints between distinct scores, plus sentinels
+    /// below the min / above the max; `recommended_for(budget)` picks the LOWEST threshold whose
+    /// `error_pct <= budget`.
+    ///
+    /// The pool below has BOTH a Single and a Multi bucket (bucket_threshold needs cases in both
+    /// buckets, or the missing bucket's threshold is `None` and `select_mode` falls back to `ac`
+    /// by construction — see the `(Some(s), Some(m))` match arm). In each bucket, all 4
+    /// `grounding` values tie at 0.5 (two ShouldServe, two ShouldAbstain) so AC's only candidate
+    /// thresholds are "serve everyone" (0.499, error 50%) and "serve no one" (0.501, error 0%);
+    /// at budget 0.0 only the latter qualifies, so `ac_single = ac_multi = 0.501` and AC's
+    /// pool-wide coverage is exactly 0 (0.5 is never `> 0.501`).
+    ///
+    /// The same cases carry `nli` scores that perfectly separate ShouldServe (0.9) from
+    /// ShouldAbstain (0.1) in each bucket. Midpoint thresholds are 0.099 (serves everyone, error
+    /// 50%) and 0.5 (serves only the two 0.9 cases, error 0%) and 0.901 (serves no one, error 0%);
+    /// at budget 0.0 the LOWEST qualifying threshold is 0.5, so `nli_single = nli_multi = 0.5`
+    /// and nli's pool-wide coverage is 2/4 = 0.5 — strictly greater than AC's 0, so `select_mode`
+    /// must pick `Nli`.
+    #[test]
+    fn select_mode_picks_nli_when_it_covers_strictly_more() {
+        use super::{select_mode, Bucket};
+        let cases = vec![
+            case(0.5, Bucket::Single, Some(0.9), Cell::ShouldServe),
+            case(0.5, Bucket::Single, Some(0.1), Cell::ShouldAbstain),
+            case(0.5, Bucket::Multi, Some(0.9), Cell::ShouldServe),
+            case(0.5, Bucket::Multi, Some(0.1), Cell::ShouldAbstain),
+        ];
+        let sel = select_mode(&cases, 0.0, 5, (1.0, 1.0));
+        assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Nli));
+        assert!(sel.nli_single.is_some());
+        assert!(sel.nli_multi.is_some());
     }
 }
