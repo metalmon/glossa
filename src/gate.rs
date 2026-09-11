@@ -1,6 +1,7 @@
 //! Answer-grounding gate (model-free). See docs/superpowers/specs/2026-09-06-answer-grounding-gate-design.md
 pub mod token;
 pub mod df;
+pub mod df_cache;
 pub mod score;
 pub mod config;
 
@@ -41,12 +42,12 @@ pub fn verify_outcome(
     chunk_paths: &[String],
 ) -> anyhow::Result<(GateOutcome, usize)> {
     let cfg = VerifyConfig::resolve(glossa_dir);
-    let df = df::DfTable::load(&df::DfTable::sidecar_path(glossa_dir))?;
+    let df = df_cache::cached_df(glossa_dir)?;
     let chunks: Vec<String> = chunk_paths
         .iter()
         .map(|p| read_chunk_text(glossa_dir, p))
         .collect::<anyhow::Result<_>>()?;
-    let s = score(answer, &chunks, &df, cfg.rare_df_frac);
+    let s = score(answer, &chunks, &*df, cfg.rare_df_frac);
     let answer_tokens = token::tokenize(answer).len();
     let outcome = decide(s, &cfg, answer_tokens);
     Ok((outcome, chunk_paths.len()))
