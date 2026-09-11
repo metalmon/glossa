@@ -42,15 +42,40 @@ pub fn verify_outcome(
     answer: &str,
     chunk_paths: &[String],
 ) -> anyhow::Result<(GateOutcome, usize)> {
+    verify_outcome_with_scorer(glossa_dir, answer, chunk_paths, None)
+}
+
+/// Same as [`verify_outcome`], plus an optional NLI scorer. `None` ⇒ model-free (today's
+/// behaviour). Plan 2 supplies a real `&dyn NliScorer`; the mode/short-circuit lives here (spec 4).
+pub fn verify_outcome_with_scorer(
+    glossa_dir: &std::path::Path,
+    answer: &str,
+    chunk_paths: &[String],
+    scorer: Option<&dyn nli::NliScorer>,
+) -> anyhow::Result<(GateOutcome, usize)> {
     let cfg = VerifyConfig::resolve(glossa_dir);
     let df = df_cache::cached_df(glossa_dir)?;
     let chunks: Vec<String> = chunk_paths
         .iter()
         .map(|p| read_chunk_text(glossa_dir, p))
         .collect::<anyhow::Result<_>>()?;
-    let s = score(answer, &chunks, &*df, cfg.rare_df_frac);
+    let ac = score(answer, &chunks, &*df, cfg.rare_df_frac);
     let answer_tokens = token::tokenize(answer).len();
-    let outcome = decide(s, &cfg, answer_tokens);
+    let need_nli = cfg.is_nli_ready()
+        && scorer.is_some()
+        && match cfg.mode {
+            VerifyMode::Ac => false,
+            VerifyMode::Nli => true,
+            VerifyMode::Combined => {
+                matches!(score::decide(ac.clone(), &cfg, answer_tokens).decision, Decision::Serve)
+            }
+        };
+    let nli_val = if need_nli {
+        nli::nli_score(answer, &chunks, &df, &cfg, scorer.unwrap())
+    } else {
+        None
+    };
+    let outcome = score::decide_modes(ac, nli_val, &cfg, answer_tokens);
     Ok((outcome, chunk_paths.len()))
 }
 
@@ -130,6 +155,8 @@ pub(crate) fn reader_reason_short(o: &GateOutcome) -> &'static str {
                 "empty answer"
             } else if o.reason == "uncalibrated" {
                 "uncalibrated"
+            } else if o.reason == "unentailed" {
+                "unentailed"
             } else {
                 "below threshold"
             }
@@ -158,7 +185,26 @@ mod reader_projection_tests {
                 rare_ungrounded: 0,
                 ungrounded_tokens: vec![],
             },
+            nli: None,
         }
+    }
+
+    #[test]
+    fn reader_reason_short_reports_unentailed() {
+        let o = GateOutcome {
+            decision: Decision::Abstain,
+            threshold: Some(0.8),
+            reason: "unentailed".into(),
+            score: GateScore {
+                grounding: 0.5,
+                bucket: Bucket::Single,
+                rare_total: 3,
+                rare_ungrounded: 0,
+                ungrounded_tokens: vec![],
+            },
+            nli: Some(0.1),
+        };
+        assert_eq!(reader_reason_short(&o), "unentailed");
     }
 
     #[test]

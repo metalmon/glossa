@@ -9,7 +9,7 @@ impl Bucket {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GateScore {
     pub grounding: f32,
     pub rare_total: usize,
@@ -29,7 +29,7 @@ pub fn score(answer: &str, chunks: &[String], df: &DfTable, rare_df_frac: f32) -
     GateScore { grounding, rare_total, rare_ungrounded: ungrounded.len(), ungrounded_tokens: ungrounded, bucket: Bucket::of(chunks.len()) }
 }
 
-use crate::gate::config::VerifyConfig;
+use crate::gate::config::{VerifyConfig, VerifyMode};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Decision { Serve, Abstain }
@@ -39,6 +39,7 @@ pub struct GateOutcome {
     pub score: GateScore,
     pub threshold: Option<f32>,
     pub reason: String,
+    pub nli: Option<f32>,
 }
 
 /// Serve/abstain decision for one answer: guards on `min_answer_tokens` first (an empty or
@@ -47,18 +48,41 @@ pub struct GateOutcome {
 /// for the answer's bucket) fails closed to `Abstain` — no threshold means no basis to serve.
 pub fn decide(score: GateScore, cfg: &VerifyConfig, answer_tokens: usize) -> GateOutcome {
     if answer_tokens < cfg.min_answer_tokens {
-        return GateOutcome { threshold: None, reason: "empty or too-short answer".into(), decision: Decision::Abstain, score };
+        return GateOutcome { threshold: None, reason: "empty or too-short answer".into(), decision: Decision::Abstain, score, nli: None };
     }
     let threshold = cfg.threshold(score.bucket);
     match threshold {
-        Some(t) if score.grounding > t => GateOutcome { decision: Decision::Serve, threshold: Some(t), reason: "grounded".into(), score },
+        Some(t) if score.grounding > t => GateOutcome { decision: Decision::Serve, threshold: Some(t), reason: "grounded".into(), score, nli: None },
         Some(t) => {
             let reason = if score.ungrounded_tokens.is_empty() { "below threshold".into() }
                          else { format!("ungrounded specifics: {}", score.ungrounded_tokens.join(", ")) };
-            GateOutcome { decision: Decision::Abstain, threshold: Some(t), reason, score }
+            GateOutcome { decision: Decision::Abstain, threshold: Some(t), reason, score, nli: None }
         }
-        None => GateOutcome { decision: Decision::Abstain, threshold: None, reason: "uncalibrated".into(), score },
+        None => GateOutcome { decision: Decision::Abstain, threshold: None, reason: "uncalibrated".into(), score, nli: None },
     }
+}
+
+/// Mode-aware decision (spec 4): compute the AC-only outcome first, then combine with the optional
+/// NLI score per `cfg.mode`. `nli == None` (off / not ready / no rare-token claim / scorer failure)
+/// always falls back to the AC-only outcome — NLI never turns a would-be serve into abstain-all.
+pub fn decide_modes(ac: GateScore, nli: Option<f32>, cfg: &VerifyConfig, answer_tokens: usize) -> GateOutcome {
+    let base = decide(ac, cfg, answer_tokens); // existing AC-only outcome (thresholds, empty guard, etc.)
+    let bucket = base.score.bucket;
+    let ac_serves = matches!(base.decision, Decision::Serve);
+    let nli_serves = |s: f32| cfg.nli_threshold(bucket).map(|t| s > t).unwrap_or(false);
+    let (decision, reason) = match (cfg.mode, nli) {
+        (VerifyMode::Ac, _) | (_, None) => (base.decision, base.reason.clone()),
+        (VerifyMode::Nli, Some(s)) => {
+            if nli_serves(s) { (Decision::Serve, "grounded".to_string()) }
+            else { (Decision::Abstain, "unentailed".to_string()) }
+        }
+        (VerifyMode::Combined, Some(s)) => {
+            if ac_serves && nli_serves(s) { (Decision::Serve, "grounded".to_string()) }
+            else if ac_serves { (Decision::Abstain, "unentailed".to_string()) }
+            else { (base.decision, base.reason.clone()) }
+        }
+    };
+    GateOutcome { decision, reason, nli, ..base }
 }
 
 #[cfg(test)]
@@ -123,5 +147,50 @@ mod tests {
         assert_eq!(decide(s2, &cfg, 20).decision, Decision::Abstain);       // ungrounded ⇒ below 0.8
         let s3 = score("short", &["x".into()], &df2, 0.5);
         assert_eq!(decide(s3, &cfg, 2).decision, Decision::Abstain);        // guard: < min_answer_tokens
+    }
+
+    /// A `GateScore` with the given AC grounding/bucket and zero rare-token counts (irrelevant to
+    /// `decide_modes` once `grounding` and `bucket` are fixed — `reason` on the ungrounded-abstain
+    /// path is the only other consumer, and these tests only exercise the serve/nli-abstain paths).
+    fn gscore(grounding: f32, bucket: Bucket) -> GateScore {
+        GateScore { grounding, bucket, rare_total: 0, rare_ungrounded: 0, ungrounded_tokens: vec![] }
+    }
+
+    /// A `VerifyConfig` for `decide_modes` mode tests: `min_answer_tokens: 1` so a 20-token test
+    /// answer clears `decide`'s empty/too-short guard (`answer_tokens < min_answer_tokens`) and the
+    /// AC-only outcome underneath reaches the threshold comparison rather than aborting early.
+    fn cfg_for(mode: crate::gate::config::VerifyMode, ac_thr: f32, nli_thr: f32) -> crate::gate::config::VerifyConfig {
+        crate::gate::config::VerifyConfig {
+            enabled: true,
+            rare_df_frac: 0.03,
+            min_answer_tokens: 1,
+            threshold_single: Some(ac_thr),
+            threshold_multi: Some(ac_thr),
+            mode,
+            nli_threshold_single: Some(nli_thr),
+            nli_threshold_multi: Some(nli_thr),
+        }
+    }
+
+    #[test]
+    fn combined_requires_both_signals() {
+        use super::{decide_modes, Decision};
+        use crate::gate::config::VerifyMode;
+        let cfg = cfg_for(VerifyMode::Combined, /*ac*/ 0.3, /*nli*/ 0.5);
+        let ac = gscore(0.9, Bucket::Single); // AC grounding above ac threshold ⇒ AC serves
+        assert_eq!(decide_modes(ac.clone(), Some(0.8), &cfg, 20).decision, Decision::Serve);
+        assert_eq!(decide_modes(ac.clone(), Some(0.4), &cfg, 20).decision, Decision::Abstain); // NLI fails
+        assert_eq!(decide_modes(ac, None, &cfg, 20).decision, Decision::Serve); // None ⇒ AC-only serves
+    }
+
+    #[test]
+    fn nli_mode_abstain_reason_is_unentailed() {
+        use super::{decide_modes, Decision};
+        use crate::gate::config::VerifyMode;
+        let cfg = cfg_for(VerifyMode::Nli, 0.3, 0.5);
+        let ac = gscore(0.9, Bucket::Single);
+        let o = decide_modes(ac, Some(0.1), &cfg, 20);
+        assert_eq!(o.decision, Decision::Abstain);
+        assert_eq!(o.reason, "unentailed");
     }
 }

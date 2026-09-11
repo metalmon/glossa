@@ -2717,6 +2717,7 @@ mod tests {
             },
             threshold: Some(0.8),
             reason: "ungrounded specifics: gsd-driver, step7".into(),
+            nli: None,
         };
         let reader = project_verify(Profile::Reader, &o, 1);
         // tokens travel as their own structured field
