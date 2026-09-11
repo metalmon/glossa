@@ -187,4 +187,36 @@ mod tests {
         assert_eq!(c.nli_threshold(Bucket::Single), Some(0.5));
         assert!(c.is_nli_ready());
     }
+
+    #[test]
+    fn ac_threshold_wins_over_legacy_when_both_present() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+        std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_SINGLE");
+        std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_MULTI");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n\
+             [verify.ac.threshold]\nsingle=0.1\nmulti=0.2\n\
+             [verify.threshold]\nsingle=0.8\nmulti=0.9\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.threshold(Bucket::Single), Some(0.1)); // ac.threshold wins, NOT legacy 0.8
+        assert_eq!(c.threshold(Bucket::Multi), Some(0.2)); // ac.threshold wins, NOT legacy 0.9
+    }
+
+    #[test]
+    fn combined_mode_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("ontology.toml"), "[verify]\nenabled=true\nmode=\"combined\"\n").unwrap();
+        assert!(matches!(VerifyConfig::resolve(&g).mode, VerifyMode::Combined));
+    }
 }
