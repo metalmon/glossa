@@ -38,6 +38,12 @@ path = "src/bin/kbx.rs"
 # export_tz_constraint + the kb-eval-constraint bin). Rare/opt-in path; see `just build-kb-constraint`
 # and `just build-train-constraint`.
 constraint = ["glossa/constraint", "dep:glossa-constraint"]
+# Off by default: builds `kbx nli check`'s real in-process ONNX scorer path (glossa-nli/ort). No
+# new external dep here — this only forwards to glossa's own `nli` feature. Without it, `kbx nli
+# check` still compiles and runs against the always-present `resolve_scorer` stub (`None` ⇒
+# AC-only); with it, a real model can load. See `just build-kb-constraint` for the analogous
+# opt-in pattern.
+nli = ["glossa/nli"]
 
 [dependencies]
 glossa = { path = ".." }

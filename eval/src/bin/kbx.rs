@@ -402,6 +402,39 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DatasetCmd,
     },
+    /// NLI answer-grounding verifier maintenance (model download + readiness check).
+    Nli {
+        #[command(subcommand)]
+        cmd: NliCmd,
+    },
+}
+
+/// `kbx nli` subcommands: `download` fetches the ONNX model + tokenizer so `[verify.nli].model_dir`
+/// has something to point at; `check` is a readiness doctor that reports whether the NLI verifier
+/// will actually run for a corpus or has silently fallen back to AC-only.
+#[derive(Subcommand)]
+enum NliCmd {
+    /// Download the ONNX model + tokenizer from a HuggingFace repo into a local dir (the dir
+    /// `[verify.nli].model_dir` points at). No network happens until this runs.
+    Download {
+        /// HuggingFace repo id, e.g. `metalmon/rubert-nli-threeway-onnx`.
+        #[arg(long)]
+        repo: String,
+        /// Git revision / branch / tag.
+        #[arg(long, default_value = "main")]
+        revision: String,
+        /// Local directory to write into (created if absent).
+        #[arg(long)]
+        to: PathBuf,
+        /// File(s) to fetch; repeat for several. Defaults to the standard export set.
+        #[arg(long = "file")]
+        files: Vec<String>,
+    },
+    /// Report whether the NLI verifier will actually run for a corpus, or why it fails open to AC.
+    Check {
+        /// Corpus root (kb-style PATH resolution, like other kbx subcommands).
+        path: Option<PathBuf>,
+    },
 }
 
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
@@ -654,6 +687,40 @@ fn main() -> Result<()> {
             },
         ),
         Cmd::Dataset { cmd } => run_dataset(cmd),
+        Cmd::Nli {
+            cmd:
+                NliCmd::Download {
+                    repo,
+                    revision,
+                    to,
+                    files,
+                },
+        } => {
+            let files = if files.is_empty() {
+                vec![
+                    "model.onnx".to_string(),
+                    "tokenizer.json".to_string(),
+                    "config.json".to_string(),
+                ]
+            } else {
+                files
+            };
+            let downloaded =
+                kb_eval::download::download_files(&repo, &revision, &files, &to, None)?;
+            let mut total = 0u64;
+            for (name, (path, bytes)) in files.iter().zip(downloaded.iter()) {
+                println!("downloaded {name} ({bytes} bytes) -> {}", path.display());
+                total += bytes;
+            }
+            println!(
+                "downloaded {} file(s), {total} bytes total",
+                downloaded.len()
+            );
+            Ok(())
+        }
+        Cmd::Nli {
+            cmd: NliCmd::Check { path },
+        } => kb_eval::nli_check::nli_check(path),
     }
 }
 
