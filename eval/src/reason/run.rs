@@ -188,7 +188,8 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
     }
     // The worker pool shares this ONE `GraphStore` (kept alive above for the chainless scan) via
     // the `GraphWriter`; the doc index is opened once and shared read-only.
-    let idx = DocIndex::open_or_create_at(&roots, &paths.state_base).context("opening doc index")?;
+    let idx =
+        DocIndex::open_or_create_at(&roots, &paths.state_base).context("opening doc index")?;
     let writer = GraphWriter::new(Arc::clone(&g), paths.state_base.clone());
 
     let fanout_max =

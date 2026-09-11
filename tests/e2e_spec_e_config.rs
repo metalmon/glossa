@@ -57,9 +57,13 @@ fn config_file_alone_starts_and_serves() {
     cmd.arg("mcp").arg("--config").arg(&cfgpath);
     let base = format!("http://127.0.0.1:{port}");
     let probe = base.clone();
-    let server = spawn_kb(cmd, base, port, Vec::new(), move || {
-        matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200)
-    });
+    let server = spawn_kb(
+        cmd,
+        base,
+        port,
+        Vec::new(),
+        move || matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200),
+    );
 
     let mcp = McpClient::connect(server.base());
     assert!(
@@ -95,9 +99,13 @@ fn cli_bind_overrides_config_bind() {
     let cmd = builder.command(flag_port);
     let base = format!("http://127.0.0.1:{flag_port}");
     let probe = base.clone();
-    let server = spawn_kb(cmd, base, flag_port, Vec::new(), move || {
-        matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200)
-    });
+    let server = spawn_kb(
+        cmd,
+        base,
+        flag_port,
+        Vec::new(),
+        move || matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200),
+    );
 
     // The flag port is up (start already gated it); the file port must NOT be listening.
     assert_eq!(http_get(server.base(), "/ready", &[]).status, 200);

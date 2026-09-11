@@ -63,3 +63,6 @@ grapth.html
 
 # Claude Code workspace-local files (never publish)
 .claude/
+
+# Local git worktrees (never publish)
+.worktrees/

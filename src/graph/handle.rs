@@ -134,7 +134,10 @@ mod tests {
         // A new file is committed through a SEPARATE index instance on the same state (as freshen does).
         let external = DocIndex::open_or_create(dir.path()).unwrap();
         external
-            .write_chunks(&[mk("a.md", "alpha content"), mk("b.md", "beta latecomer content")])
+            .write_chunks(&[
+                mk("a.md", "alpha content"),
+                mk("b.md", "beta latecomer content"),
+            ])
             .unwrap();
 
         // refresh_idx must swap in a fresh reader that sees it — and it RETURNS the result (no

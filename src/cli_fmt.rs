@@ -288,7 +288,11 @@ mod tests {
     fn last_search_is_written_under_the_given_base_only() {
         let state = tempfile::tempdir().unwrap();
         write_last_search(state.path(), &[("A/x.md".into(), "p.1".into())]).unwrap();
-        assert!(state.path().join(".glossa").join("last_search.tsv").exists());
+        assert!(state
+            .path()
+            .join(".glossa")
+            .join("last_search.tsv")
+            .exists());
         let raw = read_last_search(state.path()).unwrap();
         assert!(raw.contains("A/x.md\tp.1"));
     }

@@ -135,20 +135,92 @@ pub fn catalog() -> Vec<ToolMeta> {
             desc: None,
         }
     }
-    const READ_SHAPE: &[(ShapeFlag, Shape)] =
-        &[(ShapeFlag::NoImage, Shape::DropProps(&["page_image", "include_images"]))];
+    const READ_SHAPE: &[(ShapeFlag, Shape)] = &[(
+        ShapeFlag::NoImage,
+        Shape::DropProps(&["page_image", "include_images"]),
+    )];
     vec![
         // Reader-tier, agent-facing (eval renders these)
-        agent("search", Tier::Reader, &[], &[], schema_of::<SearchArgs>(), DESC_SEARCH),
-        agent("read", Tier::Reader, &[], READ_SHAPE, schema_of::<ReadArgs>(), DESC_READ),
-        agent("grep", Tier::Reader, &[], &[], schema_of::<GrepArgs>(), DESC_GREP),
-        agent("glob", Tier::Reader, &[], &[], schema_of::<GlobArgs>(), DESC_GLOB),
-        agent("glossary", Tier::Reader, &[Gate::Graph], &[], schema_of::<GlossaryArgs>(), DESC_GLOSSARY),
-        agent("reach", Tier::Reader, &[Gate::Graph], &[], schema_of::<ReachArgs>(), DESC_REACH),
-        agent("sql", Tier::Reader, &[Gate::Graph], &[], schema_of::<GraphQueryArgs>(), DESC_SQL),
-        agent("verify", Tier::Reader, &[Gate::Verify], &[], schema_of::<VerifyArgs>(), DESC_VERIFY),
-        agent("get_source_file", Tier::Reader, &[Gate::SourceFile], &[], schema_of::<SourceFileArgs>(), DESC_GET_SOURCE_FILE),
-        agent("get_ontology", Tier::Reader, &[], &[], schema_of::<Empty>(), DESC_GET_ONTOLOGY),
+        agent(
+            "search",
+            Tier::Reader,
+            &[],
+            &[],
+            schema_of::<SearchArgs>(),
+            DESC_SEARCH,
+        ),
+        agent(
+            "read",
+            Tier::Reader,
+            &[],
+            READ_SHAPE,
+            schema_of::<ReadArgs>(),
+            DESC_READ,
+        ),
+        agent(
+            "grep",
+            Tier::Reader,
+            &[],
+            &[],
+            schema_of::<GrepArgs>(),
+            DESC_GREP,
+        ),
+        agent(
+            "glob",
+            Tier::Reader,
+            &[],
+            &[],
+            schema_of::<GlobArgs>(),
+            DESC_GLOB,
+        ),
+        agent(
+            "glossary",
+            Tier::Reader,
+            &[Gate::Graph],
+            &[],
+            schema_of::<GlossaryArgs>(),
+            DESC_GLOSSARY,
+        ),
+        agent(
+            "reach",
+            Tier::Reader,
+            &[Gate::Graph],
+            &[],
+            schema_of::<ReachArgs>(),
+            DESC_REACH,
+        ),
+        agent(
+            "sql",
+            Tier::Reader,
+            &[Gate::Graph],
+            &[],
+            schema_of::<GraphQueryArgs>(),
+            DESC_SQL,
+        ),
+        agent(
+            "verify",
+            Tier::Reader,
+            &[Gate::Verify],
+            &[],
+            schema_of::<VerifyArgs>(),
+            DESC_VERIFY,
+        ),
+        agent(
+            "get_source_file",
+            Tier::Reader,
+            &[Gate::SourceFile],
+            &[],
+            schema_of::<SourceFileArgs>(),
+            DESC_GET_SOURCE_FILE,
+        ),
+        agent(
+            "get_ontology",
+            Tier::Reader,
+            &[],
+            &[],
+            schema_of::<Empty>(),
+            DESC_GET_ONTOLOGY,
+        ),
         // MCP-only Reader (notebook-read)
         mcp_only("ls", Tier::Reader, &[Gate::Feature("notebook")]),
         // MCP-only Editor
@@ -164,7 +236,11 @@ pub fn catalog() -> Vec<ToolMeta> {
         mcp_only("graph_generalize", Tier::Editor, &[Gate::Graph]),
         mcp_only("graph_doctor", Tier::Editor, &[Gate::Graph]),
         mcp_only("graph_stats", Tier::Editor, &[]),
-        mcp_only("constraint_solve", Tier::Editor, &[Gate::Feature("constraint")]),
+        mcp_only(
+            "constraint_solve",
+            Tier::Editor,
+            &[Gate::Feature("constraint")],
+        ),
         mcp_only("graph_build", Tier::Editor, &[Gate::Feature("constraint")]),
         // MCP-only Full
         mcp_only("purge", Tier::Full, &[Gate::Graph]),
@@ -265,6 +341,7 @@ fn normalize_schema(v: serde_json::Value) -> serde_json::Value {
 /// Test-only accessor: normalize a live rmcp route `input_schema` the same way `schema_of`
 /// normalizes a `schemars` schema, so the MCP parity test can compare a route's advertised
 /// schema against a catalog `core_schema` on equal footing.
+#[cfg(test)]
 pub(crate) fn normalize_for_test(v: &serde_json::Value) -> serde_json::Value {
     normalize_schema(v.clone())
 }
@@ -283,18 +360,47 @@ mod tests {
         use std::collections::BTreeSet;
         let names: BTreeSet<&str> = catalog().iter().map(|m| m.name).collect();
         let expected: BTreeSet<&str> = [
-            "search","read","grep","glob","glossary","reach","sql","verify",
-            "get_source_file","get_ontology","ls","note","del","index","resolve",
-            "neighbors","related","graph_upsert","graph_delete","graph_update",
-            "graph_generalize","graph_doctor","graph_stats","constraint_solve",
-            "graph_build","purge",
-        ].into_iter().collect();
-        assert_eq!(names, expected, "catalog must list exactly the 26 MCP routes");
+            "search",
+            "read",
+            "grep",
+            "glob",
+            "glossary",
+            "reach",
+            "sql",
+            "verify",
+            "get_source_file",
+            "get_ontology",
+            "ls",
+            "note",
+            "del",
+            "index",
+            "resolve",
+            "neighbors",
+            "related",
+            "graph_upsert",
+            "graph_delete",
+            "graph_update",
+            "graph_generalize",
+            "graph_doctor",
+            "graph_stats",
+            "constraint_solve",
+            "graph_build",
+            "purge",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            names, expected,
+            "catalog must list exactly the 26 MCP routes"
+        );
 
         let by = |n: &str| catalog().into_iter().find(|m| m.name == n).unwrap();
         // Reader-tier agent tools carry Some(schema)+Some(desc); MCP-only carry None.
         assert!(by("search").schema.is_some() && by("search").desc.is_some());
-        assert!(by("get_ontology").schema.is_some(), "get_ontology is Reader-tier, eval renders it");
+        assert!(
+            by("get_ontology").schema.is_some(),
+            "get_ontology is Reader-tier, eval renders it"
+        );
         assert!(by("purge").schema.is_none(), "purge is MCP-only Full-tier");
         assert!(matches!(by("purge").tier, Tier::Full));
         assert!(matches!(by("sql").tier, Tier::Reader));
@@ -314,10 +420,21 @@ mod tests {
     #[test]
     fn resolve_reader_full_gates_open() {
         use std::collections::BTreeSet;
-        let names: BTreeSet<&str> = resolve_tools(&reader_ctx()).iter().map(|t| t.name).collect();
+        let names: BTreeSet<&str> = resolve_tools(&reader_ctx())
+            .iter()
+            .map(|t| t.name)
+            .collect();
         let expected: BTreeSet<&str> = [
-            "search", "read", "grep", "glob", "glossary", "reach", "sql", "verify",
-            "get_source_file", "get_ontology",
+            "search",
+            "read",
+            "grep",
+            "glob",
+            "glossary",
+            "reach",
+            "sql",
+            "verify",
+            "get_source_file",
+            "get_ontology",
         ]
         .into_iter()
         .collect();
@@ -346,12 +463,28 @@ mod tests {
     fn no_image_strips_read_page_fields() {
         let mut ctx = reader_ctx();
         ctx.no_image = true;
-        let read = resolve_tools(&ctx).into_iter().find(|t| t.name == "read").unwrap();
-        let props = read.core_schema.get("properties").unwrap().as_object().unwrap();
+        let read = resolve_tools(&ctx)
+            .into_iter()
+            .find(|t| t.name == "read")
+            .unwrap();
+        let props = read
+            .core_schema
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert!(!props.contains_key("page_image") && !props.contains_key("include_images"));
         // and default (no_image=false) keeps them
-        let keep = resolve_tools(&reader_ctx()).into_iter().find(|t| t.name == "read").unwrap();
-        let kprops = keep.core_schema.get("properties").unwrap().as_object().unwrap();
+        let keep = resolve_tools(&reader_ctx())
+            .into_iter()
+            .find(|t| t.name == "read")
+            .unwrap();
+        let kprops = keep
+            .core_schema
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert!(kprops.contains_key("page_image"));
     }
 
@@ -363,7 +496,10 @@ mod tests {
         assert!(a.contains("graph_upsert") && a.contains("resolve"));
         assert!(!a.contains("purge"), "purge is Full-tier");
         let r = available_names(&reader_ctx());
-        assert!(!r.contains("graph_upsert"), "Reader profile excludes editor tools");
+        assert!(
+            !r.contains("graph_upsert"),
+            "Reader profile excludes editor tools"
+        );
     }
 
     #[test]
@@ -387,26 +523,41 @@ mod tests {
                     for &nsf in &[true, false] {
                         for &noimg in &[true, false] {
                             let ctx = ToolContext {
-                                profile, graph_on, verify_available: verify,
-                                no_source_file: nsf, no_image: noimg,
-                                features: FeatureSet { notebook: true, constraint: true },
+                                profile,
+                                graph_on,
+                                verify_available: verify,
+                                no_source_file: nsf,
+                                no_image: noimg,
+                                features: FeatureSet {
+                                    notebook: true,
+                                    constraint: true,
+                                },
                             };
                             // available_names ⊇ resolve_tools names (resolve = schema-bearing subset)
-                            let names: BTreeSet<&str> = resolve_tools(&ctx).iter().map(|t| t.name).collect();
+                            let names: BTreeSet<&str> =
+                                resolve_tools(&ctx).iter().map(|t| t.name).collect();
                             let avail = available_names(&ctx);
                             assert!(names.iter().all(|n| avail.contains(n)));
                             // invariants
                             assert_eq!(names.contains("verify"), verify && graph_gate_ok(true));
-                            assert_eq!(names.contains("sql"), graph_on);      // D1
+                            assert_eq!(names.contains("sql"), graph_on); // D1
                             assert_eq!(names.contains("get_source_file"), !nsf);
-                            let read = resolve_tools(&ctx).into_iter().find(|t| t.name == "read").unwrap();
-                            let has_page = read.core_schema["properties"].as_object().unwrap().contains_key("page_image");
-                            assert_eq!(has_page, !noimg);                     // no_image shaping
+                            let read = resolve_tools(&ctx)
+                                .into_iter()
+                                .find(|t| t.name == "read")
+                                .unwrap();
+                            let has_page = read.core_schema["properties"]
+                                .as_object()
+                                .unwrap()
+                                .contains_key("page_image");
+                            assert_eq!(has_page, !noimg); // no_image shaping
                         }
                     }
                 }
             }
         }
     }
-    fn graph_gate_ok(_v: bool) -> bool { true } // verify has no graph gate; helper kept explicit
+    fn graph_gate_ok(_v: bool) -> bool {
+        true
+    } // verify has no graph gate; helper kept explicit
 }

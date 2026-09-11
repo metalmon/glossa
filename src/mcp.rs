@@ -1633,8 +1633,9 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
         if let Some(p) = a.path.as_deref() {
-            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                .map_err(internal)?;
+            let idx =
+                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                    .map_err(internal)?;
             let Some(rel) = idx.canonical_document_path(p) else {
                 return Ok(CallToolResult::success(vec![Content::text(format!(
                     "not an indexed document: {p}"
@@ -1803,12 +1804,14 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "graph_build");
         #[cfg(feature = "constraint")]
         {
-            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                .map_err(internal)?;
+            let idx =
+                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                    .map_err(internal)?;
             let g = GraphStore::open(&self.state_base).map_err(internal)?;
             let ont = self.ontology();
             let tables_dir = args.tables_dir.as_deref().map(std::path::Path::new);
-            let msg = crate::tools::graph_build(&self.state_base, &idx, &g, &ont, &args.doc, tables_dir);
+            let msg =
+                crate::tools::graph_build(&self.state_base, &idx, &g, &ont, &args.doc, tables_dir);
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
         #[cfg(not(feature = "constraint"))]
@@ -2098,8 +2101,9 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "note");
         #[cfg(feature = "notebook")]
         {
-            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                .map_err(internal)?;
+            let idx =
+                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                    .map_err(internal)?;
             let msg = crate::tools::note(
                 &self.state_base,
                 &idx,
@@ -2129,8 +2133,9 @@ impl GlossaServer {
         self.freshen_now().await;
         #[cfg(feature = "notebook")]
         {
-            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                .map_err(internal)?;
+            let idx =
+                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                    .map_err(internal)?;
             let msg = crate::tools::ls_notes(&self.state_base, &idx, a.doc.as_deref());
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
@@ -2154,8 +2159,9 @@ impl GlossaServer {
         crate::audit::security_event("write", "tool_invoke", "invoked", "-", "del");
         #[cfg(feature = "notebook")]
         {
-            let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                .map_err(internal)?;
+            let idx =
+                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
+                    .map_err(internal)?;
             let msg = crate::tools::del_note(&self.state_base, &idx, &a.path);
             return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
@@ -2304,7 +2310,10 @@ mod tests {
         assert!(r.is_err(), "the closure must have panicked");
         // std::sync::Mutex would now be poisoned; parking_lot is not — this must not hang/panic.
         let g = m.lock();
-        assert_eq!(*g, 1, "the mutation before the panic is visible and the lock is usable");
+        assert_eq!(
+            *g, 1,
+            "the mutation before the panic is visible and the lock is usable"
+        );
     }
 
     /// Proves the dispatch barrier (R-C2): a panicking tool future yields `Err(McpError)` instead of
@@ -2317,11 +2326,16 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn panic_barrier_converts_panic_and_counts() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let before = TOOL_PANICS.load(Ordering::Relaxed);
         // panicking branch
         let err = run_with_panic_barrier("boom_tool", async { panic!("kaboom") }).await;
-        assert!(err.is_err(), "a panicking tool must yield Err(McpError), not unwind");
+        assert!(
+            err.is_err(),
+            "a panicking tool must yield Err(McpError), not unwind"
+        );
         assert_eq!(TOOL_PANICS.load(Ordering::Relaxed), before + 1);
         // happy branch passes through untouched and does NOT bump the counter
         let ok = run_with_panic_barrier("ok_tool", async {
@@ -2340,7 +2354,9 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn panic_barrier_does_not_poison_a_parking_lot_lock() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let m = std::sync::Arc::new(parking_lot::Mutex::new(0u32));
         let m2 = m.clone();
         let _ = run_with_panic_barrier("locker", async move {
@@ -2358,7 +2374,14 @@ mod tests {
     /// the two rmcp types can't be constructed here — it exists purely to type-check the signatures.
     #[test]
     fn rmcp_dispatch_api_is_stable_compile_guard() {
-        #[allow(dead_code, unreachable_code)]
+        // `unreachable!()` stand-ins are typed-only placeholders (this fn is never called, per the
+        // doc comment above) so the resulting divergence and "unused" bindings are expected, not bugs.
+        #[allow(
+            dead_code,
+            unreachable_code,
+            unused_variables,
+            clippy::diverging_sub_expression
+        )]
         fn _ctx_new(s: &GlossaServer) {
             let _: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> =
                 rmcp::handler::server::tool::ToolCallContext::new(
@@ -2367,11 +2390,22 @@ mod tests {
                     unreachable!() as rmcp::service::RequestContext<rmcp::RoleServer>,
                 );
         }
-        #[allow(dead_code, unreachable_code)]
+        #[allow(
+            dead_code,
+            unreachable_code,
+            unused_variables,
+            clippy::diverging_sub_expression
+        )]
         fn _router_call(r: &ToolRouter<GlossaServer>) {
-            let tcc: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> = unreachable!();
-            let _fut: std::pin::Pin<Box<dyn std::future::Future<
-                Output = Result<rmcp::model::CallToolResponse, McpError>>>> = Box::pin(r.call(tcc));
+            let tcc: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> =
+                unreachable!();
+            let _fut: std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                        Output = Result<rmcp::model::CallToolResponse, McpError>,
+                    >,
+                >,
+            > = Box::pin(r.call(tcc));
         }
     }
 
@@ -2402,7 +2436,10 @@ mod tests {
         // (Bind a PathBuf without shadowing `dir` — the TempDir guard must outlive the test.)
         let base = dir.path().to_path_buf();
         let s = GlossaServer::new(
-            vec![crate::root::Root { label: String::new(), path: base.clone() }],
+            vec![crate::root::Root {
+                label: String::new(),
+                path: base.clone(),
+            }],
             base.clone(),
             Profile::Reader,
             false,
@@ -2410,14 +2447,20 @@ mod tests {
         );
         let a = s.ontology();
         let b = s.ontology();
-        assert!(Arc::ptr_eq(&a, &b), "unchanged mtime → cached Arc reused (no re-parse)");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "unchanged mtime → cached Arc reused (no re-parse)"
+        );
         // bump mtime strictly forward (filetime, as the freshen tests do) and change content
         std::fs::write(g.join("ontology.toml"), "[verify]\nenabled = false\n").unwrap();
-        let future = filetime::FileTime::from_unix_time(
-            filetime::FileTime::now().unix_seconds() + 5, 0);
+        let future =
+            filetime::FileTime::from_unix_time(filetime::FileTime::now().unix_seconds() + 5, 0);
         filetime::set_file_mtime(g.join("ontology.toml"), future).unwrap();
         let c = s.ontology();
-        assert!(!Arc::ptr_eq(&a, &c), "mtime bump → re-parsed into a fresh Arc");
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "mtime bump → re-parsed into a fresh Arc"
+        );
     }
 
     /// Fix-round-1 regression guard (R-C6): if the ontology file changes AFTER a parse's pre-stat but
@@ -2466,7 +2509,11 @@ mod tests {
         let raced = s.ontology();
         ONTOLOGY_AFTER_PARSE_HOOK.with(|h| *h.borrow_mut() = None);
         // This caller still gets what it actually parsed (the pre-race content) …
-        assert_eq!(raced.verify_enabled(), Some(true), "caller sees the value it parsed, race or not");
+        assert_eq!(
+            raced.verify_enabled(),
+            Some(true),
+            "caller sees the value it parsed, race or not"
+        );
 
         // … but the race must have left the cache UNTOUCHED (the fix's after != cur re-check refuses
         // to publish it), rather than a pre-fix build naively storing (T0, "enabled = true") under the
@@ -2533,9 +2580,15 @@ mod tests {
     /// under a SECONDARY root is silently invisible to a running server until the next full
     /// `index(force=true)`. Two roots, write under the second one, freshen, then confirm the new
     /// file is searchable.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn freshen_now_picks_up_a_change_under_the_secondary_root() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // This test issues two back-to-back `freshen_now` calls with no elapsed time between
         // them — disable the Task 10 (D2) min-rescan gate so the second call actually re-walks
         // rather than being skipped as "too soon since the last attempt".
@@ -2562,7 +2615,7 @@ mod tests {
             ServerFlags::default(),
         );
         srv.freshen_now().await; // establish the baseline dirsig over both (empty `b`) roots
-                                  // Now write a NEW file under the SECONDARY root only.
+                                 // Now write a NEW file under the SECONDARY root only.
         std::fs::write(root_b.path().join("beta.md"), "beta secondary content").unwrap();
         srv.freshen_now().await;
         let h = srv.handle().unwrap();
@@ -2580,9 +2633,15 @@ mod tests {
     /// searches served through that SAME cached handle — not only to a freshly re-opened reader.
     /// The pre-existing `freshen_now_picks_up_a_change_under_the_secondary_root` test masks this by
     /// building the handle AFTER the write; here we open it BEFORE, exactly as a daemon does.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn search_same_handle_sees_file_added_after_open() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Two back-to-back freshens with no elapsed time — open the min-rescan gate so the second
         // actually re-walks instead of being skipped as "too soon".
         std::env::set_var("GLOSSA_MIN_RESCAN_MS", "0");
@@ -2626,9 +2685,15 @@ mod tests {
     /// first must skip the stat-walk entirely (serve the current index, no-op) — proven by
     /// `last_freshen_ms` staying unchanged across the gated call. Once the window elapses, the
     /// gate opens again and the next call DOES update the clock.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn freshen_min_rescan_skips_within_window() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // The FIRST call does real (cold) work — open_or_create the index/graph store, walk the
         // (empty) corpus — which alone can take a couple hundred ms on a loaded CI box. The window
         // must comfortably exceed that cold-start cost or the "within the window" call below would
@@ -2644,7 +2709,10 @@ mod tests {
 
         srv.freshen_now().await;
         let after_first = srv.last_freshen_ms.load(Ordering::Relaxed);
-        assert_ne!(after_first, 0, "the first (ungated) call stamps last_freshen_ms");
+        assert_ne!(
+            after_first, 0,
+            "the first (ungated) call stamps last_freshen_ms"
+        );
 
         srv.freshen_now().await; // immediately again — well inside the 3s window
         assert_eq!(
@@ -2676,8 +2744,13 @@ mod tests {
         for p in [Profile::Reader, Profile::Editor, Profile::Full] {
             let dir = tempfile::tempdir().unwrap();
             write_verify_enabled_ontology(dir.path());
-            let names = GlossaServer::new_for_test(dir.path().to_path_buf(), p, false, ServerFlags::default())
-                .enabled_tools();
+            let names = GlossaServer::new_for_test(
+                dir.path().to_path_buf(),
+                p,
+                false,
+                ServerFlags::default(),
+            )
+            .enabled_tools();
             assert!(
                 names.contains(&"verify".to_string()),
                 "verify missing in {p:?} when enabled+calibrated"
@@ -2690,8 +2763,13 @@ mod tests {
         // No [verify.threshold] (a bare tempdir has no ontology) ⇒ withheld from every profile.
         for p in [Profile::Reader, Profile::Editor, Profile::Full] {
             let dir = tempfile::tempdir().unwrap();
-            let names = GlossaServer::new_for_test(dir.path().to_path_buf(), p, false, ServerFlags::default())
-                .enabled_tools();
+            let names = GlossaServer::new_for_test(
+                dir.path().to_path_buf(),
+                p,
+                false,
+                ServerFlags::default(),
+            )
+            .enabled_tools();
             assert!(
                 !names.contains(&"verify".to_string()),
                 "verify must be fail-closed (hidden) in {p:?} when uncalibrated"
@@ -2717,11 +2795,16 @@ mod tests {
             },
             threshold: Some(0.8),
             reason: "ungrounded specifics: gsd-driver, step7".into(),
+            nli: None,
         };
         let reader = project_verify(Profile::Reader, &o, 1);
         // tokens travel as their own structured field
         let toks = reader["ungrounded_tokens"].as_array().expect("token field");
-        assert_eq!(toks.len(), 2, "reader must keep structured tokens: {reader}");
+        assert_eq!(
+            toks.len(),
+            2,
+            "reader must keep structured tokens: {reader}"
+        );
         // reason_short is a short static label, NOT the comma-joined token prose
         let rs = reader["reason_short"].as_str().unwrap();
         assert_eq!(rs, "ungrounded");
@@ -3612,9 +3695,13 @@ mod tests {
     #[test]
     fn profile_gates_tool_visibility() {
         let root = std::path::PathBuf::from(".");
-        let reader =
-            GlossaServer::new_for_test(root.clone(), Profile::Reader, false, ServerFlags::default())
-                .enabled_tools();
+        let reader = GlossaServer::new_for_test(
+            root.clone(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        )
+        .enabled_tools();
         assert!(reader.contains(&"search".to_string()) && reader.contains(&"read".to_string()));
         #[cfg(feature = "notebook")]
         assert!(reader.contains(&"ls".to_string()));
@@ -3626,9 +3713,13 @@ mod tests {
         );
         assert!(!reader.contains(&"write".to_string()));
 
-        let editor =
-            GlossaServer::new_for_test(root.clone(), Profile::Editor, false, ServerFlags::default())
-                .enabled_tools();
+        let editor = GlossaServer::new_for_test(
+            root.clone(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        )
+        .enabled_tools();
         #[cfg(feature = "notebook")]
         assert!(editor.contains(&"note".to_string()) && editor.contains(&"ls".to_string()));
         assert!(editor.contains(&"index".to_string()) && editor.contains(&"resolve".to_string()));
@@ -3673,8 +3764,9 @@ mod tests {
             "reader cannot graph_doctor"
         );
 
-        let full = GlossaServer::new_for_test(root.clone(), Profile::Full, false, ServerFlags::default())
-            .enabled_tools();
+        let full =
+            GlossaServer::new_for_test(root.clone(), Profile::Full, false, ServerFlags::default())
+                .enabled_tools();
         assert!(full.contains(&"purge".to_string()));
         #[cfg(feature = "notebook")]
         assert!(full.contains(&"note".to_string()) && full.contains(&"del".to_string()));
@@ -3714,8 +3806,13 @@ mod tests {
     fn source_file_flag_gates_get_source_file() {
         let root = std::path::PathBuf::from(".");
         // On by default (every profile) …
-        let on = GlossaServer::new_for_test(root.clone(), Profile::Reader, false, ServerFlags::default())
-            .enabled_tools();
+        let on = GlossaServer::new_for_test(
+            root.clone(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        )
+        .enabled_tools();
         assert!(
             on.contains(&"get_source_file".to_string()),
             "get_source_file is available by default"
@@ -4013,7 +4110,7 @@ mod tests {
         for k in router.map.keys() {
             // `k` is a `Cow<'static, str>`; deref to `&str` so `HashSet<&'static str>::contains`
             // (T = `&'static str`, Q = `str`, `&str: Borrow<str>`) matches on the string value.
-            let name: &str = &**k;
+            let name: &str = k;
             assert!(
                 catalog_names.contains(name),
                 "compiled route `{name}` is missing from catalog() — add it to \

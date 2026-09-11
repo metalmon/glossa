@@ -634,8 +634,8 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     // Weight the bar by chunk, not by document — identical rationale/mechanism to `run_build`'s
     // extract stage (see `extract_doc_weight`'s doc comment): a huge document is otherwise one
     // tick and the bar/ETA lie on a mixed-size corpus.
-    let idx =
-        DocIndex::open_or_create_at(&roots, &paths.state_base).context("open doc index for densify")?;
+    let idx = DocIndex::open_or_create_at(&roots, &paths.state_base)
+        .context("open doc index for densify")?;
     let mut chunk_counts: HashMap<String, usize> = HashMap::new();
     idx.iter_chunks(|path, _ord, _kind, _text| {
         *chunk_counts.entry(path.to_string()).or_default() += 1;

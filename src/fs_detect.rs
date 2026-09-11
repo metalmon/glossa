@@ -38,9 +38,7 @@ const FUSE_SUPER_MAGIC: u64 = 0x65735546;
 #[allow(dead_code)]
 fn kind_from_magic(magic: u64) -> FsKind {
     match magic {
-        NFS_SUPER_MAGIC | SMB_SUPER_MAGIC | CIFS_MAGIC_NUMBER | FUSE_SUPER_MAGIC => {
-            FsKind::Network
-        }
+        NFS_SUPER_MAGIC | SMB_SUPER_MAGIC | CIFS_MAGIC_NUMBER | FUSE_SUPER_MAGIC => FsKind::Network,
         _ => FsKind::Local,
     }
 }
@@ -109,8 +107,7 @@ mod tests {
     #[test]
     fn silent_on_local_or_unknown() {
         assert!(
-            state_dir_network_warning(&Fake(FsKind::Local), Path::new("/var/lib/glossa"))
-                .is_none()
+            state_dir_network_warning(&Fake(FsKind::Local), Path::new("/var/lib/glossa")).is_none()
         );
         assert!(
             state_dir_network_warning(&Fake(FsKind::Unknown), Path::new("/whatever")).is_none()

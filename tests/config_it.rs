@@ -76,7 +76,11 @@ fn interlock_fires_on_bind_from_config_file() {
         "[corpus]\nroots = [\"docs={}\"]\nstate_dir = \"{}\"\n\
          [server]\ntransport = \"streamable-http\"\nbind = \"0.0.0.0:8137\"\n",
         corpus.display().to_string().replace('\\', "/"),
-        dir.path().join("state").display().to_string().replace('\\', "/"),
+        dir.path()
+            .join("state")
+            .display()
+            .to_string()
+            .replace('\\', "/"),
     )
     .unwrap();
 
@@ -111,7 +115,11 @@ fn flag_transport_overrides_config_file_transport() {
         "[corpus]\nroots = [\"docs={}\"]\nstate_dir = \"{}\"\n\
          [server]\ntransport = \"streamable-http\"\nbind = \"0.0.0.0:8138\"\n",
         corpus.display().to_string().replace('\\', "/"),
-        dir.path().join("state").display().to_string().replace('\\', "/"),
+        dir.path()
+            .join("state")
+            .display()
+            .to_string()
+            .replace('\\', "/"),
     )
     .unwrap();
 

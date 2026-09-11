@@ -144,7 +144,13 @@ fn host_port(base: &str) -> String {
         .to_string()
 }
 
-fn build_request(host: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Vec<u8> {
+fn build_request(
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Vec<u8> {
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -208,7 +214,11 @@ fn dechunk(mut data: &[u8]) -> Vec<u8> {
         }
         out.extend_from_slice(&data[..size]);
         // Skip the chunk's trailing CRLF.
-        data = if data.len() >= size + 2 { &data[size + 2..] } else { &[] };
+        data = if data.len() >= size + 2 {
+            &data[size + 2..]
+        } else {
+            &[]
+        };
     }
     out
 }
@@ -216,7 +226,11 @@ fn dechunk(mut data: &[u8]) -> Vec<u8> {
 fn parse_response(raw: &[u8]) -> HttpResp {
     let split = find_subslice(raw, b"\r\n\r\n").unwrap_or(raw.len());
     let head = String::from_utf8_lossy(&raw[..split]);
-    let body_bytes = if split + 4 <= raw.len() { &raw[split + 4..] } else { &[][..] };
+    let body_bytes = if split + 4 <= raw.len() {
+        &raw[split + 4..]
+    } else {
+        &[][..]
+    };
 
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or("");
@@ -233,9 +247,9 @@ fn parse_response(raw: &[u8]) -> HttpResp {
         }
     }
 
-    let chunked = headers
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked"));
+    let chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+    });
     let content_length = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -334,10 +348,8 @@ impl McpClient {
 
     fn connect_inner(base: &str, bearer: Option<String>) -> McpClient {
         let auth_hdr = bearer.as_ref().map(|t| format!("Bearer {t}"));
-        let mut headers: Vec<(&str, &str)> = vec![
-            ("Accept", MCP_ACCEPT),
-            ("Content-Type", "application/json"),
-        ];
+        let mut headers: Vec<(&str, &str)> =
+            vec![("Accept", MCP_ACCEPT), ("Content-Type", "application/json")];
         if let Some(a) = auth_hdr.as_deref() {
             headers.push(("Authorization", a));
         }
@@ -358,9 +370,9 @@ impl McpClient {
             resp.status,
             resp.body
         );
-        let session = resp
-            .header("mcp-session-id")
-            .unwrap_or_else(|| panic!("initialize response carried no Mcp-Session-Id header: {resp:?}"));
+        let session = resp.header("mcp-session-id").unwrap_or_else(|| {
+            panic!("initialize response carried no Mcp-Session-Id header: {resp:?}")
+        });
 
         // The `initialized` notification, echoing the session header.
         let mut note_headers = headers.clone();
@@ -369,7 +381,11 @@ impl McpClient {
         let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         let _ = http_post(base, "/mcp", &note_headers, note.to_string().as_bytes());
 
-        McpClient { base: base.to_string(), session, bearer }
+        McpClient {
+            base: base.to_string(),
+            session,
+            bearer,
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -394,7 +410,11 @@ impl McpClient {
             "params": {"name": name, "arguments": args}
         });
         let resp = http_post(&self.base, "/mcp", &headers, body.to_string().as_bytes());
-        assert_eq!(resp.status, 200, "tools/call {name} status: body={}", resp.body);
+        assert_eq!(
+            resp.status, 200,
+            "tools/call {name} status: body={}",
+            resp.body
+        );
         let payload = sse_data(&resp.body);
         let v: Value = serde_json::from_str(&payload)
             .unwrap_or_else(|e| panic!("tools/call {name} response not JSON ({e}): {payload}"));
@@ -521,7 +541,13 @@ pub fn spawn_kb<F: Fn() -> bool>(
         thread::sleep(Duration::from_millis(100));
     }
 
-    ServerHandle { child, base, port, stderr, _keep: keep }
+    ServerHandle {
+        child,
+        base,
+        port,
+        stderr,
+        _keep: keep,
+    }
 }
 
 /// Fluent builder for a plaintext streamable-http `kb` server.
@@ -606,9 +632,13 @@ impl ServerBuilder {
         let cmd = self.command(port);
         let base = format!("http://127.0.0.1:{port}");
         let probe = base.clone();
-        spawn_kb(cmd, base, port, self.keep, move || {
-            matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200)
-        })
+        spawn_kb(
+            cmd,
+            base,
+            port,
+            self.keep,
+            move || matches!(try_request(&probe, "GET", "/ready", &[], None), Ok(r) if r.status == 200),
+        )
     }
 }
 
@@ -642,7 +672,11 @@ pub mod tls {
         params.distinguished_name = dn;
         let cert = params.self_signed(&key).unwrap();
         let cert_pem = cert.pem();
-        TestCa { cert_pem, cert, key }
+        TestCa {
+            cert_pem,
+            cert,
+            key,
+        }
     }
 
     /// Generate a leaf cert for `127.0.0.1`/`localhost` signed by `ca`, returning `(cert_pem,
@@ -705,7 +739,8 @@ pub mod tls {
             }
             None => builder.with_no_client_auth(),
         };
-        let server_name = ServerName::try_from(host.to_string()).map_err(|e| format!("server name: {e}"))?;
+        let server_name =
+            ServerName::try_from(host.to_string()).map_err(|e| format!("server name: {e}"))?;
         let conn = ClientConnection::new(Arc::new(config), server_name)
             .map_err(|e| format!("client connection: {e}"))?;
         let sock = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;

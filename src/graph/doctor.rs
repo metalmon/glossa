@@ -948,7 +948,10 @@ strict = false
 
         let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert_eq!(rep.dangling.len(), 20, "the 20 orphan Symptoms dangle");
-        assert!(rep.live_terminal_count >= 21, "21 live Resolution terminals");
+        assert!(
+            rep.live_terminal_count >= 21,
+            "21 live Resolution terminals"
+        );
         let risk = dangling_prune_risk(&rep, &g, &ont);
         assert!(risk.is_some(), "a never-built flood must refuse the prune");
         let msg = risk.unwrap();

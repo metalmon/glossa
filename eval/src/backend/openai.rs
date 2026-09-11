@@ -1237,8 +1237,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx_on = answer_tool_context(dir.path(), true, true);
         let ctx_off = answer_tool_context(dir.path(), true, false);
-        assert_eq!(ctx_on.no_image, false);
-        assert_eq!(ctx_off.no_image, true);
+        assert!(!ctx_on.no_image);
+        assert!(ctx_off.no_image);
     }
 
     #[test]

@@ -84,17 +84,13 @@ fn tmp_path(path: &std::path::Path) -> std::path::PathBuf {
 pub(crate) fn save(path: &std::path::Path, ckpt: &GepaCheckpoint) -> anyhow::Result<()> {
     use anyhow::Context;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let tmp = tmp_path(path);
-    let bytes =
-        serde_json::to_vec_pretty(ckpt).context("serialize checkpoint")?;
-    std::fs::write(&tmp, &bytes)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| {
-        format!("rename {} -> {}", tmp.display(), path.display())
-    })?;
+    let bytes = serde_json::to_vec_pretty(ckpt).context("serialize checkpoint")?;
+    std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -104,10 +100,9 @@ pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Option<GepaCheckpoi
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let ckpt: GepaCheckpoint = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let ckpt: GepaCheckpoint =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(ckpt))
 }
 
@@ -115,8 +110,7 @@ pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Option<GepaCheckpoi
 pub(crate) fn delete(path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context;
     if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("remove {}", path.display()))?;
+        std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
@@ -134,21 +128,18 @@ pub(crate) fn decide_resume(
     if resume {
         return match on_disk {
             Some(c) => Ok(ResumeDecision::Resume(Box::new(c))),
-            None => anyhow::bail!(
-                "--resume: no checkpoint to resume (nothing on disk)"
-            ),
+            None => anyhow::bail!("--resume: no checkpoint to resume (nothing on disk)"),
         };
     }
     match on_disk {
         None => Ok(ResumeDecision::Fresh),
-        Some(c) if c.fingerprint == current_fp => {
-            Ok(ResumeDecision::Resume(Box::new(c)))
-        }
+        Some(c) if c.fingerprint == current_fp => Ok(ResumeDecision::Resume(Box::new(c))),
         Some(c) => anyhow::bail!(
             "GEPA checkpoint on disk was written for a different run \
              (fingerprint {} != current {}). Pass --force to discard it and start fresh, \
              or --resume to resume it anyway.",
-            c.fingerprint, current_fp
+            c.fingerprint,
+            current_fp
         ),
     }
 }
@@ -222,18 +213,15 @@ mod tests {
     fn fingerprint_changes_on_seed_prompt_and_is_order_stable() {
         let ids = vec!["a".to_string(), "b".to_string()];
         let base = fingerprint(
-            "seed", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false,
-            &ids,
+            "seed", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false, &ids,
         );
         let diff = fingerprint(
-            "SEED2", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false,
-            &ids,
+            "SEED2", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false, &ids,
         );
         assert_ne!(base, diff);
         // Same SORTED ids in the same order => identical (caller sorts before hashing).
         let same = fingerprint(
-            "seed", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false,
-            &ids,
+            "seed", "m", "e", 100, 6, 3, 12, 0.2, 1, 1, true, false, false, &ids,
         );
         assert_eq!(base, same);
     }

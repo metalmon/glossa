@@ -24,8 +24,21 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # Format + lint gate on EVERY branch (ci.yml runs these only on master/main, so a feature
+      # branch would otherwise merge unlinted). `cargo fmt --check` is OS-independent → run once on
+      # Linux; clippy runs on the full matrix so Windows-`cfg` code is linted too. `-D warnings`
+      # matches ci.yml.
+      - name: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Lean release config — NO default features (no notebook, no constraint): exactly what the
       # release binary ships, so nothing outside a feature may hard-depend on notebook/constraint.

@@ -34,7 +34,11 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
 fn kb_ontology_init_command_never_writes_into_corpus_root() {
     let corpus = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
-    std::fs::write(corpus.path().join("a.md"), "# Title\n\nunrelated corpus content").unwrap();
+    std::fs::write(
+        corpus.path().join("a.md"),
+        "# Title\n\nunrelated corpus content",
+    )
+    .unwrap();
     let before = snapshot(corpus.path());
 
     assert_cmd::Command::cargo_bin("kb")
@@ -52,7 +56,10 @@ fn kb_ontology_init_command_never_writes_into_corpus_root() {
         .success();
 
     let after = snapshot(corpus.path());
-    assert_eq!(before, after, "kb ontology init must not write into the corpus root");
+    assert_eq!(
+        before, after,
+        "kb ontology init must not write into the corpus root"
+    );
     assert!(!corpus.path().join(".glossa").exists());
     assert!(
         state.path().join(".glossa").join("ontology.toml").exists(),
@@ -65,7 +72,11 @@ fn full_cycle_never_writes_into_corpus_roots() {
     use glossa::root::Root;
     let corpus = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
-    std::fs::write(corpus.path().join("a.md"), "# Title\n\nbody about pumps and valves").unwrap();
+    std::fs::write(
+        corpus.path().join("a.md"),
+        "# Title\n\nbody about pumps and valves",
+    )
+    .unwrap();
     std::fs::write(corpus.path().join("b.md"), "see [a](a.md) for pumps").unwrap();
     let before = snapshot(corpus.path()); // (path, len, mtime) set, recursive
     let roots = [Root {
@@ -77,7 +88,11 @@ fn full_cycle_never_writes_into_corpus_roots() {
     let _ = h.idx(); // search/read exercised via DocIndex
     glossa::cli_fmt::write_last_search(state.path(), &[("a.md".into(), "p.1".into())]).unwrap();
     // Traces and notebook notes must ALSO land under state_base, not the corpus.
-    glossa::trace::TraceLog::to_dir(state.path()).log("read", serde_json::json!({}), serde_json::json!({}));
+    glossa::trace::TraceLog::to_dir(state.path()).log(
+        "read",
+        serde_json::json!({}),
+        serde_json::json!({}),
+    );
     // `notebook` is a cargo feature (default-on, off under --no-default-features); gate the
     // note-write step so this test also compiles in the lean release config CI.
     #[cfg(feature = "notebook")]

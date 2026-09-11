@@ -648,7 +648,9 @@ mod tests {
         // mass makes it a real, visible contender — it surfaces in the output. Under GEOMEAN, the
         // same node is structurally excluded from the intersection, and the real bridge `x`
         // (reachable from BOTH endpoints) surfaces instead.
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         // The real bridge: a -- x -- b, plus b2 (a private neighbor of b, for realism/noise).
@@ -689,7 +691,9 @@ mod tests {
 
     #[test]
     fn compose_ppr_geomean_empty_name_matches_single_seed() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
         fact(&g, "a", "Alpha", &["Alpha"]);
@@ -710,7 +714,9 @@ mod tests {
 
     #[test]
     fn compose_ppr_geomean_disjoint_supports_falls_back_not_empty() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GLOSSA_PPR_BRIDGE", "geomean");
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();

@@ -9,7 +9,10 @@ mod harness;
 use harness::*;
 
 fn corpus() -> Corpus {
-    Corpus::with_files(&[("a.md", "# Doc\n\nsome indexed content for the serving tests.\n")])
+    Corpus::with_files(&[(
+        "a.md",
+        "# Doc\n\nsome indexed content for the serving tests.\n",
+    )])
 }
 
 #[test]
@@ -57,10 +60,7 @@ fn bearer_auth_gates_the_mcp_endpoint() {
     let unauth = http_post(
         server.base(),
         "/mcp",
-        &[
-            ("Accept", MCP_ACCEPT),
-            ("Content-Type", "application/json"),
-        ],
+        &[("Accept", MCP_ACCEPT), ("Content-Type", "application/json")],
         init_body,
     );
     assert_eq!(unauth.status, 401, "expected 401, body: {:?}", unauth.body);
@@ -107,13 +107,14 @@ fn body_limit_rejects_oversized_post() {
     let resp = http_post(
         server.base(),
         "/mcp",
-        &[
-            ("Accept", MCP_ACCEPT),
-            ("Content-Type", "application/json"),
-        ],
+        &[("Accept", MCP_ACCEPT), ("Content-Type", "application/json")],
         &big,
     );
-    assert_eq!(resp.status, 413, "expected 413 Payload Too Large, got {}", resp.status);
+    assert_eq!(
+        resp.status, 413,
+        "expected 413 Payload Too Large, got {}",
+        resp.status
+    );
 }
 
 #[test]
@@ -159,7 +160,10 @@ fn sigterm_shuts_down_gracefully_with_exit_zero() {
     let status = server
         .wait_for_exit(std::time::Duration::from_secs(5))
         .expect("server should exit within 5s of SIGTERM");
-    assert!(status.success(), "graceful shutdown should exit 0, got {status}");
+    assert!(
+        status.success(),
+        "graceful shutdown should exit 0, got {status}"
+    );
 }
 
 #[test]
@@ -181,10 +185,7 @@ fn rate_limit_sheds_excess_mcp_requests() {
             server.base(),
             "POST",
             "/mcp",
-            &[
-                ("Accept", MCP_ACCEPT),
-                ("Content-Type", "application/json"),
-            ],
+            &[("Accept", MCP_ACCEPT), ("Content-Type", "application/json")],
             Some(init_body),
         ) {
             if r.status == 429 {

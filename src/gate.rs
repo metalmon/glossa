@@ -1,11 +1,13 @@
 //! Answer-grounding gate (model-free). See docs/superpowers/specs/2026-09-06-answer-grounding-gate-design.md
-pub mod token;
-pub mod df;
-pub mod score;
 pub mod config;
+pub mod df;
+pub mod df_cache;
+pub mod nli;
+pub mod score;
+pub mod token;
 
-pub use score::{GateScore, Bucket, score, Decision, GateOutcome, decide};
-pub use config::VerifyConfig;
+pub use config::{VerifyConfig, VerifyMode};
+pub use score::{decide, score, Bucket, Decision, GateOutcome, GateScore};
 
 /// Resolve a `path#loc` citation to its chunk text, using the SAME extraction path the `read`
 /// MCP tool uses (`crate::tools::read`, which `src/mcp.rs::read_common` calls). `glossa_dir` is the
@@ -40,15 +42,42 @@ pub fn verify_outcome(
     answer: &str,
     chunk_paths: &[String],
 ) -> anyhow::Result<(GateOutcome, usize)> {
+    verify_outcome_with_scorer(glossa_dir, answer, chunk_paths, None)
+}
+
+/// Same as [`verify_outcome`], plus an optional NLI scorer. `None` ⇒ model-free (today's
+/// behaviour). Plan 2 supplies a real `&dyn NliScorer`; the mode/short-circuit lives here (spec 4).
+pub fn verify_outcome_with_scorer(
+    glossa_dir: &std::path::Path,
+    answer: &str,
+    chunk_paths: &[String],
+    scorer: Option<&dyn nli::NliScorer>,
+) -> anyhow::Result<(GateOutcome, usize)> {
     let cfg = VerifyConfig::resolve(glossa_dir);
-    let df = df::DfTable::load(&df::DfTable::sidecar_path(glossa_dir))?;
+    let df = df_cache::cached_df(glossa_dir)?;
     let chunks: Vec<String> = chunk_paths
         .iter()
         .map(|p| read_chunk_text(glossa_dir, p))
         .collect::<anyhow::Result<_>>()?;
-    let s = score(answer, &chunks, &df, cfg.rare_df_frac);
+    let ac = score(answer, &chunks, &df, cfg.rare_df_frac);
     let answer_tokens = token::tokenize(answer).len();
-    let outcome = decide(s, &cfg, answer_tokens);
+    // Always compute NLI when the mode is ready for it — no AC-serve short-circuit. Under the
+    // z-score consensus (spec §4 rev.5) a low-AC/high-NLI answer can still serve (z = zac + znli
+    // > threshold), so skipping the scorer whenever AC alone doesn't serve would make that path
+    // unreachable. Combined readiness is `is_combined_ready()` (calibrated combined stats), NOT
+    // `is_nli_ready()` (nli thresholds) — the two modes are calibrated independently.
+    let need_nli = scorer.is_some()
+        && match cfg.mode {
+            VerifyMode::Ac => false,
+            VerifyMode::Nli => cfg.is_nli_ready(),
+            VerifyMode::Combined => cfg.is_combined_ready(),
+        };
+    let nli_val = if need_nli {
+        nli::nli_score(answer, &chunks, &df, &cfg, scorer.unwrap())
+    } else {
+        None
+    };
+    let outcome = score::decide_modes(ac, nli_val, &cfg, answer_tokens);
     Ok((outcome, chunk_paths.len()))
 }
 
@@ -128,6 +157,8 @@ pub(crate) fn reader_reason_short(o: &GateOutcome) -> &'static str {
                 "empty answer"
             } else if o.reason == "uncalibrated" {
                 "uncalibrated"
+            } else if o.reason == "unentailed" {
+                "unentailed"
             } else {
                 "below threshold"
             }
@@ -156,7 +187,26 @@ mod reader_projection_tests {
                 rare_ungrounded: 0,
                 ungrounded_tokens: vec![],
             },
+            nli: None,
         }
+    }
+
+    #[test]
+    fn reader_reason_short_reports_unentailed() {
+        let o = GateOutcome {
+            decision: Decision::Abstain,
+            threshold: Some(0.8),
+            reason: "unentailed".into(),
+            score: GateScore {
+                grounding: 0.5,
+                bucket: Bucket::Single,
+                rare_total: 3,
+                rare_ungrounded: 0,
+                ungrounded_tokens: vec![],
+            },
+            nli: Some(0.1),
+        };
+        assert_eq!(reader_reason_short(&o), "unentailed");
     }
 
     #[test]
@@ -165,7 +215,10 @@ mod reader_projection_tests {
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, ["decision", "reason_short", "score", "ungrounded_tokens"]);
+        assert_eq!(
+            keys,
+            ["decision", "reason_short", "score", "ungrounded_tokens"]
+        );
         assert_eq!(v["decision"], "serve");
         assert_eq!(v["score"], json!(0.5));
         assert_eq!(v["reason_short"], "grounded");
@@ -179,7 +232,10 @@ mod reader_projection_tests {
         // shape parity with reader_verify_json: same four keys
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, ["decision", "reason_short", "score", "ungrounded_tokens"]);
+        assert_eq!(
+            keys,
+            ["decision", "reason_short", "score", "ungrounded_tokens"]
+        );
     }
 }
 
