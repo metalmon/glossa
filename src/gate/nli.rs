@@ -147,6 +147,9 @@ mod tests {
             nli_threshold_multi: Some(0.5),
             combined_single: None,
             combined_multi: None,
+            scorer: None,
+            model_dir: None,
+            entail_index: 0,
         }
     }
 

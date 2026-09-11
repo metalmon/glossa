@@ -1,7 +1,7 @@
 //! `VerifyConfig`: resolved answer-grounding-gate tuning knobs (see `crate::gate`).
 //! Precedence env > ontology > default, mirroring `graph::ppr::sim_weight`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::gate::score::Bucket;
 use crate::graph::ontology::Ontology;
@@ -38,6 +38,15 @@ pub struct VerifyConfig {
     pub nli_threshold_multi: Option<f32>,
     pub combined_single: Option<CombinedStats>,
     pub combined_multi: Option<CombinedStats>,
+    /// Runtime NLI scorer selection from `[verify.nli]` (Plan 2 Task 3): `"in_process"` (built) |
+    /// `"http"` (Task 4, not built yet). `None` ⇒ `gate::resolve_scorer` returns `None` (AC-only).
+    pub scorer: Option<String>,
+    /// Filesystem path to the exported NLI model directory (in-process scorer only). `None` ⇒
+    /// `resolve_scorer` cannot build an `InProcessNli` and fails open to `None`.
+    pub model_dir: Option<PathBuf>,
+    /// Softmax index of the entailment class; `0` is the `cointegrated/rubert-base-cased-nli-threeway`
+    /// convention (`id2label[0]=entailment`); Task 6 confirms against the real export.
+    pub entail_index: usize,
 }
 
 /// Calibrated z-score consensus stats for `combined` mode (spec §4 rev.5): AC and NLI are each
@@ -129,6 +138,24 @@ impl VerifyConfig {
             // calibrated (Task CZ-2's output), not a knob a deployment hand-sets.
             combined_single: ont.as_ref().and_then(|o| o.verify_combined_single()),
             combined_multi: ont.as_ref().and_then(|o| o.verify_combined_multi()),
+            // Runtime NLI scorer selection: env, else ontology verify.nli.{scorer,model_dir,
+            // entail_index}. Unset scorer/model_dir ⇒ `gate::resolve_scorer` returns `None`
+            // (AC-only, fail-open) — see that function's doc comment.
+            scorer: env_string("GLOSSA_VERIFY_NLI_SCORER").or_else(|| {
+                ont.as_ref()
+                    .and_then(|o| o.verify_nli_scorer())
+                    .map(str::to_string)
+            }),
+            model_dir: env_string("GLOSSA_VERIFY_NLI_MODEL_DIR")
+                .or_else(|| {
+                    ont.as_ref()
+                        .and_then(|o| o.verify_nli_model_dir())
+                        .map(str::to_string)
+                })
+                .map(PathBuf::from),
+            entail_index: env_usize("GLOSSA_VERIFY_NLI_ENTAIL_INDEX")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_entail_index()))
+                .unwrap_or(0),
         }
     }
 
@@ -324,5 +351,43 @@ mod tests {
         let multi = c.combined_stats(Bucket::Multi).unwrap();
         assert!((multi.mean_nli - 0.55).abs() < 1e-6);
         assert!((multi.threshold - (-0.2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nli_scorer_config_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_SCORER");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_MODEL_DIR");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_ENTAIL_INDEX");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n\
+             [verify.nli]\nscorer=\"in_process\"\nmodel_dir=\"/x\"\nentail_index=2\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.scorer.as_deref(), Some("in_process"));
+        assert_eq!(c.model_dir, Some(std::path::PathBuf::from("/x")));
+        assert_eq!(c.entail_index, 2);
+    }
+
+    #[test]
+    fn nli_scorer_config_defaults_when_absent() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_SCORER");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_MODEL_DIR");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_ENTAIL_INDEX");
+        let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
+        let c = VerifyConfig::resolve(dir.path());
+        assert_eq!(c.scorer, None);
+        assert_eq!(c.model_dir, None);
+        assert_eq!(c.entail_index, 0);
     }
 }
