@@ -1,37 +1,74 @@
 //! `kbx eval calibrate` — sweep the verify-gate threshold (`glossa::gate`) over a past `kbx eval
-//! run`'s graded cases so the corpus's `ontology.toml` `[verify.threshold]` can be set from real
-//! data instead of guessed. Task 9 wires the CLI surface (`CalibrateArgs`) and the case loader
-//! (`load_cases`) that reuses `report.rs`'s exact `(answerable, verdict)` classification — no
-//! parallel scoring vocabulary. The per-bucket fold sweep and `ontology.toml` write-back land in
-//! Tasks 10-11; `run` here loads and reports the graded pool so the CLI group compiles end to end.
+//! run`'s graded cases and set the corpus's `ontology.toml` `[verify.threshold]` from real data
+//! instead of a guess. It loads the run's cases, scores each with the model-free grounding gate,
+//! sweeps the serve/abstain threshold per bucket (single vs multi cited chunks) under an optional
+//! error cap, writes `calibration.svg` / `calibration.json`, prints a short operating-point
+//! summary, and — with `--write` — persists the chosen thresholds to `ontology.toml`.
 
 use crate::judge::Verdict;
 use crate::report::CaseResult;
 use anyhow::Context;
 use glossa::gate::{score, Bucket, VerifyConfig};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
+use std::time::Duration;
+
+/// A TTY-gated progress bar over the per-case scoring pass; hidden when stderr is not a terminal
+/// (CI, redirected output) so logs stay clean. Same style as the `build` / `reason` bars.
+fn mk_bar(len: u64) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.enable_steady_tick(Duration::from_millis(90));
+    pb
+}
+
+/// Cross-validation fold-threshold spread, appended to a bucket summary as an honesty note: a wide
+/// spread means the single written threshold is unstable at this sample size. Empty when fewer than
+/// two folds produced a threshold to compare.
+fn cv_spread(folds: &[Option<f32>]) -> String {
+    let vals: Vec<f32> = folds.iter().filter_map(|t| *t).collect();
+    if vals.len() < 2 {
+        return String::new();
+    }
+    let lo = vals.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    format!("   [CV folds: {lo:.2}–{hi:.2}]")
+}
 
 /// `kbx eval calibrate` flags. No `path`: the corpus + `runs/` dir come from kb-style PATH
 /// resolution off the current directory (see `crate::workspace::resolve`), matching every other
 /// `kbx` subcommand's default.
 #[derive(clap::Args, Debug)]
 pub struct CalibrateArgs {
-    /// Run tag to calibrate on. If omitted, the most recent run under `runs/` (newest mtime) is used.
+    /// Run tag to calibrate on (a directory under `runs/`). Omit to use the most recent run.
     #[arg(long)]
     pub run: Option<String>,
-    /// Which bucket(s) to sweep: single|multi|both.
+    /// Which cited-chunk bucket(s) to sweep: `single`, `multi`, or `both`.
     #[arg(long, default_value = "both")]
     pub bucket: String,
-    /// Maximum tolerated false-positive rate on the swept bucket (Tasks 10-11).
+    /// Error cap: pick the highest-coverage threshold whose served answers are at most this
+    /// fraction wrong (e.g. `0.2` = at most 20% wrong). Omit for no cap (maximise coverage).
     #[arg(long)]
     pub max_error: Option<f32>,
-    /// Cross-validation fold count for the threshold sweep (Tasks 10-11).
+    /// Cross-validation folds used to report threshold stability (a diagnostic spread only; the
+    /// written threshold is fit on all cases).
     #[arg(long, default_value_t = 5)]
     pub folds: usize,
-    /// Write the calibrated threshold(s) back to `ontology.toml` (Tasks 10-11).
+    /// Persist the chosen threshold(s) to the corpus `ontology.toml`. Without it the run is a
+    /// dry-run — it still writes calibration.svg / calibration.json but changes no config.
     #[arg(long)]
     pub write: bool,
-    /// Where to write calibration.svg / calibration.json. Defaults to the run dir under the kbx
-    /// workspace (`.glossa/kbx/runs/<tag>/`). NEVER defaults into the indexed corpus.
+    /// Directory for calibration.svg / calibration.json. Defaults to the run dir
+    /// (`.glossa/kbx/runs/<tag>/`); never the indexed corpus.
     #[arg(long)]
     pub out: Option<std::path::PathBuf>,
 }
@@ -88,8 +125,12 @@ pub fn load_cases(
     ))
     .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
     let rare_df_frac = VerifyConfig::resolve(corpus_glossa).rare_df_frac;
+    let raw = crate::report::load_cases(&run_dir.join("cases"))?;
+    let pb = mk_bar(raw.len() as u64);
+    pb.set_prefix("scoring cases");
     let mut out = Vec::new();
-    for c in crate::report::load_cases(&run_dir.join("cases"))? {
+    for c in raw {
+        pb.inc(1);
         if c.errored || c.final_answer.trim().is_empty() {
             continue; // no served candidate to check
         }
@@ -109,6 +150,7 @@ pub fn load_cases(
             cell,
         });
     }
+    pb.finish_and_clear();
     Ok(out)
 }
 
@@ -385,7 +427,6 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     let want_single = args.bucket == "single" || args.bucket == "both";
     let want_multi = args.bucket == "multi" || args.bucket == "both";
 
-    let mut ascii_report = String::new();
     let mut svg_report = String::new();
     let mut json_buckets = serde_json::Map::new();
     // Weighted (by bucket universe size `n`) average of the recommended operating point across
@@ -394,6 +435,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     let mut weighted_answered = 0.0f64;
     let mut weighted_error = 0.0f64;
     let mut weighted_n = 0usize;
+    let mut summaries: Vec<String> = Vec::new();
 
     for (name, bucket, wanted) in [
         ("single", Bucket::Single, want_single),
@@ -405,7 +447,6 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         let bucket_cases: Vec<Case> = cases.iter().copied().filter(|c| c.bucket == bucket).collect();
         let rep = sweep(&bucket_cases, args.folds);
         let cv = sweep_cv(&bucket_cases, args.folds, budget);
-        ascii_report.push_str(&render_ascii(name, &rep));
         svg_report.push_str(&render_svg(name, &rep));
 
         let recommended = rep.recommended_for(budget);
@@ -418,6 +459,14 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
                 weighted_answered += p.answered_pct as f64 * rep.n as f64;
                 weighted_error += p.error_pct as f64 * rep.n as f64;
                 weighted_n += rep.n;
+                summaries.push(format!(
+                    "  {name:<6} (N={:<4}) threshold {t:.2}  ->  answers {:.0}% · of those {:.0}% wrong · {:.0}% declined{}",
+                    rep.n,
+                    p.answered_pct * 100.0,
+                    p.error_pct * 100.0,
+                    (1.0 - p.answered_pct) * 100.0,
+                    cv_spread(&cv.fold_thresholds),
+                ));
             }
         }
 
@@ -432,7 +481,20 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         );
     }
 
-    print!("{ascii_report}");
+    // Human summary to stdout (the full per-threshold curve lives in calibration.svg / .json).
+    let cap = match args.max_error {
+        Some(e) => format!("target error ≤ {:.0}%", e * 100.0),
+        None => "no error cap".to_string(),
+    };
+    println!("\nCalibration — run \"{tag}\"   ({cap})\n");
+    if summaries.is_empty() {
+        println!("  (no eligible cases to calibrate on)");
+    } else {
+        for line in &summaries {
+            println!("{line}");
+        }
+    }
+    println!();
 
     std::fs::write(out_dir.join("calibration.svg"), &svg_report)
         .with_context(|| format!("writing {}", out_dir.join("calibration.svg").display()))?;
@@ -471,11 +533,12 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
             args.folds,
         )?;
         println!(
-            "wrote [verify.threshold]/[verify.calibration] to {}",
-            corpus_glossa.join("ontology.toml").display()
+            "written to ontology.toml: single={single_threshold:.2} multi={multi_threshold:.2}   (weighted: answers {:.0}% at {:.0}% error)",
+            answered_pct * 100.0,
+            error_pct * 100.0,
         );
     } else {
-        eprintln!("dry-run: threshold not written (pass --write to persist to ontology.toml)");
+        println!("dry-run — not written (use --write to persist to ontology.toml)");
     }
 
     Ok(())
