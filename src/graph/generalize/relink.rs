@@ -7,6 +7,7 @@ use super::Triple;
 use crate::graph::MENTIONS;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Default)]
 pub struct RelinkPlan {
     pub relinkable: Vec<(String, String, String)>,
     pub ambiguous: Vec<(String, String, Vec<String>)>,

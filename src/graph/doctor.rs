@@ -57,6 +57,10 @@ pub struct DoctorReport {
     /// query-side (every entity type is `requires_grounding` or structural), so `dangling_nodes`
     /// has no candidate and can never fire. Same false-all-clear guard as `incomplete_disabled`.
     pub dangling_inapplicable: Option<&'static str>,
+    /// Classification of `ungrounded` nodes into non-destructively fixable (relinkable/ambiguous)
+    /// vs genuine orphans, by matching each dead `MENTIONS` target against the graph's own LIVE
+    /// structural nodes (filename + section). See `generalize::relink::classify_relink`.
+    pub relink: crate::graph::generalize::relink::RelinkPlan,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,6 +116,14 @@ pub fn doctor(
     let structural: HashSet<String> = ont.structural().into_iter().collect();
 
     let ungrounded_ids = hygiene::ungrounded_nodes(&id_types, &triples, &grounding_types);
+    // Classify the ungrounded set into non-destructively fixable (relinkable/ambiguous) vs genuine
+    // orphans, reusing the exact (id,type)/Triple vectors already assembled above — no re-query.
+    let ungrounded_ids_owned: HashSet<String> = ungrounded_ids.iter().cloned().collect();
+    let relink = crate::graph::generalize::relink::classify_relink(
+        &id_types,
+        &triples,
+        &ungrounded_ids_owned,
+    );
     let incomplete_ids =
         hygiene::incomplete_nodes(&id_types, &triples, &spines, &spine_types, &structural);
 
@@ -181,6 +193,7 @@ pub fn doctor(
         live_terminal_count: live_terminal_ids.len(),
         incomplete_disabled,
         dangling_inapplicable,
+        relink,
         ..Default::default()
     };
     for id in &ungrounded_ids {
