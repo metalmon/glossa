@@ -9,26 +9,14 @@ use crate::judge::Verdict;
 use crate::report::CaseResult;
 use anyhow::Context;
 use glossa::gate::{score, Bucket, VerifyConfig};
-use indicatif::{ProgressBar, ProgressStyle};
-use std::io::IsTerminal;
-use std::time::Duration;
+use indicatif::ProgressBar;
 
 /// A TTY-gated progress bar over the per-case scoring pass; hidden when stderr is not a terminal
-/// (CI, redirected output) so logs stay clean. Same style as the `build` / `reason` bars.
+/// (CI, redirected output) so logs stay clean. Same style as the `build` / `reason` bars — delegates
+/// to the shared factory. `calibrate` has no `--no-progress` flag of its own, so it always passes
+/// `false` (the TTY check alone still hides it under CI/redirected output).
 fn mk_bar(len: u64) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new(len);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    pb.enable_steady_tick(Duration::from_millis(90));
-    pb
+    glossa::cli_fmt::progress_bar(len, false)
 }
 
 /// Cross-validation fold-threshold spread, appended to a bucket summary as an honesty note: a wide

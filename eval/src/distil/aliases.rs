@@ -34,10 +34,9 @@ use glossa::index::store::DocIndex;
 use glossa::read::DocImage;
 use glossa::tools::ChainSpec;
 use glossa::trace::TraceLog;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,23 +72,10 @@ struct AliasChain {
     poor: Vec<Node>,
 }
 
-/// indicatif progress bar over `len` units — hidden when `no_progress` or not a TTY (mirrors
-/// `reason::progress_bar`/`distil::run::progress_bar`).
+/// indicatif progress bar over `len` units — delegates to the shared `glossa::cli_fmt::progress_bar`
+/// factory (hidden when `no_progress` or stderr isn't a TTY).
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
-    let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    if !show {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new(len as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    pb.enable_steady_tick(Duration::from_millis(90));
-    pb
+    glossa::cli_fmt::progress_bar(len as u64, no_progress)
 }
 
 /// A `Chaining`-role edge per the ontology (both `LEADS_TO`-style declared relations and the

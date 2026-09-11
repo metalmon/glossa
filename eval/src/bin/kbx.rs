@@ -7,7 +7,6 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
 use kb_eval::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, token_summary, OpenAiBackend, StatusTicker,
     DEFAULT_MAX_ROUNDS,
@@ -36,7 +35,6 @@ use kb_eval::score::{relaxed_match_any, token_f1_any};
 use kb_eval::train::{self, TrainArgs};
 use kb_eval::workspace::{self, KbxPaths};
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -899,26 +897,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     let api_key = lab.model.resolve_key();
     let timeout = Duration::from_secs(lab.model.timeout_secs);
 
-    // indicatif draws to stderr by default; also check stdout since some shells redirect one but
-    // not the other and either being non-interactive is a good signal this run isn't at a console.
-    let show_progress =
-        !args.no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    let pb = if show_progress {
-        let pb = ProgressBar::new(cases.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
-        // calls — a no-op on a hidden bar.
-        pb.enable_steady_tick(Duration::from_millis(90));
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
+    // `glossa::cli_fmt::progress_bar` owns the TTY gate (stderr, where indicatif draws) and the
+    // `no_progress` bool; it returns a hidden bar (no-op ticks/draws) when either says not to show.
+    let pb = glossa::cli_fmt::progress_bar(cases.len() as u64, args.no_progress);
 
     reset_tokens();
     reset_resamples();

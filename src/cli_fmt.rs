@@ -1,6 +1,26 @@
 use crate::graph::store::{Edge, Node};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::path::Path;
+
+/// The one canonical progress bar for the whole toolkit (kbx + kb). Braille spinner + width-adaptive
+/// `{wide_bar}`, steady 90ms tick. Returns a hidden bar when `no_progress` or stderr isn't a TTY, so
+/// callers never branch. Callers set their own `{prefix}` (stage word) and drive `{msg}`/`inc`.
+pub fn progress_bar(len: u64, no_progress: bool) -> ProgressBar {
+    if no_progress || !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(90));
+    pb
+}
 
 /// True when stdout is an interactive terminal and color isn't disabled via NO_COLOR.
 pub fn use_color() -> bool {

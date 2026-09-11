@@ -31,12 +31,10 @@ use clap::ValueEnum;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Fallback for `chunks_per_round` when neither a CLI flag nor `lab.toml`'s `[tuning]
 /// chunks_per_round` overrides it. Single source of truth `run_build` resolves against AND this
@@ -133,28 +131,13 @@ impl Default for BuildOpts {
     }
 }
 
-/// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `kbx eval`'s `show_progress` gate in `src/bin/kbx.rs`). A `StatusTicker`
-/// (started by the caller) owns BOTH `{prefix}` — the live debounced activity word at the front,
-/// replacing any static stage label — and `{msg}` — the ETA + token/resample "service" counters —
-/// for the loop's scope, redrawn on its own timer so `{msg}` renders after the elapsed/ETA time.
+/// indicatif progress bar over `len` units — delegates to the shared `glossa::cli_fmt::progress_bar`
+/// factory (hidden when `no_progress` is set or stderr isn't a TTY). A `StatusTicker` (started by
+/// the caller) owns BOTH `{prefix}` — the live debounced activity word at the front, replacing any
+/// static stage label — and `{msg}` — the ETA + token/resample "service" counters — for the loop's
+/// scope, redrawn on its own timer so `{msg}` renders after the elapsed/ETA time.
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
-    let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    if !show {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new(len as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
-    // calls — a no-op on a hidden bar.
-    pb.enable_steady_tick(Duration::from_millis(90));
-    pb
+    glossa::cli_fmt::progress_bar(len as u64, no_progress)
 }
 
 /// Corpus-relative paths of every structural `Document` node in the graph, sorted for

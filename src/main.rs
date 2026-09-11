@@ -2161,14 +2161,17 @@ fn main() -> anyhow::Result<()> {
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 // `doctor()` loads every node/edge, re-stats each grounded doc for staleness, and
                 // classifies relink candidates -- on a large graph that's real wall-clock time with
-                // no output until it's done. `indicatif` is not a dependency of this crate (it's
-                // only pulled in by the `eval` workspace member), so rather than add a new
-                // dependency for one spinner, print a single one-line notice to stderr before the
-                // work starts. This is NOT a live-updating bar, so there is no collision risk with
-                // the report `print!`/prune `println!`s below -- it's one line, already flushed and
-                // done before any of that output happens.
-                eprintln!("diagnosing graph...");
+                // no output until it's done. Shares the same kbx-style spinner as `eval` via
+                // `glossa::cli_fmt::progress_bar` (TTY-gated, hidden under CI/redirected output).
+                // A coarse two-phase bar: "diagnose" (doctor()) and, when `--relink` will apply,
+                // "relink". Cleared BEFORE the report `print!` and before any prune/relink
+                // `println!`s below -- no live bar is ever on screen while other output prints.
+                let phases: u64 = if relink { 2 } else { 1 };
+                let pb = glossa::cli_fmt::progress_bar(phases, false);
+                pb.set_prefix("diagnosing");
                 let report = glossa::graph::doctor::doctor(&g, &ont, &rr.roots)?;
+                pb.inc(1);
+                pb.finish_and_clear();
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
                 // Relocated/relabeled docs are not orphans — refuse a `--prune-ungrounded` that
                 // would destroy their (recoverable) reasoning nodes until `--relink` has run, or
@@ -2194,6 +2197,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     let n = glossa::graph::doctor::apply_relink(&g, &report.relink)?;
+                    // Bar was already `finish_and_clear()`ed before the report print above, so this
+                    // inc is bookkeeping only (the "relink" phase completing) -- it draws nothing,
+                    // preserving the collision-safe ordering (no live bar during `println!`s).
+                    pb.inc(1);
                     println!("relinked: {n}");
                 }
                 if prune_dangling && !force {

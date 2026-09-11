@@ -17,10 +17,7 @@ use crate::gepa_graph::{self, GepaGraphConfig};
 use crate::lab::{AbstentionPolicy, LabConfig};
 use crate::workspace;
 use anyhow::Context;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// Fallback worker-pool size for concurrent read-only rollouts when neither `--jobs` nor
 /// `lab.toml`'s `[tuning] jobs_train` overrides it. Same single-source-of-truth rationale as
@@ -356,26 +353,11 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
 
     // Visible progress bar for the long GEPA run (mirrors `kbx run`/build/reason): one bar owned
     // here, driven by `gepa_graph::run` (length = max_metric_calls, position = rollouts spent).
-    // Hidden on a non-TTY or under `--no-progress`, exactly like `run_eval`.
-    let show_progress =
-        !args.no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    let pb = if show_progress {
-        // Length 0 at creation: `gepa_graph::run` sets the real length (= max_metric_calls) once it
-        // starts, so the bar tracks metric-call spend end-to-end (`[spent/max_metric_calls]`).
-        // Seeding a count here would flash a misleading total before that first `set_length`.
-        let pb = ProgressBar::new(0);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        pb.enable_steady_tick(Duration::from_millis(90));
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
+    // Hidden on a non-TTY or under `--no-progress` via the shared factory. Length 0 at creation:
+    // `gepa_graph::run` sets the real length (= max_metric_calls) once it starts, so the bar tracks
+    // metric-call spend end-to-end (`[spent/max_metric_calls]`). Seeding a count here would flash a
+    // misleading total before that first `set_length`.
+    let pb = glossa::cli_fmt::progress_bar(0, args.no_progress);
     // Zero the shared token/resample counters before the run so the ticker's `{msg}` reflects only
     // this run, then start the background ticker (ETA + tokens/resamples in `{msg}`). The static
     // stage word `training` prefixes the bar; `gepa_graph::run` extends it per iteration.

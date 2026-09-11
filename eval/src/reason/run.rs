@@ -15,12 +15,10 @@ use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
 use glossa::graph::ontology::{Ontology, RelationRole};
 use glossa::index::store::DocIndex;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use std::collections::HashSet;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Soft cap on predecessors synthesized per backward step when `--fanout-max` isn't given —
 /// the single source of truth `run_reason_at` applies at its real call site AND the unit test
@@ -56,25 +54,10 @@ pub struct ReasonArgs {
     pub jobs: Option<usize>,
 }
 
-/// indicatif progress bar over `len` units — hidden when `no_progress` is set or stdout/stderr
-/// isn't a TTY (mirrors `build::progress_bar`/`kbx eval`'s `show_progress` gate).
+/// indicatif progress bar over `len` units — delegates to the shared `glossa::cli_fmt::progress_bar`
+/// factory (hidden when `no_progress` is set or stderr isn't a TTY).
 fn progress_bar(len: usize, no_progress: bool) -> ProgressBar {
-    let show = !no_progress && std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
-    if !show {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new(len as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    // Animates the spinner and redraws the bar on a timer even between `pb.inc`/`set_message`
-    // calls — a no-op on a hidden bar.
-    pb.enable_steady_tick(Duration::from_millis(90));
-    pb
+    glossa::cli_fmt::progress_bar(len as u64, no_progress)
 }
 
 /// Clear a reason run's persistent checkpoint (`run_dir/done/`) — `--force`'s full-rebuild half,
