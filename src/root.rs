@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn colocated_path_via_root_inputs_is_unchanged() {
+    fn positional_root_via_root_inputs_gets_basename_label() {
         let base = tempfile::tempdir().unwrap();
         let corpus = base.path().join("plc");
         std::fs::create_dir_all(&corpus).unwrap();
@@ -525,28 +525,37 @@ mod tests {
 
     #[test]
     fn state_dir_sets_state_base_and_keeps_roots() {
-        let corpus = tempfile::tempdir().unwrap();
+        // Named subdirectory (not the tempdir's own random name) so the expected label is a
+        // hardcoded literal, not something re-derived via `.file_name()` — which would just
+        // restate what the code under test does.
+        let corpus_tmp = tempfile::tempdir().unwrap();
+        let corpus = corpus_tmp.path().join("ivk");
+        std::fs::create_dir_all(&corpus).unwrap();
         let state = tempfile::tempdir().unwrap();
-        let label = corpus
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
         let inputs = RootInputs {
-            positional: Some(corpus.path().to_path_buf()),
+            positional: Some(corpus.clone()),
             state_dir: Some(state.path().to_path_buf()),
             ..Default::default()
         };
-        let r = resolve_roots_from(inputs, corpus.path()).unwrap();
+        let r = resolve_roots_from(inputs, corpus_tmp.path()).unwrap();
         assert_eq!(r.state_base, state.path());
         assert_eq!(
             r.roots,
             vec![Root {
-                label,
-                path: corpus.path().to_path_buf()
+                label: "ivk".into(),
+                path: corpus
             }]
         );
+    }
+
+    #[test]
+    fn positional_dot_with_no_basename_gets_empty_label() {
+        // Edge case: a path whose `file_name()` is `None` (e.g. `.`) yields an empty label by
+        // design — same as discovery — rather than panicking or inventing a label. Documented
+        // here so it reads as intentional, not an accident.
+        assert_eq!(basename_label(Path::new(".")), "");
+        assert_eq!(basename_label(Path::new("..")), "");
+        assert_eq!(basename_label(Path::new("/")), "");
     }
 
     #[test]

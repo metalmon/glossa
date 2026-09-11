@@ -311,13 +311,13 @@ pub fn relink_prune_conflict(
 /// MENTIONS edges are already live — pre-existing in the DB, or created earlier in this same call —
 /// and for any later `relinkable` entry that targets an already-live pair, it DELETEs the stale
 /// `(from, MENTIONS, old_to)` row instead of repointing it (the row is now a redundant duplicate of
-/// the live edge, not something to keep). Returns the number of `relinkable` entries applied
-/// (repoint + delete both count — both fully resolve that entry; callers that need the split can
-/// walk `plan.relinkable` and re-check `live` themselves, which this crate doesn't currently need).
+/// the live edge, not something to keep). Returns the counts of each outcome separately — see
+/// [`RelinkApplied`] — so callers can report "N edges repointed (M duplicates dropped)" instead of
+/// one folded number that hides how many rows were actually deleted vs. repointed.
 pub fn apply_relink(
     g: &GraphStore,
     plan: &crate::graph::generalize::relink::RelinkPlan,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<RelinkApplied> {
     // Pre-load current MENTIONS edges as (from,to) pairs once, instead of re-querying the DB on
     // every loop iteration — cheap at doctor's scale and keeps the collision check O(1) per entry.
     let mut live: HashSet<(String, String)> = g
@@ -327,23 +327,34 @@ pub fn apply_relink(
         .map(|e| (e.from, e.to))
         .collect();
 
-    let mut applied = 0usize;
+    let mut applied = RelinkApplied::default();
     for (from, old_to, new_to) in &plan.relinkable {
         let key = (from.clone(), new_to.clone());
         if live.contains(&key) {
             // (from, MENTIONS, new_to) is already live — repointing old_to onto it would collide
             // on the PK. The old row is now a redundant duplicate: delete it.
             g.delete_edge(from, crate::graph::MENTIONS, old_to)?;
+            applied.dropped += 1;
         } else {
             g.repoint_mentions(from, old_to, new_to)?;
             live.insert(key);
+            applied.repointed += 1;
         }
         // Keep provenance's source_path pointing at the doc's current key (strip "#section").
         let new_doc = new_to.split_once('#').map(|(d, _)| d).unwrap_or(new_to.as_str());
         let _ = g.set_source_path(from, new_doc);
-        applied += 1;
     }
     Ok(applied)
+}
+
+/// Outcome of [`apply_relink`]: how many `relinkable` plan entries were resolved by repointing the
+/// dead `MENTIONS` edge onto its live target, vs. how many were instead resolved by deleting a
+/// now-redundant duplicate row (the collision case — see `apply_relink`'s doc comment). Both counts
+/// together equal `plan.relinkable.len()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelinkApplied {
+    pub repointed: usize,
+    pub dropped: usize,
 }
 
 /// Returns `Some(reason)` when pruning the `dangling` bucket would be a mass-wipe — the signal of
@@ -913,7 +924,8 @@ strict = false
             orphans: vec![],
         };
         let applied = apply_relink(&g, &plan).unwrap();
-        assert_eq!(applied, 1);
+        assert_eq!(applied.repointed, 1);
+        assert_eq!(applied.dropped, 0);
 
         let edges = g.all_edges().unwrap();
         assert!(
@@ -983,7 +995,8 @@ strict = false
         };
         // Must not panic or error on the collision.
         let applied = apply_relink(&g, &plan).unwrap();
-        assert_eq!(applied, 2, "both plan entries are resolved (1 repoint + 1 delete)");
+        assert_eq!(applied.repointed, 1, "the first entry repoints");
+        assert_eq!(applied.dropped, 1, "the second, colliding entry drops its duplicate row");
 
         let edges = g.all_edges().unwrap();
         let mentions_live: Vec<_> = edges

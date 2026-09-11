@@ -1482,6 +1482,13 @@ fn group_prefix_delta(old: &str, new: &str) -> (String, String) {
 /// of one line per node — a large relabel/move can otherwise bury the fix under hundreds of
 /// identical-looking entries), the `--relink` command is surfaced, and only genuine orphans (and
 /// ambiguous matches, as a count) keep the per-node listing.
+///
+/// The header line reports the RAW `ungrounded` total only — it does not claim what that total
+/// is made of. The lines under it break it down honestly into its three disjoint parts (relinkable
+/// groups, ambiguous, real orphans), which together add up to the header count. Earlier wording
+/// annotated the header itself as "relocated/relabeled docs, not orphans", which was only true of
+/// part of the total (it also includes ambiguous matches and genuine orphans) — fixed here so no
+/// line claims more than is true.
 fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize) -> String {
     let relink = &rep.relink;
     if relink.relinkable.is_empty() {
@@ -1494,14 +1501,13 @@ fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize)
         *groups.entry(group_prefix_delta(old_to, new_to)).or_insert(0) += 1;
     }
 
-    let mut out = format!(
-        "ungrounded: {}  (relocated/relabeled docs, not orphans)\n",
-        rep.ungrounded.len()
-    );
+    let mut out = format!("ungrounded: {}\n", rep.ungrounded.len());
     for ((old_prefix, new_prefix), count) in &groups {
         out.push_str(&format!("  {old_prefix} -> {new_prefix}  ({count})\n"));
     }
-    out.push_str("  → non-destructive fix:  kb graph doctor --relink   (full list: --verbose)\n");
+    out.push_str(
+        "  (!) non-destructive fix:  kb graph doctor --relink   (full list: --verbose)\n",
+    );
     if !relink.ambiguous.is_empty() {
         out.push_str(&format!(
             "  ambiguous: {}   (same filename in several folders — resolve by hand)\n",
@@ -4243,6 +4249,24 @@ strict = true
             "relinkable node must not be listed line-by-line:\n{s}"
         );
         assert!(s.contains("res:orphan"), "true orphan still listed:\n{s}");
+        // Honest breakdown: the header count is the RAW ungrounded total, not annotated as if it
+        // were entirely relinkable — the grouped shift, ambiguous count, and real-orphan count are
+        // shown separately so the reader sees how the total splits.
+        assert!(
+            s.contains("ungrounded: 2\n"),
+            "header must be the plain raw total, no blanket claim about its contents:\n{s}"
+        );
+        assert!(
+            !s.contains("not orphans"),
+            "header must not claim the whole total is non-orphan — it also contains real orphans:\n{s}"
+        );
+        assert!(
+            s.contains("real orphans: 1"),
+            "the real-orphan count must be broken out explicitly:\n{s}"
+        );
+        // ASCII-only output: no warning-triangle or right-arrow glyphs.
+        assert!(!s.contains('\u{26A0}'), "doctor output must be ASCII:\n{s}");
+        assert!(!s.contains('\u{2192}'), "doctor output must be ASCII:\n{s}");
     }
 
     /// When nothing is relinkable, the ungrounded bucket renders exactly as it did before

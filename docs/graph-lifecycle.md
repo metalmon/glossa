@@ -219,42 +219,52 @@ Either way, a fresh `kb index` updates the *structural* layer to the new keys im
 
 ```
 $ kb graph doctor
-ungrounded: 517  (relocated/relabeled docs, not orphans)
+ungrounded: 517
    -> plc  (498)
   plc -> arch/2024  (14)
-  → non-destructive fix:  kb graph doctor --relink   (full list: --verbose)
+  (!) non-destructive fix:  kb graph doctor --relink   (full list: --verbose)
   ambiguous: 2   (same filename in several folders — resolve by hand)
   real orphans: 3
   res:gone  [Resolution]  power-cycle sequence  plc/deleted.pdf#1  ungrounded
   ...
 ```
 
-That grouped block — `old_prefix -> new_prefix (N)` — replaces the old flat per-node listing once
-any node in the `ungrounded` bucket is recoverable this way: of the 517 nodes reported, 498 lost
-their label prefix, 14 followed a folder move (512 relinkable in total), 2 are ambiguous (the same
-`filename#section` now exists under more than one live document — the doctor won't guess, resolve
-those by hand), and 3 are **real orphans** (no live document matches at all — their source is
-genuinely gone).
+The `ungrounded: 517` line is the raw total — it does not by itself claim what that total is made
+of. The lines under it break it down honestly: that grouped block — `old_prefix -> new_prefix (N)`
+— replaces the old flat per-node listing for the part that's recoverable: of the 517 nodes
+reported, 498 lost their label prefix, 14 followed a folder move (512 relinkable in total), 2 are
+`ambiguous` (the same `filename#section` now exists under more than one live document — the doctor
+won't guess, resolve those by hand), and 3 are `real orphans` (no live document matches at all —
+their source is genuinely gone). Relinkable + ambiguous + real orphans always add up to the
+`ungrounded:` total.
 
 The cure is `kb graph doctor --relink`: it finds each affected node's document at its **current**
 key — matched by filename + section against the graph's own live structural nodes, not against a
 separate index or manifest — and re-points the `MENTIONS` edge (and the node's provenance) at it.
-It's non-destructive: nothing is deleted, and it backs up `.glossa/graph.sqlite` (as
-`graph.sqlite.pre-relink`) before writing. Run it, then confirm:
+It's non-destructive: nothing is deleted, and it backs up `.glossa/graph.sqlite` (plus its `-wal`/
+`-shm` siblings, when present) before writing — each run's backup is timestamped
+(`graph.sqlite.pre-relink-<epoch-seconds>`), so a second `--relink` run never overwrites the
+previous run's backup. Run it, then confirm:
 
 ```
 $ kb graph doctor --relink
-relinked: 512
+relinked: 512 edges (0 duplicate edges dropped)
 $ kb graph doctor
 ungrounded: 5
   res:gone  [Resolution]  power-cycle sequence  plc/deleted.pdf#1  ungrounded
   ...
 ```
 
+`relinked:` reports two counts, not one: `edges` repointed onto their live target, and any
+duplicate edges dropped instead — the collision case where two dead `MENTIONS` rows under the same
+node both resolve to the same live target (e.g. a document relabeled more than once); the second
+one is a now-redundant duplicate, so it's deleted rather than repointed. Both counts together equal
+the number of relinkable nodes fixed.
+
 Once the 512 relinkable nodes are fixed, nothing is relinkable anymore, so the report falls back to
-a plain `ungrounded: 5` listing (the 3 real orphans plus the 2 still-ambiguous nodes) — the
-`(relocated/relabeled docs, not orphans)` framing and the `real orphans:` split only appear while
-the report still has a relinkable group to summarize.
+a plain `ungrounded: 5` listing (the 3 real orphans plus the 2 still-ambiguous nodes) — the grouped
+shift summary and the `real orphans:` split only appear while the report still has a relinkable
+group to summarize.
 
 **`--prune-ungrounded` refuses while relinkable nodes exist.** Those 512 nodes are relocated
 documents, not orphans, so pruning them would silently destroy recoverable reasoning — the command
