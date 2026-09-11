@@ -1,6 +1,14 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
+/// Basename of an explicit corpus path, used as its stable label. `None` when the path has no
+/// final component (root/`.`/`..`) — caller falls back to an empty label (discovery-like).
+fn basename_label(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Where the resolved root came from — surfaced so the CLI/MCP can warn when the choice is
 /// implicit (walked up to an ancestor) instead of what the caller likely meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,12 +23,13 @@ pub enum RootOrigin {
     Fallback,
 }
 
-/// One named corpus root: a stable label paired with a filesystem path. The label is the empty
-/// string for the back-compat single positional root (see [`parse_root_arg`] for the multi-root
-/// `--root`/`GLOSSA_ROOTS` token format).
+/// One named corpus root: a stable label paired with a filesystem path. For the single positional
+/// root, the label follows how the corpus was reached: empty on discovery (no `.glossa` in cwd,
+/// walked up or fell back), basename of the path when given explicitly (positional `PATH` or
+/// `--root PATH`). See [`parse_root_arg`] for the multi-root `--root`/`GLOSSA_ROOTS` token format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Root {
-    /// "" for the back-compat single positional root; otherwise a stable label persisted in keys.
+    /// "" on discovery; basename of the explicit path otherwise — a stable label persisted in keys.
     pub label: String,
     pub path: PathBuf,
 }
@@ -34,8 +43,8 @@ pub struct ResolvedRoot {
     pub root: PathBuf,
     pub origin: RootOrigin,
     pub nested_ancestor: Option<PathBuf>,
-    /// The full set of corpus roots. Defaults to a single empty-label root at `root` — back-compat
-    /// for callers that only know about the single-root path.
+    /// The full set of corpus roots. Defaults to a single root at `root`, labeled per [`Root`]'s
+    /// discovery-vs-explicit rule — back-compat for callers that only know about the single-root path.
     pub roots: Vec<Root>,
     /// Base directory for on-disk state (`.glossa/`, index, etc). Defaults to `root`.
     pub state_base: PathBuf,
@@ -96,7 +105,7 @@ pub fn resolve_root_from(explicit: Option<PathBuf>, cwd: &Path) -> ResolvedRoot 
     if let Some(p) = explicit {
         let nested_ancestor = ancestor_glossa_above(&p);
         let roots = vec![Root {
-            label: String::new(),
+            label: basename_label(&p),
             path: p.clone(),
         }];
         let state_base = p.clone();
@@ -198,7 +207,7 @@ pub fn resolve_roots_from(inputs: RootInputs, cwd: &Path) -> anyhow::Result<Reso
         inputs.roots.clone()
     } else if let Some(p) = &inputs.positional {
         vec![Root {
-            label: String::new(),
+            label: basename_label(p),
             path: p.clone(),
         }]
     } else {
@@ -410,6 +419,60 @@ mod tests {
     }
 
     #[test]
+    fn explicit_positional_gets_basename_label() {
+        let base = tempfile::tempdir().unwrap();
+        let corpus = base.path().join("plc");
+        std::fs::create_dir_all(&corpus).unwrap();
+        let r = resolve_root_from(Some(corpus.clone()), base.path());
+        assert_eq!(r.origin, RootOrigin::Explicit);
+        assert_eq!(
+            r.roots,
+            vec![Root {
+                label: "plc".into(),
+                path: corpus.clone()
+            }]
+        );
+        assert_eq!(r.state_base, corpus);
+    }
+
+    #[test]
+    fn discovery_keeps_empty_label() {
+        let base = tempfile::tempdir().unwrap();
+        mk_glossa(base.path());
+        let r = resolve_root_from(None, base.path());
+        assert_eq!(r.origin, RootOrigin::Cwd);
+        assert_eq!(
+            r.roots,
+            vec![Root {
+                label: String::new(),
+                path: base.path().to_path_buf()
+            }]
+        );
+    }
+
+    #[test]
+    fn positional_with_state_dir_is_basename_labeled() {
+        let corpus = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let corpus_named = corpus.path().join("ivk");
+        std::fs::create_dir_all(&corpus_named).unwrap();
+        let inputs = RootInputs {
+            positional: Some(corpus_named.clone()),
+            state_dir: Some(state.path().to_path_buf()),
+            ..Default::default()
+        };
+        let r = resolve_roots_from(inputs, corpus.path()).unwrap();
+        assert_eq!(
+            r.roots,
+            vec![Root {
+                label: "ivk".into(),
+                path: corpus_named
+            }]
+        );
+        assert_eq!(r.state_base, state.path());
+    }
+
+    #[test]
     fn parse_root_arg_labeled_and_bare() {
         let labeled = parse_root_arg("docs=/mnt/a").unwrap();
         assert_eq!(
@@ -440,21 +503,23 @@ mod tests {
     #[test]
     fn colocated_path_via_root_inputs_is_unchanged() {
         let base = tempfile::tempdir().unwrap();
-        mk_glossa(base.path());
+        let corpus = base.path().join("plc");
+        std::fs::create_dir_all(&corpus).unwrap();
+        mk_glossa(&corpus);
         let inputs = RootInputs {
-            positional: Some(base.path().to_path_buf()),
+            positional: Some(corpus.clone()),
             ..Default::default()
         };
         let r = resolve_roots_from(inputs, base.path()).unwrap();
-        assert_eq!(r.root, base.path());
+        assert_eq!(r.root, corpus);
         assert_eq!(
             r.roots,
             vec![Root {
-                label: String::new(),
-                path: base.path().to_path_buf()
+                label: "plc".into(),
+                path: corpus.clone()
             }]
         );
-        assert_eq!(r.state_base, base.path());
+        assert_eq!(r.state_base, corpus);
         assert_eq!(r.origin, RootOrigin::Explicit);
     }
 
@@ -462,6 +527,12 @@ mod tests {
     fn state_dir_sets_state_base_and_keeps_roots() {
         let corpus = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
+        let label = corpus
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let inputs = RootInputs {
             positional: Some(corpus.path().to_path_buf()),
             state_dir: Some(state.path().to_path_buf()),
@@ -472,7 +543,7 @@ mod tests {
         assert_eq!(
             r.roots,
             vec![Root {
-                label: String::new(),
+                label,
                 path: corpus.path().to_path_buf()
             }]
         );
