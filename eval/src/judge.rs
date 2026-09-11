@@ -353,9 +353,15 @@ mod tests {
         // parse, and the reason is everything before the marker.
         let inline = parse_verdict("The answer is empty, providing no information. VERDICT: wrong");
         assert!(matches!(inline.verdict, Verdict::Wrong));
-        assert_eq!(inline.reason, "The answer is empty, providing no information.");
+        assert_eq!(
+            inline.reason,
+            "The answer is empty, providing no information."
+        );
         // trailing punctuation / menu separators after the word don't break it
-        assert!(matches!(parse_verdict("ok. Verdict: correct.").verdict, Verdict::Correct));
+        assert!(matches!(
+            parse_verdict("ok. Verdict: correct.").verdict,
+            Verdict::Correct
+        ));
     }
 
     #[test]

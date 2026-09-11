@@ -371,12 +371,30 @@ pub fn run_agent_loop_capturing(
     // real assistant↔user_sim dialogue worth handing the judge (a gate that accepts the first text
     // turn just yields the final answer, which the judge already sees). See the `user_sim` arms below.
     let mut sim_deflected = false;
+    // Bounded retries for an empty no-tool turn (see the empty-answer guard in the loop): a stalled
+    // endpoint/model that keeps returning blank text must not spin the whole `max_rounds` budget.
+    const MAX_EMPTY_RETRIES: usize = 2;
+    let mut empty_retries = 0usize;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
             call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
             let text = reply.text.clone().unwrap_or_default();
+            // An empty no-tool turn is never a valid final answer: resample already tried to
+            // regenerate it, and accepting it silently ships a blank answer (the mute-reader
+            // failure). Nudge for a real answer and continue, bounded by MAX_EMPTY_RETRIES so a
+            // stalled endpoint/model can't burn the whole round budget. Applies with or without a
+            // user_sim gate; once the budget is spent, fall through and accept the turn as before.
+            if text.trim().is_empty() && empty_retries < MAX_EMPTY_RETRIES {
+                empty_retries += 1;
+                transport.push_assistant_turn(&mut messages, &reply);
+                messages.push(json!({
+                    "role": "user",
+                    "content": "Your reply was empty. Give your final answer now as plain text, or call a tool if you still need to look something up."
+                }));
+                continue;
+            }
             match user_sim {
                 // No gate configured -> today's behavior EXACTLY: the first text-only turn is the
                 // final answer.
@@ -982,6 +1000,65 @@ mod tests {
         .unwrap();
         assert_eq!(out2, "ONE SHOT");
         assert!(take_reader_dialogue().is_empty());
+    }
+
+    /// An empty no-tool turn must not be accepted as the final answer: it is nudged and the loop
+    /// continues, but only up to MAX_EMPTY_RETRIES so a stalled model can't spin forever.
+    #[test]
+    fn empty_no_tool_turn_is_nudged_not_accepted_until_budget() {
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // Two empty turns get nudged, then a real answer is accepted (not the blanks).
+        let transport = MockTransport::new(vec![
+            reply_text(""),
+            reply_text("  "),
+            reply_text("REAL ANSWER"),
+        ]);
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            6,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, "REAL ANSWER");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            3,
+            "two empties nudged, third accepted"
+        );
+
+        // A persistently-empty reader is bounded: after MAX_EMPTY_RETRIES the blank is accepted
+        // rather than spinning the whole round budget.
+        let transport2 = MockTransport::new(vec![
+            reply_text(""),
+            reply_text(""),
+            reply_text(""),
+            reply_text(""),
+        ]);
+        let out2 = run_agent_loop(
+            &transport2,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            |_: &str, _: &Value| (String::new(), Vec::new()),
+            nudge,
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out2, "");
+        assert_eq!(
+            transport2.calls.borrow().len(),
+            3,
+            "2 nudged retries + 1 accepted empty = 3 calls"
+        );
     }
 
     /// The gate signals DONE (`Ok(None)`) on the first text-only turn -> the loop returns that text,
