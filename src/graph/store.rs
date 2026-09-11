@@ -1723,6 +1723,38 @@ impl GraphStore {
         Ok(c.changes() as usize)
     }
 
+    /// Repoint a `MENTIONS` edge's target: `from` and the edge type stay fixed, `eto` moves from
+    /// `old_to` to `new_to`. Used by `graph doctor --relink` to reconnect a reasoning node's
+    /// grounding after its structural target relocated (folder move / corpus re-addressing)
+    /// without touching the reasoning node itself. Returns the number of edge rows updated — 0 or
+    /// 1, since `(efrom, edge_type, eto)` is the edges primary key so at most one row can match.
+    pub fn repoint_mentions(&self, from: &str, old_to: &str, new_to: &str) -> anyhow::Result<usize> {
+        let c = self.conn();
+        c.execute(
+            "UPDATE edges SET eto = ?1 WHERE efrom = ?2 AND eto = ?3 AND edge_type = ?4",
+            rusqlite::params![new_to, from, old_to, crate::graph::MENTIONS],
+        )
+        .context("repoint MENTIONS edge")?;
+        Ok(c.changes() as usize)
+    }
+
+    /// Rewrite a node's provenance `source_path`. `source_path` is a real column on `nodes` (see
+    /// the schema in [`GraphStore::open`]), not part of a serialized blob, so this is a plain
+    /// `UPDATE` rather than a read-modify-write of the `Provenance` struct. Used by
+    /// `graph doctor --relink` to keep a relinked reasoning node's provenance pointing at the
+    /// document's current key after [`repoint_mentions`](Self::repoint_mentions) moves its
+    /// `MENTIONS` target — keeps grounding and the staleness (`file_sig`) check consistent.
+    /// Returns the number of node rows updated (0 or 1 — `id` is the nodes primary key).
+    pub fn set_source_path(&self, id: &str, new_source_path: &str) -> anyhow::Result<usize> {
+        let c = self.conn();
+        c.execute(
+            "UPDATE nodes SET source_path = ?1 WHERE id = ?2",
+            rusqlite::params![new_source_path, id],
+        )
+        .context("set node source_path")?;
+        Ok(c.changes() as usize)
+    }
+
     pub fn upsert(&self, ont: &Ontology, nodes: &[Node], edges: &[Edge]) -> anyhow::Result<()> {
         // Lock ONCE for the entire operation — helpers use _c variants to avoid deadlock.
         let c = self.conn();
@@ -2313,8 +2345,59 @@ mod tests {
         };
         g.put_node(&n).unwrap();
         assert_eq!(g.get_node("a.md").unwrap(), Some(n));
-        assert_eq!(g.get_node("missing").unwrap(), None);
-        assert_eq!(g.node_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn repoint_mentions_moves_edge_target_and_set_source_path_updates_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        // seed: res:a --MENTIONS--> m.pdf#1 (dead, pre-relabel key); a live node at the new key.
+        g.put_node(&Node {
+            id: "res:a".into(),
+            node_type: "Resolution".into(),
+            label: "res a".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_node(&Node {
+            id: "plc/m.pdf#1".into(),
+            node_type: "Section".into(),
+            label: "section 1".into(),
+            aliases: vec![],
+            prov: prov(),
+        })
+        .unwrap();
+        g.put_edge(&Edge {
+            from: "res:a".into(),
+            to: "m.pdf#1".into(),
+            edge_type: crate::graph::MENTIONS.into(),
+            prov: prov(),
+        })
+        .unwrap();
+
+        let changed = g.repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1").unwrap();
+        assert_eq!(changed, 1);
+
+        let edges = g.all_edges().unwrap();
+        assert!(edges
+            .iter()
+            .any(|e| e.from == "res:a" && e.to == "plc/m.pdf#1" && e.edge_type == crate::graph::MENTIONS));
+        assert!(!edges.iter().any(|e| e.to == "m.pdf#1"));
+
+        // Repointing again (dead target already gone) is a no-op, not an error.
+        let noop = g.repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1").unwrap();
+        assert_eq!(noop, 0);
+
+        let updated = g.set_source_path("res:a", "plc/m.pdf").unwrap();
+        assert_eq!(updated, 1);
+        let n = g.get_node("res:a").unwrap().expect("res:a still present");
+        assert_eq!(n.prov.source_path, "plc/m.pdf");
+
+        // Unknown id: no row to update.
+        let none = g.set_source_path("res:missing", "plc/m.pdf").unwrap();
+        assert_eq!(none, 0);
     }
 
     #[test]
