@@ -363,7 +363,12 @@ impl GraphStore {
         let w_sim = crate::graph::ppr::sim_weight(&self.gdir);
         let w_spine = crate::graph::ppr::spine_weight(&self.gdir);
         let key = (self.db_filesig(), w_sim.to_bits(), w_spine.to_bits());
-        if let Some((k, t)) = self.ppr_transition.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some((k, t)) = self
+            .ppr_transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             if *k == key {
                 return Ok(t.clone());
             }
@@ -382,7 +387,10 @@ impl GraphStore {
             let _ = self.save_ppr_transition(csig, &built); // best-effort; a failed write just re-builds
             built
         };
-        *self.ppr_transition.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, arc.clone()));
+        *self
+            .ppr_transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((key, arc.clone()));
         Ok(arc)
     }
 

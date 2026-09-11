@@ -1097,15 +1097,15 @@ pub fn run(
     // live state; `save` itself is atomic (tmp + rename), so a crash mid-write can't corrupt the
     // prior checkpoint.
     let save_ckpt = |pool: &[Candidate],
-                      best: f64,
-                      base: f64,
-                      val: &[Question],
-                      pareto: &[Question],
-                      blocked: &std::collections::HashSet<String>,
-                      it: usize,
-                      mc: usize,
-                      rng: &ChaCha12Rng,
-                      fv: Option<Vec<Option<f64>>>|
+                     best: f64,
+                     base: f64,
+                     val: &[Question],
+                     pareto: &[Question],
+                     blocked: &std::collections::HashSet<String>,
+                     it: usize,
+                     mc: usize,
+                     rng: &ChaCha12Rng,
+                     fv: Option<Vec<Option<f64>>>|
      -> Result<()> {
         if let Some(p) = &ckpt_path {
             let c = build_checkpoint(&fp, pool, best, base, val, pareto, blocked, it, mc, rng, fv);
@@ -1638,7 +1638,11 @@ mod tests {
 
     #[test]
     fn subset_by_ids_preserves_order_and_errors_on_missing() {
-        let all = vec![q("a", "qa", "x", &[]), q("b", "qb", "y", &[]), q("c", "qc", "z", &[])];
+        let all = vec![
+            q("a", "qa", "x", &[]),
+            q("b", "qb", "y", &[]),
+            q("c", "qc", "z", &[]),
+        ];
         let got = subset_by_ids(&all, &["c".into(), "a".into()]).unwrap();
         assert_eq!(
             got.iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
@@ -2125,7 +2129,16 @@ mod tests {
             let _: u64 = rng.gen();
         }
         let c = build_checkpoint(
-            "FP", &pool, 0.5, 0.4, &val, &pareto, &blocked, 3, 30, &rng,
+            "FP",
+            &pool,
+            0.5,
+            0.4,
+            &val,
+            &pareto,
+            &blocked,
+            3,
+            30,
+            &rng,
             Some(vec![None]),
         );
         assert_eq!(c.version, crate::gepa_checkpoint::CHECKPOINT_VERSION);

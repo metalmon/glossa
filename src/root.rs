@@ -427,18 +427,14 @@ mod tests {
 
     #[test]
     fn parse_root_arg_rejects_empty_input_and_empty_label() {
-        assert!(
-            parse_root_arg("   ")
-                .unwrap_err()
-                .to_string()
-                .contains("empty")
-        );
-        assert!(
-            parse_root_arg("=/mnt/a")
-                .unwrap_err()
-                .to_string()
-                .contains("label")
-        );
+        assert!(parse_root_arg("   ")
+            .unwrap_err()
+            .to_string()
+            .contains("empty"));
+        assert!(parse_root_arg("=/mnt/a")
+            .unwrap_err()
+            .to_string()
+            .contains("label"));
     }
 
     #[test]
@@ -546,11 +542,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(
-            resolve_roots_from(inputs, a.path())
-                .unwrap_err()
-                .to_string()
-                .contains("label")
-        );
+        assert!(resolve_roots_from(inputs, a.path())
+            .unwrap_err()
+            .to_string()
+            .contains("label"));
     }
 }

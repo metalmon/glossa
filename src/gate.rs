@@ -1,13 +1,13 @@
 //! Answer-grounding gate (model-free). See docs/superpowers/specs/2026-09-06-answer-grounding-gate-design.md
-pub mod token;
+pub mod config;
 pub mod df;
 pub mod df_cache;
 pub mod nli;
 pub mod score;
-pub mod config;
+pub mod token;
 
-pub use score::{GateScore, Bucket, score, Decision, GateOutcome, decide};
 pub use config::{VerifyConfig, VerifyMode};
+pub use score::{decide, score, Bucket, Decision, GateOutcome, GateScore};
 
 /// Resolve a `path#loc` citation to its chunk text, using the SAME extraction path the `read`
 /// MCP tool uses (`crate::tools::read`, which `src/mcp.rs::read_common` calls). `glossa_dir` is the
@@ -67,7 +67,10 @@ pub fn verify_outcome_with_scorer(
             VerifyMode::Ac => false,
             VerifyMode::Nli => true,
             VerifyMode::Combined => {
-                matches!(score::decide(ac.clone(), &cfg, answer_tokens).decision, Decision::Serve)
+                matches!(
+                    score::decide(ac.clone(), &cfg, answer_tokens).decision,
+                    Decision::Serve
+                )
             }
         };
     let nli_val = if need_nli {
@@ -213,7 +216,10 @@ mod reader_projection_tests {
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, ["decision", "reason_short", "score", "ungrounded_tokens"]);
+        assert_eq!(
+            keys,
+            ["decision", "reason_short", "score", "ungrounded_tokens"]
+        );
         assert_eq!(v["decision"], "serve");
         assert_eq!(v["score"], json!(0.5));
         assert_eq!(v["reason_short"], "grounded");
@@ -227,7 +233,10 @@ mod reader_projection_tests {
         // shape parity with reader_verify_json: same four keys
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, ["decision", "reason_short", "score", "ungrounded_tokens"]);
+        assert_eq!(
+            keys,
+            ["decision", "reason_short", "score", "ungrounded_tokens"]
+        );
     }
 }
 

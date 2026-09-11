@@ -58,7 +58,10 @@ mod tests {
 
         let a = cached_df(&glossa_dir).unwrap();
         let b = cached_df(&glossa_dir).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&a, &b), "cache hit returns the same Arc");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "cache hit returns the same Arc"
+        );
 
         // Change the sidecar: content differs -> (mtime,len) signature differs -> reload.
         let mut t = DfTable::new();

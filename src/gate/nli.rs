@@ -45,7 +45,9 @@ pub struct SeqMock {
 #[cfg(test)]
 impl SeqMock {
     pub fn new(per_call: Vec<Vec<f32>>) -> Self {
-        Self { per_call: std::cell::RefCell::new(per_call.into()) }
+        Self {
+            per_call: std::cell::RefCell::new(per_call.into()),
+        }
     }
 }
 
@@ -120,7 +122,9 @@ mod tests {
     #[test]
     fn mock_returns_fixed_scores_per_hypothesis() {
         let m = MockNli::new(vec![0.9, 0.1]);
-        let got = m.entail("premise chunk text", &["claim one", "claim two"]).unwrap();
+        let got = m
+            .entail("premise chunk text", &["claim one", "claim two"])
+            .unwrap();
         assert_eq!(got, vec![0.9, 0.1]);
     }
 
@@ -154,7 +158,9 @@ mod tests {
         let got = nli_score(
             "Widget zeta emits fault. Reset code kappa clears it.",
             &["chunk A".to_string(), "chunk B".to_string()],
-            &df, &cfg, &scorer,
+            &df,
+            &cfg,
+            &scorer,
         );
         assert!((got.unwrap() - 0.85).abs() < 1e-5);
     }
@@ -168,7 +174,10 @@ mod tests {
         }
         let cfg = test_cfg();
         let scorer = SeqMock::new(vec![vec![0.9]]);
-        assert_eq!(nli_score("The and for.", &["c".to_string()], &df, &cfg, &scorer), None);
+        assert_eq!(
+            nli_score("The and for.", &["c".to_string()], &df, &cfg, &scorer),
+            None
+        );
     }
 
     #[test]
@@ -176,8 +185,26 @@ mod tests {
         let df = crate::gate::df::DfTable::new();
         let cfg = test_cfg();
         let nan = SeqMock::new(vec![vec![f32::NAN, 0.5]]);
-        assert_eq!(nli_score("Alpha claim. Beta claim.", &["c".to_string()], &df, &cfg, &nan), None);
+        assert_eq!(
+            nli_score(
+                "Alpha claim. Beta claim.",
+                &["c".to_string()],
+                &df,
+                &cfg,
+                &nan
+            ),
+            None
+        );
         let short = SeqMock::new(vec![vec![0.9]]); // 1 score for 2 claims
-        assert_eq!(nli_score("Alpha claim. Beta claim.", &["c".to_string()], &df, &cfg, &short), None);
+        assert_eq!(
+            nli_score(
+                "Alpha claim. Beta claim.",
+                &["c".to_string()],
+                &df,
+                &cfg,
+                &short
+            ),
+            None
+        );
     }
 }

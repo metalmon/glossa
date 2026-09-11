@@ -993,15 +993,15 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             type Sample = (
                 String,                                        // answer
                 Vec<String>,                                   // tools (deduped names)
-                Vec<String>,                                   // chunk_paths (deduped read-cited doc paths)
-                String,                                        // transcript
-                f32,                                           // em
-                f32,                                           // f1
-                Verdict,                                       // verdict (reward)
-                String,                                        // reason
-                String,                                        // judge_raw
+                Vec<String>, // chunk_paths (deduped read-cited doc paths)
+                String,      // transcript
+                f32,         // em
+                f32,         // f1
+                Verdict,     // verdict (reward)
+                String,      // reason
+                String,      // judge_raw
                 kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
-                bool,                                          // errored (reader endpoint failure)
+                bool,        // errored (reader endpoint failure)
                 Vec<String>, // ranked_sources (deduped retrieved doc paths, score/coverage ranked)
             );
             let run_sample = |capture: bool| -> Sample {
@@ -1123,8 +1123,18 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 }
 
                 (
-                    answer, tools, chunk_paths, transcript, em, f1, verdict, reason, judge_raw,
-                    episode, errored, ranked_sources,
+                    answer,
+                    tools,
+                    chunk_paths,
+                    transcript,
+                    em,
+                    f1,
+                    verdict,
+                    reason,
+                    judge_raw,
+                    episode,
+                    errored,
+                    ranked_sources,
                 )
             };
 
@@ -1796,7 +1806,10 @@ mod tests {
         ];
         std::fs::write(&file, lines.join("\n")).unwrap();
         let (_tools, _chunks, ranked, _transcript) = parse_trace_file(&file);
-        assert_eq!(ranked, vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]);
+        assert_eq!(
+            ranked,
+            vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]
+        );
     }
 
     #[test]
@@ -2039,9 +2052,10 @@ mod tests {
         let cli = Cli::try_parse_from(["kbx", "eval", "run"]).unwrap();
         match cli.cmd {
             Cmd::Eval {
-                cmd: EvalCmd::Run(EvalArgs {
-                    capture, samples, ..
-                }),
+                cmd:
+                    EvalCmd::Run(EvalArgs {
+                        capture, samples, ..
+                    }),
             } => {
                 assert!(!capture, "--capture must default OFF (non-breaking)");
                 assert_eq!(samples, 1, "--samples must default to 1");
@@ -2052,9 +2066,10 @@ mod tests {
             Cli::try_parse_from(["kbx", "eval", "run", "--capture", "--samples", "4"]).unwrap();
         match cli.cmd {
             Cmd::Eval {
-                cmd: EvalCmd::Run(EvalArgs {
-                    capture, samples, ..
-                }),
+                cmd:
+                    EvalCmd::Run(EvalArgs {
+                        capture, samples, ..
+                    }),
             } => {
                 assert!(capture);
                 assert_eq!(samples, 4);

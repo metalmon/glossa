@@ -124,7 +124,9 @@ mod tests {
 
     #[test]
     fn defaults_when_no_ontology() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_RARE_DF_FRAC");
         let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
         let c = VerifyConfig::resolve(dir.path());
@@ -139,7 +141,9 @@ mod tests {
 
     #[test]
     fn env_overrides_default() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GLOSSA_VERIFY_RARE_DF_FRAC", "0.10");
         let dir = tempfile::tempdir().unwrap();
         let c = VerifyConfig::resolve(dir.path());
@@ -149,7 +153,9 @@ mod tests {
 
     #[test]
     fn mode_defaults_to_ac_and_ac_alias_precedence() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_MODE");
         std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_SINGLE");
         std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_MULTI");
@@ -169,7 +175,9 @@ mod tests {
 
     #[test]
     fn nli_ready_requires_mode_and_nli_threshold() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_MODE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
@@ -190,7 +198,9 @@ mod tests {
 
     #[test]
     fn ac_threshold_wins_over_legacy_when_both_present() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_MODE");
         std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_SINGLE");
         std::env::remove_var("GLOSSA_VERIFY_THRESHOLD_MULTI");
@@ -211,12 +221,21 @@ mod tests {
 
     #[test]
     fn combined_mode_round_trips_from_ontology() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_VERIFY_MODE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
-        std::fs::write(g.join("ontology.toml"), "[verify]\nenabled=true\nmode=\"combined\"\n").unwrap();
-        assert!(matches!(VerifyConfig::resolve(&g).mode, VerifyMode::Combined));
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\nmode=\"combined\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            VerifyConfig::resolve(&g).mode,
+            VerifyMode::Combined
+        ));
     }
 }

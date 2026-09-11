@@ -160,8 +160,8 @@ pub fn config_path(flag: Option<PathBuf>) -> Option<PathBuf> {
 pub fn load(path: &Path) -> anyhow::Result<DeploymentConfig> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config file {}", path.display()))?;
-    let cfg: DeploymentConfig = toml::from_str(&text)
-        .with_context(|| format!("parsing config file {}", path.display()))?;
+    let cfg: DeploymentConfig =
+        toml::from_str(&text).with_context(|| format!("parsing config file {}", path.display()))?;
     cfg.validate_static()
         .with_context(|| format!("validating config file {}", path.display()))?;
     Ok(cfg)
@@ -255,9 +255,15 @@ level = "info"
         let cfg: DeploymentConfig = toml::from_str(FULL).unwrap();
         assert_eq!(
             cfg.corpus.roots,
-            vec!["docs=/mnt/store/a".to_string(), "specs=/mnt/store/b".to_string()]
+            vec![
+                "docs=/mnt/store/a".to_string(),
+                "specs=/mnt/store/b".to_string()
+            ]
         );
-        assert_eq!(cfg.corpus.state_dir.as_deref(), Some(std::path::Path::new("/var/lib/glossa/roleA")));
+        assert_eq!(
+            cfg.corpus.state_dir.as_deref(),
+            Some(std::path::Path::new("/var/lib/glossa/roleA"))
+        );
         assert_eq!(cfg.server.transport.as_deref(), Some("streamable-http"));
         assert_eq!(cfg.server.session_idle_secs, Some(900));
         assert_eq!(cfg.limits.max_body_bytes, Some(4_000_000));
@@ -265,7 +271,10 @@ level = "info"
         assert_eq!(cfg.retrieval.min_rescan_ms, Some(300));
         assert_eq!(cfg.logging.format.as_deref(), Some("json"));
         let tls = cfg.tls.expect("[tls] present");
-        assert_eq!(tls.cert.as_deref(), Some(std::path::Path::new("/etc/glossa/roleA/tls/cert.pem")));
+        assert_eq!(
+            tls.cert.as_deref(),
+            Some(std::path::Path::new("/etc/glossa/roleA/tls/cert.pem"))
+        );
     }
 
     #[test]
@@ -279,20 +288,26 @@ level = "info"
     #[test]
     fn unknown_top_level_key_is_rejected() {
         let err = toml::from_str::<DeploymentConfig>("[bogus]\nx = 1\n").unwrap_err();
-        assert!(err.to_string().contains("bogus") || err.to_string().contains("unknown"),
-            "deny_unknown_fields must reject unknown section: {err}");
+        assert!(
+            err.to_string().contains("bogus") || err.to_string().contains("unknown"),
+            "deny_unknown_fields must reject unknown section: {err}"
+        );
     }
 
     #[test]
     fn unknown_nested_key_is_rejected() {
         let err = toml::from_str::<DeploymentConfig>("[server]\nbnid = \"x\"\n").unwrap_err();
-        assert!(err.to_string().contains("bnid") || err.to_string().contains("unknown"),
-            "deny_unknown_fields must reject typo'd key: {err}");
+        assert!(
+            err.to_string().contains("bnid") || err.to_string().contains("unknown"),
+            "deny_unknown_fields must reject typo'd key: {err}"
+        );
     }
 
     #[test]
     fn config_path_prefers_flag_over_env() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Flag wins even when the env is set.
         std::env::set_var("GLOSSA_CONFIG", "/from/env.toml");
         let got = config_path(Some(PathBuf::from("/from/flag.toml")));
@@ -302,14 +317,18 @@ level = "info"
 
     #[test]
     fn config_path_none_when_unset() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_CONFIG");
         assert_eq!(config_path(None), None);
     }
 
     #[test]
     fn config_path_falls_back_to_env_when_no_flag() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // No flag given: the env var must actually be read, not ignored.
         std::env::set_var("GLOSSA_CONFIG", "/from/env.toml");
         let got = config_path(None);
@@ -329,7 +348,10 @@ level = "info"
     #[test]
     fn load_missing_file_errors_with_path() {
         let err = load(std::path::Path::new("/no/such/role.toml")).unwrap_err();
-        assert!(err.to_string().contains("role.toml"), "error names the file: {err}");
+        assert!(
+            err.to_string().contains("role.toml"),
+            "error names the file: {err}"
+        );
     }
 
     #[test]
@@ -338,7 +360,10 @@ level = "info"
         let p = dir.path().join("bad.toml");
         std::fs::write(&p, "this = = not toml").unwrap();
         let err = load(&p).unwrap_err();
-        assert!(err.to_string().contains("bad.toml"), "parse error names the file: {err}");
+        assert!(
+            err.to_string().contains("bad.toml"),
+            "parse error names the file: {err}"
+        );
     }
 
     #[test]
@@ -375,7 +400,10 @@ level = "info"
         let err = cfg.validate_static().unwrap_err();
         let m = err.to_string();
         assert!(m.contains("tls"), "error mentions the tls feature: {m}");
-        assert!(m.contains("feature"), "error explains the feature gate: {m}");
+        assert!(
+            m.contains("feature"),
+            "error explains the feature gate: {m}"
+        );
     }
 
     #[test]
@@ -417,10 +445,7 @@ level = "info"
             merge_list(vec!["a".into()], vec!["b".into()]),
             vec!["a".to_string()]
         );
-        assert_eq!(
-            merge_list(vec![], vec!["b".into()]),
-            vec!["b".to_string()]
-        );
+        assert_eq!(merge_list(vec![], vec!["b".into()]), vec!["b".to_string()]);
         assert_eq!(merge_list(Vec::new(), Vec::new()), Vec::<String>::new());
     }
 
@@ -433,7 +458,8 @@ level = "info"
 
     #[test]
     fn serving_sections_present_detects_server_keys() {
-        let cfg: DeploymentConfig = toml::from_str("[server]\nbind = \"127.0.0.1:8080\"\n").unwrap();
+        let cfg: DeploymentConfig =
+            toml::from_str("[server]\nbind = \"127.0.0.1:8080\"\n").unwrap();
         assert!(cfg.serving_sections_present());
     }
 

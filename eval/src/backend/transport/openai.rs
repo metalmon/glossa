@@ -505,7 +505,11 @@ mod tests {
             .find(|t| t["function"]["name"] == "search")
             .unwrap();
         assert_eq!(search["type"], "function");
-        let core = &resolved.iter().find(|r| r.name == "search").unwrap().core_schema;
+        let core = &resolved
+            .iter()
+            .find(|r| r.name == "search")
+            .unwrap()
+            .core_schema;
         assert_eq!(&search["function"]["parameters"], core);
     }
 

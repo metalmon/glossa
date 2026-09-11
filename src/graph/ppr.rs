@@ -549,7 +549,9 @@ mod tests {
     fn sim_weight_resolves_default_then_ontology() {
         // Serialize against every other test that reads/mutates GLOSSA_PPR_* (process-global env,
         // shared across the whole test binary including graph::compose).
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Neutralize any ambient env override (a dev/CI shell may export GLOSSA_PPR_SIM_WEIGHT) so
         // this test exercises the config + default path deterministically.
         std::env::remove_var("GLOSSA_PPR_SIM_WEIGHT");
@@ -591,7 +593,9 @@ mod tests {
 
     #[test]
     fn spine_weight_resolves_default_then_ontology() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GLOSSA_PPR_SPINE_WEIGHT");
         let d = tempfile::tempdir().unwrap();
         let gdir = d.path().join(".glossa");
@@ -616,7 +620,9 @@ mod tests {
 
     #[test]
     fn bridge_mode_resolves_env_over_ontology_over_default() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = tempfile::tempdir().unwrap();
         let gdir = d.path().join(".glossa");
         std::fs::create_dir_all(&gdir).unwrap();
@@ -646,7 +652,9 @@ mod tests {
 
     #[test]
     fn build_transition_weights_similar_below_reasoning() {
-        let _env = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Neutralize any ambient env override so this asserts the engine default (0.1) on a corpus
         // with no `[retrieval].sim_weight`.
         std::env::remove_var("GLOSSA_PPR_SIM_WEIGHT");

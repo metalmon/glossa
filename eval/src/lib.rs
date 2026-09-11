@@ -24,9 +24,9 @@ pub mod export_tz;
 pub mod export_tz_constraint;
 pub mod finetune;
 pub mod gepa;
+pub mod gepa_checkpoint;
 #[cfg(feature = "constraint")]
 pub mod gepa_constraint;
-pub mod gepa_checkpoint;
 pub mod gepa_graph;
 pub mod judge;
 pub mod lab;

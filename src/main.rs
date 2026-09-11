@@ -92,9 +92,10 @@ fn resolve_inputs_reported(
     for a in rr.advisories() {
         warn(a);
     }
-    if let Some(w) =
-        glossa::fs_detect::state_dir_network_warning(&glossa::fs_detect::SysFsDetector, &rr.state_base)
-    {
+    if let Some(w) = glossa::fs_detect::state_dir_network_warning(
+        &glossa::fs_detect::SysFsDetector,
+        &rr.state_base,
+    ) {
         warn(w);
     }
     // Stale co-located `.glossa`: --state-dir moved state elsewhere, but a root still carries its
@@ -1136,7 +1137,11 @@ async fn serve_streamable_http(
             "MCP TLS: serving HTTPS{mtls_note} (reload on SIGHUP + cert-file mtime change, \
              {handshake_timeout:?} handshake timeout, max {max_handshakes} concurrent \
              handshakes{cap_note})",
-            mtls_note = if mtls { " with client-certificate (mTLS) required" } else { "" },
+            mtls_note = if mtls {
+                " with client-certificate (mTLS) required"
+            } else {
+                ""
+            },
             cap_note = match max_connections {
                 Some(n) => format!(", max {n} concurrent established connections"),
                 None => String::new(),
@@ -1177,9 +1182,12 @@ async fn serve_streamable_http(
             tracing::info!(
                 "MCP overload guard: max concurrent connections = {max_conn} (excess waits at the listener)"
             );
-            axum::serve(glossa::conn_cap::CappedListener::new(listener, max_conn), app)
-                .with_graceful_shutdown(async move { cancel.cancelled().await })
-                .await?;
+            axum::serve(
+                glossa::conn_cap::CappedListener::new(listener, max_conn),
+                app,
+            )
+            .with_graceful_shutdown(async move { cancel.cancelled().await })
+            .await?;
         }
         None => {
             axum::serve(
@@ -1235,7 +1243,9 @@ fn apply_overload_guards(
     // chain and only widens to a single global bucket as the very last resort -- see its doc
     // comment for why plain `SmartIpKeyExtractor` is unsafe to use directly here.
     if let Some(per_sec) = rate_limit_per_sec.filter(|n| *n > 0) {
-        tracing::info!("MCP overload guard: per-IP rate limit = {per_sec}/s on /mcp (excess → 429)");
+        tracing::info!(
+            "MCP overload guard: per-IP rate limit = {per_sec}/s on /mcp (excess → 429)"
+        );
         let governor_conf = std::sync::Arc::new(
             tower_governor::governor::GovernorConfigBuilder::default()
                 .key_extractor(FailOpenIpKeyExtractor)
@@ -1415,7 +1425,10 @@ fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
     // [retrieval] — Spec B.
     export_if_resolved(
         "GLOSSA_READ_RETRIES",
-        pick_env_file("GLOSSA_READ_RETRIES", c.retrieval.read_retries.map(|n| n.to_string())),
+        pick_env_file(
+            "GLOSSA_READ_RETRIES",
+            c.retrieval.read_retries.map(|n| n.to_string()),
+        ),
     );
     export_if_resolved(
         "GLOSSA_READ_RETRY_BACKOFF_MS",
@@ -1433,7 +1446,10 @@ fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
     );
     export_if_resolved(
         "GLOSSA_MIN_RESCAN_MS",
-        pick_env_file("GLOSSA_MIN_RESCAN_MS", c.retrieval.min_rescan_ms.map(|n| n.to_string())),
+        pick_env_file(
+            "GLOSSA_MIN_RESCAN_MS",
+            c.retrieval.min_rescan_ms.map(|n| n.to_string()),
+        ),
     );
     // [limits]/overload — Spec C (all env-only serve guards). Each is opt-in (no built-in default
     // here): leaving it unset when neither env nor file supplies a value is the correct behavior.
@@ -1446,7 +1462,10 @@ fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
     );
     export_if_resolved(
         "GLOSSA_MCP_MAX_BODY_BYTES",
-        pick_env_file("GLOSSA_MCP_MAX_BODY_BYTES", c.limits.max_body_bytes.map(|n| n.to_string())),
+        pick_env_file(
+            "GLOSSA_MCP_MAX_BODY_BYTES",
+            c.limits.max_body_bytes.map(|n| n.to_string()),
+        ),
     );
     export_if_resolved(
         "GLOSSA_MCP_MAX_CONCURRENCY",
@@ -1464,7 +1483,10 @@ fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
     );
     export_if_resolved(
         "GLOSSA_MCP_MAX_CONNECTIONS",
-        pick_env_file("GLOSSA_MCP_MAX_CONNECTIONS", c.limits.connection_cap.map(|n| n.to_string())),
+        pick_env_file(
+            "GLOSSA_MCP_MAX_CONNECTIONS",
+            c.limits.connection_cap.map(|n| n.to_string()),
+        ),
     );
     // `max_handshakes` (round-1 fix C1, `tls` feature only) has a built-in default even when
     // unset everywhere, but it's still merged the same env-or-file way as its siblings above --
@@ -1472,7 +1494,10 @@ fn export_env_overrides(c: &glossa::config::DeploymentConfig) {
     // default at the call site, same as any other unset env var.
     export_if_resolved(
         "GLOSSA_MCP_MAX_HANDSHAKES",
-        pick_env_file("GLOSSA_MCP_MAX_HANDSHAKES", c.limits.max_handshakes.map(|n| n.to_string())),
+        pick_env_file(
+            "GLOSSA_MCP_MAX_HANDSHAKES",
+            c.limits.max_handshakes.map(|n| n.to_string()),
+        ),
     );
 }
 
@@ -1499,7 +1524,9 @@ fn main() -> anyhow::Result<()> {
             .level
             .as_deref()
             .and_then(|v| tracing_subscriber::EnvFilter::try_new(v).ok())
-            .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error"))
+            .unwrap_or_else(|| {
+                tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
+            })
     });
     let json_logs = std::env::var("GLOSSA_LOG_FORMAT")
         .ok()
@@ -1907,7 +1934,11 @@ fn main() -> anyhow::Result<()> {
                 // Server (Spec C): each setting is a clap Option<T> that already collapsed flag+env
                 // via `env=`, so a plain two-tier pick/merge_list is correct here (no
                 // GLOSSA_ROOTS-style 3-way trap).
-                let bind = glossa::config::pick(bind, c.server.bind.clone(), glossa::config::defaults::BIND.to_string());
+                let bind = glossa::config::pick(
+                    bind,
+                    c.server.bind.clone(),
+                    glossa::config::defaults::BIND.to_string(),
+                );
                 let transport = match glossa::config::pick_opt(
                     transport,
                     c.server
@@ -1925,17 +1956,22 @@ fn main() -> anyhow::Result<()> {
                     c.server.session_idle_secs,
                     glossa::config::defaults::SESSION_IDLE_SECS,
                 );
-                let allowed_hosts = glossa::config::merge_list(allowed_hosts, c.server.allowed_hosts.clone());
+                let allowed_hosts =
+                    glossa::config::merge_list(allowed_hosts, c.server.allowed_hosts.clone());
                 // stays Option<bool>; .unwrap_or(false) happens at the serve_streamable_http call
                 // site (src/main.rs), unchanged.
                 let insecure = glossa::config::pick_opt(insecure, c.server.insecure);
                 #[cfg(feature = "tls")]
-                let tls_cert = glossa::config::pick_opt(tls_cert, c.tls.as_ref().and_then(|t| t.cert.clone()));
+                let tls_cert =
+                    glossa::config::pick_opt(tls_cert, c.tls.as_ref().and_then(|t| t.cert.clone()));
                 #[cfg(feature = "tls")]
-                let tls_key = glossa::config::pick_opt(tls_key, c.tls.as_ref().and_then(|t| t.key.clone()));
+                let tls_key =
+                    glossa::config::pick_opt(tls_key, c.tls.as_ref().and_then(|t| t.key.clone()));
                 #[cfg(feature = "tls")]
-                let tls_client_ca =
-                    glossa::config::pick_opt(tls_client_ca, c.tls.as_ref().and_then(|t| t.client_ca.clone()));
+                let tls_client_ca = glossa::config::pick_opt(
+                    tls_client_ca,
+                    c.tls.as_ref().and_then(|t| t.client_ca.clone()),
+                );
                 // auth_token is env/flag ONLY (never c.server.*) — validate_static already rejected
                 // a token key in the file at load time, so there is nothing to merge here.
                 let params = ServeParams {
@@ -1998,7 +2034,8 @@ fn main() -> anyhow::Result<()> {
             } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
-                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let trace = glossa::trace::TraceLog::disabled();
                 let spec = glossa::tools::ChainSpec::from_ontology(
@@ -2023,7 +2060,8 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Query { sql, path } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
-                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let trace = glossa::trace::TraceLog::disabled();
                 println!("{}", glossa::tools::sql(&idx, &g, &sql, &trace));
@@ -2268,7 +2306,8 @@ fn main() -> anyhow::Result<()> {
             } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
-                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let trace = glossa::trace::TraceLog::disabled();
@@ -2473,7 +2512,8 @@ fn main() -> anyhow::Result<()> {
                     glossa::notebook::notes_root(&rr.state_base)
                         .join(glossa::notebook::mirror_dir_for_doc(&doc))
                 });
-                let idx = glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
                 let report = glossa::tables::tables_to_graph(&idx, &g, &ont, &doc, &tables)?;
@@ -2578,9 +2618,13 @@ mod cli_root_wiring_tests {
 
     #[test]
     fn glossa_roots_env_used_when_no_flag_given() {
-        let inputs =
-            build_root_inputs(None, &[], Some("specs=/mnt/b\n\ndocs=/mnt/a".to_string()), None)
-                .unwrap();
+        let inputs = build_root_inputs(
+            None,
+            &[],
+            Some("specs=/mnt/b\n\ndocs=/mnt/a".to_string()),
+            None,
+        )
+        .unwrap();
         assert_eq!(inputs.roots.len(), 2, "blank env lines are skipped");
         assert_eq!(inputs.roots[0].label, "specs");
         assert_eq!(inputs.roots[1].label, "docs");
@@ -2701,10 +2745,8 @@ mod mcp_serve_layer_tests {
             tower::ServiceExt::<()>::ready(&mut svc2).await.unwrap();
             svc2.call(()).await
         };
-        let (r1, r2): (
-            Result<(), tower::BoxError>,
-            Result<(), tower::BoxError>,
-        ) = tokio::join!(call1, call2);
+        let (r1, r2): (Result<(), tower::BoxError>, Result<(), tower::BoxError>) =
+            tokio::join!(call1, call2);
         let results = [&r1, &r2];
         assert_eq!(
             results.iter().filter(|r| r.is_ok()).count(),

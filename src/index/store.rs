@@ -174,7 +174,10 @@ impl DocIndex {
     /// Primitive: open the index under `state_base/.glossa/index`, resolving doc keys against
     /// `roots`. `roots` are canonicalized here so every stored/looked-up key is anchored to the
     /// same absolute form regardless of how the caller addressed them.
-    pub fn open_or_create_at(roots: &[crate::root::Root], state_base: &Path) -> anyhow::Result<DocIndex> {
+    pub fn open_or_create_at(
+        roots: &[crate::root::Root],
+        state_base: &Path,
+    ) -> anyhow::Result<DocIndex> {
         let schema = build_schema();
         let idx_path = index_dir_path(state_base);
         std::fs::create_dir_all(&idx_path).with_context(|| format!("create {idx_path:?}"))?;
@@ -234,7 +237,6 @@ impl DocIndex {
     pub fn doc_file(&self, key: &str) -> PathBuf {
         doc_file_in(&self.roots, key)
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1347,7 +1349,10 @@ pub fn orphan_notes(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// mode, and flags EVERY note as orphaned (a non-dry-run `kb prune` would then delete every note
 /// file). Same class of bug as `ensure_fresh` vs `ensure_fresh_at`.
 #[cfg(feature = "notebook")]
-pub fn orphan_notes_at(roots: &[crate::root::Root], state_base: &Path) -> anyhow::Result<Vec<String>> {
+pub fn orphan_notes_at(
+    roots: &[crate::root::Root],
+    state_base: &Path,
+) -> anyhow::Result<Vec<String>> {
     let manifest = Manifest::load(state_base);
     let delta = scan_delta_at(roots, state_base, &manifest)?;
     let files = &delta.next.files;
@@ -1935,7 +1940,15 @@ pub fn index_dir_at_locked(
         };
         eprintln!("  + {doc_key_str}");
         let res = with_read_retry(retries, backoff, || {
-            index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links, df.as_mut())
+            index_file_into(
+                &idx,
+                &graph,
+                &writer,
+                doc_key_str,
+                abs,
+                &mut links,
+                df.as_mut(),
+            )
         });
         match res {
             Ok(_) => {
@@ -2618,8 +2631,9 @@ pub fn reindex_dirs_at_locked(
     // Scoped walk over just the changed/added dirs (falls back to a full walk when unsafe to scope —
     // see `scan_scoped_delta_at`); the rest of this function mirrors `index_dir_at_locked`'s indexing
     // loop exactly regardless of which walk produced `delta`.
-    let mut delta =
-        scan_scoped_delta_at(roots, state_base, &manifest, changed, added, removed, deadline)?;
+    let mut delta = scan_scoped_delta_at(
+        roots, state_base, &manifest, changed, added, removed, deadline,
+    )?;
     let mut next = Manifest::default();
     next.files = std::mem::take(&mut delta.next.files);
     // Dirs held back from this pass's dirsig advance for a reason OTHER than "the indexed file's
@@ -2757,12 +2771,12 @@ pub fn reindex_dirs_at_locked(
     let cur = dir_mtime_map_at(roots, state_base).unwrap_or_default();
     let mut unsettled = unsettled_dirs_at(&idx.roots, &indexed, &delta.abs_paths);
     unsettled.extend(unsettled_extra); // spec R-B3: reverted-sig / transient-stat dirs must re-scan
-    // Also hold back a dir whose file we just indexed was written within the last few seconds: it
-    // may still be mid-copy. A finalize write landing AFTER this pass does NOT re-bump the dir mtime,
-    // so without this the dir-mtime gate would never re-open and the finalized content would stay
-    // invisible to search/grep (regression: `freshen_gate_misses_content_finalized_after_a_settled_
-    // index`). This is the freshen (MCP) path only — the CLI `scan_delta_at` path already re-stats
-    // every file. The hold self-clears once the file ages past the window, so steady state stays fast.
+                                       // Also hold back a dir whose file we just indexed was written within the last few seconds: it
+                                       // may still be mid-copy. A finalize write landing AFTER this pass does NOT re-bump the dir mtime,
+                                       // so without this the dir-mtime gate would never re-open and the finalized content would stay
+                                       // invisible to search/grep (regression: `freshen_gate_misses_content_finalized_after_a_settled_
+                                       // index`). This is the freshen (MCP) path only — the CLI `scan_delta_at` path already re-stats
+                                       // every file. The hold self-clears once the file ages past the window, so steady state stays fast.
     let now = now_secs();
     for (key, sig) in &indexed {
         if now >= sig.mtime_secs && now - sig.mtime_secs < FRESH_WINDOW_SECS {
@@ -2849,7 +2863,8 @@ pub fn freshen_blocking_at(
     // Task 10 (D1): the wall budget for the awaited walk+reindex itself (checked mid-walk inside
     // `scan_scoped_delta_at`'s per-dir loop) — separate from `lock_deadline` below, which only
     // bounds how long we spin waiting for a PEER to release `index.lock`.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(freshen_deadline_ms());
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(freshen_deadline_ms());
     let lock_deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(_guard) = crate::index::lock::try_index_lock(state_base) {
@@ -3448,7 +3463,10 @@ mod incremental_tests {
         }];
 
         let s1 = index_dir_at(&roots, state.path(), false).unwrap();
-        assert_eq!(s1.permanent_skips, 1, "the corrupt .doc is a permanent skip");
+        assert_eq!(
+            s1.permanent_skips, 1,
+            "the corrupt .doc is a permanent skip"
+        );
         assert!(
             Manifest::load(state.path()).files.contains_key("bad.doc"),
             "its sig IS recorded, so it's treated as settled"
@@ -3698,18 +3716,16 @@ mod incremental_tests {
             manifest.files
         );
         let idx2 = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
-        assert!(
-            idx2.search("alpha", 10)
-                .unwrap()
-                .iter()
-                .any(|h| h.path.ends_with("one.md"))
-        );
-        assert!(
-            idx2.search("bravo", 10)
-                .unwrap()
-                .iter()
-                .any(|h| h.path.ends_with("two.md"))
-        );
+        assert!(idx2
+            .search("alpha", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("one.md")));
+        assert!(idx2
+            .search("bravo", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.path.ends_with("two.md")));
     }
 
     #[test]
@@ -5680,7 +5696,10 @@ mod tests {
         read_fault::arm_read(&abs, read_retries() + 1, std::io::ErrorKind::TimedOut, None);
         let s1 = freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
         read_fault::clear();
-        assert_eq!(s1.transient_failures, 1, "sanity: the fault fires on the first pass");
+        assert_eq!(
+            s1.transient_failures, 1,
+            "sanity: the fault fires on the first pass"
+        );
 
         // Fault cleared. `cur` (the future-bumped dir mtime) still doesn't match the held-back
         // `stored` dirsig, so this pass must re-diff the dir (not short-circuit on the fast path)
@@ -5724,7 +5743,10 @@ mod tests {
         .unwrap();
 
         let s1 = freshen_blocking(dir.path(), Duration::from_secs(3)).unwrap();
-        assert_eq!(s1.permanent_skips, 1, "the corrupt .doc is a permanent skip");
+        assert_eq!(
+            s1.permanent_skips, 1,
+            "the corrupt .doc is a permanent skip"
+        );
         assert!(
             Manifest::load(dir.path()).files.contains_key("bad.doc"),
             "its sig IS recorded, so it's treated as settled"
@@ -5785,7 +5807,15 @@ mod tests {
         // even resolved/scanned.
         let deadline = Some(std::time::Instant::now());
         let stats = reindex_dirs_at_locked(
-            &roots, state.path(), &cur, &changed, &added, &removed, false, deadline, 1,
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            deadline,
+            1,
         )
         .unwrap();
         assert_eq!(
@@ -5819,7 +5849,15 @@ mod tests {
         // A follow-up UNBOUNDED pass (as the maintenance loop's next freshen would run) resumes
         // and finishes both dirs the first pass held back.
         let stats2 = reindex_dirs_at_locked(
-            &roots, state.path(), &cur, &changed, &added, &removed, false, None, 3,
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            None,
+            3,
         )
         .unwrap();
         assert_eq!(
@@ -5864,15 +5902,22 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("root_file.md"), "root level content\n").unwrap();
         std::fs::create_dir(root.path().join("sub")).unwrap();
-        std::fs::write(root.path().join("sub").join("sub_file.md"), "sub level content\n")
-            .unwrap();
+        std::fs::write(
+            root.path().join("sub").join("sub_file.md"),
+            "sub level content\n",
+        )
+        .unwrap();
         let roots = vec![Root {
             label: String::new(),
             path: root.path().into(),
         }];
         index_dir_at(&roots, state.path(), true).unwrap(); // seed manifest with both docs
         let stored = read_dirsig(state.path()).unwrap();
-        assert_eq!(Manifest::load(state.path()).files.len(), 2, "sanity: both docs indexed");
+        assert_eq!(
+            Manifest::load(state.path()).files.len(),
+            2,
+            "sanity: both docs indexed"
+        );
 
         // The subdir transiently vanishes (unmount-style): its own dir key drops out of the
         // mtime map entirely (-> `removed`), while the ROOT's own listing loses an entry (-> its
@@ -5882,14 +5927,30 @@ mod tests {
 
         let cur = dir_mtime_map_at(&roots, state.path()).unwrap();
         let (changed, added, removed) = diff_corpus_dirs(&stored, &cur);
-        assert_eq!(changed, vec!["c:".to_string()], "sanity: only the root's own key changed");
-        assert_eq!(removed, vec!["c:sub".to_string()], "sanity: the subdir's key vanished entirely");
+        assert_eq!(
+            changed,
+            vec!["c:".to_string()],
+            "sanity: only the root's own key changed"
+        );
+        assert_eq!(
+            removed,
+            vec!["c:sub".to_string()],
+            "sanity: the subdir's key vanished entirely"
+        );
 
         // Already-elapsed deadline: the scoped loop's per-dir check fires before the FIRST (only)
         // changed dir is even resolved — nothing gets scanned this pass.
         let deadline = Some(std::time::Instant::now());
         let stats = reindex_dirs_at_locked(
-            &roots, state.path(), &cur, &changed, &added, &removed, false, deadline, 1,
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            deadline,
+            1,
         )
         .unwrap();
         assert_eq!(
@@ -5919,7 +5980,15 @@ mod tests {
         // the real removal via the empty-mount-guarded path (this is a genuine deletion, not an
         // empty mount: the root still has `root_file.md` either way).
         let stats2 = reindex_dirs_at_locked(
-            &roots, state.path(), &cur, &changed, &added, &removed, false, None, 1,
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            None,
+            1,
         )
         .unwrap();
         assert_eq!(
@@ -5966,7 +6035,11 @@ mod tests {
         ];
         index_dir_at(&roots, state.path(), true).unwrap(); // seed manifest with all 3 docs
         let stored = read_dirsig(state.path()).unwrap();
-        assert_eq!(Manifest::load(state.path()).files.len(), 3, "sanity: all 3 docs indexed");
+        assert_eq!(
+            Manifest::load(state.path()).files.len(),
+            3,
+            "sanity: all 3 docs indexed"
+        );
 
         // Root A goes empty while still mounted (bumps ONLY its own dir key into `changed`, both
         // files vanish). Root B has an ordinary content change (also bumps its own dir key into
@@ -5974,7 +6047,11 @@ mod tests {
         std::fs::remove_file(a.path().join("a1.md")).unwrap();
         std::fs::remove_file(a.path().join("a2.md")).unwrap();
         bump_dir_mtime_future(a.path());
-        std::fs::write(b.path().join("b1.md"), "beta body changed, now much longer\n").unwrap();
+        std::fs::write(
+            b.path().join("b1.md"),
+            "beta body changed, now much longer\n",
+        )
+        .unwrap();
         bump_dir_mtime_future(b.path());
 
         let cur = dir_mtime_map_at(&roots, state.path()).unwrap();
@@ -5984,7 +6061,10 @@ mod tests {
             vec!["c:A:".to_string(), "c:B:".to_string()],
             "sanity: both roots' dirs changed, A sorts first: {changed:?}"
         );
-        assert!(removed.is_empty(), "sanity: no dir vanished entirely: {removed:?}");
+        assert!(
+            removed.is_empty(),
+            "sanity: no dir vanished entirely: {removed:?}"
+        );
 
         // Force the per-dir loop to stop after root A's dir is fully scanned but before it
         // reaches root B — deterministic stand-in for "B is slow/lock-held and burns the
@@ -5992,7 +6072,15 @@ mod tests {
         deadline_fault::arm_after(1);
         let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         let stats = reindex_dirs_at_locked(
-            &roots, state.path(), &cur, &changed, &added, &removed, false, deadline, 1,
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            deadline,
+            1,
         )
         .unwrap();
         deadline_fault::clear();
@@ -6114,7 +6202,10 @@ mod store_root_tests {
             },
         ];
         let stats = index_dir_at(&roots, state.path(), true).unwrap();
-        assert_eq!(stats.added, 2, "identical relpath in both roots → 2 docs, no collision");
+        assert_eq!(
+            stats.added, 2,
+            "identical relpath in both roots → 2 docs, no collision"
+        );
         // All artifacts under state, nothing written into the corpus roots.
         assert!(state.path().join(".glossa").join("index").is_dir());
         assert!(!a.path().join(".glossa").exists());
@@ -6179,7 +6270,10 @@ mod store_root_tests {
         // A new file under the SECONDARY root is picked up.
         std::fs::write(b.path().join("c.md"), "gamma content here").unwrap();
         let s2 = ensure_fresh_at(&roots, state.path()).unwrap();
-        assert_eq!(s2.added, 1, "new file under the secondary root is added: {s2:?}");
+        assert_eq!(
+            s2.added, 1,
+            "new file under the secondary root is added: {s2:?}"
+        );
         let idx2 = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
         assert!(idx2.read_chunk_by_ord("specs/c.md", 1).unwrap().is_some());
     }
@@ -6269,13 +6363,22 @@ mod store_root_tests {
         );
         let (changed, added, removed) = diff_corpus_dirs(&dirsig0, &cur);
 
-        let stats =
-            reindex_dirs_at_locked(
-                &roots, state.path(), &cur, &changed, &added, &removed, false, None,
-                read_retries(),
-            )
-            .unwrap();
-        assert_eq!(stats.added, 1, "the new file under root B is picked up: {stats:?}");
+        let stats = reindex_dirs_at_locked(
+            &roots,
+            state.path(),
+            &cur,
+            &changed,
+            &added,
+            &removed,
+            false,
+            None,
+            read_retries(),
+        )
+        .unwrap();
+        assert_eq!(
+            stats.added, 1,
+            "the new file under root B is picked up: {stats:?}"
+        );
 
         let idx = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
         assert!(
@@ -6599,19 +6702,18 @@ mod store_root_tests {
         // `resolve_dir_key` must return `None` for it, and the caller must fall back to a full walk
         // rather than silently under-scan (and miss b.md).
         let bogus = vec!["c:no-such-label:sub".to_string()];
-        let stats =
-            reindex_dirs_at_locked(
-                &roots,
-                state.path(),
-                &cur,
-                &bogus,
-                &[],
-                &[],
-                false,
-                None,
-                read_retries(),
-            )
-            .unwrap();
+        let stats = reindex_dirs_at_locked(
+            &roots,
+            state.path(),
+            &cur,
+            &bogus,
+            &[],
+            &[],
+            false,
+            None,
+            read_retries(),
+        )
+        .unwrap();
         assert_eq!(
             stats.added, 1,
             "fallback full walk still finds the new file: {stats:?}"

@@ -2153,7 +2153,12 @@ mod tests {
         let tlog = TraceLog::to_dir(d.path());
         let _ = grep(d.path(), &i, "calibration", &GrepOpts::default(), &tlog);
         let tdir = d.path().join(".glossa").join("traces");
-        let file = std::fs::read_dir(&tdir).unwrap().next().unwrap().unwrap().path();
+        let file = std::fs::read_dir(&tdir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         let body = std::fs::read_to_string(file).unwrap();
         let entry = body
             .lines()
@@ -3663,7 +3668,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let tlog = TraceLog::to_dir(d.path());
         let _ = glob(&i, "notes/**/*.md", &tlog);
         let tdir = d.path().join(".glossa").join("traces");
-        let file = std::fs::read_dir(&tdir).unwrap().next().unwrap().unwrap().path();
+        let file = std::fs::read_dir(&tdir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         let body = std::fs::read_to_string(file).unwrap();
         let entry = body
             .lines()

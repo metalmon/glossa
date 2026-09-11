@@ -44,9 +44,14 @@ fn start_tls_server(
     let state = state_dir();
     let port = free_port();
 
-    let builder = ServerBuilder::new().root(c.root_arg("docs")).state_dir(state.path());
+    let builder = ServerBuilder::new()
+        .root(c.root_arg("docs"))
+        .state_dir(state.path());
     let mut cmd = builder.command(port);
-    cmd.arg("--tls-cert").arg(&cert_path).arg("--tls-key").arg(&key_path);
+    cmd.arg("--tls-cert")
+        .arg(&cert_path)
+        .arg("--tls-key")
+        .arg(&key_path);
     if let Some(p) = &ca_path {
         cmd.arg("--tls-client-ca").arg(p);
     }
@@ -107,6 +112,10 @@ fn mtls_requires_a_client_certificate() {
     )
     .expect("a client cert signed by the trusted CA should be accepted");
     assert_eq!(with_cert.status, 200);
-    assert!(with_cert.body.contains("ok"), "health body: {:?}", with_cert.body);
+    assert!(
+        with_cert.body.contains("ok"),
+        "health body: {:?}",
+        with_cert.body
+    );
     drop(server);
 }
