@@ -496,10 +496,17 @@ mod tests {
             )
             .expect("entail should succeed against a real model");
         assert_eq!(scores.len(), 2);
-        assert!(
-            scores[0] > scores[1],
-            "expected the entailment score to beat the contradiction score, got {scores:?}"
-        );
+        // Model-agnostic smoke check: inference ran and produced valid probabilities. We do NOT
+        // assert entailment direction on an English probe — the shipped model may be non-English
+        // (the reference model is Russian-trained), so an English pair's scores are not a reliable
+        // direction signal (this is exactly why `kbx nli check`'s sanity probe is advisory-only).
+        // Batching/parity correctness is proven language-agnostically by the parity test below.
+        for s in &scores {
+            assert!(
+                (0.0..=1.0).contains(s),
+                "entail score outside [0,1]: {scores:?}"
+            );
+        }
     }
 
     // ---- plan_batches: pure, no model -------------------------------------------------------
@@ -647,27 +654,17 @@ mod tests {
             );
         }
 
-        // Padding invariance: the short hypothesis's row, scored alone, must match its score when
-        // padded out to a much longer row's length inside a shared batch — proving
-        // attention_mask=0 on the padded tail contributes nothing.
-        let short_windows = nli
-            .premise_windows(&premise, short_hyp)
-            .expect("premise_windows should succeed");
-        let short_window = short_windows
-            .first()
-            .expect("expected at least one window for the short hypothesis");
+        // Padding invariance: a short row, scored alone, must match its score when padded out to a
+        // longer row's length inside a shared batch — proving attention_mask=0 on the padded tail
+        // contributes nothing. Use a SHORT premise here so the two rows differ in length purely by
+        // hypothesis length; the long windowing premise above fills every row to max_seq_len, which
+        // would leave the two rows equal-length and unable to exercise padding at all.
+        let short_premise = "The device is powered off.";
         let (s_ids, s_mask, s_types) = nli
-            .encode_row(short_window, short_hyp)
+            .encode_row(short_premise, short_hyp)
             .expect("encode_row should succeed");
-
-        let long_windows = nli
-            .premise_windows(&premise, long_hyp)
-            .expect("premise_windows should succeed");
-        let long_window = long_windows
-            .first()
-            .expect("expected at least one window for the long hypothesis");
         let (l_ids, l_mask, l_types) = nli
-            .encode_row(long_window, long_hyp)
+            .encode_row(short_premise, long_hyp)
             .expect("encode_row should succeed");
         assert!(
             l_ids.len() > s_ids.len(),
