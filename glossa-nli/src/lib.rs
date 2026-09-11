@@ -206,7 +206,19 @@ impl InProcessNli {
             let end = (start + budget).min(ids.len());
             let byte_start = offsets[start].0;
             let byte_end = offsets[end - 1].1;
-            windows.push(&premise[byte_start..byte_end]);
+            // A normalizing tokenizer can emit offsets that don't land on a UTF-8 char boundary
+            // (e.g. after character substitution during normalization); `&premise[a..b]` would
+            // panic on those. Clamp down to the nearest valid boundaries via a checked `.get(..)`
+            // instead, and skip the window if clamping collapses it to empty — `entail_one`'s
+            // max-pool already treats zero windows as "no entailment signal" (score stays 0.0),
+            // the same fallback path as an already-empty premise.
+            let safe_start = floor_char_boundary(premise, byte_start);
+            let safe_end = floor_char_boundary(premise, byte_end);
+            if safe_start < safe_end {
+                if let Some(window) = premise.get(safe_start..safe_end) {
+                    windows.push(window);
+                }
+            }
             if end == ids.len() {
                 break;
             }
@@ -261,8 +273,15 @@ impl InProcessNli {
         ])?;
 
         // Index by position (not name) so the output naming in the real export doesn't matter —
-        // these classification heads have exactly one output (the logits).
-        let (_shape, data) = outputs[0]
+        // these classification heads have exactly one output (the logits). `SessionOutputs` has
+        // no `get(usize)` (only `get(&str)`); `.values().next()` is the checked equivalent of
+        // position-0 access — unlike `outputs[0]` (whose `Index<usize>` impl panics when the
+        // graph emits zero outputs), this returns `None` instead of unwinding.
+        let out0 = outputs
+            .values()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("onnx session returned no outputs"))?;
+        let (_shape, data) = out0
             .try_extract_tensor::<f32>()
             .map_err(|e| anyhow::anyhow!("logits extraction: {e}"))?;
         if data.len() != 3 {
@@ -274,6 +293,17 @@ impl InProcessNli {
         let probs = softmax3([data[0], data[1], data[2]]);
         Ok(probs[self.entail_index])
     }
+}
+
+/// Round `idx` down to the nearest UTF-8 char boundary of `s` (clamped to `s.len()`). Used to
+/// make tokenizer byte offsets safe to slice with even if a normalizing tokenizer produced an
+/// offset that lands mid-char.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 /// Numerically stable softmax over exactly 3 logits.

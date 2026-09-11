@@ -4,7 +4,6 @@
 //! CI has no network; see the module tests for what IS covered).
 
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// HuggingFace "resolve" URL for one file in a repo at a given revision:
@@ -22,19 +21,14 @@ pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
 /// response body straight to disk (no full in-memory buffer). Returns `(path, bytes)` per file, in
 /// the same order as `files`.
 ///
-/// `expected_sha256`, when it has an entry for a given file name, would be checked after that file
-/// is written (hex, case-insensitive), with a mismatch deleting the partial file and returning an
-/// error — but this crate does not (yet) depend on `sha2`, so checksum verification is SKIPPED
-/// entirely (size-only, matching the module-level doc): every downloaded file is checked for
-/// non-emptiness (`bytes > 0`) instead. `expected_sha256` is accepted for forward-compatibility
-/// with a future `--sha256` flag once `sha2` is added as a dependency; today the CLI always passes
-/// `None`.
+/// No checksum verification: this crate does not depend on `sha2`, so integrity is checked
+/// size-only — every downloaded file is checked for non-emptiness (`bytes > 0`). A future
+/// `--sha256` flag can add real verification (and the `sha2` dependency) if needed.
 pub fn download_files(
     repo: &str,
     revision: &str,
     files: &[String],
     to_dir: &Path,
-    expected_sha256: Option<&HashMap<String, String>>,
 ) -> Result<Vec<(PathBuf, u64)>> {
     std::fs::create_dir_all(to_dir)
         .with_context(|| format!("creating download dir {}", to_dir.display()))?;
@@ -51,17 +45,12 @@ pub fn download_files(
         let mut out_file =
             std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
         let bytes = std::io::copy(&mut reader, &mut out_file)
-            .with_context(|| format!("writing {}", dest.display()))?;
+            .with_context(|| format!("writing {} from {url}", dest.display()))?;
 
         if bytes == 0 {
             let _ = std::fs::remove_file(&dest);
             bail!("empty download: {url} wrote 0 bytes");
         }
-
-        // Checksum verification is intentionally SKIPPED (size-only) — no `sha2` dependency in
-        // this crate today; see the function doc comment. `expected_sha256` is accepted but unused
-        // until a future `--sha256` flag adds that dependency.
-        let _ = expected_sha256;
 
         out.push((dest, bytes));
     }

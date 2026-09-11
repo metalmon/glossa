@@ -724,8 +724,7 @@ fn main() -> Result<()> {
             } else {
                 files
             };
-            let downloaded =
-                kb_eval::download::download_files(&repo, &revision, &files, &to, None)?;
+            let downloaded = kb_eval::download::download_files(&repo, &revision, &files, &to)?;
             let mut total = 0u64;
             for (name, (path, bytes)) in files.iter().zip(downloaded.iter()) {
                 println!("downloaded {name} ({bytes} bytes) -> {}", path.display());
