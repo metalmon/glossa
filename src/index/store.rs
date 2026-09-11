@@ -6481,7 +6481,10 @@ mod store_root_tests {
         let labeled_key = doc_key(
             "docs",
             &abs_root(a.path()),
-            &a.path().join("sub").join("f.md"),
+            // Build the file path from the SAME canonical base passed as root_abs — on Windows the raw
+            // tempdir path and its `abs_root` (canonicalized, `\\?\`-stripped) differ, so a raw abs
+            // here would fail `rel_key`'s strip_prefix and store the whole path as the key.
+            &abs_root(a.path()).join("sub").join("f.md"),
         );
         let dir_key = parent_dir_key_at(&labeled_key, &roots);
         let (dir_abs, label) = resolve_dir_key(&dir_key, &roots).expect("labeled key resolves");
@@ -6489,7 +6492,7 @@ mod store_root_tests {
         assert_eq!(dir_abs, abs_root(a.path()).join("sub"));
 
         // Unlabeled (back-compat) root, root-level file.
-        let bare_key = doc_key("", &abs_root(b.path()), &b.path().join("g.md"));
+        let bare_key = doc_key("", &abs_root(b.path()), &abs_root(b.path()).join("g.md"));
         let dir_key2 = parent_dir_key_at(&bare_key, &roots);
         let (dir_abs2, label2) = resolve_dir_key(&dir_key2, &roots).expect("bare key resolves");
         assert_eq!(label2, "");
