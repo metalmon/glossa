@@ -306,15 +306,25 @@ fn coverage_at(
 /// tie-break `ac > nli` (a model-free gate beats a model gate that only ties it). `nli` is a
 /// candidate only when enough cases carry a score (`nli.is_some()`); otherwise `ac` wins by default.
 /// `combined` is intentionally not considered here (Plan 1 scope ruling).
+///
+/// `ac_single`/`ac_multi` are the FINAL, already-decided AC thresholds — the caller (`run`'s
+/// per-bucket sweep loop) has already recomputed them for whichever bucket(s) `--bucket` asked for
+/// and preserved the existing ontology value for the bucket it didn't touch. `select_mode` must NOT
+/// recompute AC itself (that would silently override the preserved bucket from the full case pool,
+/// defeating `--bucket single`/`multi`); it only decides the mode and, when wanted, an NLI
+/// candidate. `want_single`/`want_multi` gate the NLI sweep the same way: an unswept bucket's NLI
+/// threshold stays `None`, which (since `Nli` requires BOTH `nli_single` and `nli_multi` to be
+/// `Some`) naturally falls back to `Ac` rather than inventing an NLI threshold for a bucket the
+/// caller didn't ask to calibrate.
 pub fn select_mode(
     cases: &[Case],
     budget: f32,
     folds: usize,
-    existing_ac: (f32, f32),
+    ac_single: f32,
+    ac_multi: f32,
+    want_single: bool,
+    want_multi: bool,
 ) -> ModeSelection {
-    // AC operating point per bucket (reuse the existing sweep on `grounding`).
-    let ac_single = bucket_threshold(cases, Bucket::Single, folds, budget).unwrap_or(existing_ac.0);
-    let ac_multi = bucket_threshold(cases, Bucket::Multi, folds, budget).unwrap_or(existing_ac.1);
     let ac_cov = coverage_at(cases, |c| c.grounding, ac_single, ac_multi);
 
     // NLI operating point: sweep on the nli value, over cases that HAVE one. If none carry nli, NLI
@@ -332,8 +342,15 @@ pub fn select_mode(
     let (mode, nli_single, nli_multi) = if nli_cases.is_empty() {
         (glossa::gate::config::VerifyMode::Ac, None, None)
     } else {
-        let ns = bucket_threshold(&nli_cases, Bucket::Single, folds, budget);
-        let nm = bucket_threshold(&nli_cases, Bucket::Multi, folds, budget);
+        // Only sweep a bucket's NLI threshold when the caller asked to calibrate it; an unwanted
+        // bucket stays `None` (see the doc comment above — this is what makes `--bucket single`
+        // leave the multi NLI threshold untouched too).
+        let ns = want_single
+            .then(|| bucket_threshold(&nli_cases, Bucket::Single, folds, budget))
+            .flatten();
+        let nm = want_multi
+            .then(|| bucket_threshold(&nli_cases, Bucket::Multi, folds, budget))
+            .flatten();
         match (ns, nm) {
             (Some(s), Some(m)) => {
                 let nli_cov = coverage_at(cases, |c| c.nli.unwrap_or(f32::NEG_INFINITY), s, m);
@@ -687,7 +704,10 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
             &cases,
             budget,
             args.folds,
-            (single_threshold, multi_threshold),
+            single_threshold,
+            multi_threshold,
+            want_single,
+            want_multi,
         );
         write_threshold(
             &corpus_glossa,
@@ -1004,37 +1024,36 @@ mod tests {
     #[test]
     fn select_mode_picks_ac_when_no_nli_data() {
         use super::{select_mode, Bucket};
-        // All nli None -> ac chosen regardless of grounding distribution.
+        // All nli None -> ac chosen regardless of grounding distribution. The passed ac thresholds
+        // are irrelevant to the outcome here (an empty nli pool short-circuits to `Ac` before the
+        // coverage comparison), so any fixed values exercise the guard.
         let cases = vec![
             case(0.9, Bucket::Single, None, Cell::ShouldServe),
             case(0.1, Bucket::Single, None, Cell::ShouldAbstain),
         ];
-        let sel = select_mode(&cases, 0.5, 5, (1.0, 1.0));
+        let sel = select_mode(&cases, 0.5, 5, 1.0, 1.0, true, true);
         assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Ac));
         assert_eq!(sel.nli_single, None);
     }
 
     /// Proves "nli strictly beats ac at the budget -> nli chosen", not just "nli data present".
     ///
-    /// Traced against `sweep_over`/`recommended_for` (both bucket-agnostic — the same math runs
-    /// per bucket): candidate thresholds are midpoints between distinct scores, plus sentinels
-    /// below the min / above the max; `recommended_for(budget)` picks the LOWEST threshold whose
-    /// `error_pct <= budget`.
-    ///
-    /// The pool below has BOTH a Single and a Multi bucket (bucket_threshold needs cases in both
-    /// buckets, or the missing bucket's threshold is `None` and `select_mode` falls back to `ac`
-    /// by construction — see the `(Some(s), Some(m))` match arm). In each bucket, all 4
-    /// `grounding` values tie at 0.5 (two ShouldServe, two ShouldAbstain) so AC's only candidate
-    /// thresholds are "serve everyone" (0.499, error 50%) and "serve no one" (0.501, error 0%);
-    /// at budget 0.0 only the latter qualifies, so `ac_single = ac_multi = 0.501` and AC's
-    /// pool-wide coverage is exactly 0 (0.5 is never `> 0.501`).
+    /// `select_mode` no longer recomputes AC itself (that's the caller's job — see
+    /// `select_mode_preserves_unswept_bucket_threshold` below); the passed `ac_single`/`ac_multi`
+    /// here are the same 0.501 the OLD in-fn recompute would have produced for this pool, traced
+    /// against `sweep_over`/`recommended_for`: all 4 `grounding` values tie at 0.5 (two
+    /// ShouldServe, two ShouldAbstain) per bucket, so the only candidate thresholds are "serve
+    /// everyone" (0.499, error 50%) and "serve no one" (0.501, error 0%); at budget 0.0 only the
+    /// latter qualifies. With `ac_single = ac_multi = 0.501`, AC's pool-wide coverage is exactly 0
+    /// (0.5 is never `> 0.501`).
     ///
     /// The same cases carry `nli` scores that perfectly separate ShouldServe (0.9) from
-    /// ShouldAbstain (0.1) in each bucket. Midpoint thresholds are 0.099 (serves everyone, error
-    /// 50%) and 0.5 (serves only the two 0.9 cases, error 0%) and 0.901 (serves no one, error 0%);
-    /// at budget 0.0 the LOWEST qualifying threshold is 0.5, so `nli_single = nli_multi = 0.5`
-    /// and nli's pool-wide coverage is 2/4 = 0.5 — strictly greater than AC's 0, so `select_mode`
-    /// must pick `Nli`.
+    /// ShouldAbstain (0.1) in each bucket, and both buckets are wanted (`want_single`/`want_multi`
+    /// both `true`), so `select_mode` sweeps NLI for both. Midpoint thresholds are 0.099 (serves
+    /// everyone, error 50%), 0.5 (serves only the two 0.9 cases, error 0%), and 0.901 (serves no
+    /// one, error 0%); at budget 0.0 the LOWEST qualifying threshold is 0.5, so
+    /// `nli_single = nli_multi = 0.5` and nli's pool-wide coverage is 2/4 = 0.5 — strictly greater
+    /// than AC's 0, so `select_mode` must pick `Nli`.
     #[test]
     fn select_mode_picks_nli_when_it_covers_strictly_more() {
         use super::{select_mode, Bucket};
@@ -1044,9 +1063,36 @@ mod tests {
             case(0.5, Bucket::Multi, Some(0.9), Cell::ShouldServe),
             case(0.5, Bucket::Multi, Some(0.1), Cell::ShouldAbstain),
         ];
-        let sel = select_mode(&cases, 0.0, 5, (1.0, 1.0));
+        let sel = select_mode(&cases, 0.0, 5, 0.501, 0.501, true, true);
         assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Nli));
         assert!(sel.nli_single.is_some());
         assert!(sel.nli_multi.is_some());
+    }
+
+    /// The CRITICAL regression this fixes: `--bucket single` (i.e. `want_multi = false`) must not
+    /// let `select_mode` recompute — and thereby silently overwrite — the multi bucket's AC
+    /// threshold from whatever multi-bucket cases happen to be in the loaded pool. The pool below
+    /// has both buckets (so a full-pool recompute WOULD have produced a different multi threshold
+    /// than 0.42, proving this isn't vacuous), but with `want_multi = false` the passed `ac_multi`
+    /// must come back verbatim, and the multi NLI sweep must not run either (so `Nli` can't be
+    /// selected — its selection needs both `nli_single` and `nli_multi`, and the pool here has no
+    /// nli data anyway, so `Ac` is expected regardless).
+    #[test]
+    fn select_mode_preserves_unswept_bucket_threshold() {
+        // Pool has BOTH buckets, but the caller asked to sweep only single (want_multi=false).
+        // The passed ac_multi must be preserved verbatim, NOT recomputed from the multi cases.
+        use super::{select_mode, Bucket};
+        let cases = vec![
+            case(0.9, Bucket::Single, None, Cell::ShouldServe),
+            case(0.1, Bucket::Single, None, Cell::ShouldAbstain),
+            case(0.9, Bucket::Multi, None, Cell::ShouldServe),
+            case(0.1, Bucket::Multi, None, Cell::ShouldAbstain),
+        ];
+        let sel = select_mode(
+            &cases, 0.5, 5, /*ac_single*/ 0.30, /*ac_multi*/ 0.42, true,
+            /*want_multi*/ false,
+        );
+        assert_eq!(sel.ac_multi, 0.42); // preserved, not recomputed
+        assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Ac));
     }
 }
