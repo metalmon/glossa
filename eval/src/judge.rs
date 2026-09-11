@@ -184,6 +184,7 @@ fn dialogue_block(dialogue: &[(String, String)]) -> Option<String> {
 /// `ANSWER:`. When `answerable` is `false` there is no GOLD/EVIDENCE and the abstention rule applies.
 /// When `dialogue` is non-empty (a user_sim conversation happened) the `DIALOGUE:` block and the
 /// dialogue rule are added so the judge grades the reader's actual answer, not a closing pleasantry.
+#[allow(clippy::too_many_arguments)]
 fn build_user(
     question: &str,
     gold: &str,
