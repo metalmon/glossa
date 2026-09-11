@@ -16,13 +16,16 @@ nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has so
 
 [dependencies]
 anyhow = "1"
-# Pinned via context7 (pykeio/ort docs, crates.io newest_version) 2026-09: 2.0.0-rc.13 is the
-# current release; ort recommends an EXACT pin on pre-1.0 rc versions since the API can change
-# between rcs. `default-features = false` drops the pulled-in `ndarray`/ONNX-Runtime-version
-# defaults we don't need yet; `std` is required for the filesystem-backed session-loading API
-# (Task 2 loads `model.onnx` from a local dir) and is otherwise off when default-features=false;
-# `download-binaries` fetches the CPU ONNX Runtime binary at build time (no system install step).
-ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries"] }
+# Pinned via context7 (pykeio/ort docs, crates.io newest_version) 2026-09: 2.0.0-rc.13, EXACT pin
+# on the pre-1.0 rc. `default-features = false` drops `ndarray`/ONNX-Runtime-version defaults we
+# don't need yet; `std` is required for filesystem-backed session loading (Task 2 loads
+# `model.onnx` from a local dir). `load-dynamic` (NOT `download-binaries`): the ONNX Runtime is
+# loaded at RUNTIME from a dylib (path via `ORT_DYLIB_PATH`), so the build does NOT compile
+# ort-sys's binary downloader — which fails on `ureq 3.4.1` (`ort-sys-rc.13`'s downloader was
+# written against an earlier ureq 3.x: `unresolved import ureq::tls` / `no method tls_config`).
+# Runtime loading also matches the spec's offline/CI story (§2.6). Real inference (Task 2 smoke +
+# Task 6) sets `ORT_DYLIB_PATH`; that path is deferred with the model artifact.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 # Pinned via context7 (huggingface/tokenizers docs.rs Cargo.toml) + crates.io newest_version
 # 2026-09: 0.23.2. `default-features = false` drops `progressbar` (indicatif) and `http` (hf-hub
 # download support, not needed — Task 2 loads `tokenizer.json` from the local model_dir); `onig`
