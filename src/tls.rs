@@ -1332,7 +1332,8 @@ mod tests {
             Ok(mut excess) => {
                 use tokio::io::AsyncReadExt;
                 let mut buf = [0u8; 16];
-                let shed = tokio::time::timeout(Duration::from_secs(2), excess.read(&mut buf)).await;
+                let shed =
+                    tokio::time::timeout(Duration::from_secs(2), excess.read(&mut buf)).await;
                 match shed {
                     Ok(Ok(0)) => {}  // clean EOF
                     Ok(Err(_)) => {} // reset / unexpected-eof from the abrupt close
