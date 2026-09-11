@@ -435,6 +435,25 @@ enum NliCmd {
         /// Corpus root (kb-style PATH resolution, like other kbx subcommands).
         path: Option<PathBuf>,
     },
+    /// Write `[verify.nli]` (model_dir + scorer, optional entail_index/mode) into the corpus
+    /// `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
+    Set {
+        /// Corpus root (kb-style PATH resolution, like `check`).
+        path: Option<PathBuf>,
+        /// Local model dir (what `download --to` produced). Written to `[verify.nli].model_dir`.
+        #[arg(long = "model-dir")]
+        model_dir: PathBuf,
+        /// Scorer backend. Written to `[verify.nli].scorer`.
+        #[arg(long, default_value = "in_process")]
+        scorer: String,
+        /// Entailment softmax class index; written to `[verify.nli].entail_index` only if given.
+        #[arg(long = "entail-index")]
+        entail_index: Option<usize>,
+        /// Also set `[verify].mode` (ac|nli|combined) — only written if given. NLI still needs
+        /// calibrated thresholds (`kbx eval calibrate`) to actually fire; `set` only wires the model.
+        #[arg(long)]
+        mode: Option<String>,
+    },
 }
 
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
@@ -721,6 +740,16 @@ fn main() -> Result<()> {
         Cmd::Nli {
             cmd: NliCmd::Check { path },
         } => kb_eval::nli_check::nli_check(path),
+        Cmd::Nli {
+            cmd:
+                NliCmd::Set {
+                    path,
+                    model_dir,
+                    scorer,
+                    entail_index,
+                    mode,
+                },
+        } => kb_eval::nli_check::nli_set(path, model_dir, scorer, entail_index, mode),
     }
 }
 
