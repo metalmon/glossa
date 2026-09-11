@@ -2159,6 +2159,15 @@ fn main() -> anyhow::Result<()> {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
+                // `doctor()` loads every node/edge, re-stats each grounded doc for staleness, and
+                // classifies relink candidates -- on a large graph that's real wall-clock time with
+                // no output until it's done. `indicatif` is not a dependency of this crate (it's
+                // only pulled in by the `eval` workspace member), so rather than add a new
+                // dependency for one spinner, print a single one-line notice to stderr before the
+                // work starts. This is NOT a live-updating bar, so there is no collision risk with
+                // the report `print!`/prune `println!`s below -- it's one line, already flushed and
+                // done before any of that output happens.
+                eprintln!("diagnosing graph...");
                 let report = glossa::graph::doctor::doctor(&g, &ont, &rr.roots)?;
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
                 // Relocated/relabeled docs are not orphans — refuse a `--prune-ungrounded` that
