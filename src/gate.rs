@@ -61,17 +61,16 @@ pub fn verify_outcome_with_scorer(
         .collect::<anyhow::Result<_>>()?;
     let ac = score(answer, &chunks, &df, cfg.rare_df_frac);
     let answer_tokens = token::tokenize(answer).len();
-    let need_nli = cfg.is_nli_ready()
-        && scorer.is_some()
+    // Always compute NLI when the mode is ready for it — no AC-serve short-circuit. Under the
+    // z-score consensus (spec §4 rev.5) a low-AC/high-NLI answer can still serve (z = zac + znli
+    // > threshold), so skipping the scorer whenever AC alone doesn't serve would make that path
+    // unreachable. Combined readiness is `is_combined_ready()` (calibrated combined stats), NOT
+    // `is_nli_ready()` (nli thresholds) — the two modes are calibrated independently.
+    let need_nli = scorer.is_some()
         && match cfg.mode {
             VerifyMode::Ac => false,
-            VerifyMode::Nli => true,
-            VerifyMode::Combined => {
-                matches!(
-                    score::decide(ac.clone(), &cfg, answer_tokens).decision,
-                    Decision::Serve
-                )
-            }
+            VerifyMode::Nli => cfg.is_nli_ready(),
+            VerifyMode::Combined => cfg.is_combined_ready(),
         };
     let nli_val = if need_nli {
         nli::nli_score(answer, &chunks, &df, &cfg, scorer.unwrap())

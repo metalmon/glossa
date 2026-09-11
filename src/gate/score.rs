@@ -369,6 +369,20 @@ mod tests {
     }
 
     #[test]
+    fn combined_missing_stats_falls_back_to_ac() {
+        use super::{decide_modes, Decision};
+        use crate::gate::config::VerifyMode;
+        // `cfg_for` leaves combined_single/multi at None — mode is Combined but the bucket is
+        // uncalibrated, so `decide_modes` must fall back to the AC-only decision rather than
+        // treating missing stats as always-abstain or always-serve.
+        let cfg = cfg_for(VerifyMode::Combined, /*ac*/ 0.3, /*nli*/ 0.5);
+        assert!(cfg.combined_stats(Bucket::Single).is_none());
+        // AC threshold 0.3 < grounding 0.9 ⇒ the AC-only rule unambiguously serves.
+        let o = decide_modes(gscore(0.9, Bucket::Single), Some(0.9), &cfg, 20);
+        assert_eq!(o.decision, Decision::Serve);
+    }
+
+    #[test]
     fn nli_mode_abstain_reason_is_unentailed() {
         use super::{decide_modes, Decision};
         use crate::gate::config::VerifyMode;
