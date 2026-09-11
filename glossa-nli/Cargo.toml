@@ -1,0 +1,30 @@
+[package]
+name = "glossa-nli"
+version = "0.1.0"
+edition = "2021"
+description = "In-process NLI (entailment) scorer over an ONNX 3-way NLI model — standalone crate (no glossa dep)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["nli-ort"]
+# EXACTLY ONE engine per build. nli-burn-wgpu is a FUTURE alternative; enabling both is a compile
+# error (see lib.rs). Only nli-ort is implemented in this plan.
+nli-ort = ["dep:ort", "dep:tokenizers"]
+nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has something to guard)
+
+[dependencies]
+anyhow = "1"
+# Pinned via context7 (pykeio/ort docs, crates.io newest_version) 2026-09: 2.0.0-rc.13 is the
+# current release; ort recommends an EXACT pin on pre-1.0 rc versions since the API can change
+# between rcs. `default-features = false` drops the pulled-in `ndarray`/ONNX-Runtime-version
+# defaults we don't need yet; `std` is required for the filesystem-backed session-loading API
+# (Task 2 loads `model.onnx` from a local dir) and is otherwise off when default-features=false;
+# `download-binaries` fetches the CPU ONNX Runtime binary at build time (no system install step).
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries"] }
+# Pinned via context7 (huggingface/tokenizers docs.rs Cargo.toml) + crates.io newest_version
+# 2026-09: 0.23.2. `default-features = false` drops `progressbar` (indicatif) and `http` (hf-hub
+# download support, not needed — Task 2 loads `tokenizer.json` from the local model_dir); `onig`
+# is the default regex backend used for pre-tokenization patterns.
+tokenizers = { version = "=0.23.2", optional = true, default-features = false, features = ["onig"] }
