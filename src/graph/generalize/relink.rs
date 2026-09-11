@@ -13,11 +13,10 @@ pub struct RelinkPlan {
     pub orphans: Vec<String>,
 }
 
-/// The match key for a structural target id: everything after the last '/'. For `plc/a/manual.pdf#12`
-/// that is `manual.pdf#12`; for a Document id `plc/manual.pdf` it is `manual.pdf`. Ids without a '/'
-/// (reasoning node ids like `res:…`) return `None` and never participate.
-fn tail(id: &str) -> Option<&str> {
-    id.rsplit_once('/').map(|(_, t)| t)
+/// The match key for a structural target id: the segment after the last '/', or the WHOLE id when
+/// there is no '/' (a bare/unlabeled key like `manual.pdf#12` — the discovery/empty-label case).
+fn tail(id: &str) -> &str {
+    id.rsplit('/').next().unwrap_or(id)
 }
 
 pub fn classify_relink(
@@ -30,9 +29,7 @@ pub fn classify_relink(
     // tail -> live structural node ids (doc-key-shaped ids that currently exist).
     let mut by_tail: HashMap<&str, Vec<&str>> = HashMap::new();
     for (id, _ty) in nodes {
-        if let Some(t) = tail(id) {
-            by_tail.entry(t).or_default().push(id.as_str());
-        }
+        by_tail.entry(tail(id)).or_default().push(id.as_str());
     }
 
     let mut relinkable = Vec::new();
@@ -46,7 +43,7 @@ pub fn classify_relink(
         if existing.contains(to.as_str()) {
             continue; // live target — not our problem
         }
-        let Some(t) = tail(to) else { continue }; // target isn't a doc-key form
+        let t = tail(to);
         let mut cands: Vec<&str> = by_tail
             .get(t)
             .map(|v| v.iter().copied().filter(|c| *c != to.as_str()).collect())
@@ -160,5 +157,14 @@ mod tests {
                 ("res:p".into(), "a.pdf#1".into(), "plc/a.pdf#1".into()),
             ]
         );
+    }
+
+    #[test]
+    fn node_with_one_relinkable_and_one_orphan_target_is_not_orphan() {
+        let nodes = n(&[("res:a", "Resolution"), ("plc/a.pdf#1", "Section")]);
+        let edges = e(&[("res:a", "MENTIONS", "a.pdf#1"), ("res:a", "MENTIONS", "gone.pdf#9")]);
+        let plan = classify_relink(&nodes, &edges, &set(&["res:a"]));
+        assert_eq!(plan.relinkable, vec![("res:a".into(), "a.pdf#1".into(), "plc/a.pdf#1".into())]);
+        assert!(plan.orphans.is_empty(), "a node recovered by one target is not an orphan");
     }
 }
