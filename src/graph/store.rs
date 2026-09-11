@@ -1728,7 +1728,12 @@ impl GraphStore {
     /// grounding after its structural target relocated (folder move / corpus re-addressing)
     /// without touching the reasoning node itself. Returns the number of edge rows updated — 0 or
     /// 1, since `(efrom, edge_type, eto)` is the edges primary key so at most one row can match.
-    pub fn repoint_mentions(&self, from: &str, old_to: &str, new_to: &str) -> anyhow::Result<usize> {
+    pub fn repoint_mentions(
+        &self,
+        from: &str,
+        old_to: &str,
+        new_to: &str,
+    ) -> anyhow::Result<usize> {
         let c = self.conn();
         c.execute(
             "UPDATE edges SET eto = ?1 WHERE efrom = ?2 AND eto = ?3 AND edge_type = ?4",
@@ -2377,17 +2382,21 @@ mod tests {
         })
         .unwrap();
 
-        let changed = g.repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1").unwrap();
+        let changed = g
+            .repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1")
+            .unwrap();
         assert_eq!(changed, 1);
 
         let edges = g.all_edges().unwrap();
-        assert!(edges
-            .iter()
-            .any(|e| e.from == "res:a" && e.to == "plc/m.pdf#1" && e.edge_type == crate::graph::MENTIONS));
+        assert!(edges.iter().any(|e| e.from == "res:a"
+            && e.to == "plc/m.pdf#1"
+            && e.edge_type == crate::graph::MENTIONS));
         assert!(!edges.iter().any(|e| e.to == "m.pdf#1"));
 
         // Repointing again (dead target already gone) is a no-op, not an error.
-        let noop = g.repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1").unwrap();
+        let noop = g
+            .repoint_mentions("res:a", "m.pdf#1", "plc/m.pdf#1")
+            .unwrap();
         assert_eq!(noop, 0);
 
         let updated = g.set_source_path("res:a", "plc/m.pdf").unwrap();

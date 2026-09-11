@@ -1498,16 +1498,16 @@ fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize)
     let mut groups: std::collections::BTreeMap<(String, String), usize> =
         std::collections::BTreeMap::new();
     for (_from, old_to, new_to) in &relink.relinkable {
-        *groups.entry(group_prefix_delta(old_to, new_to)).or_insert(0) += 1;
+        *groups
+            .entry(group_prefix_delta(old_to, new_to))
+            .or_insert(0) += 1;
     }
 
     let mut out = format!("ungrounded: {}\n", rep.ungrounded.len());
     for ((old_prefix, new_prefix), count) in &groups {
         out.push_str(&format!("  {old_prefix} -> {new_prefix}  ({count})\n"));
     }
-    out.push_str(
-        "  (!) non-destructive fix:  kb graph doctor --relink   (full list: --verbose)\n",
-    );
+    out.push_str("  (!) non-destructive fix:  kb graph doctor --relink   (full list: --verbose)\n");
     if !relink.ambiguous.is_empty() {
         out.push_str(&format!(
             "  ambiguous: {}   (same filename in several folders — resolve by hand)\n",

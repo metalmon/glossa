@@ -1510,6 +1510,7 @@ dependencies = [
  "glossa-constraint",
  "ignore",
  "image",
+ "indicatif",
  "libc",
  "lingua",
  "memmap2",

@@ -341,7 +341,10 @@ pub fn apply_relink(
             applied.repointed += 1;
         }
         // Keep provenance's source_path pointing at the doc's current key (strip "#section").
-        let new_doc = new_to.split_once('#').map(|(d, _)| d).unwrap_or(new_to.as_str());
+        let new_doc = new_to
+            .split_once('#')
+            .map(|(d, _)| d)
+            .unwrap_or(new_to.as_str());
         let _ = g.set_source_path(from, new_doc);
     }
     Ok(applied)
@@ -929,9 +932,9 @@ strict = false
 
         let edges = g.all_edges().unwrap();
         assert!(
-            edges
-                .iter()
-                .any(|e| e.from == "res:a" && e.to == "plc/m.pdf#1" && e.edge_type == crate::graph::MENTIONS),
+            edges.iter().any(|e| e.from == "res:a"
+                && e.to == "plc/m.pdf#1"
+                && e.edge_type == crate::graph::MENTIONS),
             "MENTIONS must now point at the live target"
         );
         assert!(
@@ -996,7 +999,10 @@ strict = false
         // Must not panic or error on the collision.
         let applied = apply_relink(&g, &plan).unwrap();
         assert_eq!(applied.repointed, 1, "the first entry repoints");
-        assert_eq!(applied.dropped, 1, "the second, colliding entry drops its duplicate row");
+        assert_eq!(
+            applied.dropped, 1,
+            "the second, colliding entry drops its duplicate row"
+        );
 
         let edges = g.all_edges().unwrap();
         let mentions_live: Vec<_> = edges
@@ -1009,7 +1015,9 @@ strict = false
             "exactly one live MENTIONS edge must survive, no duplicate/collision row: {mentions_live:?}"
         );
         assert_eq!(mentions_live[0].to, "plc/m.pdf#1");
-        assert!(!edges.iter().any(|e| e.to == "m.pdf#1" || e.to == "old/m.pdf#1"));
+        assert!(!edges
+            .iter()
+            .any(|e| e.to == "m.pdf#1" || e.to == "old/m.pdf#1"));
 
         let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         assert!(

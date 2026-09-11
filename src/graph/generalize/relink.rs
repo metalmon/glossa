@@ -60,7 +60,11 @@ pub fn classify_relink(
                 relinkable.push((from.clone(), to.clone(), cands[0].to_string()));
                 recovered.insert(from.as_str());
             }
-            _ => ambiguous.push((from.clone(), to.clone(), cands.iter().map(|s| s.to_string()).collect())),
+            _ => ambiguous.push((
+                from.clone(),
+                to.clone(),
+                cands.iter().map(|s| s.to_string()).collect(),
+            )),
         }
     }
 
@@ -76,7 +80,11 @@ pub fn classify_relink(
     ambiguous.sort();
     orphans.sort();
     orphans.dedup();
-    RelinkPlan { relinkable, ambiguous, orphans }
+    RelinkPlan {
+        relinkable,
+        ambiguous,
+        orphans,
+    }
 }
 
 #[cfg(test)]
@@ -84,10 +92,14 @@ mod tests {
     use super::*;
 
     fn n(p: &[(&str, &str)]) -> Vec<(String, String)> {
-        p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        p.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
     fn e(t: &[(&str, &str, &str)]) -> Vec<Triple> {
-        t.iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())).collect()
+        t.iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect()
     }
     fn set(x: &[&str]) -> HashSet<String> {
         x.iter().map(|s| s.to_string()).collect()
@@ -102,16 +114,33 @@ mod tests {
         ]);
         let edges = e(&[("res:a", "MENTIONS", "manual.pdf#12")]); // dead: bare old key
         let plan = classify_relink(&nodes, &edges, &set(&["res:a"]));
-        assert_eq!(plan.relinkable, vec![("res:a".into(), "manual.pdf#12".into(), "plc/manual.pdf#12".into())]);
+        assert_eq!(
+            plan.relinkable,
+            vec![(
+                "res:a".into(),
+                "manual.pdf#12".into(),
+                "plc/manual.pdf#12".into()
+            )]
+        );
         assert!(plan.ambiguous.is_empty() && plan.orphans.is_empty());
     }
 
     #[test]
     fn relinks_folder_move_same_filename() {
-        let nodes = n(&[("res:a", "Resolution"), ("arch/2024/manual.pdf#3", "Section")]);
+        let nodes = n(&[
+            ("res:a", "Resolution"),
+            ("arch/2024/manual.pdf#3", "Section"),
+        ]);
         let edges = e(&[("res:a", "MENTIONS", "plc/manual.pdf#3")]); // file moved plc/ -> arch/2024/
         let plan = classify_relink(&nodes, &edges, &set(&["res:a"]));
-        assert_eq!(plan.relinkable, vec![("res:a".into(), "plc/manual.pdf#3".into(), "arch/2024/manual.pdf#3".into())]);
+        assert_eq!(
+            plan.relinkable,
+            vec![(
+                "res:a".into(),
+                "plc/manual.pdf#3".into(),
+                "arch/2024/manual.pdf#3".into()
+            )]
+        );
     }
 
     #[test]
@@ -128,12 +157,22 @@ mod tests {
         assert_eq!(plan.ambiguous[0].0, "res:a");
         let mut cands = plan.ambiguous[0].2.clone();
         cands.sort();
-        assert_eq!(cands, vec!["ivk/manual.pdf#1".to_string(), "plc/manual.pdf#1".to_string()]);
+        assert_eq!(
+            cands,
+            vec![
+                "ivk/manual.pdf#1".to_string(),
+                "plc/manual.pdf#1".to_string()
+            ]
+        );
     }
 
     #[test]
     fn orphan_when_filename_absent_or_no_mentions() {
-        let nodes = n(&[("res:gone", "Resolution"), ("res:none", "Resolution"), ("plc/other.pdf#1", "Section")]);
+        let nodes = n(&[
+            ("res:gone", "Resolution"),
+            ("res:none", "Resolution"),
+            ("plc/other.pdf#1", "Section"),
+        ]);
         let edges = e(&[("res:gone", "MENTIONS", "plc/deleted.pdf#1")]); // deleted.pdf not in index; res:none has no MENTIONS
         let plan = classify_relink(&nodes, &edges, &set(&["res:gone", "res:none"]));
         assert!(plan.relinkable.is_empty() && plan.ambiguous.is_empty());
@@ -150,7 +189,10 @@ mod tests {
             ("plc/a.pdf#1", "Section"),
             ("ivk/b.pdf#2", "Section"),
         ]);
-        let edges = e(&[("res:p", "MENTIONS", "a.pdf#1"), ("res:i", "MENTIONS", "b.pdf#2")]);
+        let edges = e(&[
+            ("res:p", "MENTIONS", "a.pdf#1"),
+            ("res:i", "MENTIONS", "b.pdf#2"),
+        ]);
         let plan = classify_relink(&nodes, &edges, &set(&["res:p", "res:i"]));
         let mut r = plan.relinkable.clone();
         r.sort();
@@ -166,9 +208,18 @@ mod tests {
     #[test]
     fn node_with_one_relinkable_and_one_orphan_target_is_not_orphan() {
         let nodes = n(&[("res:a", "Resolution"), ("plc/a.pdf#1", "Section")]);
-        let edges = e(&[("res:a", "MENTIONS", "a.pdf#1"), ("res:a", "MENTIONS", "gone.pdf#9")]);
+        let edges = e(&[
+            ("res:a", "MENTIONS", "a.pdf#1"),
+            ("res:a", "MENTIONS", "gone.pdf#9"),
+        ]);
         let plan = classify_relink(&nodes, &edges, &set(&["res:a"]));
-        assert_eq!(plan.relinkable, vec![("res:a".into(), "a.pdf#1".into(), "plc/a.pdf#1".into())]);
-        assert!(plan.orphans.is_empty(), "a node recovered by one target is not an orphan");
+        assert_eq!(
+            plan.relinkable,
+            vec![("res:a".into(), "a.pdf#1".into(), "plc/a.pdf#1".into())]
+        );
+        assert!(
+            plan.orphans.is_empty(),
+            "a node recovered by one target is not an orphan"
+        );
     }
 }
