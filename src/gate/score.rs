@@ -97,9 +97,21 @@ mod tests {
     #[test]
     fn decide_guards_and_thresholds() {
         use super::{decide, score, Decision};
-        use crate::gate::{config::VerifyConfig, df::DfTable, token::tokenize};
-        let cfg = VerifyConfig { enabled: true, rare_df_frac: 0.5, min_answer_tokens: 10,
-            threshold_single: Some(0.8), threshold_multi: Some(0.9) };
+        use crate::gate::{
+            config::{VerifyConfig, VerifyMode},
+            df::DfTable,
+            token::tokenize,
+        };
+        let cfg = VerifyConfig {
+            enabled: true,
+            rare_df_frac: 0.5,
+            min_answer_tokens: 10,
+            threshold_single: Some(0.8),
+            threshold_multi: Some(0.9),
+            mode: VerifyMode::Ac,
+            nli_threshold_single: None,
+            nli_threshold_multi: None,
+        };
         let mut df = DfTable::new(); df.add_chunk(&tokenize("pp.19.00.00.00 text"));
         let answer = "needs a pp.19.00.00.00 license plus ten more english words to pass the guard threshold";
         // cited chunk echoes the answer's own words, so every rare token is grounded

@@ -7,7 +7,7 @@ pub mod score;
 pub mod config;
 
 pub use score::{GateScore, Bucket, score, Decision, GateOutcome, decide};
-pub use config::VerifyConfig;
+pub use config::{VerifyConfig, VerifyMode};
 
 /// Resolve a `path#loc` citation to its chunk text, using the SAME extraction path the `read`
 /// MCP tool uses (`crate::tools::read`, which `src/mcp.rs::read_common` calls). `glossa_dir` is the

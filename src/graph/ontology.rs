@@ -80,6 +80,32 @@ struct RawVerify {
     min_answer_tokens: Option<usize>,
     #[serde(default)]
     threshold: Option<RawVerifyThreshold>,
+    /// `[verify].mode`: "ac" | "nli" | "combined" — how the AC and NLI verdicts combine.
+    /// Unset falls back to the engine default `Ac`. Parsed as a raw string here; the engine
+    /// (`gate::config::VerifyMode::parse`) owns the enum mapping.
+    #[serde(default)]
+    mode: Option<String>,
+    /// `[verify.ac]`: the lexical/anomaly ("AC") verifier's own threshold table, preferred over
+    /// the legacy `[verify.threshold]` when present.
+    #[serde(default)]
+    ac: Option<RawVerifyAc>,
+    /// `[verify.nli]`: the NLI support-verifier's threshold table.
+    #[serde(default)]
+    nli: Option<RawVerifyNli>,
+}
+
+/// `[verify.ac]` overlay: currently just the alias threshold table (see `RawVerify::ac`).
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawVerifyAc {
+    #[serde(default)]
+    threshold: Option<RawVerifyThreshold>,
+}
+
+/// `[verify.nli]` overlay: the NLI support-verifier's calibrated thresholds by bucket.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawVerifyNli {
+    #[serde(default)]
+    threshold: Option<RawVerifyThreshold>,
 }
 
 /// Calibrated grounding thresholds by [`crate::gate::score::Bucket`]. `None` (either field, or the
@@ -314,6 +340,16 @@ pub struct Ontology {
     verify_min_answer_tokens: Option<usize>,
     verify_threshold_single: Option<f32>,
     verify_threshold_multi: Option<f32>,
+    /// Per-corpus `[verify].mode` override ("ac" | "nli" | "combined"). `None` when unset →
+    /// `gate::config::VerifyConfig` applies its engine default (`Ac`). See [`Ontology::verify_mode`].
+    verify_mode: Option<String>,
+    /// Per-corpus `[verify.ac.threshold]` override, preferred over the legacy
+    /// `[verify.threshold]` fields above. See [`Ontology::verify_ac_threshold_single`].
+    verify_ac_threshold_single: Option<f32>,
+    verify_ac_threshold_multi: Option<f32>,
+    /// Per-corpus `[verify.nli.threshold]` override. See [`Ontology::verify_nli_threshold_single`].
+    verify_nli_threshold_single: Option<f32>,
+    verify_nli_threshold_multi: Option<f32>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -446,6 +482,31 @@ impl Ontology {
             verify_min_answer_tokens: raw.verify.min_answer_tokens,
             verify_threshold_single: raw.verify.threshold.as_ref().and_then(|t| t.single),
             verify_threshold_multi: raw.verify.threshold.as_ref().and_then(|t| t.multi),
+            verify_mode: raw.verify.mode.clone(),
+            verify_ac_threshold_single: raw
+                .verify
+                .ac
+                .as_ref()
+                .and_then(|a| a.threshold.as_ref())
+                .and_then(|t| t.single),
+            verify_ac_threshold_multi: raw
+                .verify
+                .ac
+                .as_ref()
+                .and_then(|a| a.threshold.as_ref())
+                .and_then(|t| t.multi),
+            verify_nli_threshold_single: raw
+                .verify
+                .nli
+                .as_ref()
+                .and_then(|n| n.threshold.as_ref())
+                .and_then(|t| t.single),
+            verify_nli_threshold_multi: raw
+                .verify
+                .nli
+                .as_ref()
+                .and_then(|n| n.threshold.as_ref())
+                .and_then(|t| t.multi),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -642,6 +703,33 @@ impl Ontology {
     /// Per-corpus `[verify].threshold.multi` override, or `None` when uncalibrated.
     pub fn verify_threshold_multi(&self) -> Option<f32> {
         self.verify_threshold_multi
+    }
+
+    /// Per-corpus `[verify].mode` override ("ac" | "nli" | "combined"), or `None` when the
+    /// ontology declares none — in which case `gate::config::VerifyConfig` applies its engine
+    /// default (`Ac`).
+    pub fn verify_mode(&self) -> Option<String> {
+        self.verify_mode.clone()
+    }
+
+    /// Per-corpus `[verify.ac.threshold].single` override, or `None` when uncalibrated.
+    pub fn verify_ac_threshold_single(&self) -> Option<f32> {
+        self.verify_ac_threshold_single
+    }
+
+    /// Per-corpus `[verify.ac.threshold].multi` override, or `None` when uncalibrated.
+    pub fn verify_ac_threshold_multi(&self) -> Option<f32> {
+        self.verify_ac_threshold_multi
+    }
+
+    /// Per-corpus `[verify.nli.threshold].single` override, or `None` when uncalibrated.
+    pub fn verify_nli_threshold_single(&self) -> Option<f32> {
+        self.verify_nli_threshold_single
+    }
+
+    /// Per-corpus `[verify.nli.threshold].multi` override, or `None` when uncalibrated.
+    pub fn verify_nli_threshold_multi(&self) -> Option<f32> {
+        self.verify_nli_threshold_multi
     }
 
     pub fn validate_node(&self, node_type: &str) -> Result<(), String> {
