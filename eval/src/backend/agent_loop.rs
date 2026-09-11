@@ -367,6 +367,10 @@ pub fn run_agent_loop_capturing(
     // Novelty tracking for the unproductive-streak detector (see the doc comment above).
     let mut seen: HashSet<String> = HashSet::new();
     let mut unproductive: usize = 0;
+    // Whether the `user_sim` gate has deflected at least once this conversation. Only THEN is there a
+    // real assistant↔user_sim dialogue worth handing the judge (a gate that accepts the first text
+    // turn just yields the final answer, which the judge already sees). See the `user_sim` arms below.
+    let mut sim_deflected = false;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
@@ -381,21 +385,33 @@ pub fn run_agent_loop_capturing(
                     return Ok(text);
                 }
                 Some(gate) => match gate.judge(&question, &messages, &text) {
-                    // Substantive answer (or the gate failed open) -> accept and return it.
+                    // Substantive answer (or the gate failed open) -> accept and return it. If a
+                    // dialogue actually happened (>=1 deflection), record this final assistant turn so
+                    // the judge can see the answer the reader gave BEFORE any closing pleasantry.
                     Ok(None) => {
+                        if sim_deflected {
+                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
                     }
                     // The assistant only kept asking: echo its turn, append the in-character user
                     // deflection as a `role:"user"` message, and continue. Each deflection consumes
-                    // a round, so this is naturally capped by `max_rounds`.
+                    // a round, so this is naturally capped by `max_rounds`. Record BOTH text turns
+                    // (assistant + user_sim) into the dialogue the judge will later see.
                     Ok(Some(deflection)) => {
+                        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        crate::backend::openai::push_reader_dialogue_turn("user", &deflection);
+                        sim_deflected = true;
                         transport.push_assistant_turn(&mut messages, &reply);
                         messages.push(json!({ "role": "user", "content": deflection }));
                         continue;
                     }
                     // Fail-open on a gate error: return the text rather than hang the run.
                     Err(_) => {
+                        if sim_deflected {
+                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
                     }
@@ -450,6 +466,9 @@ pub fn run_agent_loop_capturing(
     }));
     let reply = call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
     let text = reply.text.unwrap_or_default();
+    if sim_deflected {
+        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+    }
     record_episode(&mut capture, system, tools, &messages, &text);
     Ok(text)
 }
@@ -903,6 +922,60 @@ mod tests {
             Some("I don't know, that's what I was hoping you'd tell me.")
         );
         assert_eq!(*gate.calls.borrow(), 2);
+    }
+
+    /// A user_sim dialogue (>=1 deflection) is captured as text-only turns for the judge; a run with
+    /// NO gate captures nothing.
+    #[test]
+    fn dialogue_captured_only_when_user_sim_deflects() {
+        use crate::backend::openai::take_reader_dialogue;
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+
+        // Deflect once, then accept -> dialogue = [assistant, user_sim, assistant(final)].
+        let transport = MockTransport::new(vec![
+            reply_text("thinking, restating the question"),
+            reply_text("FINAL ANSWER"),
+        ]);
+        let gate = MockGate::new(vec![Ok(Some("keep going, step by step".to_string())), Ok(None)]);
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            5,
+            Some(&gate),
+        )
+        .unwrap();
+        assert_eq!(out, "FINAL ANSWER");
+        assert_eq!(
+            take_reader_dialogue(),
+            vec![
+                ("assistant".to_string(), "thinking, restating the question".to_string()),
+                ("user".to_string(), "keep going, step by step".to_string()),
+                ("assistant".to_string(), "FINAL ANSWER".to_string()),
+            ]
+        );
+
+        // No gate -> nothing captured (single-turn run the judge already sees in full).
+        let transport2 = MockTransport::new(vec![reply_text("ONE SHOT")]);
+        let out2 = run_agent_loop(
+            &transport2,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            |_: &str, _: &Value| (String::new(), Vec::new()),
+            nudge,
+            5,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out2, "ONE SHOT");
+        assert!(take_reader_dialogue().is_empty());
     }
 
     /// The gate signals DONE (`Ok(None)`) on the first text-only turn -> the loop returns that text,
