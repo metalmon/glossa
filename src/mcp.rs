@@ -2374,7 +2374,14 @@ mod tests {
     /// the two rmcp types can't be constructed here — it exists purely to type-check the signatures.
     #[test]
     fn rmcp_dispatch_api_is_stable_compile_guard() {
-        #[allow(dead_code, unreachable_code)]
+        // `unreachable!()` stand-ins are typed-only placeholders (this fn is never called, per the
+        // doc comment above) so the resulting divergence and "unused" bindings are expected, not bugs.
+        #[allow(
+            dead_code,
+            unreachable_code,
+            unused_variables,
+            clippy::diverging_sub_expression
+        )]
         fn _ctx_new(s: &GlossaServer) {
             let _: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> =
                 rmcp::handler::server::tool::ToolCallContext::new(
@@ -2383,7 +2390,12 @@ mod tests {
                     unreachable!() as rmcp::service::RequestContext<rmcp::RoleServer>,
                 );
         }
-        #[allow(dead_code, unreachable_code)]
+        #[allow(
+            dead_code,
+            unreachable_code,
+            unused_variables,
+            clippy::diverging_sub_expression
+        )]
         fn _router_call(r: &ToolRouter<GlossaServer>) {
             let tcc: rmcp::handler::server::tool::ToolCallContext<'_, GlossaServer> =
                 unreachable!();
@@ -2568,6 +2580,10 @@ mod tests {
     /// under a SECONDARY root is silently invisible to a running server until the next full
     /// `index(force=true)`. Two roots, write under the second one, freshen, then confirm the new
     /// file is searchable.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn freshen_now_picks_up_a_change_under_the_secondary_root() {
         let _env = crate::TEST_ENV_LOCK
@@ -2617,6 +2633,10 @@ mod tests {
     /// searches served through that SAME cached handle — not only to a freshly re-opened reader.
     /// The pre-existing `freshen_now_picks_up_a_change_under_the_secondary_root` test masks this by
     /// building the handle AFTER the write; here we open it BEFORE, exactly as a daemon does.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn search_same_handle_sees_file_added_after_open() {
         let _env = crate::TEST_ENV_LOCK
@@ -2665,6 +2685,10 @@ mod tests {
     /// first must skip the stat-walk entirely (serve the current index, no-op) — proven by
     /// `last_freshen_ms` staying unchanged across the gated call. Once the window elapses, the
     /// gate opens again and the next call DOES update the clock.
+    // Holds `TEST_ENV_LOCK` across `.await` points on purpose: the guard must serialize this
+    // test's `GLOSSA_MIN_RESCAN_MS` env mutation against sibling tests for the WHOLE body, and
+    // `#[tokio::test]` runs on a current-thread runtime so the std guard never crosses threads.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn freshen_min_rescan_skips_within_window() {
         let _env = crate::TEST_ENV_LOCK
@@ -4086,7 +4110,7 @@ mod tests {
         for k in router.map.keys() {
             // `k` is a `Cow<'static, str>`; deref to `&str` so `HashSet<&'static str>::contains`
             // (T = `&'static str`, Q = `str`, `&str: Borrow<str>`) matches on the string value.
-            let name: &str = &**k;
+            let name: &str = k;
             assert!(
                 catalog_names.contains(name),
                 "compiled route `{name}` is missing from catalog() — add it to \

@@ -341,6 +341,7 @@ fn normalize_schema(v: serde_json::Value) -> serde_json::Value {
 /// Test-only accessor: normalize a live rmcp route `input_schema` the same way `schema_of`
 /// normalizes a `schemars` schema, so the MCP parity test can compare a route's advertised
 /// schema against a catalog `core_schema` on equal footing.
+#[cfg(test)]
 pub(crate) fn normalize_for_test(v: &serde_json::Value) -> serde_json::Value {
     normalize_schema(v.clone())
 }

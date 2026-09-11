@@ -2299,7 +2299,7 @@ fn scan_dir_delta_into(
 pub(crate) mod rescan_probe {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
-    thread_local! { static WALKED: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new()); }
+    thread_local! { static WALKED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) }; }
     pub fn record(dir: &Path) {
         WALKED.with(|w| w.borrow_mut().push(dir.to_path_buf()));
     }
