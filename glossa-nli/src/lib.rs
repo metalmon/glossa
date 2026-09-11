@@ -98,9 +98,16 @@ impl InProcessNli {
         tokenizer.with_padding(None);
 
         let model_path = model_dir.join("model.onnx");
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
+        // ort's `SessionBuilder`-typed error (`ort::Error<SessionBuilder>`) carries a
+        // `NonNull<OrtSessionOptions>` and is therefore NOT `Send + Sync`, so `?` cannot convert it
+        // into `anyhow::Error` (whose `From<E>` requires `E: Send + Sync + 'static`). Map every
+        // builder step through `Display` first, exactly as `commit_from_file` already does.
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
+            .with_intra_threads(1)
+            .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?
             .commit_from_file(&model_path)
             .map_err(|e| anyhow::anyhow!("onnx session load ({}): {e}", model_path.display()))?;
 
