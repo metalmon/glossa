@@ -279,6 +279,24 @@ pub fn prune(
     Ok((inc, ung, dang, stale))
 }
 
+/// True when a single `graph doctor` invocation combines `--relink` with any `--prune-*` flag.
+/// Disallowed: `prune()` deletes against the `DoctorReport` computed BEFORE `--relink` ran, so a
+/// node `--relink` just re-grounded is still listed in that report's `ungrounded` (or reachable via
+/// `dangling`, once its terminal is live again) and would be pruned right back out from under the
+/// repoint it just received — `--relink --prune-ungrounded --force` would re-ground nodes and then
+/// immediately delete exactly those nodes. Callers must check this BEFORE doing any work at all
+/// (before `doctor()`/backup/relink/prune) and refuse the whole invocation, directing the operator
+/// to run `--relink` alone first, then a separate `doctor` pass to prune what truly remains.
+pub fn relink_prune_conflict(
+    relink: bool,
+    prune_incomplete: bool,
+    prune_ungrounded: bool,
+    prune_dangling: bool,
+    prune_stale: bool,
+) -> bool {
+    relink && (prune_incomplete || prune_ungrounded || prune_dangling || prune_stale)
+}
+
 /// Apply a `RelinkPlan` (as computed into `DoctorReport.relink` by [`doctor`]) to the store:
 /// non-destructively re-point each relinkable reasoning node's `MENTIONS` edge from its dead target
 /// to the live structural node `classify_relink` matched it to, and keep provenance's `source_path`
@@ -847,6 +865,21 @@ strict = false
         let rep = doctor(&g, &ont, &single_root(root)).unwrap();
         let dangling: Vec<&str> = rep.dangling.iter().map(|d| d.id.as_str()).collect();
         assert!(dangling.contains(&"sym:orphan"));
+    }
+
+    #[test]
+    fn relink_prune_conflict_rejects_relink_with_any_prune_flag() {
+        // relink alone, or prune alone (any combination), is fine.
+        assert!(!relink_prune_conflict(false, false, false, false, false));
+        assert!(!relink_prune_conflict(true, false, false, false, false));
+        assert!(!relink_prune_conflict(false, true, true, true, true));
+        // relink + exactly one prune-* flag, for each flag, must conflict.
+        assert!(relink_prune_conflict(true, true, false, false, false));
+        assert!(relink_prune_conflict(true, false, true, false, false));
+        assert!(relink_prune_conflict(true, false, false, true, false));
+        assert!(relink_prune_conflict(true, false, false, false, true));
+        // relink + all four.
+        assert!(relink_prune_conflict(true, true, true, true, true));
     }
 
     #[test]

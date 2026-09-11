@@ -2156,6 +2156,24 @@ fn main() -> anyhow::Result<()> {
                 force,
                 relink,
             } => {
+                // Refuse the combo BEFORE any work: resolving roots, opening the store, diagnosing,
+                // backing up, relinking, or pruning. A `--relink` + `--prune-*` in one run would
+                // prune against the report computed before relink ran, deleting the very nodes
+                // relink just re-grounded (see `relink_prune_conflict`'s doc comment).
+                if glossa::graph::doctor::relink_prune_conflict(
+                    relink,
+                    prune_incomplete,
+                    prune_ungrounded,
+                    prune_dangling,
+                    prune_stale,
+                ) {
+                    anyhow::bail!(
+                        "--relink cannot be combined with --prune-* in one run: relink re-grounds \
+                         nodes that the prune (computed before relink) would then delete. Run `kb \
+                         graph doctor --relink` first, then re-run doctor to prune what truly \
+                         remains."
+                    );
+                }
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);

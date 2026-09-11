@@ -27,7 +27,10 @@ pub fn classify_relink(
 ) -> RelinkPlan {
     let existing: HashSet<&str> = nodes.iter().map(|(id, _)| id.as_str()).collect();
 
-    // tail -> live structural node ids (doc-key-shaped ids that currently exist).
+    // tail -> ALL live node ids sharing that tail (not filtered to structural/doc-key-shaped —
+    // built over every node in the graph). Harmless: a reasoning id like `res:slug` has no '/' and
+    // no '#', so its tail is the whole id and it never collides with a `filename#section` tail a
+    // dead MENTIONS target is looking for.
     let mut by_tail: HashMap<&str, Vec<&str>> = HashMap::new();
     for (id, _ty) in nodes {
         by_tail.entry(tail(id)).or_default().push(id.as_str());
