@@ -253,15 +253,82 @@ pub fn sweep(cases: &[Case], _folds: usize) -> BucketReport {
     sweep_over(cases.iter(), cases.len())
 }
 
-/// The calibrated verify combination policy for one corpus: which signal decides, plus the AC and
-/// (when chosen) NLI per-bucket thresholds. Plan 1 selects between `ac` and `nli`; `combined` is
-/// deferred to Plan 2 (needs real labeled nli).
+/// The calibrated verify combination policy for one corpus: which signal decides, plus the AC,
+/// (when chosen) NLI, and (when chosen) combined per-bucket thresholds. `select_mode` chooses
+/// between `ac`, `nli`, and `combined` (z-score consensus of AC and NLI, Task CZ-2); Plan 1's
+/// runtime never carries labeled `nli`, so `combined` is only ever selected by tests that
+/// construct `Case`s with `Some(nli)` directly.
 pub struct ModeSelection {
     pub mode: glossa::gate::config::VerifyMode,
     pub ac_single: f32,
     pub ac_multi: f32,
     pub nli_single: Option<f32>,
     pub nli_multi: Option<f32>,
+    /// Calibrated z-score consensus stats per bucket (mean/std of AC and NLI + swept z-threshold),
+    /// populated whenever enough labeled cases exist for that bucket — regardless of whether
+    /// `combined` ended up winning the coverage comparison (mirrors `nli_single`/`nli_multi`'s
+    /// always-fill-when-computed convention). `write_threshold` only persists these when
+    /// `mode == Combined`.
+    pub combined_single: Option<glossa::gate::config::CombinedStats>,
+    pub combined_multi: Option<glossa::gate::config::CombinedStats>,
+}
+
+/// Population mean and standard deviation of a slice of scores (used to standardize AC and NLI
+/// for the `combined` z-score candidate). Population (not sample) std, per the spec: divide the
+/// sum of squared deviations by `n`, not `n - 1`. Caller guarantees `vals` is non-empty.
+fn mean_std(vals: &[f32]) -> (f32, f32) {
+    let n = vals.len() as f32;
+    let mean = vals.iter().sum::<f32>() / n;
+    let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
+    (mean, var.sqrt())
+}
+
+/// Calibrate the `combined` z-score consensus for one bucket: standardize `grounding` (AC) and
+/// `nli` by their own per-bucket mean/std over cases that carry BOTH signals, sum the two z-scores
+/// per case, and sweep that z-value the same way [`bucket_threshold`] sweeps a raw score — the
+/// threshold is a z-score (can be negative), not a [0,1] grounding value. Needs at least 2 such
+/// cases to have a non-degenerate std; returns `None` when fewer exist or the z-sweep itself can't
+/// recommend a threshold at `budget` (mirrors [`bucket_threshold`]'s empty-bucket `None`).
+fn combined_bucket_stats(
+    cases: &[Case],
+    bucket: Bucket,
+    folds: usize,
+    budget: f32,
+) -> Option<glossa::gate::config::CombinedStats> {
+    let labeled: Vec<&Case> = cases
+        .iter()
+        .filter(|c| c.bucket == bucket && c.nli.is_some())
+        .collect();
+    if labeled.len() < 2 {
+        return None;
+    }
+    let ac_vals: Vec<f32> = labeled.iter().map(|c| c.grounding).collect();
+    let nli_vals: Vec<f32> = labeled.iter().map(|c| c.nli.unwrap()).collect();
+    let (mean_ac, std_ac) = mean_std(&ac_vals);
+    let (mean_nli, std_nli) = mean_std(&nli_vals);
+    // `threshold` doesn't affect `z()` (it only compares afterwards in `serves()`), so 0.0 here is
+    // just a placeholder to compute each case's z ahead of sweeping the real threshold below.
+    let prelim = glossa::gate::config::CombinedStats {
+        mean_ac,
+        std_ac,
+        mean_nli,
+        std_nli,
+        threshold: 0.0,
+    };
+    let pseudo: Vec<Case> = labeled
+        .iter()
+        .map(|c| Case {
+            grounding: prelim.z(c.grounding, c.nli.unwrap()),
+            bucket,
+            cell: c.cell,
+            nli: None,
+        })
+        .collect();
+    let threshold = sweep(&pseudo, folds).recommended_for(budget)?;
+    Some(glossa::gate::config::CombinedStats {
+        threshold,
+        ..prelim
+    })
 }
 
 /// The recommended threshold for one bucket via the existing sweep, or None if that bucket is empty.
@@ -302,10 +369,12 @@ fn coverage_at(
     served as f32 / cases.len() as f32
 }
 
-/// Choose `ac` vs `nli` from the labeled pool by max served-coverage subject to `error <= budget`,
-/// tie-break `ac > nli` (a model-free gate beats a model gate that only ties it). `nli` is a
-/// candidate only when enough cases carry a score (`nli.is_some()`); otherwise `ac` wins by default.
-/// `combined` is intentionally not considered here (Plan 1 scope ruling).
+/// Choose `ac` vs `nli` vs `combined` from the labeled pool by max served-coverage subject to
+/// `error <= budget`, tie-break `ac > nli > combined` (a cheaper gate wins an exact tie — spec §5).
+/// `nli` is a candidate only when enough cases carry a score (`nli.is_some()`); `combined` is a
+/// candidate only when BOTH wanted buckets calibrate a z-threshold ([`combined_bucket_stats`]),
+/// mirroring the `nli`-both-buckets rule. Under Plan 1's runtime (`Case.nli` always `None`)
+/// neither candidate materializes and `ac` wins, unchanged from before Task CZ-2.
 ///
 /// `ac_single`/`ac_multi` are the FINAL, already-decided AC thresholds — the caller (`run`'s
 /// per-bucket sweep loop) has already recomputed them for whichever bucket(s) `--bucket` asked for
@@ -327,8 +396,9 @@ pub fn select_mode(
 ) -> ModeSelection {
     let ac_cov = coverage_at(cases, |c| c.grounding, ac_single, ac_multi);
 
-    // NLI operating point: sweep on the nli value, over cases that HAVE one. If none carry nli, NLI
-    // is unavailable -> ac wins.
+    // NLI operating point: sweep on the nli value, over cases that HAVE one. Only sweep a bucket's
+    // NLI threshold when the caller asked to calibrate it; an unwanted bucket stays `None` (this is
+    // what makes `--bucket single` leave the multi NLI threshold untouched too).
     let nli_cases: Vec<Case> = cases
         .iter()
         .filter(|c| c.nli.is_some())
@@ -339,37 +409,73 @@ pub fn select_mode(
             nli: c.nli,
         })
         .collect();
-    let (mode, nli_single, nli_multi) = if nli_cases.is_empty() {
-        (glossa::gate::config::VerifyMode::Ac, None, None)
-    } else {
-        // Only sweep a bucket's NLI threshold when the caller asked to calibrate it; an unwanted
-        // bucket stays `None` (see the doc comment above — this is what makes `--bucket single`
-        // leave the multi NLI threshold untouched too).
-        let ns = want_single
-            .then(|| bucket_threshold(&nli_cases, Bucket::Single, folds, budget))
-            .flatten();
-        let nm = want_multi
-            .then(|| bucket_threshold(&nli_cases, Bucket::Multi, folds, budget))
-            .flatten();
-        match (ns, nm) {
-            (Some(s), Some(m)) => {
-                let nli_cov = coverage_at(cases, |c| c.nli.unwrap_or(f32::NEG_INFINITY), s, m);
-                // tie-break ac > nli: nli wins only if strictly higher coverage at the budget.
-                if nli_cov > ac_cov {
-                    (glossa::gate::config::VerifyMode::Nli, Some(s), Some(m))
-                } else {
-                    (glossa::gate::config::VerifyMode::Ac, Some(s), Some(m))
-                }
-            }
-            _ => (glossa::gate::config::VerifyMode::Ac, ns, nm),
-        }
+    let nli_single = want_single
+        .then(|| bucket_threshold(&nli_cases, Bucket::Single, folds, budget))
+        .flatten();
+    let nli_multi = want_multi
+        .then(|| bucket_threshold(&nli_cases, Bucket::Multi, folds, budget))
+        .flatten();
+    let nli_cov = match (nli_single, nli_multi) {
+        (Some(s), Some(m)) => Some(coverage_at(
+            cases,
+            |c| c.nli.unwrap_or(f32::NEG_INFINITY),
+            s,
+            m,
+        )),
+        _ => None,
     };
+
+    // Combined (z-score consensus) operating point: calibrate each wanted bucket's z-threshold,
+    // then measure served coverage using each case's own bucket's stats. A candidate only when
+    // BOTH wanted buckets calibrated (mirrors the nli rule above).
+    let combined_single = want_single
+        .then(|| combined_bucket_stats(cases, Bucket::Single, folds, budget))
+        .flatten();
+    let combined_multi = want_multi
+        .then(|| combined_bucket_stats(cases, Bucket::Multi, folds, budget))
+        .flatten();
+    let combined_cov = match (combined_single, combined_multi) {
+        (Some(s), Some(m)) => {
+            let z_of = |c: &Case| match c.nli {
+                Some(n) => {
+                    let st = if matches!(c.bucket, Bucket::Single) {
+                        s
+                    } else {
+                        m
+                    };
+                    st.z(c.grounding, n)
+                }
+                None => f32::NEG_INFINITY, // no nli -> never served by combined
+            };
+            Some(coverage_at(cases, z_of, s.threshold, m.threshold))
+        }
+        _ => None,
+    };
+
+    // Selection: highest coverage wins; tie-break ac > nli > combined, i.e. a candidate only
+    // displaces the current best when it is STRICTLY higher (spec §5).
+    let mut mode = glossa::gate::config::VerifyMode::Ac;
+    let mut best_cov = ac_cov;
+    if let Some(cov) = nli_cov {
+        if cov > best_cov {
+            mode = glossa::gate::config::VerifyMode::Nli;
+            best_cov = cov;
+        }
+    }
+    if let Some(cov) = combined_cov {
+        if cov > best_cov {
+            mode = glossa::gate::config::VerifyMode::Combined;
+        }
+    }
+
     ModeSelection {
         mode,
         ac_single,
         ac_multi,
         nli_single,
         nli_multi,
+        combined_single,
+        combined_multi,
     }
 }
 
@@ -458,7 +564,8 @@ pub fn render_svg(bucket: &str, rep: &BucketReport) -> String {
 
 /// Set `[verify].mode`, `[verify.ac.threshold]` (canonical), `[verify.threshold]` (legacy sync —
 /// keeps the currently-deployed binary working for one release), `[verify.nli.threshold]` (only
-/// when `sel` carries both nli thresholds), and `[verify.calibration]` in
+/// when `sel` carries both nli thresholds), `[verify.combined.<bucket>]` (only when `sel.mode` is
+/// `Combined` and both buckets' stats are present), and `[verify.calibration]` in
 /// `<glossa_dir>/ontology.toml`, preserving every other table/comment via `toml_edit`. `toml_edit`
 /// does not auto-vivify intermediate tables on assignment, so each level is created explicitly
 /// when absent before its keys are set.
@@ -541,6 +648,33 @@ pub fn write_threshold(
         }
         verify["nli"]["threshold"]["single"] = value(f(s));
         verify["nli"]["threshold"]["multi"] = value(f(m));
+    }
+
+    // `[verify.combined.<bucket>]`: only written when `combined` actually won the selection AND
+    // both buckets calibrated — a bucket that didn't calibrate has no stats to write, and writing
+    // combined stats while a different mode is active would suggest a readiness the corpus doesn't
+    // have (`is_combined_ready` requires `mode == Combined` too).
+    if sel.mode == glossa::gate::config::VerifyMode::Combined {
+        if let (Some(s), Some(m)) = (sel.combined_single, sel.combined_multi) {
+            if verify.get("combined").is_none() {
+                verify["combined"] = Item::Table(Table::new());
+            }
+            for (name, st) in [("single", s), ("multi", m)] {
+                if verify["combined"]
+                    .as_table_mut()
+                    .context("[verify.combined] is not a table")?
+                    .get(name)
+                    .is_none()
+                {
+                    verify["combined"][name] = Item::Table(Table::new());
+                }
+                verify["combined"][name]["mean_ac"] = value(f(st.mean_ac));
+                verify["combined"][name]["std_ac"] = value(f(st.std_ac));
+                verify["combined"][name]["mean_nli"] = value(f(st.mean_nli));
+                verify["combined"][name]["std_nli"] = value(f(st.std_nli));
+                verify["combined"][name]["threshold"] = value(f(st.threshold));
+            }
+        }
     }
 
     verify["calibration"]["run"] = value(run);
@@ -955,6 +1089,8 @@ mod tests {
             ac_multi,
             nli_single: None,
             nli_multi: None,
+            combined_single: None,
+            combined_multi: None,
         }
     }
 
@@ -1094,5 +1230,114 @@ mod tests {
         );
         assert_eq!(sel.ac_multi, 0.42); // preserved, not recomputed
         assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Ac));
+    }
+
+    /// Plan-1 runtime reality: every `Case.nli` is `None`. Neither `nli` nor `combined` can
+    /// calibrate (both need labeled cases), so `select_mode` must fall back to `ac` exactly as it
+    /// did before Task CZ-2, and `combined_single`/`combined_multi` must stay `None` (nothing to
+    /// write into `[verify.combined]`).
+    #[test]
+    fn select_mode_no_nli_data_still_picks_ac_and_no_combined() {
+        use super::{select_mode, Bucket};
+        let cases = vec![
+            case(0.9, Bucket::Single, None, Cell::ShouldServe),
+            case(0.1, Bucket::Single, None, Cell::ShouldAbstain),
+            case(0.9, Bucket::Multi, None, Cell::ShouldServe),
+            case(0.1, Bucket::Multi, None, Cell::ShouldAbstain),
+        ];
+        let sel = select_mode(&cases, 0.5, 5, 1.0, 1.0, true, true);
+        assert!(matches!(sel.mode, glossa::gate::config::VerifyMode::Ac));
+        assert!(sel.nli_single.is_none());
+        assert!(sel.combined_single.is_none());
+        assert!(sel.combined_multi.is_none());
+    }
+
+    /// Proves "combined strictly beats BOTH ac and nli at the budget -> combined chosen", not just
+    /// "combined data present". Per-bucket pool (same 4 cases duplicated into `Single` and `Multi`,
+    /// like `select_mode_picks_nli_when_it_covers_strictly_more` above):
+    ///
+    ///   ShouldServe: grounding=0.9 nli=0.2   |   grounding=0.2 nli=0.9
+    ///   ShouldAbstain: grounding=0.4 nli=0.4 |   grounding=0.1 nli=0.1
+    ///
+    /// Neither raw signal separates cleanly at budget 0: on grounding alone the ShouldServe value
+    /// 0.2 sits BELOW the ShouldAbstain value 0.4, so any 0-error grounding threshold can only
+    /// serve the single case scoring 0.9 (midpoint-sweep threshold 0.65) — same shape on nli alone
+    /// (values are the same set, just swapped between the two ShouldServe cases). With
+    /// `ac_single = ac_multi = 0.65` (the threshold a real AC sweep would recommend here), AC's
+    /// pool-wide coverage is 2/8 = 0.25; NLI's own 0.65-threshold sweep gives the identical 0.25.
+    ///
+    /// The combined signal standardizes both columns by their shared per-bucket mean 0.4 /
+    /// population std sqrt(0.095)≈0.30822 (both columns are the same value SET {0.9,0.2,0.4,0.1},
+    /// just permuted between the two ShouldServe cases, so mean_ac==mean_nli and std_ac==std_nli).
+    /// The two z-terms' additions are commutative, so both ShouldServe cases land on the exact same
+    /// z ≈ (0.5-0.2)/0.30822 ≈ 0.9733; the ShouldAbstain z=0.4 case lands at z=0 and the z=0.1 case
+    /// at z≈-1.9467. Sweeping those z-values at budget 0 recommends the midpoint between 0 and
+    /// 0.9733 (≈0.4867) — serving exactly the two ShouldServe cases per bucket, 4/8 = 0.5 pool-wide
+    /// coverage, strictly above both 0.25s.
+    #[test]
+    fn select_mode_picks_combined_when_it_covers_strictly_more() {
+        use super::{select_mode, Bucket};
+        let mk_bucket = |bucket: Bucket| {
+            vec![
+                case(0.9, bucket, Some(0.2), Cell::ShouldServe),
+                case(0.2, bucket, Some(0.9), Cell::ShouldServe),
+                case(0.4, bucket, Some(0.4), Cell::ShouldAbstain),
+                case(0.1, bucket, Some(0.1), Cell::ShouldAbstain),
+            ]
+        };
+        let mut cases = mk_bucket(Bucket::Single);
+        cases.extend(mk_bucket(Bucket::Multi));
+
+        let sel = select_mode(
+            &cases, 0.0, 5, /*ac_single*/ 0.65, /*ac_multi*/ 0.65, true, true,
+        );
+        assert!(
+            matches!(sel.mode, glossa::gate::config::VerifyMode::Combined),
+            "expected Combined, got a mode with lower or equal coverage"
+        );
+        let cs = sel.combined_single.expect("single bucket must calibrate");
+        let cm = sel.combined_multi.expect("multi bucket must calibrate");
+        assert!((cs.mean_ac - 0.4).abs() < 1e-4);
+        assert!((cs.mean_nli - 0.4).abs() < 1e-4);
+        assert!((cm.mean_ac - 0.4).abs() < 1e-4);
+        // The swept z-threshold must sit strictly between the abstain z (0.0) and the serve z
+        // (≈0.9733) — i.e. it actually separates the two cells rather than defaulting to a
+        // sentinel.
+        assert!(cs.threshold > 0.0 && cs.threshold < 0.9733);
+    }
+
+    /// `write_threshold` must persist `[verify.combined.<bucket>]` with all five calibrated keys
+    /// when `combined` won the selection, alongside the usual `[verify.ac.threshold]` and
+    /// `mode = "combined"` — this is the CZ-2 half of the runtime contract CZ-1 already reads.
+    #[test]
+    fn write_threshold_writes_combined_block_when_combined_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        let stats = glossa::gate::config::CombinedStats {
+            mean_ac: 0.4,
+            std_ac: 0.308,
+            mean_nli: 0.4,
+            std_nli: 0.308,
+            threshold: 0.486,
+        };
+        let sel = super::ModeSelection {
+            mode: glossa::gate::config::VerifyMode::Combined,
+            ac_single: 0.65,
+            ac_multi: 0.65,
+            nli_single: Some(0.65),
+            nli_multi: Some(0.65),
+            combined_single: Some(stats),
+            combined_multi: Some(stats),
+        };
+        super::write_threshold(&glossa, &sel, "runZ", None, 0.5, 0.0, 5).unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("mode = \"combined\""));
+        assert!(o.contains("[verify.combined.single]"));
+        assert!(o.contains("[verify.combined.multi]"));
+        assert!(o.contains("mean_ac = 0.4"));
+        assert!(o.contains("std_ac = 0.308"));
+        assert!(o.contains("mean_nli = 0.4"));
+        assert!(o.contains("std_nli = 0.308"));
+        assert!(o.contains("threshold = 0.486"));
     }
 }
