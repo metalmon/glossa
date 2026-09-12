@@ -450,7 +450,9 @@ mod tests {
     /// which must win even though the FIRST sample was `wrong`.
     #[test]
     fn judge_samples_n_times_and_returns_the_majority_verdict() {
-        let _g = JUDGE_VOTES_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = JUDGE_VOTES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
