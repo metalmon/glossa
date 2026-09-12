@@ -2084,24 +2084,25 @@ fn main() -> anyhow::Result<()> {
                     &glossa::graph::ontology::Ontology::load_or_default(&rr.state_base),
                 );
                 let stale = glossa::tools::StaleChecker::new(rr.roots.clone());
-                println!(
-                    "{}",
-                    glossa::tools::glossary(
-                        &idx,
-                        &g,
-                        &query,
-                        &spec,
-                        &trace,
-                        as_of.as_deref(),
-                        Some(&stale),
-                        scope.as_deref(),
-                    )
+                // `glossary_with_query_counted` returns the rendered body AND the count of entity
+                // matches actually shown in it (post `--as-of`/`--scope` filtering) — using that
+                // count (rather than a separate unfiltered `resolve()`) means the summary can never
+                // overstate what's above it when either flag narrows the result. The rendered body
+                // itself is shared verbatim with the MCP `glossary` tool and stays untouched here —
+                // it feeds an agent reader directly, so its content/formatting isn't part of the CLI
+                // output contract.
+                let (body, matches) = glossa::tools::glossary_with_query_counted(
+                    &idx,
+                    &g,
+                    &query,
+                    None,
+                    &spec,
+                    &trace,
+                    as_of.as_deref(),
+                    Some(&stale),
+                    scope.as_deref(),
                 );
-                // Headline count only — computed independently of the rendered body (which is
-                // shared with the MCP `glossary` tool and stays untouched: it feeds an agent
-                // reader directly, so its content/formatting isn't touched by the CLI output
-                // contract). `resolve` is cheap (id lookup) so a second call here is fine.
-                let matches = g.resolve(&query).map(|ids| ids.len()).unwrap_or(0);
+                println!("{body}");
                 glossa::cli_fmt::summary(&[("matches", matches.to_string())]);
                 Ok(())
             }

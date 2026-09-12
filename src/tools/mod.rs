@@ -866,18 +866,40 @@ pub fn glossary_with_query(
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
 ) -> String {
+    glossary_with_query_counted(idx, g, name, query, spec, trace, as_of, stale, scope).0
+}
+
+/// Same as [`glossary_with_query`], but also returns how many entity matches actually survived the
+/// `as_of`/`scope` filtering and were rendered (the same `visible` set the body is built from) — the
+/// CLI's `graph glossary` summary count needs THIS number, not an independent unfiltered `resolve()`
+/// re-query, which would overstate the count whenever `--as-of`/`--scope` narrows what's shown.
+#[allow(clippy::too_many_arguments)]
+pub fn glossary_with_query_counted(
+    idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    name: &str,
+    query: Option<&str>,
+    spec: &ChainSpec,
+    trace: &TraceLog,
+    as_of: Option<&str>,
+    stale: Option<&StaleChecker>,
+    scope: Option<&str>,
+) -> (String, usize) {
     // Log the FULL rendered body (what the reader actually sees), not just an id count — otherwise a
     // trace is a black box and a mislabeled/mis-grounded chain terminal is invisible. Bodies are
     // already bounded by the entry/depth caps inside. Wrapper captures every return path of _inner.
-    let body = glossary_with_query_inner(idx, g, name, query, spec, as_of, stale, scope);
+    let (body, shown) = glossary_with_query_inner(idx, g, name, query, spec, as_of, stale, scope);
     trace.log(
         "glossary",
         json!({ "name": name, "query": query }),
         json!({ "body": body }),
     );
-    body
+    (body, shown)
 }
 
+/// Returns `(rendered body, count of entity matches actually shown)` — the count is the same
+/// `visible` set (post `as_of`/`scope` filtering) the body renders, never a wider or independent
+/// query, so a caller's headline count can never drift from what's printed above it.
 #[allow(clippy::too_many_arguments)]
 fn glossary_with_query_inner(
     idx: &DocIndex,
@@ -888,22 +910,22 @@ fn glossary_with_query_inner(
     as_of: Option<&str>,
     stale: Option<&StaleChecker>,
     scope: Option<&str>,
-) -> String {
+) -> (String, usize) {
     let at = match as_of
         .map(crate::graph::temporal::normalize_point)
         .transpose()
     {
         Ok(a) => a,
-        Err(e) => return format!("as_of error: {e}"),
+        Err(e) => return (format!("as_of error: {e}"), 0),
     };
     let scope_glob = match compile_scope(scope) {
         Ok(s) => s,
-        Err(e) => return e,
+        Err(e) => return (e, 0),
     };
     match g.resolve(name) {
         Ok(ids) => {
             if ids.is_empty() {
-                return "(no matches)".to_string();
+                return ("(no matches)".to_string(), 0);
             }
             // A very common entity can be an alias on many facts; rendering each fact's full spine
             // chain floods the reader's context (a hub entity ballooned to hundreds of lines). Cap
@@ -918,7 +940,8 @@ fn glossary_with_query_inner(
                         && in_scope(scope_glob.as_ref(), owning_doc(g, id).as_deref())
                 })
                 .collect();
-            let truncated = visible.len().saturating_sub(GLOSSARY_MAX_ENTRIES);
+            let visible_len = visible.len();
+            let truncated = visible_len.saturating_sub(GLOSSARY_MAX_ENTRIES);
             let mut lines: Vec<String> = visible
                 .into_iter()
                 .take(GLOSSARY_MAX_ENTRIES)
@@ -1027,7 +1050,7 @@ fn glossary_with_query_inner(
                 })
                 .collect();
             if lines.is_empty() {
-                "(no matches)".to_string()
+                ("(no matches)".to_string(), 0)
             } else {
                 if truncated > 0 {
                     lines.push(format!(
@@ -1074,10 +1097,10 @@ fn glossary_with_query_inner(
                         lines.extend(extra);
                     }
                 }
-                lines.join("\n")
+                (lines.join("\n"), visible_len)
             }
         }
-        Err(e) => format!("glossary error: {e}"),
+        Err(e) => (format!("glossary error: {e}"), 0),
     }
 }
 

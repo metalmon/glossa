@@ -1,6 +1,18 @@
 use assert_cmd::Command;
+use glossa::graph::store::{Edge, GraphStore, Node, Provenance};
 use predicates::str::contains;
 use std::fs;
+
+fn prov(source_path: &str) -> Provenance {
+    Provenance {
+        source_path: source_path.into(),
+        range: None,
+        file_sig: None,
+        origin: "agent".into(),
+        confidence: 0.9,
+        created_at: 1,
+    }
+}
 
 #[test]
 fn graph_stats_and_neighbors_after_index() {
@@ -107,4 +119,99 @@ fn graph_doctor_ends_with_summary_block() {
     );
     assert!(s.contains("relinkable:"), "summary carries relinkable:\n{s}");
     assert!(s.contains("ambiguous:"), "summary carries ambiguous:\n{s}");
+}
+
+/// `graph glossary`'s trailing `matches:` count must reflect the SAME filtered set the body
+/// renders — not an independent unfiltered re-query. Regression for a bug where `--scope`
+/// narrowed what's printed but the summary still counted the unfiltered total. Fixture mirrors
+/// the `tools::mod` unit test `glossary_scope_narrows_grounded_entries_to_owning_document`: two
+/// `Fact` nodes sharing one label, each grounded (MENTIONS) to a different document's section, so
+/// an unscoped lookup surfaces both and a `--scope` to one document surfaces only its own.
+#[test]
+fn graph_glossary_summary_matches_reflects_scope_filtered_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let g = GraphStore::open(dir.path()).unwrap();
+    g.put_node(&Node {
+        id: "sec:docA".into(),
+        node_type: "Section".into(),
+        label: "Heading A".into(),
+        aliases: vec![],
+        prov: prov("docA.md"),
+    })
+    .unwrap();
+    g.put_node(&Node {
+        id: "sec:docB".into(),
+        node_type: "Section".into(),
+        label: "Heading B".into(),
+        aliases: vec![],
+        prov: prov("docB.md"),
+    })
+    .unwrap();
+    g.put_node(&Node {
+        id: "fact:a".into(),
+        node_type: "Fact".into(),
+        label: "Shared term".into(),
+        aliases: vec![],
+        prov: prov("docA.md"),
+    })
+    .unwrap();
+    g.put_node(&Node {
+        id: "fact:b".into(),
+        node_type: "Fact".into(),
+        label: "Shared term".into(),
+        aliases: vec![],
+        prov: prov("docB.md"),
+    })
+    .unwrap();
+    g.put_edge(&Edge {
+        from: "fact:a".into(),
+        to: "sec:docA".into(),
+        edge_type: "MENTIONS".into(),
+        prov: prov("docA.md"),
+    })
+    .unwrap();
+    g.put_edge(&Edge {
+        from: "fact:b".into(),
+        to: "sec:docB".into(),
+        edge_type: "MENTIONS".into(),
+        prov: prov("docB.md"),
+    })
+    .unwrap();
+
+    // Unscoped: both facts are rendered — the summary's `matches:` must count both.
+    let out = Command::cargo_bin("kb")
+        .unwrap()
+        .args(["graph", "glossary", "Shared term", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("fact:a") && s.contains("fact:b"), "{s}");
+    assert!(s.contains("matches: 2"), "unscoped summary must count both shown matches:\n{s}");
+
+    // `--scope docA.md`: only `fact:a` is rendered — the summary's `matches:` must drop to 1,
+    // matching what's actually printed above it, not the unfiltered `resolve()` total of 2.
+    let out = Command::cargo_bin("kb")
+        .unwrap()
+        .args([
+            "graph",
+            "glossary",
+            "Shared term",
+            dir.path().to_str().unwrap(),
+            "--scope",
+            "docA.md",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("fact:a") && !s.contains("fact:b"), "{s}");
+    assert!(
+        s.contains("matches: 1"),
+        "scoped summary must match the filtered/shown count, not the unfiltered resolve():\n{s}"
+    );
 }
