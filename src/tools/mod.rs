@@ -442,19 +442,24 @@ pub fn read(
         // a normal chunk read can't find that, so resolve the trailing `#handle` to its node and
         // read that node (its grounded chunk) instead of failing. A numeric `#n` is a real page and
         // is left to the document read below.
-        if !page_image {
-            if let Some((_, suffix)) = path.rsplit_once('#') {
-                let numeric = !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit());
-                if !numeric {
-                    if let Some(node) = resolve_node_handle(g, suffix) {
-                        if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
-                            trace.log(
-                                "read",
-                                json!({ "node_via_hash": path }),
-                                json!({ "node": node.id }),
-                            );
-                            return read_node(idx, g, node);
+        if let Some((_, suffix)) = path.rsplit_once('#') {
+            let numeric = !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit());
+            if !numeric {
+                if let Some(node) = resolve_node_handle(g, suffix) {
+                    if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
+                        // Mirror the raw-node-id path above: a node render has no page image.
+                        if page_image {
+                            return ReadOut {
+                                text: format!("page_image is only supported for PDF (got {path})"),
+                                images: Vec::new(),
+                            };
                         }
+                        trace.log(
+                            "read",
+                            json!({ "node_via_hash": path }),
+                            json!({ "node": node.id }),
+                        );
+                        return read_node(idx, g, node);
                     }
                 }
             }
@@ -2618,15 +2623,29 @@ mod tests {
     #[test]
     fn read_leaves_numeric_page_suffix_to_document() {
         let (_d, i) = idx();
-        let (_gd, g) = reasoning_graph();
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        // A node whose id ends in a digit-only tail: a bare "#3" WOULD suffix-match ":3" if the
+        // numeric guard were absent, so this fixture makes the guard load-bearing (the test would
+        // fail if the guard were deleted, instead of passing vacuously).
+        g.put_node(&node("res:3", "Resolution", "Numeric tail node"))
+            .unwrap();
         let t = TraceLog::disabled();
         // whatever.pdf doesn't exist in this corpus — a numeric #3 must be treated as a page
-        // anchor on the (missing) document, never hijacked into the res:set node render.
+        // anchor on the (missing) document, never hijacked into the res:3 node render.
         let out = read(_d.path(), &i, Some(&g), "whatever.pdf#3", 1, false, &t);
         assert!(
-            !out.text.contains("Change respTimeout"),
+            !out.text.contains("Numeric tail node"),
             "numeric #n must not hijack a node: {}",
             out.text
+        );
+        // The SAME node is reachable by its non-numeric handle — proving the miss above is the
+        // numeric guard, not a resolution failure.
+        let via_handle = read(_d.path(), &i, Some(&g), "whatever.pdf#res:3", 1, false, &t);
+        assert!(
+            via_handle.text.contains("Numeric tail node"),
+            "a non-numeric handle to the same node must resolve: {}",
+            via_handle.text
         );
     }
 
