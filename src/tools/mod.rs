@@ -2562,6 +2562,97 @@ mod tests {
     }
 
     #[test]
+    fn resolve_node_handle_exact_and_unique_suffix() {
+        let (_gd, g) = reasoning_graph();
+        // exact id
+        let exact = resolve_node_handle(&g, "res:set").expect("exact id resolves");
+        assert_eq!(exact.id, "res:set");
+        // bare suffix with the "<abbrev>:" prefix dropped, unambiguous
+        let by_suffix = resolve_node_handle(&g, "set").expect("unique suffix resolves");
+        assert_eq!(by_suffix.id, "res:set");
+    }
+
+    #[test]
+    fn resolve_node_handle_ambiguous_suffix_is_none() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        g.put_node(&node("res:dup", "Resolution", "A resolution"))
+            .unwrap();
+        g.put_node(&node("sym:dup", "Symptom", "A symptom"))
+            .unwrap();
+        assert!(resolve_node_handle(&g, "dup").is_none());
+    }
+
+    #[test]
+    fn resolve_node_handle_no_match_and_empty_are_none() {
+        let (_gd, g) = reasoning_graph();
+        assert!(resolve_node_handle(&g, "nope").is_none());
+        assert!(resolve_node_handle(&g, "").is_none());
+    }
+
+    #[test]
+    fn read_resolves_node_handle_appended_to_path() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        let direct = read(_d.path(), &i, Some(&g), "res:set", 1, false, &t);
+        assert!(direct.text.contains("res:set"), "{}", direct.text);
+        let via_handle = read(
+            _d.path(),
+            &i,
+            Some(&g),
+            "whatever.pdf#res:set",
+            1,
+            false,
+            &t,
+        );
+        assert!(
+            via_handle.text.contains("res:set") && via_handle.text.contains("Change respTimeout"),
+            "{}",
+            via_handle.text
+        );
+        // the #handle route and the direct node id route land on the exact same render
+        assert_eq!(direct.text, via_handle.text);
+    }
+
+    #[test]
+    fn read_leaves_numeric_page_suffix_to_document() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        let t = TraceLog::disabled();
+        // whatever.pdf doesn't exist in this corpus — a numeric #3 must be treated as a page
+        // anchor on the (missing) document, never hijacked into the res:set node render.
+        let out = read(_d.path(), &i, Some(&g), "whatever.pdf#3", 1, false, &t);
+        assert!(
+            !out.text.contains("Change respTimeout"),
+            "numeric #n must not hijack a node: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn read_does_not_hijack_structural_node_suffix() {
+        let (_d, i) = idx();
+        let (_gd, g) = reasoning_graph();
+        g.put_node(&node("term:foo", "Term", "Some term")).unwrap();
+        let t = TraceLog::disabled();
+        let out = read(
+            _d.path(),
+            &i,
+            Some(&g),
+            "whatever.pdf#term:foo",
+            1,
+            false,
+            &t,
+        );
+        assert!(
+            !out.text.contains("Some term"),
+            "a structural node (Term) must not be hijacked via #handle: {}",
+            out.text
+        );
+    }
+
+    #[test]
     fn glossary_renders_full_chain_in_one_call() {
         let (_d, i) = idx();
         let (_gd, g) = reasoning_graph();
