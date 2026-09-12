@@ -191,7 +191,10 @@ needs_graph="yes"
     // `needs_graph` must appear exactly once — in the trailing summary — not also as a
     // byte-identical top-of-output body line above the per-case dump.
     assert_eq!(
-        lines.iter().filter(|l| l.starts_with("needs_graph:")).count(),
+        lines
+            .iter()
+            .filter(|l| l.starts_with("needs_graph:"))
+            .count(),
         1,
         "needs_graph must appear exactly once (bottom summary only):\n{stdout}"
     );
