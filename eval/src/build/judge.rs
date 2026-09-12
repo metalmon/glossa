@@ -217,11 +217,14 @@ pub fn run_judge(
 
         let (facts, truncated) = cap_facts(facts, max_facts);
         if truncated {
-            println!(
+            // `run_judge` executes under a live `pb` (the judge-stage bar in `build/mod.rs`) — a
+            // bare `println!` here would tear the bar mid-render, so route through `pb.println`
+            // like every other in-loop notice in this pipeline.
+            pb.println(format!(
                 "judge: group '{}' has more than --bridge-max-facts {max_facts} fact(s); \
                  judging only the first {max_facts}",
                 group.entity
-            );
+            ));
         }
 
         let doc_by_id: HashMap<&str, &str> = facts

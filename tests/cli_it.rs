@@ -267,6 +267,46 @@ fn index_force_folds_generalize_counts_into_the_one_final_summary() {
 }
 
 #[test]
+fn read_and_cat_emit_raw_content_only_no_summary_block() {
+    // Carve-out (CLI output contract): `read`/`cat` are content dumps, not reporting commands —
+    // their stdout must be EXACTLY the document text (pipe-safe to an agent/grep), never a
+    // trailing `cli_fmt::summary` block. Content is colon-free so a false-positive summary-shaped
+    // line can't hide inside the document text itself.
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("doc.md");
+    let content = "# Title\nfirst section body\n\nsecond section body\n";
+    fs::write(&f, content).unwrap();
+
+    for sub in ["read", "cat"] {
+        let assert = Command::cargo_bin("kb")
+            .unwrap()
+            .args([sub, f.to_str().unwrap()])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        assert_eq!(
+            stdout.trim_end(),
+            content.trim_end(),
+            "`kb {sub}` stdout must be exactly the document text, no summary appended:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains('\u{2500}'),
+            "`kb {sub}` stdout must not contain the summary separator rule:\n{stdout}"
+        );
+        let last_line = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        assert!(
+            !last_line.contains(": "),
+            "`kb {sub}` stdout must not end with a `label: value` summary line: {:?}",
+            last_line
+        );
+    }
+}
+
+#[test]
 fn zero_hit_search_preserves_last_search() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.md"), b"# Title\nhello world here\n").unwrap();
