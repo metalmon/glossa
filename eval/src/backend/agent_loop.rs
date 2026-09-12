@@ -605,11 +605,23 @@ mod tests {
 
     /// An empty no-tool turn must not be accepted as the final answer: it is nudged and the loop
     /// continues, but only up to MAX_EMPTY_RETRIES so a stalled model can't spin forever.
+    ///
+    /// Call-count note: an empty/no-tool reply is ALSO degenerate to `resample.rs`'s own
+    /// `call_with_resample` (see `is_degenerate`), which already retries it internally — up to
+    /// `GEN_LOOP_RETRIES` (2) extra attempts — BEFORE `call_with_context_retry` ever returns to
+    /// this loop's empty-guard. So one OUTER round that stays empty end-to-end costs 3 raw
+    /// `transport.call` invocations (1 initial + 2 inner resamples), not 1. The first scenario
+    /// below relies on exactly that: its 2 blank replies are absorbed by the INNER resample within
+    /// round 1, so "REAL ANSWER" (the 3rd reply) is what round 1 returns — the outer nudge/continue
+    /// path is never even exercised there. The second scenario exercises the outer nudge path
+    /// itself, so it needs enough replies to fill 3 full inner-resample rounds.
     #[test]
     fn empty_no_tool_turn_is_nudged_not_accepted_until_budget() {
         let ep = test_endpoint();
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
-        // Two empty turns get nudged, then a real answer is accepted (not the blanks).
+        // Two empty turns are absorbed by resample.rs's own inner degenerate-resample within a
+        // SINGLE outer round (see the call-count note above), so the outer empty-guard never fires
+        // here — round 1 already returns "REAL ANSWER" once the inner resample budget lands on it.
         let transport = MockTransport::new(vec![
             reply_text(""),
             reply_text("  "),
@@ -631,17 +643,16 @@ mod tests {
         assert_eq!(
             transport.calls.borrow().len(),
             3,
-            "two empties nudged, third accepted"
+            "both blanks absorbed by the inner resample within round 1; 3rd reply accepted"
         );
 
         // A persistently-empty reader is bounded: after MAX_EMPTY_RETRIES the blank is accepted
-        // rather than spinning the whole round budget.
-        let transport2 = MockTransport::new(vec![
-            reply_text(""),
-            reply_text(""),
-            reply_text(""),
-            reply_text(""),
-        ]);
+        // rather than spinning the whole round budget. With MAX_EMPTY_RETRIES=2, that's 2 OUTER
+        // rounds nudged + 1 OUTER round accepted = 3 outer rounds; each outer round that stays
+        // empty throughout costs 3 raw transport calls (see the call-count note above), so a
+        // persistently-empty transport needs 3*3=9 scripted replies to reach the accept path
+        // without exhausting its script.
+        let transport2 = MockTransport::new(vec![reply_text(""); 9]);
         let out2 = run_agent_loop(
             &transport2,
             &ep,
@@ -657,8 +668,8 @@ mod tests {
         assert_eq!(out2, "");
         assert_eq!(
             transport2.calls.borrow().len(),
-            3,
-            "2 nudged retries + 1 accepted empty = 3 calls"
+            9,
+            "3 outer rounds (2 nudged + 1 accepted) x 3 inner transport calls/round = 9 calls"
         );
     }
 
