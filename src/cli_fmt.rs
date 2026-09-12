@@ -256,6 +256,40 @@ pub fn nth_record(tsv: &str, n: usize) -> Option<(String, String)> {
     Some((path, loc))
 }
 
+/// The canonical CLI summary block as a String (pure, so it is unit-testable): a dim separator
+/// rule, then `label: value` pairs with the values emphasized. One line when it fits (<= 60 visible
+/// chars), else one pair per line. Empty `pairs` -> empty string. The ONE place the summary format
+/// lives — `kb` and `kbx` both call it, so a format change here changes both.
+pub fn summary_string(pairs: &[(&str, String)]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let visible: usize = pairs.iter().map(|(k, v)| k.len() + 2 + v.len()).sum::<usize>()
+        + 2 * pairs.len().saturating_sub(1);
+    let rule = dim(&"─".repeat(visible.clamp(8, 60)));
+    let rendered: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}: {}", bold(v))).collect();
+    let body = if visible <= 60 { rendered.join("  ") } else { rendered.join("\n") };
+    format!("{rule}\n{body}")
+}
+
+/// Print the canonical summary block to STDOUT. Call LAST in a reporting command — nothing prints
+/// on stdout after it. No-op for empty `pairs`.
+pub fn summary(pairs: &[(&str, String)]) {
+    let s = summary_string(pairs);
+    if !s.is_empty() {
+        println!("{s}");
+    }
+}
+
+/// A suggestion/banner to the user — STDERR, so it never pollutes the piped stdout result.
+pub fn hint(msg: &str) {
+    eprintln!("{}", dim(msg));
+}
+/// A neutral status line — STDERR.
+pub fn note(msg: &str) {
+    eprintln!("{msg}");
+}
+
 /// Human-readable rendering of a graph node with its outgoing edges.
 pub fn render_node(n: &Node, edges: &[Edge]) -> String {
     let mut out = String::new();
@@ -450,6 +484,42 @@ mod tests {
     #[test]
     fn render_search_pretty_empty_is_no_results() {
         assert_eq!(render_search_pretty(&[], false, ""), "no results");
+    }
+
+    #[test]
+    fn summary_string_one_line_when_short() {
+        let s = summary_string(&[("matches", "42".into()), ("shown", "10".into())]);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 2, "separator + one pair line:\n{s}");
+        assert!(
+            lines[0]
+                .chars()
+                .all(|c| c == '─' || c == '\u{1b}' || c.is_ascii()),
+            "sep is a rule"
+        );
+        assert!(lines[1].contains("matches: 42") && lines[1].contains("shown: 10"));
+    }
+
+    #[test]
+    fn summary_string_multiline_when_long() {
+        let pairs = [
+            ("alpha", "1".into()),
+            ("bravo", "2".into()),
+            ("charlie", "3".into()),
+            ("delta", "4".into()),
+            ("echo", "5".into()),
+            ("foxtrot", "6".into()),
+        ];
+        let s = summary_string(&pairs);
+        assert!(
+            s.lines().count() >= 1 + pairs.len(),
+            "one pair per line when long:\n{s}"
+        );
+    }
+
+    #[test]
+    fn summary_string_empty_is_empty() {
+        assert_eq!(summary_string(&[]), "");
     }
 
     #[test]
