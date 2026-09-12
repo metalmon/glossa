@@ -56,8 +56,9 @@ pub enum Probe {
 /// Judge [`NliFacts`] into a `(ready, verdict_line)` pair. READY only when every gate passes, in
 /// this order (the returned line names the FIRST one that fails): mode isn't `ac` -> feature `nli`
 /// is built -> scorer is `"in_process"` -> `model_dir` is configured -> `model_dir` has both model
-/// files -> `ORT_DYLIB_PATH` is set and exists -> a scorer actually loaded -> the sanity probe RAN
-/// without error. The probe's internal support-vs-contra comparison is advisory only and never
+/// files -> a scorer actually loaded -> the sanity probe RAN without error. (`ORT_DYLIB_PATH` is
+/// NOT a gate — see the note at the `scorer_built` check.) The probe's support-vs-contra comparison
+/// is advisory only and never
 /// blocks READY (see [`Probe`]'s doc comment for why: the probe is English text, the target model
 /// may not be). Pure — no IO, no panics; safe to call with any combination of facts (including ones
 /// that couldn't co-occur in practice, e.g. `probe: Probe::Ran { .. }` with `scorer_built: false`).
@@ -102,16 +103,16 @@ pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
                 .to_string(),
         );
     }
-    if !f.dylib_set {
-        return (
-            false,
-            "not ready: ORT_DYLIB_PATH not set (or the path it names doesn't exist)".to_string(),
-        );
-    }
+    // NB: `ORT_DYLIB_PATH` is NOT gated here. A `download-binaries` build links the ONNX Runtime
+    // into the binary, so the scorer loads with the var unset; and a `load-dynamic` build that
+    // genuinely can't find the runtime simply fails `InProcessNli::load` -> `scorer_built == false`,
+    // caught below. `dylib_set` stays an INFORMATIONAL line in the printed report, never a gate.
     if !f.scorer_built {
         return (
             false,
-            "not ready: scorer failed to load (see the load-failure log line above)".to_string(),
+            "not ready: scorer failed to load (ORT runtime missing? see the load-failure log line \
+             above; a load-dynamic build needs ORT_DYLIB_PATH)"
+                .to_string(),
         );
     }
     match &f.probe {
@@ -409,12 +410,15 @@ mod tests {
     }
 
     #[test]
-    fn dylib_unset_blocks() {
+    fn dylib_unset_does_not_block_when_scorer_loaded() {
+        // A download-binaries build links the runtime in, so the scorer loads with ORT_DYLIB_PATH
+        // unset. `check` must NOT report not-ready on the env var alone when the scorer actually
+        // loaded and the probe ran — that was a stale load-dynamic-era assumption.
         let mut f = ready_facts();
         f.dylib_set = false;
         let (ready, line) = nli_verdict(&f);
-        assert!(!ready);
-        assert!(line.contains("ORT_DYLIB_PATH"), "line was: {line}");
+        assert!(ready, "dylib_set=false must not block a loaded+running scorer; line: {line}");
+        assert_eq!(line, "READY");
     }
 
     #[test]

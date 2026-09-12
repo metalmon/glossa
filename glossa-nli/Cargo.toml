@@ -18,14 +18,23 @@ nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has so
 anyhow = "1"
 # Pinned via context7 (pykeio/ort docs, crates.io newest_version) 2026-09: 2.0.0-rc.13, EXACT pin
 # on the pre-1.0 rc. `default-features = false` drops `ndarray`/ONNX-Runtime-version defaults we
-# don't need yet; `std` is required for filesystem-backed session loading (Task 2 loads
-# `model.onnx` from a local dir). `load-dynamic` (NOT `download-binaries`): the ONNX Runtime is
-# loaded at RUNTIME from a dylib (path via `ORT_DYLIB_PATH`), so the build does NOT compile
-# ort-sys's binary downloader — which fails on `ureq 3.4.1` (`ort-sys-rc.13`'s downloader was
-# written against an earlier ureq 3.x: `unresolved import ureq::tls` / `no method tls_config`).
-# Runtime loading also matches the spec's offline/CI story (§2.6). Real inference (Task 2 smoke +
-# Task 6) sets `ORT_DYLIB_PATH`; that path is deferred with the model artifact.
-ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic"] }
+# don't need yet; `std` is required for filesystem-backed session loading (loads `model.onnx` from a
+# local dir). `download-binaries`: ort-sys fetches the ONNX Runtime at BUILD time and places it
+# beside the binary, so a CPU user just runs the binary — no `ORT_DYLIB_PATH`, no dll to source (the
+# self-contained UX the spec wants). `load-dynamic` (runtime dylib via `ORT_DYLIB_PATH`) is the
+# offline / bring-your-own-runtime fallback, not the default.
+#
+# `tls-rustls` is REQUIRED with `download-binaries`: the downloader fetches over HTTPS (ureq), and
+# with `default-features = false` no TLS is otherwise configured, so ort-sys errors "a TLS feature
+# must be configured" and ureq's `tls` module stays cfg'd out (`unresolved import ureq::tls`).
+# rustls (ring provider) is pure-Rust: no system OpenSSL/schannel dep, so the build stays portable.
+# (This, NOT the ureq version, was the actual Plan-2 build break; it was misdiagnosed there.)
+#
+# ureq is ALSO pinned to 3.3.0 in Cargo.lock (belt-and-suspenders): ort-sys rc.13 (2026-07-28) was
+# written against ureq <= 3.3.0, and ureq 3.4.x (2026-08/09) renamed the tls builder API the
+# downloader calls (`tls_config` / `TlsConfig`). The pin (Cargo.lock; kb-eval's `ureq = "2"` is a
+# different major, unaffected) keeps that API stable. Drop it once ort-sys supports ureq 3.4.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 # Pinned via context7 (huggingface/tokenizers docs.rs Cargo.toml) + crates.io newest_version
 # 2026-09: 0.23.2. `default-features = false` drops `progressbar` (indicatif) and `http` (hf-hub
 # download support, not needed — Task 2 loads `tokenizer.json` from the local model_dir); `onig`
