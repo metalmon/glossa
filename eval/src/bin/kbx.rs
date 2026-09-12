@@ -1246,12 +1246,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             all_results.len()
         );
     } else {
-        println!("{}", summary_text(&all_results));
+        // Detail first (confusion matrix, then the secondary lexical EM/F1 numbers), headline
+        // last: `summary_text` now ends in the shared `cli_fmt::summary_string` block, so it must
+        // print AFTER the other detail sections to keep "significant numbers last" true for the
+        // whole `kbx eval` stdout, not just within `summary_text` itself.
         let conf = confusion_text(&all_results);
         if !conf.is_empty() {
             println!("{conf}");
         }
         println!("{}", lexical_text(&all_results));
+        println!("{}", summary_text(&all_results));
     }
 
     // `--answers`: flat question->answer CSV deliverable. A relative path lands under runs/<tag>/

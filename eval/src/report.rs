@@ -6,6 +6,7 @@
 
 use crate::judge::Verdict;
 use anyhow::Context;
+use glossa::cli_fmt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -248,6 +249,12 @@ pub fn confusion_text(results: &[CaseResult]) -> String {
 /// rendered as plain text. Shared by `write_run` (the report.md primary section) and the CLI's
 /// post-run stdout print, so the two never drift apart. EM/F1 are NOT included here; see
 /// `lexical_text` for those (demoted to a secondary, clearly-labelled block).
+///
+/// Detail-first, numbers-last (the shared `cli_fmt` output contract): the per-hop-type breakdown
+/// prints as DETAIL above, then the headline (judge quality, correct/partial/wrong/unscored/total,
+/// errored) renders through `cli_fmt::summary_string` as the FINAL block — the same separator +
+/// `label: value` format `kb` uses, so a `kb`/`kbx` run looks like one tool. Only the rendering
+/// changed here; every value/percentage is computed exactly as before.
 pub fn summary_text(results: &[CaseResult]) -> String {
     let t = tally(results);
     let pct = |n: usize| -> f32 {
@@ -259,21 +266,29 @@ pub fn summary_text(results: &[CaseResult]) -> String {
     };
     let q = quality(results);
 
-    let mut s = format!(
-        "judge quality (graded): {q:.3}  (correct + 0.5*partial) / answered\n\ncorrect  {} ({:.1}%)\npartial  {} ({:.1}%)\nwrong {} ({:.1}%)\nunscored {} ({:.1}%)\ntotal {}\n",
-        t.correct, pct(t.correct), t.partial, pct(t.partial), t.wrong, pct(t.wrong), t.unscored, pct(t.unscored), t.total
-    );
-    // Surface endpoint-errored cases as their own line (never silently dropped): they are excluded
-    // from the graded-quality denominator above, so this makes the exclusion visible.
-    if t.errored > 0 {
-        s.push_str(&format!("errored (endpoint, excluded): {}\n", t.errored));
-    }
-    // Prominent per-hop-type breakdown right under the headline, so the multihop-vs-lexical gap is
-    // visible at a glance (the full table still lives in the "By question type" section below).
+    // Detail: prominent per-hop-type breakdown, so the multihop-vs-lexical gap is visible before the
+    // headline (the full table still lives in the "By question type" section below).
+    let mut s = String::new();
     let hop = hop_summary_line(results);
     if !hop.is_empty() {
         s.push_str(&hop);
+        s.push('\n');
     }
+
+    let mut pairs: Vec<(&str, String)> = vec![
+        ("judge quality (graded)", format!("{q:.3}")),
+        ("correct", format!("{} ({:.1}%)", t.correct, pct(t.correct))),
+        ("partial", format!("{} ({:.1}%)", t.partial, pct(t.partial))),
+        ("wrong", format!("{} ({:.1}%)", t.wrong, pct(t.wrong))),
+        ("unscored", format!("{} ({:.1}%)", t.unscored, pct(t.unscored))),
+        ("total", t.total.to_string()),
+    ];
+    // Surface endpoint-errored cases as their own pair (never silently dropped): they are excluded
+    // from the graded-quality denominator above, so this makes the exclusion visible in the headline.
+    if t.errored > 0 {
+        pairs.push(("errored (endpoint, excluded)", t.errored.to_string()));
+    }
+    s.push_str(&cli_fmt::summary_string(&pairs));
     s
 }
 
@@ -695,7 +710,7 @@ mod tests {
         let report = std::fs::read_to_string(&p).unwrap();
         assert!(report.contains("judge quality (graded): 0.500"));
         assert!(report.contains("## Judge quality (primary)"));
-        assert!(report.contains("correct  1") && report.contains("wrong 1"));
+        assert!(report.contains("correct: 1") && report.contains("wrong: 1"));
         assert!(report.contains("## By question type"));
         assert!(report.contains("### hop_type") && report.contains("### needs_graph"));
         assert!(report.contains("| lexical | 1 | 1.000 | 1 | 0 | 0 |"));
@@ -823,14 +838,35 @@ mod tests {
     }
 
     #[test]
-    fn summary_text_leads_with_graded_quality_and_reports_counts() {
+    fn summary_text_ends_with_graded_quality_block() {
         let s = summary_text(&quality_cases());
+
+        // Detail (the per-hop-type breakdown) prints ABOVE the final headline block.
+        let hop_pos = s.find("by hop_type").expect("hop breakdown present as detail");
+        let sep_pos = s.rfind('\u{2500}').expect("cli_fmt summary separator rule present");
+        assert!(
+            hop_pos < sep_pos,
+            "per-hop detail must precede the final summary block:\n{s}"
+        );
+
         assert!(s.contains("judge quality (graded): 0.500"));
-        // Headline quality line comes before the counts block.
-        assert!(s.find("judge quality").unwrap() < s.find("correct  1").unwrap());
-        assert!(s.contains("correct  1 (50.0%)"));
-        assert!(s.contains("wrong 1 (50.0%)"));
-        assert!(s.contains("total 2"));
+        assert!(s.contains("correct: 1 (50.0%)"));
+        assert!(s.contains("partial: 0 (0.0%)"));
+        assert!(s.contains("wrong: 1 (50.0%)"));
+        assert!(s.contains("total: 2"));
+
+        // The headline pairs render via the shared `cli_fmt::summary_string` format and are the
+        // LAST content in `summary_text` — nothing follows the block.
+        let quality_pos = s.find("judge quality (graded)").unwrap();
+        assert!(
+            sep_pos < quality_pos,
+            "separator rule immediately precedes the headline pairs"
+        );
+        assert!(
+            s.ends_with("total: 2"),
+            "headline block (ending in total) must be the last content:\n{s}"
+        );
+
         // EM/F1 are demoted out of the primary summary entirely.
         assert!(!s.contains("EM mean"));
         assert!(!s.contains("F1 mean"));
@@ -888,7 +924,7 @@ mod tests {
             "errored count must be visible in the summary: {s}"
         );
         // total still reports every case (errored included).
-        assert!(s.contains("total 3"));
+        assert!(s.contains("total: 3"));
     }
 
     #[test]
