@@ -367,12 +367,30 @@ pub fn run_agent_loop_capturing(
     // Novelty tracking for the unproductive-streak detector (see the doc comment above).
     let mut seen: HashSet<String> = HashSet::new();
     let mut unproductive: usize = 0;
+    // Bounded retries for an empty no-tool turn (see the empty-answer guard in the loop): a stalled
+    // endpoint/model that keeps returning blank text must not spin the whole `max_rounds` budget.
+    const MAX_EMPTY_RETRIES: usize = 2;
+    let mut empty_retries = 0usize;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
             call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
         if reply.tool_calls.is_empty() {
             let text = reply.text.clone().unwrap_or_default();
+            // An empty no-tool turn is never a valid final answer: resample already tried to
+            // regenerate it, and accepting it silently ships a blank answer (the mute-reader
+            // failure). Nudge for a real answer and continue, bounded by MAX_EMPTY_RETRIES so a
+            // stalled endpoint/model can't burn the whole round budget. Applies with or without a
+            // user_sim gate; once the budget is spent, fall through and accept the turn as before.
+            if text.trim().is_empty() && empty_retries < MAX_EMPTY_RETRIES {
+                empty_retries += 1;
+                transport.push_assistant_turn(&mut messages, &reply);
+                messages.push(json!({
+                    "role": "user",
+                    "content": "Your reply was empty. Give your final answer now as plain text, or call a tool if you still need to look something up."
+                }));
+                continue;
+            }
             match user_sim {
                 // No gate configured -> today's behavior EXACTLY: the first text-only turn is the
                 // final answer.
@@ -583,6 +601,76 @@ mod tests {
         let out =
             run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
         assert_eq!(out, "ANSWER: Bob");
+    }
+
+    /// An empty no-tool turn must not be accepted as the final answer: it is nudged and the loop
+    /// continues, but only up to MAX_EMPTY_RETRIES so a stalled model can't spin forever.
+    ///
+    /// Call-count note: an empty/no-tool reply is ALSO degenerate to `resample.rs`'s own
+    /// `call_with_resample` (see `is_degenerate`), which already retries it internally — up to
+    /// `GEN_LOOP_RETRIES` (2) extra attempts — BEFORE `call_with_context_retry` ever returns to
+    /// this loop's empty-guard. So one OUTER round that stays empty end-to-end costs 3 raw
+    /// `transport.call` invocations (1 initial + 2 inner resamples), not 1. The first scenario
+    /// below relies on exactly that: its 2 blank replies are absorbed by the INNER resample within
+    /// round 1, so "REAL ANSWER" (the 3rd reply) is what round 1 returns — the outer nudge/continue
+    /// path is never even exercised there. The second scenario exercises the outer nudge path
+    /// itself, so it needs enough replies to fill 3 full inner-resample rounds.
+    #[test]
+    fn empty_no_tool_turn_is_nudged_not_accepted_until_budget() {
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // Two empty turns are absorbed by resample.rs's own inner degenerate-resample within a
+        // SINGLE outer round (see the call-count note above), so the outer empty-guard never fires
+        // here — round 1 already returns "REAL ANSWER" once the inner resample budget lands on it.
+        let transport = MockTransport::new(vec![
+            reply_text(""),
+            reply_text("  "),
+            reply_text("REAL ANSWER"),
+        ]);
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            exec,
+            nudge,
+            6,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, "REAL ANSWER");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            3,
+            "both blanks absorbed by the inner resample within round 1; 3rd reply accepted"
+        );
+
+        // A persistently-empty reader is bounded: after MAX_EMPTY_RETRIES the blank is accepted
+        // rather than spinning the whole round budget. With MAX_EMPTY_RETRIES=2, that's 2 OUTER
+        // rounds nudged + 1 OUTER round accepted = 3 outer rounds; each outer round that stays
+        // empty throughout costs 3 raw transport calls (see the call-count note above), so a
+        // persistently-empty transport needs 3*3=9 scripted replies to reach the accept path
+        // without exhausting its script.
+        let transport2 = MockTransport::new(vec![reply_text(""); 9]);
+        let out2 = run_agent_loop(
+            &transport2,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"q"})],
+            None,
+            |_: &str, _: &Value| (String::new(), Vec::new()),
+            nudge,
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out2, "");
+        assert_eq!(
+            transport2.calls.borrow().len(),
+            9,
+            "3 outer rounds (2 nudged + 1 accepted) x 3 inner transport calls/round = 9 calls"
+        );
     }
 
     #[test]

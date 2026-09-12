@@ -9,7 +9,7 @@ use glossa::index::store::DocIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Verdict {
     Correct,
     Partial,
@@ -24,37 +24,39 @@ pub struct Judgement {
     pub raw: String,
 }
 
-/// Parse the LAST `VERDICT:` line in `reply` (case-insensitive), whatever precedes it becomes the
-/// `reason`. No `VERDICT:` line at all → `Unscored`. An unrecognized value after `VERDICT:` also
-/// falls back to `Unscored` (but still carries the raw reply so a caller can see what happened).
+/// Parse the LAST `VERDICT:` occurrence in `reply` (case-insensitive), whatever precedes it becomes
+/// the `reason`. The marker is matched ANYWHERE — not only at the start of a line — because models
+/// frequently inline it after the reason on the same line ("reason. VERDICT: wrong"); requiring a
+/// line start silently dropped those to `Unscored`. No `VERDICT:` at all → `Unscored`. An
+/// unrecognized value after `VERDICT:` also falls back to `Unscored` (raw reply is always carried).
 pub fn parse_verdict(reply: &str) -> Judgement {
-    let mut verdict = Verdict::Unscored;
-    for line in reply.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_lowercase();
-        if let Some(rest) = lower.strip_prefix("verdict:") {
-            verdict = match rest.trim() {
+    const MARKER: &str = "verdict:";
+    // ASCII-only lowercasing: `to_lowercase()` can change a char's byte length for some Unicode
+    // (e.g. İ U+0130 -> 2-char/3-byte), which would desync `pos` (an index into the lowercased
+    // string) from `reply`'s own byte offsets and panic on a non-char-boundary slice below.
+    // `to_ascii_lowercase()` is always 1:1 in byte length, and the marker itself is pure ASCII, so
+    // matching still works identically for every reply that actually contains "VERDICT:"/"verdict:".
+    let lower = reply.to_ascii_lowercase();
+    let (verdict, reason) = match lower.rfind(MARKER) {
+        Some(pos) => {
+            // The verdict word is the first alphabetic token after the marker (stops at the newline
+            // / punctuation / the `correct|partial|wrong` menu separators the prompt uses).
+            let after = &reply[pos + MARKER.len()..];
+            let token: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphabetic())
+                .flat_map(char::to_lowercase)
+                .collect();
+            let v = match token.as_str() {
                 "correct" => Verdict::Correct,
                 "partial" => Verdict::Partial,
                 "wrong" => Verdict::Wrong,
                 _ => Verdict::Unscored,
             };
+            (v, reply[..pos].trim().to_string())
         }
-    }
-    // Reason: everything before the first VERDICT: line, joined, trimmed. Falls back to the
-    // whole reply when there's no VERDICT: line to anchor on.
-    let cut = reply
-        .lines()
-        .position(|l| l.trim().to_lowercase().starts_with("verdict:"));
-    let reason = match cut {
-        Some(i) => reply
-            .lines()
-            .take(i)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        None => reply.trim().to_string(),
+        None => (Verdict::Unscored, reply.trim().to_string()),
     };
     Judgement {
         verdict,
@@ -166,12 +168,38 @@ fn build_user(
     }
 }
 
+/// Default number of independent samples `judge()` draws per case before taking the majority
+/// verdict (see `majority_verdict`). Voting is INTRINSIC to `judge()` — every caller (eval's
+/// `kbx.rs` and train's `gepa_graph.rs`) votes automatically; there is no per-call opt-out or
+/// per-call votes argument to forget. Override the ONE knob for a run via the `KB_EVAL_JUDGE_VOTES`
+/// env var (mirrors the existing `KB_EVAL_TEMP` override — see `Endpoint::resolve_temperature`);
+/// an unset or unparseable value falls back to this default.
+const DEFAULT_JUDGE_VOTES: usize = 5;
+
+/// Resolve how many times `judge()` samples the endpoint before taking the majority verdict:
+/// `KB_EVAL_JUDGE_VOTES` env var if set and it parses to a `usize`, else `DEFAULT_JUDGE_VOTES`.
+/// Always at least 1 (a caller setting `KB_EVAL_JUDGE_VOTES=0` still gets a single sample, not zero
+/// judge calls).
+fn resolve_judge_votes() -> usize {
+    std::env::var("KB_EVAL_JUDGE_VOTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_JUDGE_VOTES)
+        .max(1)
+}
+
 /// Judge one case: system = `judge_md` (the file-prompt), user = the fixed QUESTION/GOLD/ANSWER
 /// block. When `source` names corpus chunks and `idx` is supplied, their text is injected as an
 /// `EVIDENCE:` block between GOLD and ANSWER so a correct answer that EXCEEDS the terse gold is
 /// credited, not penalized (see `evidence_block`). When `source` is empty, `idx` is `None`, or no
 /// ref loads, the EVIDENCE block is omitted and the prompt is byte-identical to the gold-only form.
-/// Posts to `ep` via `chat_once` and parses the reply with `parse_verdict`.
+///
+/// The endpoint is sampled `resolve_judge_votes()` times (default `DEFAULT_JUDGE_VOTES`, always at
+/// least 1) with the SAME message, and the majority verdict across those samples is returned (see
+/// `majority_verdict`) — this tames the judge's run-to-run non-determinism (the model flips a
+/// borderline verdict between otherwise-identical calls even at temperature 0). Each individual
+/// sample still goes through `chat_once_resampled`, which separately guards against a degenerate
+/// (empty/truncated) single reply; voting is an orthogonal layer on top of that.
 #[allow(clippy::too_many_arguments)]
 pub fn judge(
     ep: &Endpoint,
@@ -201,10 +229,45 @@ pub fn judge(
         json!({ "role": "system", "content": judge_md }),
         json!({ "role": "user", "content": user }),
     ];
-    let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
-        .context("judge endpoint request failed")?;
-    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-    Ok(parse_verdict(content))
+    let votes = resolve_judge_votes();
+    let mut ballots = Vec::with_capacity(votes);
+    for _ in 0..votes {
+        let msg = crate::backend::openai::chat_once_resampled(ep, &messages)
+            .context("judge endpoint request failed")?;
+        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        ballots.push(parse_verdict(content));
+    }
+    Ok(majority_verdict(&ballots))
+}
+
+/// The majority `Judgement` over `ballots`: the verdict with the most votes wins; ties break by
+/// severity (`Wrong > Partial > Correct > Unscored`) so a split never silently favors a pass. The
+/// returned reason is that of the first ballot carrying the winning verdict. Empty input → `Unscored`.
+fn majority_verdict(ballots: &[Judgement]) -> Judgement {
+    use std::collections::HashMap;
+    if ballots.is_empty() {
+        return parse_verdict("");
+    }
+    let mut counts: HashMap<Verdict, usize> = HashMap::new();
+    for j in ballots {
+        *counts.entry(j.verdict).or_default() += 1;
+    }
+    let severity = |v: &Verdict| match v {
+        Verdict::Wrong => 3,
+        Verdict::Partial => 2,
+        Verdict::Correct => 1,
+        Verdict::Unscored => 0,
+    };
+    let winner = *counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| severity(a.0).cmp(&severity(b.0))))
+        .map(|(v, _)| v)
+        .expect("non-empty counts");
+    ballots
+        .iter()
+        .find(|j| j.verdict == winner)
+        .cloned()
+        .expect("winner came from the ballots")
 }
 
 #[cfg(test)]
@@ -234,6 +297,50 @@ mod tests {
             parse_verdict("VERDICT: wrong\nVERDICT: correct").verdict,
             Verdict::Correct
         ));
+        // INLINE verdict on the same line as the reason (not only at line start): must still
+        // parse, and the reason is everything before the marker.
+        let inline = parse_verdict("The answer is empty, providing no information. VERDICT: wrong");
+        assert!(matches!(inline.verdict, Verdict::Wrong));
+        assert_eq!(
+            inline.reason,
+            "The answer is empty, providing no information."
+        );
+        // trailing punctuation / menu separators after the word don't break it
+        assert!(matches!(
+            parse_verdict("ok. Verdict: correct.").verdict,
+            Verdict::Correct
+        ));
+    }
+
+    /// Regression: a non-ASCII char BEFORE the marker must not desync the byte offset computed
+    /// from the lowercased copy against the original `reply` (e.g. a naive `to_lowercase()` can
+    /// grow some Unicode chars, like İ U+0130 -> 2-char/3-byte, shifting byte-length). Must parse
+    /// without panicking and still find the verdict.
+    #[test]
+    fn parse_verdict_non_ascii_before_marker_does_not_panic() {
+        let j = parse_verdict("café VERDICT: correct");
+        assert!(matches!(j.verdict, Verdict::Correct));
+        assert_eq!(j.reason, "café");
+        // The specific char known to change byte length under full Unicode lowercasing.
+        let j2 = parse_verdict("İstanbul café review. VERDICT: wrong");
+        assert!(matches!(j2.verdict, Verdict::Wrong));
+    }
+
+    #[test]
+    fn majority_verdict_takes_mode_then_severity_on_tie() {
+        let j = |v: &str| parse_verdict(&format!("reason\nVERDICT: {v}"));
+        // Clear mode: 2 correct beats 1 wrong.
+        assert_eq!(
+            majority_verdict(&[j("correct"), j("correct"), j("wrong")]).verdict,
+            Verdict::Correct
+        );
+        // Three-way tie -> severity: Wrong wins.
+        assert_eq!(
+            majority_verdict(&[j("correct"), j("partial"), j("wrong")]).verdict,
+            Verdict::Wrong
+        );
+        // Empty -> Unscored.
+        assert_eq!(majority_verdict(&[]).verdict, Verdict::Unscored);
     }
 
     #[test]
@@ -329,5 +436,93 @@ mod tests {
         assert_eq!(got, expected);
         // An empty `source` with no index loads no evidence → block omitted → gold-only path.
         assert!(evidence_block(&load_evidence(&[], None)).is_none());
+    }
+
+    // Serializes tests that mutate the process-wide `KB_EVAL_JUDGE_VOTES` env var, so a parallel
+    // test run never sees a partially-set value from a sibling test (same pattern as
+    // `TOKEN_TEST_LOCK` in `backend::openai` / `RESAMPLE_TEST_LOCK` in `backend::resample`).
+    static JUDGE_VOTES_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// End-to-end: `judge()` actually samples the endpoint `KB_EVAL_JUDGE_VOTES` times (not once)
+    /// and returns the MAJORITY verdict across those samples, not the first/last one. A mock HTTP
+    /// server (same pattern as `backend::openai`'s `chat_http` integration tests) serves three
+    /// distinct replies — wrong, correct, correct — for one `judge()` call; 2-of-3 is `correct`,
+    /// which must win even though the FIRST sample was `wrong`.
+    #[test]
+    fn judge_samples_n_times_and_returns_the_majority_verdict() {
+        let _g = JUDGE_VOTES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        std::env::set_var("KB_EVAL_JUDGE_VOTES", "3");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // 1 wrong, 2 correct: the majority (correct) must win despite the first ballot being wrong.
+        let replies = [
+            "the answer misses the key fact. VERDICT: wrong",
+            "the answer matches the gold. VERDICT: correct",
+            "the answer matches the gold. VERDICT: correct",
+        ];
+        let server = std::thread::spawn(move || {
+            for reply in replies {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).unwrap();
+                let body = serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": reply},
+                        "finish_reason": "stop",
+                    }]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                sock.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let ep = Endpoint {
+            endpoint: format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            model: "m".to_string(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            timeout_secs: 5,
+            api: crate::lab::ApiKind::default(),
+            temperature: None,
+            rate_limit: None,
+            fallback: Vec::new(),
+            function_name: None,
+            feedback_score_metric: None,
+            feedback_bool_metric: None,
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let result = judge(
+            &ep,
+            "You are a grading judge.",
+            "What is the capital of France?",
+            "Paris",
+            "Paris",
+            &[],
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+
+        server.join().unwrap();
+        std::env::remove_var("KB_EVAL_JUDGE_VOTES");
+
+        assert_eq!(
+            result.verdict,
+            Verdict::Correct,
+            "2-of-3 correct ballots must win the majority, not the first (wrong) sample"
+        );
     }
 }
