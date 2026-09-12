@@ -31,7 +31,12 @@ pub struct Judgement {
 /// unrecognized value after `VERDICT:` also falls back to `Unscored` (raw reply is always carried).
 pub fn parse_verdict(reply: &str) -> Judgement {
     const MARKER: &str = "verdict:";
-    let lower = reply.to_lowercase();
+    // ASCII-only lowercasing: `to_lowercase()` can change a char's byte length for some Unicode
+    // (e.g. İ U+0130 -> 2-char/3-byte), which would desync `pos` (an index into the lowercased
+    // string) from `reply`'s own byte offsets and panic on a non-char-boundary slice below.
+    // `to_ascii_lowercase()` is always 1:1 in byte length, and the marker itself is pure ASCII, so
+    // matching still works identically for every reply that actually contains "VERDICT:"/"verdict:".
+    let lower = reply.to_ascii_lowercase();
     let (verdict, reason) = match lower.rfind(MARKER) {
         Some(pos) => {
             // The verdict word is the first alphabetic token after the marker (stops at the newline
@@ -305,6 +310,20 @@ mod tests {
             parse_verdict("ok. Verdict: correct.").verdict,
             Verdict::Correct
         ));
+    }
+
+    /// Regression: a non-ASCII char BEFORE the marker must not desync the byte offset computed
+    /// from the lowercased copy against the original `reply` (e.g. a naive `to_lowercase()` can
+    /// grow some Unicode chars, like İ U+0130 -> 2-char/3-byte, shifting byte-length). Must parse
+    /// without panicking and still find the verdict.
+    #[test]
+    fn parse_verdict_non_ascii_before_marker_does_not_panic() {
+        let j = parse_verdict("café VERDICT: correct");
+        assert!(matches!(j.verdict, Verdict::Correct));
+        assert_eq!(j.reason, "café");
+        // The specific char known to change byte length under full Unicode lowercasing.
+        let j2 = parse_verdict("İstanbul café review. VERDICT: wrong");
+        assert!(matches!(j2.verdict, Verdict::Wrong));
     }
 
     #[test]
