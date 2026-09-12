@@ -1433,13 +1433,15 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 pct(s.answerable),
                 s.unanswerable
             );
+            // `needs_graph` has no per-item percentage/context to add above the fold — the
+            // rendered `k=v, ...` string would be byte-identical top and bottom, so it lives only
+            // in the trailing summary pair below (not printed here too).
             let ng = s
                 .needs_graph
                 .iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("needs_graph: {ng}");
             println!(
                 "aliases: {} with, {} without",
                 s.with_aliases, s.without_aliases

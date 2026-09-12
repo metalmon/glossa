@@ -467,12 +467,11 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
         }
         drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
         pb.finish_and_clear();
+        // Doc count lives ONLY in the trailing `docs_extracted` summary pair (kbx.rs) — this line
+        // reports the detail that summary doesn't carry (chunks/nodes/mentions), not the doc total.
         println!(
-            "extract: {} doc(s), {} chunk(s), {} node(s), {} mention edge(s)",
-            docs.len(),
-            total_chunks,
-            total.nodes,
-            total.mentions
+            "extract: {} chunk(s), {} node(s), {} mention edge(s)",
+            total_chunks, total.nodes, total.mentions
         );
         let footnote = if cache_is_estimated() {
             " (cache estimated from prompt re-send)"
@@ -523,10 +522,9 @@ pub fn run_build(paths: KbxPaths, opts: BuildOpts) -> Result<BuildReport> {
             .context("judging candidate groups")?;
             drop(ticker); // stop before finish_and_clear so it can't redraw a message onto a cleared bar
             pb.finish_and_clear();
-            println!(
-                "judge: {} group(s) judged, {} link(s)",
-                stats.judged, stats.linked
-            );
+            // Judged-group count lives ONLY in the trailing `groups_judged` summary pair (kbx.rs)
+            // — this line reports the link count, which the summary doesn't carry.
+            println!("judge: {} link(s)", stats.linked);
             let footnote = if cache_is_estimated() {
                 " (cache estimated from prompt re-send)"
             } else {

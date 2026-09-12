@@ -1684,28 +1684,25 @@ pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     let nodes = g.node_count().unwrap_or(0);
     let edges = g.edge_count().unwrap_or(0);
     let mut out = graph_type_counts(g);
+    // No top-level "communities: N" / "communities: (none)" headline here — that count lives
+    // only in the trailing `cli_fmt::summary_string` block below. When there ARE communities,
+    // the per-community breakdown (id, size, top examples) is genuine detail and stays; it just
+    // no longer repeats the total that introduces it.
     let communities = if g.node_meta_count().unwrap_or(0) == 0 {
-        out.push_str("\ncommunities: (none)");
         0
     } else {
         let sizes = g.community_sizes().unwrap_or_default();
-        if sizes.is_empty() {
-            out.push_str("\ncommunities: (none)");
-            0
-        } else {
-            out.push_str(&format!("\ncommunities: {}", sizes.len()));
-            for (comm, size) in &sizes {
-                out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
-                for (id, meta) in g
-                    .community_top_nodes(*comm, COMMUNITY_TOP_LIMIT)
-                    .unwrap_or_default()
-                {
-                    out.push('\n');
-                    out.push_str(&stats_example_line(g, &id, &meta));
-                }
+        for (comm, size) in &sizes {
+            out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
+            for (id, meta) in g
+                .community_top_nodes(*comm, COMMUNITY_TOP_LIMIT)
+                .unwrap_or_default()
+            {
+                out.push('\n');
+                out.push_str(&stats_example_line(g, &id, &meta));
             }
-            sizes.len()
         }
+        sizes.len()
     };
     out.push('\n');
     out.push_str(&crate::cli_fmt::summary_string(&[
@@ -3326,6 +3323,13 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             out.contains("comm 1  (1 nodes)") && out.contains("Modbus timeout"),
             "{out}"
         );
+        // The "communities" headline count appears exactly once — in the trailing summary, not
+        // duplicated as a top-of-output header above the per-community breakdown.
+        assert_eq!(
+            out.matches("communities:").count(),
+            1,
+            "communities count must appear exactly once (bottom summary only):\n{out}"
+        );
     }
 
     #[test]
@@ -3334,9 +3338,16 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let g = GraphStore::open(gd.path()).unwrap();
         g.put_node(&node("sym:x", "Symptom", "X")).unwrap();
         let out = graph_stats(&g);
+        // No community metadata at all: the body has no communities section, just the trailing
+        // summary carrying "communities: 0".
         assert!(
-            out.contains("nodes: 1") && out.contains("communities: (none)"),
+            out.contains("nodes: 1") && out.contains("communities: 0"),
             "{out}"
+        );
+        assert_eq!(
+            out.matches("communities:").count(),
+            1,
+            "communities count must appear exactly once (bottom summary only):\n{out}"
         );
     }
 

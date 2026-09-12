@@ -188,6 +188,13 @@ needs_graph="yes"
         Some("needs_graph: (unset)=1, yes=1"),
         "the summary block's last pair (needs_graph) is the LAST stdout line:\n{stdout}"
     );
+    // `needs_graph` must appear exactly once — in the trailing summary — not also as a
+    // byte-identical top-of-output body line above the per-case dump.
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("needs_graph:")).count(),
+        1,
+        "needs_graph must appear exactly once (bottom summary only):\n{stdout}"
+    );
 }
 
 /// `kbx distil --help` should also expose the densify-mode flags (Task 4: densify is now the

@@ -696,10 +696,21 @@ strict = false
             rep.dangling_inapplicable.is_some(),
             "every type is a grounded terminal → dangling check inapplicable"
         );
-        // And the shared formatter renders `n/a`, not `0`.
+        // And the shared formatter renders `n/a — <reason>`, not `0` — and ONLY in the trailing
+        // summary block, not as a duplicated top-of-output header line.
         let text = crate::graph::ops::fmt_doctor_report(&rep);
         assert!(text.contains("incomplete: n/a"), "got:\n{text}");
         assert!(text.contains("dangling: n/a"), "got:\n{text}");
+        assert_eq!(
+            text.matches("incomplete:").count(),
+            1,
+            "incomplete n/a must appear exactly once (bottom summary only):\n{text}"
+        );
+        assert_eq!(
+            text.matches("dangling:").count(),
+            1,
+            "dangling n/a must appear exactly once (bottom summary only):\n{text}"
+        );
     }
 
     #[test]

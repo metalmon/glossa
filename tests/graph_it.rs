@@ -88,7 +88,10 @@ fn graph_stats_ends_with_summary_block() {
 }
 
 /// `graph doctor` on a clean, freshly indexed corpus ends with the trailing summary block
-/// (`ungrounded: 0  ... unverifiable: 0`), with the doubt-bucket detail above it.
+/// (`ungrounded: 0  ... unverifiable: 0`) and does NOT duplicate that headline count as a
+/// top-of-output header — a clean report's only content is the summary block itself. Bucket
+/// headers (`ungrounded: N`, `stale: N`, ...) were removed from the top; each doubt count now
+/// lives exactly once, in the trailing `cli_fmt::summary_string` block.
 #[test]
 fn graph_doctor_ends_with_summary_block() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,16 +113,19 @@ fn graph_doctor_ends_with_summary_block() {
         .clone();
     let s = String::from_utf8(out).unwrap();
 
-    let detail_pos = s
-        .find("ungrounded:")
-        .expect("ungrounded bucket detail present");
     let sep_pos = s.rfind('\u{2500}').expect("summary separator rule present");
+    let ungrounded_pos = s.find("ungrounded:").expect("summary carries ungrounded:");
     let unverifiable_pos = s
         .rfind("unverifiable:")
         .expect("summary carries unverifiable:");
     assert!(
-        detail_pos < sep_pos && sep_pos < unverifiable_pos,
-        "doubt-bucket detail must precede the trailing summary block:\n{s}"
+        sep_pos < ungrounded_pos && sep_pos < unverifiable_pos,
+        "ungrounded/unverifiable counts must live in the trailing summary block, not a top header:\n{s}"
+    );
+    assert_eq!(
+        s.matches("ungrounded:").count(),
+        1,
+        "ungrounded count must appear exactly once (bottom summary only, no duplicated top header):\n{s}"
     );
     assert!(
         s.contains("relinkable:"),

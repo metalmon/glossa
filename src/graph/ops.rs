@@ -1446,9 +1446,12 @@ fn fmt_doubtful_line(d: &crate::graph::doctor::DoubtfulNode) -> String {
     }
 }
 
-/// Bounded listing of a doctor bucket: at most `limit` lines, then a `… N more` summary.
-fn fmt_bucket(name: &str, nodes: &[crate::graph::doctor::DoubtfulNode], limit: usize) -> String {
-    let mut out = format!("{name}: {}\n", nodes.len());
+/// Bounded listing of a doctor bucket: at most `limit` lines, then a `… N more` summary. No
+/// header line — the count belongs only in the trailing `cli_fmt::summary_string` block (each
+/// detail line already carries its own reason suffix, so the bucket stays self-identifying
+/// without repeating its own total up top).
+fn fmt_bucket(nodes: &[crate::graph::doctor::DoubtfulNode], limit: usize) -> String {
+    let mut out = String::new();
     for d in nodes.iter().take(limit) {
         out.push_str(&fmt_doubtful_line(d));
         out.push('\n');
@@ -1477,22 +1480,20 @@ fn group_prefix_delta(old: &str, new: &str) -> (String, String) {
 }
 
 /// Render the `ungrounded` bucket. When nothing in it is relinkable, this is byte-identical to
-/// plain `fmt_bucket("ungrounded", …)` — no behavior change from before `--relink` existed.
-/// Otherwise the relinkable nodes are collapsed into grouped `old -> new` shift summaries (instead
-/// of one line per node — a large relabel/move can otherwise bury the fix under hundreds of
-/// identical-looking entries), the `--relink` command is surfaced, and only genuine orphans (and
-/// ambiguous matches, as a count) keep the per-node listing.
+/// plain `fmt_bucket(…)` — no behavior change from before `--relink` existed. Otherwise the
+/// relinkable nodes are collapsed into grouped `old -> new` shift summaries (instead of one line
+/// per node — a large relabel/move can otherwise bury the fix under hundreds of identical-looking
+/// entries), the `--relink` command is surfaced, and only genuine orphans (and ambiguous matches,
+/// as a count) keep the per-node listing.
 ///
-/// The header line reports the RAW `ungrounded` total only — it does not claim what that total
-/// is made of. The lines under it break it down honestly into its three disjoint parts (relinkable
-/// groups, ambiguous, real orphans), which together add up to the header count. Earlier wording
-/// annotated the header itself as "relocated/relabeled docs, not orphans", which was only true of
-/// part of the total (it also includes ambiguous matches and genuine orphans) — fixed here so no
-/// line claims more than is true.
+/// No top-level total here — the raw `ungrounded` count lives only in the trailing
+/// `cli_fmt::summary_string` block. The lines below break the total down honestly into its three
+/// disjoint parts (relinkable groups, ambiguous, real orphans), which together add up to that
+/// summary count; none of them claims to BE the total.
 fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize) -> String {
     let relink = &rep.relink;
     if relink.relinkable.is_empty() {
-        return fmt_bucket("ungrounded", &rep.ungrounded, limit);
+        return fmt_bucket(&rep.ungrounded, limit);
     }
 
     let mut groups: std::collections::BTreeMap<(String, String), usize> =
@@ -1503,7 +1504,7 @@ fn fmt_ungrounded_bucket(rep: &crate::graph::doctor::DoctorReport, limit: usize)
             .or_insert(0) += 1;
     }
 
-    let mut out = format!("ungrounded: {}\n", rep.ungrounded.len());
+    let mut out = String::new();
     for ((old_prefix, new_prefix), count) in &groups {
         out.push_str(&format!("  {old_prefix} -> {new_prefix}  ({count})\n"));
     }
@@ -1542,33 +1543,29 @@ pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
     const LIMIT: usize = 50;
     let mut out = String::new();
     out.push_str(&fmt_ungrounded_bucket(rep, LIMIT));
-    out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
+    out.push_str(&fmt_bucket(&rep.stale, LIMIT));
     // `incomplete`/`dangling` can be structurally inert for some ontologies (no spines; no
-    // query-side types). Print `n/a — <reason>` rather than a bare `0` that reads as a clean check.
+    // query-side types). No top-of-output line for this — the `n/a — <reason>` case is folded
+    // straight into the trailing summary value below, so it reads as neither a false "0 == clean"
+    // nor a duplicated top header.
     let incomplete_val = match rep.incomplete_disabled {
-        Some(why) => {
-            out.push_str(&format!("incomplete: n/a — {why}\n"));
-            "n/a".to_string()
-        }
+        Some(why) => format!("n/a — {why}"),
         None => {
-            out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT));
+            out.push_str(&fmt_bucket(&rep.incomplete, LIMIT));
             rep.incomplete.len().to_string()
         }
     };
     let dangling_val = match rep.dangling_inapplicable {
-        Some(why) => {
-            out.push_str(&format!("dangling: n/a — {why}\n"));
-            "n/a".to_string()
-        }
+        Some(why) => format!("n/a — {why}"),
         None => {
-            out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT));
+            out.push_str(&fmt_bucket(&rep.dangling, LIMIT));
             rep.dangling.len().to_string()
         }
     };
     // Trailing headline block: every doubt count in one place (replaces the old lone
     // `unverifiable: {n}` line — that count is now just one pair among the others). `incomplete`/
-    // `dangling` carry `n/a` here too, matching the detail lines above, so the summary can't read
-    // as a false "0 == clean" when the check never ran for this ontology.
+    // `dangling` carry `n/a — <reason>` here when the check is structurally inert for this
+    // ontology, so the summary can't read as a false "0 == clean".
     out.push_str(&crate::cli_fmt::summary_string(&[
         ("ungrounded", rep.ungrounded.len().to_string()),
         ("relinkable", rep.relink.relinkable.len().to_string()),
@@ -4274,21 +4271,24 @@ strict = true
             "relinkable node must not be listed line-by-line:\n{s}"
         );
         assert!(s.contains("res:orphan"), "true orphan still listed:\n{s}");
-        // Honest breakdown: the header count is the RAW ungrounded total, not annotated as if it
-        // were entirely relinkable — the grouped shift, ambiguous count, and real-orphan count are
-        // shown separately so the reader sees how the total splits.
-        assert!(
-            s.contains("ungrounded: 2\n"),
-            "header must be the plain raw total, no blanket claim about its contents:\n{s}"
-        );
+        // No top-of-output "ungrounded: N" header — the raw total lives ONLY in the trailing
+        // summary block. The detail above breaks it down honestly into its three disjoint parts
+        // (relinkable groups, ambiguous, real orphans), which together add up to that total.
         assert!(
             !s.contains("not orphans"),
-            "header must not claim the whole total is non-orphan — it also contains real orphans:\n{s}"
+            "no line may claim the whole total is non-orphan — it also contains real orphans:\n{s}"
         );
         assert!(
             s.contains("real orphans: 1"),
             "the real-orphan count must be broken out explicitly:\n{s}"
         );
+        {
+            let before_summary = &s[..s.rfind('─').expect("summary separator present")];
+            assert!(
+                !before_summary.contains("ungrounded:"),
+                "the raw ungrounded total must not appear before the trailing summary block:\n{s}"
+            );
+        }
         // ASCII-only output: no warning-triangle or right-arrow glyphs.
         assert!(!s.contains('\u{26A0}'), "doctor output must be ASCII:\n{s}");
         assert!(!s.contains('\u{2192}'), "doctor output must be ASCII:\n{s}");
@@ -4312,8 +4312,9 @@ strict = true
         );
     }
 
-    /// When nothing is relinkable, the ungrounded bucket renders exactly as it did before
-    /// `--relink` existed — no behavior change for corpora with genuine orphans/stale nodes only.
+    /// When nothing is relinkable, the ungrounded bucket renders exactly as the plain
+    /// `fmt_bucket` detail listing — no header line, just the per-node detail — and the count
+    /// shows up exactly once, in the trailing summary block.
     #[test]
     fn doctor_report_ungrounded_unchanged_when_nothing_relinkable() {
         use crate::graph::doctor::{DoctorReport, DoubtfulNode, Reason};
@@ -4331,11 +4332,17 @@ strict = true
         };
 
         let s = fmt_doctor_report(&report);
-        let expected_bucket = fmt_bucket("ungrounded", &[orphan], 50);
+        let expected_bucket = fmt_bucket(&[orphan], 50);
         assert!(
             s.starts_with(&expected_bucket),
-            "empty-relink path must match the old plain bucket rendering exactly:\n{s}"
+            "empty-relink path must match the plain bucket detail rendering exactly (no header):\n{s}"
         );
         assert!(!s.contains("--relink"));
+        // The count appears exactly once — in the trailing summary — not as a top header.
+        assert_eq!(
+            s.matches("ungrounded:").count(),
+            1,
+            "ungrounded count must appear exactly once (bottom summary only):\n{s}"
+        );
     }
 }
