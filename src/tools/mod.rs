@@ -1654,30 +1654,42 @@ pub fn node_inspect(g: &crate::graph::store::GraphStore, id: &str) -> String {
 }
 
 /// Graph node/edge counts and, when `node_meta` exists, a per-community overview with up to
-/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank. The second line is a
-/// domain-independent breakdown by node/edge type ([`graph_type_counts`]).
+/// [`COMMUNITY_TOP_LIMIT`] example nodes ranked by PageRank. Detail (type breakdown, per-community
+/// examples) prints first; a trailing `cli_fmt::summary_string` block carries the headline counts
+/// (`nodes`, `edges`, `communities`) last, per the CLI output contract.
 pub fn graph_stats(g: &crate::graph::store::GraphStore) -> String {
     let nodes = g.node_count().unwrap_or(0);
     let edges = g.edge_count().unwrap_or(0);
-    let mut out = format!("nodes: {nodes}, edges: {edges}\n{}", graph_type_counts(g));
-    if g.node_meta_count().unwrap_or(0) == 0 {
-        return format!("{out}\ncommunities: (none)");
-    }
-    let sizes = g.community_sizes().unwrap_or_default();
-    if sizes.is_empty() {
-        return format!("{out}\ncommunities: (none)");
-    }
-    out.push_str(&format!("\ncommunities: {}", sizes.len()));
-    for (comm, size) in sizes {
-        out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
-        for (id, meta) in g
-            .community_top_nodes(comm, COMMUNITY_TOP_LIMIT)
-            .unwrap_or_default()
-        {
-            out.push('\n');
-            out.push_str(&stats_example_line(g, &id, &meta));
+    let mut out = graph_type_counts(g);
+    let communities = if g.node_meta_count().unwrap_or(0) == 0 {
+        out.push_str("\ncommunities: (none)");
+        0
+    } else {
+        let sizes = g.community_sizes().unwrap_or_default();
+        if sizes.is_empty() {
+            out.push_str("\ncommunities: (none)");
+            0
+        } else {
+            out.push_str(&format!("\ncommunities: {}", sizes.len()));
+            for (comm, size) in &sizes {
+                out.push_str(&format!("\n\ncomm {comm}  ({size} nodes)"));
+                for (id, meta) in g
+                    .community_top_nodes(*comm, COMMUNITY_TOP_LIMIT)
+                    .unwrap_or_default()
+                {
+                    out.push('\n');
+                    out.push_str(&stats_example_line(g, &id, &meta));
+                }
+            }
+            sizes.len()
         }
-    }
+    };
+    out.push('\n');
+    out.push_str(&crate::cli_fmt::summary_string(&[
+        ("nodes", nodes.to_string()),
+        ("edges", edges.to_string()),
+        ("communities", communities.to_string()),
+    ]));
     out
 }
 

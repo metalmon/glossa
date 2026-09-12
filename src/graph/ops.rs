@@ -1545,15 +1545,40 @@ pub fn fmt_doctor_report(rep: &crate::graph::doctor::DoctorReport) -> String {
     out.push_str(&fmt_bucket("stale", &rep.stale, LIMIT));
     // `incomplete`/`dangling` can be structurally inert for some ontologies (no spines; no
     // query-side types). Print `n/a — <reason>` rather than a bare `0` that reads as a clean check.
-    match rep.incomplete_disabled {
-        Some(why) => out.push_str(&format!("incomplete: n/a — {why}\n")),
-        None => out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT)),
-    }
-    match rep.dangling_inapplicable {
-        Some(why) => out.push_str(&format!("dangling: n/a — {why}\n")),
-        None => out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT)),
-    }
-    out.push_str(&format!("unverifiable: {}\n", rep.unverifiable));
+    let incomplete_val = match rep.incomplete_disabled {
+        Some(why) => {
+            out.push_str(&format!("incomplete: n/a — {why}\n"));
+            "n/a".to_string()
+        }
+        None => {
+            out.push_str(&fmt_bucket("incomplete", &rep.incomplete, LIMIT));
+            rep.incomplete.len().to_string()
+        }
+    };
+    let dangling_val = match rep.dangling_inapplicable {
+        Some(why) => {
+            out.push_str(&format!("dangling: n/a — {why}\n"));
+            "n/a".to_string()
+        }
+        None => {
+            out.push_str(&fmt_bucket("dangling", &rep.dangling, LIMIT));
+            rep.dangling.len().to_string()
+        }
+    };
+    // Trailing headline block: every doubt count in one place (replaces the old lone
+    // `unverifiable: {n}` line — that count is now just one pair among the others). `incomplete`/
+    // `dangling` carry `n/a` here too, matching the detail lines above, so the summary can't read
+    // as a false "0 == clean" when the check never ran for this ontology.
+    out.push_str(&crate::cli_fmt::summary_string(&[
+        ("ungrounded", rep.ungrounded.len().to_string()),
+        ("relinkable", rep.relink.relinkable.len().to_string()),
+        ("ambiguous", rep.relink.ambiguous.len().to_string()),
+        ("stale", rep.stale.len().to_string()),
+        ("incomplete", incomplete_val),
+        ("dangling", dangling_val),
+        ("unverifiable", rep.unverifiable.to_string()),
+    ]));
+    out.push('\n');
     out
 }
 
@@ -4267,6 +4292,22 @@ strict = true
         // ASCII-only output: no warning-triangle or right-arrow glyphs.
         assert!(!s.contains('\u{26A0}'), "doctor output must be ASCII:\n{s}");
         assert!(!s.contains('\u{2192}'), "doctor output must be ASCII:\n{s}");
+        // Trailing summary block (cli_fmt::summary_string): every headline doubt count in one
+        // place at the end, replacing the old lone `unverifiable: n` line.
+        assert!(
+            s.contains("ungrounded: 2") && s.contains("relinkable: 1") && s.contains("ambiguous: 0"),
+            "trailing summary must carry the headline doubt counts:\n{s}"
+        );
+        assert!(
+            s.contains("unverifiable: 0"),
+            "unverifiable count moves into the trailing summary block:\n{s}"
+        );
+        let sep_pos = s.rfind('─');
+        let unverifiable_pos = s.rfind("unverifiable:");
+        assert!(
+            sep_pos.is_some() && unverifiable_pos.is_some() && sep_pos < unverifiable_pos,
+            "the summary separator must precede the final headline pairs:\n{s}"
+        );
     }
 
     /// When nothing is relinkable, the ungrounded bucket renders exactly as it did before

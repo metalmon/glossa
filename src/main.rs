@@ -2097,6 +2097,12 @@ fn main() -> anyhow::Result<()> {
                         scope.as_deref(),
                     )
                 );
+                // Headline count only — computed independently of the rendered body (which is
+                // shared with the MCP `glossary` tool and stays untouched: it feeds an agent
+                // reader directly, so its content/formatting isn't touched by the CLI output
+                // contract). `resolve` is cheap (id lookup) so a second call here is fine.
+                let matches = g.resolve(&query).map(|ids| ids.len()).unwrap_or(0);
+                glossa::cli_fmt::summary(&[("matches", matches.to_string())]);
                 Ok(())
             }
             GraphAction::Query { sql, path } => {
@@ -2139,7 +2145,14 @@ fn main() -> anyhow::Result<()> {
                         for (t, c) in &counts {
                             println!("{t}: {c}");
                         }
-                        println!("\n(use --type <T> to list nodes, or `kb graph search <query>`)");
+                        glossa::cli_fmt::hint(
+                            "(use --type <T> to list nodes, or `kb graph search <query>`)",
+                        );
+                        let total: usize = counts.values().sum();
+                        glossa::cli_fmt::summary(&[
+                            ("types", counts.len().to_string()),
+                            ("nodes", total.to_string()),
+                        ]);
                     }
                     Some(t) => {
                         let mut matched = Vec::new();
@@ -2155,8 +2168,15 @@ fn main() -> anyhow::Result<()> {
                             println!("{}  [{}]  {}", n.id, n.node_type, n.label);
                         }
                         if matched.len() > limit {
-                            println!("… {} more (--limit to show more)", matched.len() - limit);
+                            glossa::cli_fmt::hint(&format!(
+                                "… {} more (--limit to show more)",
+                                matched.len() - limit
+                            ));
                         }
+                        glossa::cli_fmt::summary(&[
+                            ("matches", matched.len().to_string()),
+                            ("shown", matched.len().min(limit).to_string()),
+                        ]);
                     }
                 }
                 Ok(())
@@ -2171,15 +2191,13 @@ fn main() -> anyhow::Result<()> {
                 );
                 opts.apply_merges = merge;
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
-                println!(
-                    "generalize: inferred_edges={} similar_edges={} communities={} \
-                     merge_candidates={} merged_nodes={}",
-                    r.inferred_edges,
-                    r.similar_edges,
-                    r.communities,
-                    r.merge_candidates,
-                    r.merged_nodes,
-                );
+                glossa::cli_fmt::summary(&[
+                    ("inferred_edges", r.inferred_edges.to_string()),
+                    ("similar_edges", r.similar_edges.to_string()),
+                    ("communities", r.communities.to_string()),
+                    ("merge_candidates", r.merge_candidates.to_string()),
+                    ("merged_nodes", r.merged_nodes.to_string()),
+                ]);
                 Ok(())
             }
             GraphAction::Doctor {
@@ -2260,19 +2278,21 @@ fn main() -> anyhow::Result<()> {
                     // inc is bookkeeping only (the "relink" phase completing) -- it draws nothing,
                     // preserving the collision-safe ordering (no live bar during `println!`s).
                     pb.inc(1);
-                    println!(
+                    // Action confirmation, not part of the diagnostic report — stderr, so the
+                    // report's stdout still ends with exactly the one summary block above.
+                    glossa::cli_fmt::note(&format!(
                         "relinked: {} edges ({} duplicate edges dropped)",
                         applied.repointed, applied.dropped
-                    );
+                    ));
                 }
                 if prune_dangling && !force {
                     if let Some(reason) =
                         glossa::graph::doctor::dangling_prune_risk(&report, &g, &ont)
                     {
                         prune_dangling = false;
-                        println!(
+                        glossa::cli_fmt::note(&format!(
                             "dangling prune REFUSED: {reason}\nre-run with --force to override."
-                        );
+                        ));
                     }
                 }
                 if prune_incomplete || prune_ungrounded || prune_dangling || prune_stale {
@@ -2286,9 +2306,11 @@ fn main() -> anyhow::Result<()> {
                             stale: prune_stale,
                         },
                     )?;
-                    println!(
+                    // Action confirmation (see note above the `relinked:` line) — stderr, keeping
+                    // the diagnostic report's summary block the last thing on stdout.
+                    glossa::cli_fmt::note(&format!(
                         "pruned: incomplete={inc} ungrounded={ung} dangling={dang} stale={stale}"
-                    );
+                    ));
                 }
                 Ok(())
             }
@@ -2567,12 +2589,14 @@ fn main() -> anyhow::Result<()> {
             } => {
                 let g = glossa::graph::store::GraphStore::open(&path)?;
                 let mut total = 0;
+                let mut would_remove = 0;
                 for t in &node_type {
                     match &source {
                         // Source-scoped: delete only the nodes of this type grounded in a matching doc.
                         Some(src) => {
                             let ids = g.ids_of_type_grounded_in(t, src)?;
                             if dry_run {
+                                would_remove += ids.len();
                                 println!(
                                     "graph prune (dry-run): {} {t} grounded in *{src}* would be removed:",
                                     ids.len()
@@ -2595,6 +2619,7 @@ fn main() -> anyhow::Result<()> {
                         None => {
                             if dry_run {
                                 let ids = g.ids_of_type(t)?;
+                                would_remove += ids.len();
                                 println!(
                                     "graph prune (dry-run): all {} {t} nodes would be removed",
                                     ids.len()
@@ -2607,8 +2632,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                if !dry_run {
-                    println!("graph prune: {total} total entries removed");
+                if dry_run {
+                    glossa::cli_fmt::summary(&[("would_remove", would_remove.to_string())]);
+                } else {
+                    glossa::cli_fmt::summary(&[("removed", total.to_string())]);
                 }
                 Ok(())
             }
@@ -2646,6 +2673,7 @@ fn main() -> anyhow::Result<()> {
                             .then(a.family.cmp(&b.family))
                             .then(a.name.cmp(&b.name))
                     });
+                    let mut shown = 0usize;
                     for t in cat {
                         if let Some(f) = &family {
                             if t.family.as_deref() != Some(f.as_str()) {
@@ -2660,7 +2688,9 @@ fn main() -> anyhow::Result<()> {
                         let desc = t.description.as_deref().unwrap_or("");
                         let fam = t.family.as_deref().unwrap_or("-");
                         println!("[tier {}] {:<18} {:<12} {}", t.tier, t.name, fam, desc);
+                        shown += 1;
                     }
+                    glossa::cli_fmt::summary(&[("presets", shown.to_string())]);
                     Ok(())
                 }
                 OntologyAction::Show { name } => {
@@ -2682,16 +2712,17 @@ fn main() -> anyhow::Result<()> {
                     // at `kb index --ontology` above.
                     let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                     match ot::write_template(&rr.state_base, &template, force)? {
-                        ot::Written::Created => {
-                            println!("wrote '{template}' to .glossa/ontology.toml")
-                        }
-                        ot::Written::Overwritten => {
-                            println!("overwrote .glossa/ontology.toml with '{template}'")
-                        }
+                        ot::Written::Created => glossa::cli_fmt::note(&format!(
+                            "wrote '{template}' to .glossa/ontology.toml"
+                        )),
+                        ot::Written::Overwritten => glossa::cli_fmt::note(&format!(
+                            "overwrote .glossa/ontology.toml with '{template}'"
+                        )),
                         ot::Written::Kept => anyhow::bail!(
                             ".glossa/ontology.toml already exists — pass --force to replace it"
                         ),
                     }
+                    glossa::cli_fmt::summary(&[("template", template.clone())]);
                     Ok(())
                 }
                 OntologyAction::Suggest { text } => {
@@ -2700,9 +2731,11 @@ fn main() -> anyhow::Result<()> {
                     if hits.is_empty() {
                         println!("no preset matched — try `kb ontology list`");
                     }
+                    let n = hits.len();
                     for (name, score) in hits {
                         println!("{name}\t(score {score})");
                     }
+                    glossa::cli_fmt::summary(&[("hits", n.to_string())]);
                     Ok(())
                 }
             }
