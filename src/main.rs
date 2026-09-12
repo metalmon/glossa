@@ -1741,10 +1741,13 @@ fn main() -> anyhow::Result<()> {
                 let _lock = glossa::index::lock::try_index_lock(&rr.state_base)
                     .ok_or_else(|| anyhow::anyhow!("another process is indexing; try again"))?;
                 glossa::index::store::index_one_file_locked_at(&rr.roots, &rr.state_base, &rel)?;
-                println!(
-                    "reindexed {rel} in {}",
-                    glossa::cli_fmt::format_elapsed(started.elapsed())
-                );
+                glossa::cli_fmt::summary(&[
+                    ("reindexed", rel.to_string()),
+                    (
+                        "elapsed",
+                        glossa::cli_fmt::format_elapsed(started.elapsed()),
+                    ),
+                ]);
                 return Ok(());
             }
             if let Some(name) = ontology {
@@ -1752,7 +1755,9 @@ fn main() -> anyhow::Result<()> {
                 // never a corpus root — state-dir separation means these can differ.
                 match glossa::ontology_templates::write_template(&rr.state_base, &name, false)? {
                     glossa::ontology_templates::Written::Created => {
-                        println!("ontology: wrote '{name}' preset to .glossa/ontology.toml");
+                        glossa::cli_fmt::note(&format!(
+                            "ontology: wrote '{name}' preset to .glossa/ontology.toml"
+                        ));
                     }
                     glossa::ontology_templates::Written::Kept => {
                         eprintln!(
