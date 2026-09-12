@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use glossa::cli_fmt;
 use kb_eval::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, token_summary, OpenAiBackend, StatusTicker,
     DEFAULT_MAX_ROUNDS,
@@ -464,7 +465,7 @@ fn main() -> Result<()> {
             // (single PATH) walk-up discovery for now.
             let root = workspace::resolve(path).root;
             let paths = scaffold_init(&root, force)?;
-            println!("initialized kbx workspace at {}", paths.kbx_dir.display());
+            cli_fmt::summary(&[("workspace", paths.kbx_dir.display().to_string())]);
             Ok(())
         }
         Cmd::Eval {
@@ -533,11 +534,10 @@ fn main() -> Result<()> {
                     jobs,
                 },
             )?;
-            println!(
-                "build report: {} doc(s) extracted, {} group(s) judged",
-                report.docs_extracted.len(),
-                report.groups_judged
-            );
+            cli_fmt::summary(&[
+                ("docs_extracted", report.docs_extracted.len().to_string()),
+                ("groups_judged", report.groups_judged.to_string()),
+            ]);
             Ok(())
         }
         Cmd::Train {
@@ -1234,6 +1234,16 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         timestamp,
     };
     let report_path = write_run(&runs_dir, &tag, &meta, &all_results)?;
+
+    // Usage detail ABOVE the headline: printed here (before the confusion/lexical/summary block
+    // below) so the summary block stays the last stdout content, per the CLI output contract.
+    let footnote = if cache_is_estimated() {
+        " (cache estimated from prompt re-send)"
+    } else {
+        ""
+    };
+    println!("tokens: {}{footnote}", token_summary());
+
     if args.no_gold {
         // Predict-only: no golds to score against, so the graded/lexical summaries are meaningless.
         let answered = all_results
@@ -1241,10 +1251,11 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             .filter(|r| !r.answer.trim().is_empty())
             .count();
         let errored = all_results.iter().filter(|r| r.errored).count();
-        println!(
-            "predict-only: {} question(s), {answered} answered, {errored} endpoint-errored",
-            all_results.len()
-        );
+        cli_fmt::summary(&[
+            ("cases", all_results.len().to_string()),
+            ("answered", answered.to_string()),
+            ("errored", errored.to_string()),
+        ]);
     } else {
         // Detail first (confusion matrix, then the secondary lexical EM/F1 numbers), headline
         // last: `summary_text` now ends in the shared `cli_fmt::summary_string` block, so it must
@@ -1259,7 +1270,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     }
 
     // `--answers`: flat question->answer CSV deliverable. A relative path lands under runs/<tag>/
-    // (inside .glossa, never the indexed corpus); an absolute path is used verbatim.
+    // (inside .glossa, never the indexed corpus); an absolute path is used verbatim. The
+    // confirmation is a status NOTE (stderr) — it must not follow the headline summary on stdout.
     if let Some(ap) = &args.answers {
         let out_path = if ap.is_absolute() {
             ap.clone()
@@ -1293,16 +1305,12 @@ fn run_eval(args: EvalArgs) -> Result<()> {
             })
             .collect();
         let written = write_answers_csv(&out_path, &rows, !args.no_gold)?;
-        println!("wrote answers -> {}", written.display());
+        cli_fmt::note(&format!("wrote answers -> {}", written.display()));
     }
 
-    let footnote = if cache_is_estimated() {
-        " (cache estimated from prompt re-send)"
-    } else {
-        ""
-    };
-    println!("tokens: {}{footnote}", token_summary());
-    println!("wrote {}", report_path.display());
+    // Status note, not a result number — stderr, so the summary block above stays the last thing
+    // on stdout (a piped `kbx eval run | tail` always lands on the headline, not this path).
+    cli_fmt::note(&format!("wrote {}", report_path.display()));
     Ok(())
 }
 
@@ -1330,7 +1338,9 @@ fn run_export(args: ExportArgs) -> Result<()> {
         })?);
     }
 
-    let (rows, summary) = match args.format {
+    // `pairs` carries the headline tallies for the final `cli_fmt::summary` block; any qualitative
+    // detail (skip reason, tag count) prints ABOVE it on stdout.
+    let (rows, pairs): (_, Vec<(&str, String)>) = match args.format {
         ExportFormat::Sft => {
             let shape = match args.shape {
                 ExportShape::Messages => SftShape::Messages,
@@ -1342,14 +1352,13 @@ fn run_export(args: ExportArgs) -> Result<()> {
                 args.include_partial,
                 args.sft_prefer_signal,
             );
-            let summary = format!(
-                "SFT: {} lines from {} trajectories ({} tag(s)), {} signal-reaction",
-                out.rows.len(),
-                records.len(),
-                tags.len(),
-                out.signal_reaction
-            );
-            (out.rows, summary)
+            println!("sft: {} tag(s) sourced", tags.len());
+            let pairs = vec![
+                ("lines", out.rows.len().to_string()),
+                ("trajectories", records.len().to_string()),
+                ("signal_reaction", out.signal_reaction.to_string()),
+            ];
+            (out.rows, pairs)
         }
         ExportFormat::Dpo => {
             let focus_plateau = matches!(args.dpo_focus, Some(DpoFocus::Plateau));
@@ -1359,15 +1368,14 @@ fn run_export(args: ExportArgs) -> Result<()> {
             } else {
                 "lacked both classes"
             };
-            let summary = format!(
-                "DPO: {} pairs ({} plateau-contrastive), {} question(s) skipped ({}), from {} trajectories",
-                out.pairs.len(),
-                out.plateau_contrastive,
-                out.questions_skipped,
-                skip_reason,
-                records.len()
-            );
-            (out.pairs, summary)
+            println!("dpo: skipped questions reason -> {skip_reason}");
+            let pairs = vec![
+                ("pairs", out.pairs.len().to_string()),
+                ("plateau_contrastive", out.plateau_contrastive.to_string()),
+                ("skipped", out.questions_skipped.to_string()),
+                ("trajectories", records.len().to_string()),
+            ];
+            (out.pairs, pairs)
         }
     };
 
@@ -1379,8 +1387,8 @@ fn run_export(args: ExportArgs) -> Result<()> {
     }
     std::fs::write(&args.out, to_jsonl(&rows))
         .with_context(|| format!("writing {}", args.out.display()))?;
-    println!("{summary}");
-    println!("wrote {}", args.out.display());
+    cli_fmt::note(&format!("wrote {}", args.out.display()));
+    cli_fmt::summary(&pairs);
     Ok(())
 }
 
@@ -1398,7 +1406,18 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                     100.0 * n as f64 / s.total as f64
                 }
             };
-            println!("cases: {}", s.total);
+            // Detail FIRST: the per-case dump (same shape as `dataset sample`'s listing), then the
+            // breakdown lines, then the answer-reachability table when a graph is present. The
+            // headline tallies (cli_fmt::summary, below) are the LAST stdout content.
+            for c in &cases {
+                let hop = if c.hop_type.is_empty() {
+                    "(untyped)"
+                } else {
+                    c.hop_type.as_str()
+                };
+                println!("{} [{}] {}", c.id, hop, c.question);
+                println!("    -> {}", truncate_chars(&c.answer, 100));
+            }
             println!(
                 "hop_type: lexical {} ({:.0}%), multihop {} ({:.0}%), untyped {} ({:.0}%)",
                 s.lexical,
@@ -1460,31 +1479,46 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("answer-reachability skipped: {e}");
+                            cli_fmt::note(&format!("answer-reachability skipped: {e}"));
                         }
                     }
                 }
             }
+            // Headline LAST: the contract's canonical block, so a `kbx dataset stat | tail` always
+            // lands on the same handful of numbers regardless of dataset size.
+            cli_fmt::summary(&[
+                ("cases", s.total.to_string()),
+                ("lexical", s.lexical.to_string()),
+                ("multihop", s.multihop.to_string()),
+                ("untyped", s.untyped.to_string()),
+                ("answerable", s.answerable.to_string()),
+                ("unanswerable", s.unanswerable.to_string()),
+                ("needs_graph", ng),
+            ]);
             Ok(())
         }
         DatasetCmd::Merge { from, into } => {
             let summary = dataset_ops::merge_files(&from, &into)?;
-            println!(
-                "merge: from={}, added={}, skipped_dup={}, total={} (backed up {} -> {})",
+            cli_fmt::note(&format!(
+                "merged {} case(s) from {} into {} (backed up {} -> {})",
                 summary.from,
-                summary.added,
-                summary.skipped_dup,
-                summary.total,
+                from.display(),
+                into.display(),
                 into.display(),
                 dataset_ops::backup_path(&into).display()
-            );
+            ));
+            cli_fmt::summary(&[
+                ("added", summary.added.to_string()),
+                ("skipped_dup", summary.skipped_dup.to_string()),
+                ("total", summary.total.to_string()),
+            ]);
             Ok(())
         }
         DatasetCmd::Validate { file } => {
             let cases = dataset_ops::load_cases(&file)?;
             let issues = dataset_ops::validate_cases(&cases);
             if issues.is_empty() {
-                println!("ok: {} cases", cases.len());
+                cli_fmt::summary(&[("cases", cases.len().to_string()), ("issues", "0".into())]);
                 Ok(())
             } else {
                 for i in &issues {
@@ -1495,11 +1529,15 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
         }
         DatasetCmd::Dedup { file } => {
             let (removed, total) = dataset_ops::dedup_file(&file)?;
-            println!(
-                "dedup: removed {removed}, {total} remain (backed up {} -> {})",
+            cli_fmt::note(&format!(
+                "backed up {} -> {}",
                 file.display(),
                 dataset_ops::backup_path(&file).display()
-            );
+            ));
+            cli_fmt::summary(&[
+                ("removed", removed.to_string()),
+                ("remaining", total.to_string()),
+            ]);
             Ok(())
         }
         DatasetCmd::Sample { file, n, seed } => {
@@ -1514,6 +1552,7 @@ fn run_dataset(cmd: DatasetCmd) -> Result<()> {
                 println!("{} [{}] {}", c.id, hop, c.question);
                 println!("    -> {}", truncate_chars(&c.answer, 100));
             }
+            cli_fmt::summary(&[("shown", chosen.len().to_string())]);
             Ok(())
         }
     }

@@ -17,6 +17,7 @@ use crate::lab::LabConfig;
 use crate::parallel::{run_units_parallel, GraphWriter};
 use crate::workspace::{self, KbxPaths};
 use anyhow::{bail, Context, Result};
+use glossa::cli_fmt;
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
 use glossa::index::store::DocIndex;
@@ -456,13 +457,6 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
 
     write_dataset_toml(&out_path, &kept)?;
 
-    println!(
-        "distil: {} attempted, {} kept, {} dropped -> {}",
-        attempts,
-        kept.len(),
-        n_dropped,
-        out_path.display()
-    );
     let footnote = if cache_is_estimated() {
         " (cache estimated from prompt re-send)"
     } else {
@@ -471,15 +465,21 @@ fn run_distil_at(paths: KbxPaths, args: DistilArgs) -> Result<()> {
     println!("tokens: {}{footnote}", token_summary());
     if let Some(t) = target {
         if kept.len() < t {
-            println!(
+            cli_fmt::hint(&format!(
                 "distil: target {} NOT reached — kept {} in {} attempts (cap {}); raise --max-attempts or loosen seeds",
                 t,
                 kept.len(),
                 attempts,
                 cap
-            );
+            ));
         }
     }
+    cli_fmt::note(&format!("wrote {} -> {}", kept.len(), out_path.display()));
+    cli_fmt::summary(&[
+        ("attempted", attempts.to_string()),
+        ("kept", kept.len().to_string()),
+        ("dropped", n_dropped.to_string()),
+    ]);
     Ok(())
 }
 

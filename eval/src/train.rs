@@ -17,6 +17,7 @@ use crate::gepa_graph::{self, GepaGraphConfig};
 use crate::lab::{AbstentionPolicy, LabConfig};
 use crate::workspace;
 use anyhow::Context;
+use glossa::cli_fmt;
 use std::path::PathBuf;
 
 /// Fallback worker-pool size for concurrent read-only rollouts when neither `--jobs` nor
@@ -426,14 +427,13 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             .with_context(|| format!("write {}", paths.answer.display()))?;
     }
 
-    println!(
-        "kbx train {tag}: seed_score={:.3} best_score={:.3} candidates={} winner={} applied={}",
-        result.baseline_score,
-        result.best_score,
-        result.candidates,
-        winner_path.display(),
-        apply,
-    );
+    cli_fmt::note(&format!("kbx train {tag}: winner -> {}", winner_path.display()));
+    cli_fmt::summary(&[
+        ("seed_score", format!("{:.3}", result.baseline_score)),
+        ("best_score", format!("{:.3}", result.best_score)),
+        ("candidates", result.candidates.to_string()),
+        ("applied", apply.to_string()),
+    ]);
 
     Ok(())
 }
