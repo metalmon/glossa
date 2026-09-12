@@ -28,7 +28,9 @@ fn kb_index_honors_corpus_from_config() {
         .arg(&cfg)
         .assert()
         .success()
-        .stdout(predicates::str::contains("indexed"));
+        // `kb index`'s stdout is now the CLI output contract's summary block (`added: N  ...`),
+        // not the word "indexed" — see docs/superpowers/plans/2026-09-12-cli-output-contract.md.
+        .stdout(predicates::str::contains("added:"));
     // Artifacts landed under the file's state_dir, proving [corpus] was consumed by kb index.
     assert!(state.join(".glossa").join("index").exists());
 }

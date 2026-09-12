@@ -88,7 +88,8 @@ fn resolve_inputs_reported(
     if via_tracing {
         tracing::info!(root = %shown.display(), "resolved kb root");
     } else {
-        eprintln!("root: {}", shown.display());
+        // CLI output contract: banners/notes are stderr-only via the shared `cli_fmt::note`.
+        glossa::cli_fmt::note(&format!("root: {}", shown.display()));
     }
     for a in rr.advisories() {
         warn(a);
@@ -1642,6 +1643,15 @@ fn main() -> anyhow::Result<()> {
                     "{}",
                     glossa::cli_fmt::render_search_pretty(&display, !scan, &pattern)
                 );
+                // CLI output contract: the summary block is a pretty-mode-only affordance. `--format
+                // rg` (or `auto` piped to a non-tty) must stay byte-for-byte grep-compatible, so the
+                // summary is gated on the same `pretty` flag that selects the detail rendering above
+                // — never printed in rg-style/pipe mode.
+                let shown = display.len();
+                glossa::cli_fmt::summary(&[
+                    ("matches", shown.to_string()),
+                    ("shown", shown.to_string()),
+                ]);
             } else {
                 for l in &rg_lines {
                     println!("{l}");
@@ -1763,24 +1773,24 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             let stats = glossa::index::store::index_dir_at(&rr.roots, &rr.state_base, force)?;
-            let skipped = if stats.errors.is_empty() {
-                String::new()
-            } else {
-                format!(", {} skipped(errors)", stats.errors.len())
-            };
-            println!(
-                "indexed: {} added, {} removed, {} unchanged{} in {}",
-                stats.added,
-                stats.removed,
-                stats.unchanged,
-                skipped,
-                glossa::cli_fmt::format_elapsed(started.elapsed())
-            );
             if !stats.errors.is_empty() {
                 eprintln!("errors ({}):", stats.errors.len());
                 for (p, e) in &stats.errors {
                     eprintln!("  {p}: {e}");
                 }
+            }
+            // CLI output contract: exactly one canonical summary block on stdout, LAST — so the
+            // (optional) `--force` generalize pass below must run and fold its counts into the SAME
+            // final `pairs` vec rather than printing its own trailing line after the summary.
+            // `skipped` is only included when non-zero, so a clean run doesn't carry a stray
+            // `skipped: 0` pair.
+            let mut pairs = vec![
+                ("added", stats.added.to_string()),
+                ("removed", stats.removed.to_string()),
+                ("unchanged", stats.unchanged.to_string()),
+            ];
+            if !stats.errors.is_empty() {
+                pairs.push(("skipped", stats.errors.len().to_string()));
             }
             if force {
                 // Auto-run the generalization pass over the freshly rebuilt graph so derived edges
@@ -1794,11 +1804,16 @@ fn main() -> anyhow::Result<()> {
                     glossa::trace::now_ms(),
                 );
                 let r = glossa::graph::generalize::apply::generalize(&g, &opts)?;
-                println!(
-                    "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
-                    r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
-                );
+                pairs.push(("inferred_edges", r.inferred_edges.to_string()));
+                pairs.push(("similar_edges", r.similar_edges.to_string()));
+                pairs.push(("communities", r.communities.to_string()));
+                pairs.push(("merge_candidates", r.merge_candidates.to_string()));
             }
+            pairs.push((
+                "elapsed",
+                glossa::cli_fmt::format_elapsed(started.elapsed()),
+            ));
+            glossa::cli_fmt::summary(&pairs);
             Ok(())
         }
         #[cfg(feature = "notebook")]
@@ -1880,8 +1895,26 @@ fn main() -> anyhow::Result<()> {
                 path: None,
                 scope,
             };
-            for h in glossa::grep::grep(&idx, &pattern, &opts)? {
+            let hits = glossa::grep::grep(&idx, &pattern, &opts)?;
+            // CLI output contract: `grep` has no explicit `--format` flag (unlike `search`), so the
+            // pretty-vs-pipe gate mirrors `search`'s `OutputFormat::Auto` arm directly — TTY stdout
+            // gets the trailing summary, a pipe (the common `kb grep ... | ...` case) stays
+            // byte-for-byte grep-compatible with no extra trailing lines.
+            let pretty = glossa::cli_fmt::stdout_is_tty();
+            let mut match_count = 0usize;
+            let mut files: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for h in &hits {
                 println!("{}", h.display_line());
+                if h.kind != glossa::grep::HitKind::Context {
+                    match_count += 1;
+                    files.insert(h.path.as_str());
+                }
+            }
+            if pretty {
+                glossa::cli_fmt::summary(&[
+                    ("matches", match_count.to_string()),
+                    ("files", files.len().to_string()),
+                ]);
             }
             Ok(())
         }
@@ -1893,9 +1926,12 @@ fn main() -> anyhow::Result<()> {
             if docs.is_empty() {
                 println!("(no documents match — ripgrep -g glob syntax: use * or **/* or *.{{pdf,md}}; matches PATHS not content; use `kb grep` or `kb search` for text)");
             } else {
+                let n_docs = docs.len();
                 for (p, n) in docs {
                     println!("{p}  ({n} chunks)");
                 }
+                // `glob` has no rg-style pipe mode (unlike search/grep) — it always ends in a summary.
+                glossa::cli_fmt::summary(&[("docs", n_docs.to_string())]);
             }
             Ok(())
         }
