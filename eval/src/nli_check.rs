@@ -417,7 +417,10 @@ mod tests {
         let mut f = ready_facts();
         f.dylib_set = false;
         let (ready, line) = nli_verdict(&f);
-        assert!(ready, "dylib_set=false must not block a loaded+running scorer; line: {line}");
+        assert!(
+            ready,
+            "dylib_set=false must not block a loaded+running scorer; line: {line}"
+        );
         assert_eq!(line, "READY");
     }
 
