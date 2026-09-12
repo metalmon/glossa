@@ -222,6 +222,36 @@ fn gather_mentions(
     }
 }
 
+/// Resolve a graph node handle the model appended to a `read` path. Accepts the exact id
+/// (`res:4506ffa9`) and, when the `<abbrev>:` prefix was dropped (`4506ffa9`), a unique suffix match
+/// against `*:<handle>`. Returns `None` when nothing matches or the bare suffix is ambiguous (two
+/// nodes share the hash tail), so a guess never reads the wrong node.
+fn resolve_node_handle(
+    g: &crate::graph::store::GraphStore,
+    handle: &str,
+) -> Option<crate::graph::store::Node> {
+    let handle = handle.trim();
+    if handle.is_empty() {
+        return None;
+    }
+    if let Ok(Some(n)) = g.get_node(handle) {
+        return Some(n);
+    }
+    // Prefix dropped: match an id ending in ":<handle>", but only when the handle carries no ':'
+    // of its own and the match is unambiguous.
+    if !handle.contains(':') {
+        if let Ok(nodes) = g.all_nodes() {
+            let needle = format!(":{handle}");
+            let mut hits = nodes.into_iter().filter(|n| n.id.ends_with(&needle));
+            let first = hits.next();
+            if hits.next().is_none() {
+                return first;
+            }
+        }
+    }
+    None
+}
+
 /// Omnivorous read of a graph NODE: the node's own line, plus every chunk it AND its 1-hop reasoning
 /// neighbours MENTION — each labelled with where it came from. Reading a Resolution gives its fix
 /// chunk; reading a Symptom also pulls the Cause/Resolution evidence one hop along the chain.
@@ -405,6 +435,28 @@ pub fn read(
                 }
                 trace.log("read", json!({ "node": path }), json!({ "node": path }));
                 return read_node(idx, g, node);
+            }
+        }
+        // Tolerant: the model sometimes appends a graph node handle to a document path
+        // (`doc.pdf#res:4506ffa9`, or with the `<abbrev>:` prefix dropped as `doc.pdf#4506ffa9`) —
+        // a normal chunk read can't find that, so resolve the trailing `#handle` to its node and
+        // read that node (its grounded chunk) instead of failing. A numeric `#n` is a real page and
+        // is left to the document read below.
+        if !page_image {
+            if let Some((_, suffix)) = path.rsplit_once('#') {
+                let numeric = !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit());
+                if !numeric {
+                    if let Some(node) = resolve_node_handle(g, suffix) {
+                        if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
+                            trace.log(
+                                "read",
+                                json!({ "node_via_hash": path }),
+                                json!({ "node": node.id }),
+                            );
+                            return read_node(idx, g, node);
+                        }
+                    }
+                }
             }
         }
     }
