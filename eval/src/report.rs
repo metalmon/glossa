@@ -280,7 +280,10 @@ pub fn summary_text(results: &[CaseResult]) -> String {
         ("correct", format!("{} ({:.1}%)", t.correct, pct(t.correct))),
         ("partial", format!("{} ({:.1}%)", t.partial, pct(t.partial))),
         ("wrong", format!("{} ({:.1}%)", t.wrong, pct(t.wrong))),
-        ("unscored", format!("{} ({:.1}%)", t.unscored, pct(t.unscored))),
+        (
+            "unscored",
+            format!("{} ({:.1}%)", t.unscored, pct(t.unscored)),
+        ),
         ("total", t.total.to_string()),
     ];
     // Surface endpoint-errored cases as their own pair (never silently dropped): they are excluded
@@ -842,8 +845,12 @@ mod tests {
         let s = summary_text(&quality_cases());
 
         // Detail (the per-hop-type breakdown) prints ABOVE the final headline block.
-        let hop_pos = s.find("by hop_type").expect("hop breakdown present as detail");
-        let sep_pos = s.rfind('\u{2500}').expect("cli_fmt summary separator rule present");
+        let hop_pos = s
+            .find("by hop_type")
+            .expect("hop breakdown present as detail");
+        let sep_pos = s
+            .rfind('\u{2500}')
+            .expect("cli_fmt summary separator rule present");
         assert!(
             hop_pos < sep_pos,
             "per-hop detail must precede the final summary block:\n{s}"

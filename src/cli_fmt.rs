@@ -264,11 +264,21 @@ pub fn summary_string(pairs: &[(&str, String)]) -> String {
     if pairs.is_empty() {
         return String::new();
     }
-    let visible: usize = pairs.iter().map(|(k, v)| k.len() + 2 + v.len()).sum::<usize>()
+    let visible: usize = pairs
+        .iter()
+        .map(|(k, v)| k.len() + 2 + v.len())
+        .sum::<usize>()
         + 2 * pairs.len().saturating_sub(1);
     let rule = dim(&"─".repeat(visible.clamp(8, 60)));
-    let rendered: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}: {}", bold(v))).collect();
-    let body = if visible <= 60 { rendered.join("  ") } else { rendered.join("\n") };
+    let rendered: Vec<String> = pairs
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", bold(v)))
+        .collect();
+    let body = if visible <= 60 {
+        rendered.join("  ")
+    } else {
+        rendered.join("\n")
+    };
     format!("{rule}\n{body}")
 }
 
@@ -512,7 +522,7 @@ mod tests {
         ];
         let s = summary_string(&pairs);
         assert!(
-            s.lines().count() >= 1 + pairs.len(),
+            s.lines().count() > pairs.len(),
             "one pair per line when long:\n{s}"
         );
     }

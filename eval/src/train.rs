@@ -427,7 +427,10 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
             .with_context(|| format!("write {}", paths.answer.display()))?;
     }
 
-    cli_fmt::note(&format!("kbx train {tag}: winner -> {}", winner_path.display()));
+    cli_fmt::note(&format!(
+        "kbx train {tag}: winner -> {}",
+        winner_path.display()
+    ));
     cli_fmt::summary(&[
         ("seed_score", format!("{:.3}", result.baseline_score)),
         ("best_score", format!("{:.3}", result.best_score)),

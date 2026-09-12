@@ -4295,7 +4295,9 @@ strict = true
         // Trailing summary block (cli_fmt::summary_string): every headline doubt count in one
         // place at the end, replacing the old lone `unverifiable: n` line.
         assert!(
-            s.contains("ungrounded: 2") && s.contains("relinkable: 1") && s.contains("ambiguous: 0"),
+            s.contains("ungrounded: 2")
+                && s.contains("relinkable: 1")
+                && s.contains("ambiguous: 0"),
             "trailing summary must carry the headline doubt counts:\n{s}"
         );
         assert!(

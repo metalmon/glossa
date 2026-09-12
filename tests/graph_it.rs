@@ -110,14 +110,21 @@ fn graph_doctor_ends_with_summary_block() {
         .clone();
     let s = String::from_utf8(out).unwrap();
 
-    let detail_pos = s.find("ungrounded:").expect("ungrounded bucket detail present");
+    let detail_pos = s
+        .find("ungrounded:")
+        .expect("ungrounded bucket detail present");
     let sep_pos = s.rfind('\u{2500}').expect("summary separator rule present");
-    let unverifiable_pos = s.rfind("unverifiable:").expect("summary carries unverifiable:");
+    let unverifiable_pos = s
+        .rfind("unverifiable:")
+        .expect("summary carries unverifiable:");
     assert!(
         detail_pos < sep_pos && sep_pos < unverifiable_pos,
         "doubt-bucket detail must precede the trailing summary block:\n{s}"
     );
-    assert!(s.contains("relinkable:"), "summary carries relinkable:\n{s}");
+    assert!(
+        s.contains("relinkable:"),
+        "summary carries relinkable:\n{s}"
+    );
     assert!(s.contains("ambiguous:"), "summary carries ambiguous:\n{s}");
 }
 
@@ -181,7 +188,12 @@ fn graph_glossary_summary_matches_reflects_scope_filtered_count() {
     // Unscoped: both facts are rendered — the summary's `matches:` must count both.
     let out = Command::cargo_bin("kb")
         .unwrap()
-        .args(["graph", "glossary", "Shared term", dir.path().to_str().unwrap()])
+        .args([
+            "graph",
+            "glossary",
+            "Shared term",
+            dir.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -189,7 +201,10 @@ fn graph_glossary_summary_matches_reflects_scope_filtered_count() {
         .clone();
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("fact:a") && s.contains("fact:b"), "{s}");
-    assert!(s.contains("matches: 2"), "unscoped summary must count both shown matches:\n{s}");
+    assert!(
+        s.contains("matches: 2"),
+        "unscoped summary must count both shown matches:\n{s}"
+    );
 
     // `--scope docA.md`: only `fact:a` is rendered — the summary's `matches:` must drop to 1,
     // matching what's actually printed above it, not the unfiltered `resolve()` total of 2.

@@ -122,7 +122,12 @@ fn index_file_flag_reindexes_one_document() {
 
 /// The last non-empty lines of `s`, in original order (helper for summary-block assertions).
 fn last_nonempty_lines(s: &str, n: usize) -> Vec<&str> {
-    let mut rev: Vec<&str> = s.lines().rev().filter(|l| !l.trim().is_empty()).take(n).collect();
+    let mut rev: Vec<&str> = s
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(n)
+        .collect();
     rev.reverse();
     rev
 }
@@ -142,7 +147,11 @@ fn search_pretty_ends_with_summary_block() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     let tail = last_nonempty_lines(&stdout, 2);
-    assert_eq!(tail.len(), 2, "expected separator + summary line, got:\n{stdout}");
+    assert_eq!(
+        tail.len(),
+        2,
+        "expected separator + summary line, got:\n{stdout}"
+    );
     assert!(
         tail[0].chars().all(|c| c == '\u{2500}'),
         "line above summary must be the `\u{2500}` rule: {:?}",
@@ -190,7 +199,10 @@ fn grep_stdout_stays_pipe_compatible_no_summary() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    assert!(stdout.contains("needle"), "grep must still find the match:\n{stdout}");
+    assert!(
+        stdout.contains("needle"),
+        "grep must still find the match:\n{stdout}"
+    );
     assert!(
         !stdout.contains("matches:") && !stdout.contains("files:"),
         "piped grep stdout must stay rg-compatible (no summary block):\n{stdout}"
@@ -211,9 +223,21 @@ fn glob_ends_with_summary_block() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     let tail = last_nonempty_lines(&stdout, 2);
-    assert_eq!(tail.len(), 2, "expected separator + summary line, got:\n{stdout}");
-    assert!(tail[0].chars().all(|c| c == '\u{2500}'), "separator: {:?}", tail[0]);
-    assert!(tail[1].contains("docs: 2"), "last stdout line: {:?}", tail[1]);
+    assert_eq!(
+        tail.len(),
+        2,
+        "expected separator + summary line, got:\n{stdout}"
+    );
+    assert!(
+        tail[0].chars().all(|c| c == '\u{2500}'),
+        "separator: {:?}",
+        tail[0]
+    );
+    assert!(
+        tail[1].contains("docs: 2"),
+        "last stdout line: {:?}",
+        tail[1]
+    );
 }
 
 #[test]
@@ -229,8 +253,16 @@ fn index_ends_with_summary_block() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     let tail = last_nonempty_lines(&stdout, 2);
-    assert_eq!(tail.len(), 2, "expected separator + summary line, got:\n{stdout}");
-    assert!(tail[0].chars().all(|c| c == '\u{2500}'), "separator: {:?}", tail[0]);
+    assert_eq!(
+        tail.len(),
+        2,
+        "expected separator + summary line, got:\n{stdout}"
+    );
+    assert!(
+        tail[0].chars().all(|c| c == '\u{2500}'),
+        "separator: {:?}",
+        tail[0]
+    );
     assert!(
         tail[1].contains("added:") && tail[1].contains("elapsed:"),
         "last stdout line: {:?}",
@@ -258,7 +290,11 @@ fn index_force_folds_generalize_counts_into_the_one_final_summary() {
         "the old separate generalize line must be folded into the summary:\n{stdout}"
     );
     let tail = last_nonempty_lines(&stdout, 2);
-    assert_eq!(tail.len(), 2, "expected separator + summary line, got:\n{stdout}");
+    assert_eq!(
+        tail.len(),
+        2,
+        "expected separator + summary line, got:\n{stdout}"
+    );
     assert!(
         tail[1].contains("added:") && tail[1].contains("elapsed:"),
         "last stdout line: {:?}",
