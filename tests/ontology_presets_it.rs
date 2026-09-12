@@ -18,7 +18,9 @@ fn index_ontology_materializes_then_indexes() {
         ])
         .assert()
         .success()
-        .stdout(contains("indexed"));
+        // `kb index`'s stdout is now the CLI output contract's summary block (`added: N  ...`),
+        // not the word "indexed" — see docs/superpowers/plans/2026-09-12-cli-output-contract.md.
+        .stdout(contains("added:"));
 
     let onto = fs::read_to_string(dir.path().join(".glossa").join("ontology.toml")).unwrap();
     assert!(onto.contains("Symptom"));

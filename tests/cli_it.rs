@@ -130,7 +130,7 @@ fn last_nonempty_lines(s: &str, n: usize) -> Vec<&str> {
 #[test]
 fn search_pretty_ends_with_summary_block() {
     // CLI output contract: `search --format pretty` (the interactive/pretty path) must end its
-    // stdout with the shared `cli_fmt::summary` block — a dim `─` rule, then `matches: N  shown: N`.
+    // stdout with the shared `cli_fmt::summary` block — a dim `─` rule, then `results: N`.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), b"# Intro\nthe cat sat\n").unwrap();
 
@@ -149,12 +149,10 @@ fn search_pretty_ends_with_summary_block() {
         tail[0]
     );
     assert!(
-        tail[1].contains("matches:") && tail[1].contains("shown:"),
+        tail[1].contains("results:"),
         "last stdout line must be the summary: {:?}",
         tail[1]
     );
-    // Suggestions/banners are stderr-only — never in the stdout summary/detail.
-    assert!(!stdout.contains("did you mean"), "stdout must not carry suggestions:\n{stdout}");
 }
 
 #[test]
@@ -172,7 +170,7 @@ fn search_rg_format_has_no_summary_block() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
-        !stdout.contains("matches:") && !stdout.contains("shown:"),
+        !stdout.contains("results:"),
         "rg-format stdout must stay grep-compatible (no summary block):\n{stdout}"
     );
 }

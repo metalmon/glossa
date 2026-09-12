@@ -1647,11 +1647,10 @@ fn main() -> anyhow::Result<()> {
                 // rg` (or `auto` piped to a non-tty) must stay byte-for-byte grep-compatible, so the
                 // summary is gated on the same `pretty` flag that selects the detail rendering above
                 // — never printed in rg-style/pipe mode.
-                let shown = display.len();
-                glossa::cli_fmt::summary(&[
-                    ("matches", shown.to_string()),
-                    ("shown", shown.to_string()),
-                ]);
+                // One honest count only: `limit` is already applied inside search_filtered/
+                // search_chunks before this point, so there is no separate pre-truncation total to
+                // report — a fake "matches: N  shown: N" pair (always equal) would be dishonest.
+                glossa::cli_fmt::summary(&[("results", display.len().to_string())]);
             } else {
                 for l in &rg_lines {
                     println!("{l}");
