@@ -56,6 +56,11 @@ pub struct GepaGraphConfig {
     pub endpoint: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// The reader endpoint's resolved sampling temperature (`lab.model.resolve_temperature()`):
+    /// `Some(t)` sends `t`, `None` omits the field so the provider default applies. This makes GEPA
+    /// score each candidate prompt at the SAME temperature eval/live serving uses (server default
+    /// when unset) instead of a hardcoded 0.8 — train and serve no longer diverge.
+    pub reader_temperature: Option<f64>,
     pub val_frac: f64,
     /// Hard ceiling on total reader rollouts (metric calls) the GEPA SEARCH may spend, DSPy-style.
     /// Every `score_questions` pass adds the number of questions it scored to a running counter;
@@ -318,6 +323,7 @@ fn rollout_one(
             tools,
             messages,
             Duration::from_secs(240),
+            cfg.reader_temperature,
         )
     };
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {

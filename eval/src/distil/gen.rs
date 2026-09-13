@@ -13,7 +13,7 @@
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::run_agent_loop;
-use crate::backend::transport::openai::agent_chat_full;
+use crate::backend::transport::openai::{agent_chat_full, generative_sampling_temp};
 use crate::lab::LabConfig;
 use crate::reason::schema_graph_block;
 use crate::score::contains_match;
@@ -483,6 +483,7 @@ pub fn generate_one(
             &tools,
             messages,
             timeout,
+            generative_sampling_temp(),
         )
     };
 

@@ -309,6 +309,9 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         endpoint: model_ep.endpoint.clone(),
         model: model_ep.model.clone(),
         api_key: model_key,
+        // Score rollouts at the reader endpoint's own temperature (server default when unset), so
+        // GEPA optimizes the prompt under the SAME conditions eval/live serving uses — not 0.8.
+        reader_temperature: model_ep.resolve_temperature(),
         val_frac,
         max_metric_calls: budget.max_metric_calls,
         max_candidates: budget.max_candidates,

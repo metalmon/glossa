@@ -420,14 +420,53 @@ pub(crate) fn reply_from_response(full: &Value) -> anyhow::Result<TurnReply> {
     })
 }
 
+/// Build the agent-loop request body shared by every closure-based stage. `temperature` is carried
+/// ONLY when `Some` — `None` OMITS the field so the provider/model applies its own default (the
+/// same contract as [`OpenAiTransport::call`]/[`chat_http`]). `min_p` ([`agent_min_p`]) and
+/// `max_tokens` ([`super::agent_max_tokens`]) are always included; `tools` is passed through.
+pub(crate) fn agent_request_body(
+    model: &str,
+    messages: &[Value],
+    tools: &Value,
+    temperature: Option<f64>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "min_p": agent_min_p(),
+        "max_tokens": super::agent_max_tokens(),
+    });
+    // Include `temperature` only when set — `None` omits it so the provider default applies.
+    if let Some(t) = temperature {
+        body["temperature"] = json!(t);
+    }
+    body
+}
+
+/// The sampling temperature for the GENERATIVE stages (build/distil/reason): env `KB_EVAL_TEMP`
+/// (set once per run from each stage's own knob — `build_temp` / densify temp), else `0.8` — the
+/// historical `lmstudio_chat` default for these stochastic, N-run-averaged passes. Always `Some`,
+/// so these stages keep sending an explicit temperature exactly as before. The GEPA reader rollout
+/// does NOT use this — it passes the reader endpoint's `resolve_temperature()` so training matches
+/// eval/live serving (server default when unset), not a hardcoded 0.8.
+pub(crate) fn generative_sampling_temp() -> Option<f64> {
+    Some(
+        std::env::var("KB_EVAL_TEMP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.8),
+    )
+}
+
 /// One OpenAI-compatible chat round-trip returning the WHOLE response `Value` (so the resample
 /// layer, via the `ClosureTransport` shim, can read `choices[0].finish_reason`). This is the
 /// body-building + single-call half of the retired `lmstudio_chat` — the resample loop itself now
 /// lives provider-neutrally in [`crate::backend::resample::call_with_resample`], driven by the
-/// agent loop for EVERY stage (reader included). Builds the agent-loop request body: `temperature`
-/// (env `KB_EVAL_TEMP`, default `0.8` — this stage is stochastic and averaged over N runs), `min_p`
-/// ([`agent_min_p`]), `max_tokens` ([`super::agent_max_tokens`]), and the passed `tools`. `url` is the
-/// FULL chat-completions URL, POSTed verbatim.
+/// agent loop for EVERY stage. `temperature` is an EXPLICIT argument (`None` omits the field so the
+/// provider default applies): generative stages pass [`generative_sampling_temp`]; the GEPA reader
+/// passes its endpoint's `resolve_temperature()`. `url` is the FULL chat-completions URL, POSTed
+/// verbatim.
 ///
 /// Used by the closure-based callers still on the `ClosureTransport` shim (`build::extract`,
 /// `distil::densify`/`gen`, `reason::seed`, `gepa_graph`) — they capture their own
@@ -439,21 +478,9 @@ pub(crate) fn agent_chat_full(
     tools: &Value,
     messages: &[Value],
     timeout: Duration,
+    temperature: Option<f64>,
 ) -> anyhow::Result<Value> {
-    // Sampling temperature: overridable via KB_EVAL_TEMP for noise-sensitivity runs (default 0.8),
-    // matching the historical `lmstudio_chat` default exactly.
-    let temperature: f64 = std::env::var("KB_EVAL_TEMP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.8);
-    let body = json!({
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-        "temperature": temperature,
-        "min_p": agent_min_p(),
-        "max_tokens": super::agent_max_tokens(),
-    });
+    let body = agent_request_body(model, messages, tools, temperature);
     // Diagnostics: KB_EVAL_DUMP_REQ=<path> writes the exact request body (incl. the `tools` array
     // with descriptions) sent to the endpoint, to prove what the model actually receives.
     if let Ok(p) = std::env::var("KB_EVAL_DUMP_REQ") {
@@ -481,6 +508,23 @@ mod tests {
             no_image: false,
             features: FeatureSet::default(),
         }
+    }
+
+    /// The agent-loop request body carries `temperature` ONLY when the caller passes `Some`; `None`
+    /// OMITS the field so the provider/model applies its own default. This is the contract that lets
+    /// the GEPA reader rollout match eval/live serving — the reader endpoint's `resolve_temperature()`
+    /// (server default when unset) — instead of a hardcoded sampling temperature.
+    #[test]
+    fn agent_request_body_omits_temperature_when_none() {
+        let tools = json!([]);
+        let msgs = [json!({ "role": "user", "content": "hi" })];
+        let with = agent_request_body("m", &msgs, &tools, Some(0.3));
+        assert_eq!(with["temperature"], json!(0.3));
+        let without = agent_request_body("m", &msgs, &tools, None);
+        assert!(
+            without.get("temperature").is_none(),
+            "temperature must be omitted when None, got {without}"
+        );
     }
 
     /// Task 5: the OpenAI envelope wraps EXACTLY the resolver's core schema per tool, hides `verify`

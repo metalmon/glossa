@@ -4,7 +4,7 @@
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::run_agent_loop;
-use crate::backend::transport::openai::agent_chat_full;
+use crate::backend::transport::openai::{agent_chat_full, generative_sampling_temp};
 use crate::build::extract::{extract_tools_schema, parse_and_filter_upsert, upserted_node_ids};
 use crate::distil::Seed;
 use crate::lab::LabConfig;
@@ -170,6 +170,7 @@ pub fn chain_one_seed(
             &tools,
             messages,
             timeout,
+            generative_sampling_temp(),
         )
     };
 

@@ -17,7 +17,7 @@
 //! covered below without a live model.
 
 use crate::backend::openai::run_agent_loop;
-use crate::backend::transport::openai::agent_chat_full;
+use crate::backend::transport::openai::{agent_chat_full, generative_sampling_temp};
 use crate::lab::LabConfig;
 use crate::parallel::GraphWriter;
 use crate::reason::grounding_schema_block;
@@ -404,6 +404,7 @@ pub fn extract_doc(
                 &tools,
                 messages,
                 timeout,
+                generative_sampling_temp(),
             )
         };
 

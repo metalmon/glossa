@@ -28,7 +28,7 @@
 
 use crate::backend::glossa_tools;
 use crate::backend::openai::run_agent_loop;
-use crate::backend::transport::openai::agent_chat_full;
+use crate::backend::transport::openai::{agent_chat_full, generative_sampling_temp};
 use crate::build::extract::{
     doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids,
 };
@@ -235,6 +235,7 @@ pub fn densify_doc(
                 &tools,
                 messages,
                 timeout,
+                generative_sampling_temp(),
             )
         };
 

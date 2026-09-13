@@ -865,6 +865,15 @@ fn run_optimize_graph(
             endpoint,
             model,
             api_key,
+            // Legacy research binary has no lab.toml (so no reader `Endpoint` to resolve): keep the
+            // historical sampling default — `KB_EVAL_TEMP` else 0.8 — so its rollouts are byte-for-
+            // byte unchanged. The maintained `kbx train` front-end instead passes the reader
+            // endpoint's `resolve_temperature()` (server default when unset). Mirrors
+            // `transport::openai::generative_sampling_temp`, inlined to avoid widening crate API.
+            reader_temperature: std::env::var("KB_EVAL_TEMP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(Some(0.8)),
             val_frac,
             max_metric_calls: legacy_max_metric_calls,
             max_candidates: legacy_max_candidates,

@@ -19,7 +19,7 @@ use crate::backend::glossa_tools;
 use crate::backend::openai::{
     cache_is_estimated, reset_resamples, reset_tokens, run_agent_loop, token_summary, StatusTicker,
 };
-use crate::backend::transport::openai::agent_chat_full;
+use crate::backend::transport::openai::{agent_chat_full, generative_sampling_temp};
 use crate::distil::run::DistilArgs;
 use crate::distil::seed_pool;
 use crate::lab::{Endpoint, LabConfig};
@@ -373,6 +373,7 @@ fn enrich_one_chain(
             tools,
             messages,
             timeout,
+            generative_sampling_temp(),
         )
     };
 
