@@ -2388,6 +2388,7 @@ dependencies = [
  "filetime",
  "glossa",
  "glossa-constraint",
+ "glossa-nli",
  "indicatif",
  "jsonrepair",
  "predicates",
