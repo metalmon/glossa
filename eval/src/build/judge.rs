@@ -164,15 +164,19 @@ fn majority_links(
     let mut order: Vec<(String, String)> = Vec::new();
     let mut counts: HashMap<(String, String), usize> = HashMap::new();
     for ballot in ballots {
-        let mut seen_in_ballot: HashSet<(String, String)> = HashSet::new();
+        // Borrow the links to dedup within this ballot — no clone on the repeat path.
+        let mut seen_in_ballot: HashSet<&(String, String)> = HashSet::new();
         for link in ballot {
-            if !seen_in_ballot.insert(link.clone()) {
+            if !seen_in_ballot.insert(link) {
                 continue; // guard: count a ballot at most once per unique link
             }
-            if !counts.contains_key(link) {
-                order.push(link.clone());
+            match counts.get_mut(link) {
+                Some(c) => *c += 1,
+                None => {
+                    order.push(link.clone());
+                    counts.insert(link.clone(), 1);
+                }
             }
-            *counts.entry(link.clone()).or_default() += 1;
         }
     }
     order
@@ -453,5 +457,32 @@ mod tests {
     fn majority_links_single_vote_keeps_any_link_that_appeared() {
         let ballots = vec![vec![link("a", "b")]];
         assert_eq!(majority_links(&ballots, 1), vec![link("a", "b")]);
+    }
+
+    /// Pins the `seen_in_ballot` guard: a single ballot that repeats a link must count it ONCE, so a
+    /// duplicate-heavy ballot can't manufacture a fake majority. With one ballot at votes=2, one true
+    /// count needs `1*2 > 2` = false → dropped; if the dup were miscounted as 2, `2*2 > 2` → kept.
+    #[test]
+    fn majority_links_counts_intra_ballot_duplicate_once() {
+        let ballots = vec![vec![link("a", "b"), link("a", "b")]];
+        assert!(majority_links(&ballots, 2).is_empty());
+        // And at votes=1 the single distinct link still survives (count 1, not 2).
+        assert_eq!(majority_links(&ballots, 1), vec![link("a", "b")]);
+    }
+
+    /// Covers the shipped default `KB_EVAL_JUDGE_VOTES=5`: a link needs `count*2 > 5` = count >= 3.
+    #[test]
+    fn majority_links_default_five_votes_needs_three() {
+        let yes = vec![link("a", "b")];
+        let no = vec![link("c", "d")];
+        // ("a","b") in 3 of 5 ballots (kept); ("c","d") in 2 of 5 (dropped).
+        let ballots = vec![
+            yes.clone(),
+            yes.clone(),
+            yes.clone(),
+            no.clone(),
+            no.clone(),
+        ];
+        assert_eq!(majority_links(&ballots, 5), vec![link("a", "b")]);
     }
 }
