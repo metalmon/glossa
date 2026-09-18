@@ -233,6 +233,11 @@ fn build_user(
     } else {
         format!("\n{}", sections.dialogue)
     };
+    // The abstention branch places `dlg_rule` BEFORE the reply line, so it needs a trailing
+    // separator when present (otherwise the rule glues onto "Reply with…"); the answerable branch
+    // places `dlg_rule` last and needs none. Empty when `dlg_rule` is empty, so the legacy /
+    // no-dialogue message stays byte-identical.
+    let dlg_sep = if dlg_rule.is_empty() { "" } else { "\n" };
 
     if !answerable {
         let abs_rule: &str = if sections.abstention.is_empty() {
@@ -249,7 +254,7 @@ fn build_user(
              technical answer.\n\
              ANSWER: {answer}\n\
              {dlg_data}{abs_rule}\n\
-             {dlg_rule}{reply}"
+             {dlg_rule}{dlg_sep}{reply}"
         );
     }
     // Safety-first only: a decline on an ANSWERABLE question is a SAFE miss, not a fabrication — grade
@@ -347,6 +352,11 @@ pub fn judge(
     );
     // The messages are built ONCE and resampled `votes` times below — voting stays intrinsic to
     // `judge()` (no separate `votes` parameter), unaffected by the dialogue/sectioning changes above.
+    // System content is `sections.preamble`. For a legacy (unsectioned) judge.md that is the whole
+    // file with leading/trailing whitespace trimmed and line endings normalized to `\n` (see
+    // `split_judge_sections`) — a CONSCIOUS, accepted difference from sending the raw `judge_md`
+    // byte-for-byte: it is functionally inert for the grader (whitespace/CRLF only), while the USER
+    // message stays byte-identical under legacy+no-dialogue (pinned by `build_user_without_dialogue_matches_legacy`).
     let messages = vec![
         json!({ "role": "system", "content": sections.preamble }),
         json!({ "role": "user", "content": user }),
@@ -524,6 +534,25 @@ mod tests {
     }
 
     #[test]
+    fn split_judge_sections_marker_as_first_line_yields_empty_preamble() {
+        // A prompt that opens directly on a marker has no preamble text before it.
+        let s = split_judge_sections("[[ANSWERABLE]]\nONLY-RULE\n");
+        assert_eq!(s.preamble, "");
+        assert_eq!(s.answerable, "ONLY-RULE");
+        assert!(s.dialogue.is_empty() && s.abstention.is_empty());
+    }
+
+    #[test]
+    fn split_judge_sections_only_some_markers_present() {
+        // Only ANSWERABLE is declared; the absent DIALOGUE/ABSTENTION sections stay empty (build_user
+        // then falls back to LEGACY_ABSTENTION_RULE and omits the dialogue rule).
+        let s = split_judge_sections("PRE\n[[ANSWERABLE]]\nANS\n");
+        assert_eq!(s.preamble, "PRE");
+        assert_eq!(s.answerable, "ANS");
+        assert!(s.dialogue.is_empty() && s.abstention.is_empty());
+    }
+
+    #[test]
     fn dialogue_block_empty_is_none_and_two_turns_are_ordered() {
         assert!(dialogue_block(&[]).is_none());
         let dlg = vec![
@@ -687,11 +716,21 @@ mod tests {
         assert!(!without_dlg.contains("DIALOGUE-RULE"));
         assert!(without_dlg.contains("ANSWERABLE-RULE"));
 
-        // Same for the abstention branch.
+        // Same for the abstention branch — and here the dialogue rule sits BEFORE the reply line,
+        // so pin that it is SEPARATED from it (a regression guard: a missing separator once glued
+        // the rule onto "Reply with…" on the unanswerable+dialogue path).
         let with_dlg_abs = build_user("Q?", "", "A", None, false, false, &dlg, &s);
         assert!(with_dlg_abs.contains("DIALOGUE:"));
         assert!(with_dlg_abs.contains("DIALOGUE-RULE"));
         assert!(with_dlg_abs.contains("ABSTENTION-RULE"));
+        assert!(
+            with_dlg_abs.contains("DIALOGUE-RULE\nReply"),
+            "dialogue rule must be newline-separated from the reply line: {with_dlg_abs}"
+        );
+        assert!(
+            !with_dlg_abs.contains("DIALOGUE-RULEReply"),
+            "dialogue rule must not glue onto the reply line: {with_dlg_abs}"
+        );
     }
 
     // Serializes tests that mutate the process-wide `KB_EVAL_JUDGE_VOTES` env var, so a parallel
