@@ -485,47 +485,27 @@ impl InProcessNli {
     }
 }
 
-/// Build the ORT execution-provider dispatch list for `providers`, in the caller's order,
-/// cfg-gated on which `nli-cuda` / `nli-directml` / `nli-coreml` Cargo features are compiled into
-/// this build. `"cpu"`, unknown names, and any GPU name whose feature isn't compiled are simply
-/// skipped — they end up on ORT's implicit CPU execution provider, which is always available and
-/// requires no explicit entry here. This is the same name filter as [`compiled_gpu_providers`]
-/// (kept in sync — see its doc), just producing live `ExecutionProviderDispatch` values instead of
-/// names, so it can't be unit-tested without a real `ort` build; `compiled_gpu_providers` is.
+/// Build the ORT execution-provider dispatch list for `providers`, in the caller's order. Names
+/// are first filtered down to the GPU EPs actually compiled into this build by
+/// [`compiled_gpu_providers`] (the single source of truth for that filter — `"cpu"`, unknown
+/// names, and any GPU name whose feature isn't compiled are dropped there), then each surviving
+/// name is turned into a live `ExecutionProviderDispatch` by [`dispatch_for_gpu_name`]. Called
+/// unconditionally from `build_inner` in every build (CPU-only builds just get an empty `Vec`,
+/// i.e. `with_execution_providers([])` — a no-op, same as never calling it), which is what keeps
+/// [`compiled_gpu_providers`] genuinely exercised (not dead code) in the default CPU-only build.
 fn execution_provider_dispatch(providers: &[String]) -> Vec<ExecutionProviderDispatch> {
-    providers
-        .iter()
-        .filter_map(|p| dispatch_for_name(p))
+    compiled_gpu_providers(providers)
+        .into_iter()
+        .filter_map(dispatch_for_gpu_name)
         .collect()
 }
 
-/// Per-name EP-dispatch lookup used by [`execution_provider_dispatch`]. Written as a chain of
-/// early returns (rather than a `match`) so that with NO GPU feature compiled in, `name` is still
-/// referenced by live (if unreachable-by-cfg) code in every build — avoiding an `unused_variables`
-/// warning that a fully cfg-stripped `match` arm set would otherwise leave behind.
-fn dispatch_for_name(name: &str) -> Option<ExecutionProviderDispatch> {
-    #[cfg(feature = "nli-cuda")]
-    if name == "cuda" {
-        return Some(ort::ep::CUDA::default().build());
-    }
-    #[cfg(feature = "nli-directml")]
-    if name == "directml" {
-        return Some(ort::ep::DirectML::default().build());
-    }
-    #[cfg(feature = "nli-coreml")]
-    if name == "coreml" {
-        return Some(ort::ep::CoreML::default().build());
-    }
-    let _ = name; // reachable when no GPU feature above ran (or matched nothing)
-    None // cpu (implicit), unknown, or a feature not compiled in → skip.
-}
-
-/// Pure name-level mirror of [`execution_provider_dispatch`]'s filtering, with no `ort`/session
-/// access — this is what's actually unit-tested (below), since building real
-/// `ExecutionProviderDispatch` values requires a compiled EP feature and isn't meaningfully
-/// assertable without a GPU. Returns the subset of `providers` that WOULD be registered as GPU
-/// execution providers given the features compiled into this build, in the same relative order as
-/// the input; `"cpu"` and unknown names are always dropped (they fall to CPU either way).
+/// Returns the subset of `providers` that WOULD be registered as GPU execution providers given
+/// the `nli-cuda` / `nli-directml` / `nli-coreml` Cargo features compiled into this build, in the
+/// same relative order as the input; `"cpu"` and unknown names are always dropped (they fall to
+/// ORT's implicit CPU execution provider either way). Pure name-level logic, no `ort`/session
+/// access — both [`execution_provider_dispatch`] (production) and the unit tests below call this
+/// same function, so there is exactly one place the EP-name filter lives.
 fn compiled_gpu_providers(providers: &[String]) -> Vec<&'static str> {
     providers
         .iter()
@@ -533,8 +513,10 @@ fn compiled_gpu_providers(providers: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
-/// Per-name lookup used by [`compiled_gpu_providers`]; mirrors [`dispatch_for_name`]'s cfg gates
-/// exactly, minus the `ort` construction (see that function's doc for the early-return rationale).
+/// Per-name lookup used by [`compiled_gpu_providers`]. Written as a chain of early returns (rather
+/// than a `match`) so that with NO GPU feature compiled in, `name` is still referenced by live (if
+/// unreachable-by-cfg) code in every build — avoiding an `unused_variables` warning that a fully
+/// cfg-stripped `match` arm set would otherwise leave behind.
 fn compiled_gpu_name(name: &str) -> Option<&'static str> {
     #[cfg(feature = "nli-cuda")]
     if name == "cuda" {
@@ -548,8 +530,29 @@ fn compiled_gpu_name(name: &str) -> Option<&'static str> {
     if name == "coreml" {
         return Some("coreml");
     }
+    let _ = name; // reachable when no GPU feature above ran (or matched nothing)
+    None // cpu (implicit), unknown, or a feature not compiled in → skip.
+}
+
+/// Turns an already-filtered GPU EP name (one that [`compiled_gpu_providers`] confirmed is
+/// compiled into this build) into a live `ExecutionProviderDispatch`. Mirrors
+/// [`compiled_gpu_name`]'s cfg gates exactly (same early-return shape, same rationale) — the only
+/// difference is constructing a real `ort::ep::*` value instead of returning the bare name.
+fn dispatch_for_gpu_name(name: &str) -> Option<ExecutionProviderDispatch> {
+    #[cfg(feature = "nli-cuda")]
+    if name == "cuda" {
+        return Some(ort::ep::CUDA::default().build());
+    }
+    #[cfg(feature = "nli-directml")]
+    if name == "directml" {
+        return Some(ort::ep::DirectML::default().build());
+    }
+    #[cfg(feature = "nli-coreml")]
+    if name == "coreml" {
+        return Some(ort::ep::CoreML::default().build());
+    }
     let _ = name;
-    None
+    None // unreachable in practice (name already passed compiled_gpu_providers), but total.
 }
 
 /// One `(window, hypothesis)` row queued for batched execution, tagged with the index of the
