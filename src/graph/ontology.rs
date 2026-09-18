@@ -120,6 +120,10 @@ struct RawVerifyNli {
     /// Softmax index of the entailment class in the model's output; model-export-specific.
     #[serde(default)]
     entail_index: Option<usize>,
+    /// Ordered execution-provider preference list (e.g. `["cuda", "cpu"]`) for a later task's EP
+    /// registration; `None`/absent when unset (see [`Ontology::verify_nli_execution_providers`]).
+    #[serde(default)]
+    execution_providers: Option<Vec<String>>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -399,6 +403,9 @@ pub struct Ontology {
     verify_nli_scorer: Option<String>,
     verify_nli_model_dir: Option<String>,
     verify_nli_entail_index: Option<usize>,
+    /// Per-corpus `[verify.nli].execution_providers` ordered EP preference list, empty when unset.
+    /// See [`Ontology::verify_nli_execution_providers`].
+    verify_nli_execution_providers: Vec<String>,
     /// Per-corpus `[verify.combined.<bucket>]` z-score consensus calibration (Task CZ-2's output).
     /// `None` when the bucket's table is absent OR only partially populated — see
     /// [`Ontology::verify_combined_single`].
@@ -577,6 +584,12 @@ impl Ontology {
             verify_nli_scorer: raw.verify.nli.as_ref().and_then(|n| n.scorer.clone()),
             verify_nli_model_dir: raw.verify.nli.as_ref().and_then(|n| n.model_dir.clone()),
             verify_nli_entail_index: raw.verify.nli.as_ref().and_then(|n| n.entail_index),
+            verify_nli_execution_providers: raw
+                .verify
+                .nli
+                .as_ref()
+                .and_then(|n| n.execution_providers.clone())
+                .unwrap_or_default(),
             verify_combined_single: raw
                 .verify
                 .combined
@@ -830,6 +843,13 @@ impl Ontology {
     /// `gate::config::VerifyConfig` applies its engine default (`0`).
     pub fn verify_nli_entail_index(&self) -> Option<usize> {
         self.verify_nli_entail_index
+    }
+
+    /// Per-corpus `[verify.nli].execution_providers` ordered EP preference list (e.g.
+    /// `["cuda", "cpu"]`), or an empty slice when the ontology declares none — in which case
+    /// `gate::config::VerifyConfig::resolve` applies its engine default (`["cpu"]`).
+    pub fn verify_nli_execution_providers(&self) -> &[String] {
+        &self.verify_nli_execution_providers
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the

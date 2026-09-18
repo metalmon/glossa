@@ -452,6 +452,12 @@ enum NliCmd {
         /// calibrated thresholds (`kbx eval calibrate`) to actually fire; `set` only wires the model.
         #[arg(long)]
         mode: Option<String>,
+        /// Ordered execution-provider preference list for a later task's GPU EP registration
+        /// (this task only writes the config). Repeat the flag or comma-join a single value, e.g.
+        /// `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split too). Written to
+        /// `[verify.nli].execution_providers` only if given.
+        #[arg(long = "ep")]
+        ep: Vec<String>,
     },
 }
 
@@ -745,8 +751,20 @@ fn main() -> Result<()> {
                     scorer,
                     entail_index,
                     mode,
+                    ep,
                 },
-        } => kb_eval::nli_check::nli_set(path, model_dir, scorer, entail_index, mode),
+        } => {
+            // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
+            // the repeated-flag and comma-joined forms into one ordered list.
+            let ep: Vec<String> = ep
+                .iter()
+                .flat_map(|s| s.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            kb_eval::nli_check::nli_set(path, model_dir, scorer, entail_index, mode, ep)
+        }
     }
 }
 

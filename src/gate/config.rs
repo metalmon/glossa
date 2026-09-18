@@ -47,6 +47,38 @@ pub struct VerifyConfig {
     /// Softmax index of the entailment class; `0` is the `cointegrated/rubert-base-cased-nli-threeway`
     /// convention (`id2label[0]=entailment`); Task 6 confirms against the real export.
     pub entail_index: usize,
+    /// Ordered execution-provider preference list (Plan 3 Task 1), e.g. `["cuda", "cpu"]`. Consumed
+    /// by a later task's EP registration — this task only resolves and normalizes it. Always
+    /// non-empty after `resolve`: an unset/empty/all-unknown list defaults to `["cpu"]`, which the
+    /// runtime treats exactly as today (CPU-only, no behavior change).
+    pub execution_providers: Vec<String>,
+}
+
+/// Execution providers the runtime knows how to register (Plan 3's later task); anything else is
+/// dropped with a warning rather than erroring — fail-open, since a bad/typo'd EP name should never
+/// block the gate from resolving.
+const KNOWN_EXECUTION_PROVIDERS: &[&str] =
+    &["cpu", "cuda", "directml", "coreml", "rocm", "tensorrt"];
+
+/// Lowercase + trim each entry, drop anything outside [`KNOWN_EXECUTION_PROVIDERS`] (warning, not
+/// error), and default to `["cpu"]` when the result is empty — whether because the input was empty
+/// or because every entry was unknown.
+fn normalize_eps(raw: impl Iterator<Item = String>) -> Vec<String> {
+    let normalized: Vec<String> = raw
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| {
+            let known = KNOWN_EXECUTION_PROVIDERS.contains(&s.as_str());
+            if !known {
+                tracing::warn!(execution_provider = %s, "unknown [verify.nli].execution_providers entry dropped");
+            }
+            known
+        })
+        .collect();
+    if normalized.is_empty() {
+        vec!["cpu".to_string()]
+    } else {
+        normalized
+    }
 }
 
 /// Calibrated z-score consensus stats for `combined` mode (spec §4 rev.5): AC and NLI are each
@@ -156,6 +188,19 @@ impl VerifyConfig {
             entail_index: env_usize("GLOSSA_VERIFY_NLI_ENTAIL_INDEX")
                 .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_entail_index()))
                 .unwrap_or(0),
+            // Ordered EP preference list: env (comma-separated) wins wholesale over ontology, else
+            // ontology's list, else empty — normalize_eps then defaults empty/all-unknown to
+            // ["cpu"], so an unset deployment resolves to today's CPU-only behavior unchanged.
+            execution_providers: normalize_eps(
+                match env_string("GLOSSA_NLI_EP") {
+                    Some(v) => v.split(',').map(str::to_string).collect::<Vec<_>>(),
+                    None => ont
+                        .as_ref()
+                        .map(|o| o.verify_nli_execution_providers().to_vec())
+                        .unwrap_or_default(),
+                }
+                .into_iter(),
+            ),
         }
     }
 
@@ -389,5 +434,114 @@ mod tests {
         assert_eq!(c.scorer, None);
         assert_eq!(c.model_dir, None);
         assert_eq!(c.entail_index, 0);
+    }
+
+    #[test]
+    fn execution_providers_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_NLI_EP");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n\
+             [verify.nli]\nexecution_providers=[\"cuda\",\"cpu\"]\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(
+            c.execution_providers,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
+    }
+
+    #[test]
+    fn execution_providers_defaults_to_cpu_when_absent() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_NLI_EP");
+        let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
+        let c = VerifyConfig::resolve(dir.path());
+        assert_eq!(c.execution_providers, vec!["cpu".to_string()]);
+    }
+
+    #[test]
+    fn execution_providers_env_overrides_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"cuda\"]\n",
+        )
+        .unwrap();
+        std::env::set_var("GLOSSA_NLI_EP", "directml,cpu");
+        let c = VerifyConfig::resolve(&g);
+        std::env::remove_var("GLOSSA_NLI_EP");
+        assert_eq!(
+            c.execution_providers,
+            vec!["directml".to_string(), "cpu".to_string()]
+        );
+    }
+
+    #[test]
+    fn execution_providers_unknown_entries_dropped() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_NLI_EP");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"bogus\",\"cpu\"]\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.execution_providers, vec!["cpu".to_string()]);
+    }
+
+    #[test]
+    fn execution_providers_all_unknown_falls_back_to_cpu() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_NLI_EP");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"bogus\"]\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.execution_providers, vec!["cpu".to_string()]);
+    }
+
+    #[test]
+    fn execution_providers_mixed_case_normalized_lowercase() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_NLI_EP");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"CUDA\"]\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.execution_providers, vec!["cuda".to_string()]);
     }
 }

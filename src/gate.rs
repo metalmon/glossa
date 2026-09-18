@@ -216,6 +216,7 @@ mod resolve_scorer_tests {
             scorer: None,
             model_dir: None,
             entail_index: 0,
+            execution_providers: vec!["cpu".into()],
         }
     }
 
