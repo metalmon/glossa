@@ -413,6 +413,12 @@ fn rollout_one(
                 q.answerable,
                 cfg.credit_abstention,
                 Some(idx),
+                // TODO: training does not feed reader<->user_sim dialogue to the judge — GEPA's
+                // rollout here doesn't run through `run_agent_loop_capturing`'s eval call-site
+                // pairing the way `kbx.rs` does, so there's no same-thread guarantee this could
+                // safely drain. Wire this to `openai::take_reader_dialogue()` if/when a training
+                // rollout on this path can guarantee running on the same thread as this judge call.
+                &[],
             ) {
                 // Keep the judge's reason alongside the score — the reflector surfaces it to the
                 // teacher as WHY this case was wrong (signal B). Dropping it here is what left the

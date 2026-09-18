@@ -1026,6 +1026,14 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                         None => (Vec::new(), Vec::new(), Vec::new(), String::new()),
                     };
 
+                // Drain THIS worker thread's captured reader<->user_sim dialogue (see
+                // `openai::READER_DIALOGUE`) right after the rollout that populated it and before the
+                // judge call that consumes it — both run synchronously in this same closure on this
+                // same thread, so the thread-local handoff is safe even under `kbx --jobs N`. Empty
+                // when no `user_sim` gate deflected (or none is configured), so the judge grades
+                // exactly as before.
+                let reader_dialogue = kb_eval::backend::openai::take_reader_dialogue();
+
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the
                 // report excludes them from those denominators too.
@@ -1061,6 +1069,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                             q.answerable,
                             credit_abstention,
                             judge_idx.as_ref(),
+                            &reader_dialogue,
                         ) {
                             Ok(Judgement {
                                 verdict,

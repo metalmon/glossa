@@ -371,6 +371,10 @@ pub fn run_agent_loop_capturing(
     // endpoint/model that keeps returning blank text must not spin the whole `max_rounds` budget.
     const MAX_EMPTY_RETRIES: usize = 2;
     let mut empty_retries = 0usize;
+    // Whether the `user_sim` gate has deflected at least once this conversation. Only THEN is there a
+    // real assistant↔user_sim dialogue worth handing the judge (a gate that accepts the first text
+    // turn just yields the final answer, which the judge already sees). See the `user_sim` arms below.
+    let mut sim_deflected = false;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
@@ -399,21 +403,33 @@ pub fn run_agent_loop_capturing(
                     return Ok(text);
                 }
                 Some(gate) => match gate.judge(&question, &messages, &text) {
-                    // Substantive answer (or the gate failed open) -> accept and return it.
+                    // Substantive answer (or the gate failed open) -> accept and return it. If a
+                    // dialogue actually happened (>=1 deflection), record this final assistant turn so
+                    // the judge can see the answer the reader gave BEFORE any closing pleasantry.
                     Ok(None) => {
+                        if sim_deflected {
+                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
                     }
                     // The assistant only kept asking: echo its turn, append the in-character user
                     // deflection as a `role:"user"` message, and continue. Each deflection consumes
-                    // a round, so this is naturally capped by `max_rounds`.
+                    // a round, so this is naturally capped by `max_rounds`. Record BOTH text turns
+                    // (assistant + user_sim) into the dialogue the judge will later see.
                     Ok(Some(deflection)) => {
+                        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        crate::backend::openai::push_reader_dialogue_turn("user", &deflection);
+                        sim_deflected = true;
                         transport.push_assistant_turn(&mut messages, &reply);
                         messages.push(json!({ "role": "user", "content": deflection }));
                         continue;
                     }
                     // Fail-open on a gate error: return the text rather than hang the run.
                     Err(_) => {
+                        if sim_deflected {
+                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                        }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
                     }
@@ -468,6 +484,9 @@ pub fn run_agent_loop_capturing(
     }));
     let reply = call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
     let text = reply.text.unwrap_or_default();
+    if sim_deflected {
+        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+    }
     record_episode(&mut capture, system, tools, &messages, &text);
     Ok(text)
 }
