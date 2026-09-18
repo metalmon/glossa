@@ -152,6 +152,52 @@ pub fn judge_group(
     Ok(parse_links(content, &member_ids))
 }
 
+/// Keep a link only when it appears in a STRICT majority of the ballots (`count * 2 > votes`),
+/// preserving first-seen order for deterministic output. Each ballot is tallied at most once per
+/// unique `(from,to)` — ballots arrive already deduped (`parse_links`'s own contract), but this
+/// guards that invariant rather than trusting it, so a future ballot source that isn't pre-deduped
+/// can't silently double-count a single reply into two "votes".
+fn majority_links(
+    ballots: &[Vec<(String, String)>],
+    votes: usize,
+) -> Vec<(String, String)> {
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for ballot in ballots {
+        let mut seen_in_ballot: HashSet<(String, String)> = HashSet::new();
+        for link in ballot {
+            if !seen_in_ballot.insert(link.clone()) {
+                continue; // guard: count a ballot at most once per unique link
+            }
+            if !counts.contains_key(link) {
+                order.push(link.clone());
+            }
+            *counts.entry(link.clone()).or_default() += 1;
+        }
+    }
+    order
+        .into_iter()
+        .filter(|link| counts[link] * 2 > votes)
+        .collect()
+}
+
+/// Sample `judge_group` `resolve_judge_votes()` times and keep only the links that survive a
+/// strict majority (see `majority_links`). Errors propagate (mirrors `judge()`), so a hard
+/// endpoint failure fails the group rather than silently voting on fewer ballots.
+pub fn judge_group_voted(
+    ep: &Endpoint,
+    bridge_md: &str,
+    entity: &str,
+    facts: &[GroupFact],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let votes = crate::judge::resolve_judge_votes();
+    let mut ballots = Vec::with_capacity(votes);
+    for _ in 0..votes {
+        ballots.push(judge_group(ep, bridge_md, entity, facts)?);
+    }
+    Ok(majority_links(&ballots, votes))
+}
+
 /// The edge type `kbx build`'s judge writes for every link. Build groups are always Fact->Fact
 /// (extraction is pinned to a single flat `Fact` node type — Task 2), so there's no per-link
 /// resolution to do: every written link is always `glossa::graph::LEADS_TO`. Factored to a
@@ -232,7 +278,7 @@ pub fn run_judge(
             .map(|f| (f.id.as_str(), f.doc.as_str()))
             .collect();
 
-        let links = judge_group(
+        let links = judge_group_voted(
             lab.bridge.as_ref().unwrap_or(&lab.model),
             bridge_md,
             &group.entity,
@@ -350,5 +396,62 @@ mod tests {
     #[test]
     fn build_judge_writes_leads_to_for_fact_groups() {
         assert_eq!(spine_edge_for_build(), glossa::graph::LEADS_TO);
+    }
+
+    fn link(from: &str, to: &str) -> (String, String) {
+        (from.to_string(), to.to_string())
+    }
+
+    #[test]
+    fn majority_links_keeps_strict_majority() {
+        // ("a","b") appears in 2 of 3 ballots (majority); ("c","d") in only 1 of 3 (dropped).
+        let ballots = vec![
+            vec![link("a", "b"), link("c", "d")],
+            vec![link("a", "b")],
+            vec![],
+        ];
+        assert_eq!(majority_links(&ballots, 3), vec![link("a", "b")]);
+    }
+
+    #[test]
+    fn majority_links_unanimous_and_empty() {
+        let ballots = vec![vec![link("a", "b")], vec![link("a", "b")], vec![link("a", "b")]];
+        assert_eq!(majority_links(&ballots, 3), vec![link("a", "b")]);
+
+        let empty_ballots: Vec<Vec<(String, String)>> = vec![vec![], vec![], vec![]];
+        assert!(majority_links(&empty_ballots, 3).is_empty());
+    }
+
+    #[test]
+    fn majority_links_preserves_first_seen_order() {
+        // ("c","d") is first seen in ballot 1 (before ("a","b") first appears in ballot 2), and
+        // both survive a strict majority over 3 ballots — output must reflect that first-seen
+        // order, not insertion order of a later ballot.
+        let ballots = vec![
+            vec![link("c", "d")],
+            vec![link("a", "b"), link("c", "d")],
+            vec![link("a", "b")],
+        ];
+        assert_eq!(
+            majority_links(&ballots, 3),
+            vec![link("c", "d"), link("a", "b")]
+        );
+    }
+
+    #[test]
+    fn majority_links_threshold_at_two_votes() {
+        // votes=2 requires count*2 > 2, i.e. count >= 2 (both ballots) — a link in only 1 of 2 is
+        // dropped even though it's the "more common" one seen so far.
+        let ballots = vec![vec![link("a", "b")], vec![link("a", "b"), link("c", "d")]];
+        assert_eq!(majority_links(&ballots, 2), vec![link("a", "b")]);
+    }
+
+    /// Boundary guard: votes=1 requires count*2 > 1, i.e. count >= 1 — any link that appeared at
+    /// all survives a single-ballot vote. Matters because `KB_EVAL_JUDGE_VOTES=1` is a real,
+    /// expected setting (e.g. under a GEPA search sweeping the votes knob for cost).
+    #[test]
+    fn majority_links_single_vote_keeps_any_link_that_appeared() {
+        let ballots = vec![vec![link("a", "b")]];
+        assert_eq!(majority_links(&ballots, 1), vec![link("a", "b")]);
     }
 }

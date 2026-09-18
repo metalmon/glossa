@@ -180,7 +180,7 @@ const DEFAULT_JUDGE_VOTES: usize = 5;
 /// `KB_EVAL_JUDGE_VOTES` env var if set and it parses to a `usize`, else `DEFAULT_JUDGE_VOTES`.
 /// Always at least 1 (a caller setting `KB_EVAL_JUDGE_VOTES=0` still gets a single sample, not zero
 /// judge calls).
-fn resolve_judge_votes() -> usize {
+pub(crate) fn resolve_judge_votes() -> usize {
     std::env::var("KB_EVAL_JUDGE_VOTES")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
