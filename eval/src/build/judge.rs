@@ -157,10 +157,7 @@ pub fn judge_group(
 /// unique `(from,to)` — ballots arrive already deduped (`parse_links`'s own contract), but this
 /// guards that invariant rather than trusting it, so a future ballot source that isn't pre-deduped
 /// can't silently double-count a single reply into two "votes".
-fn majority_links(
-    ballots: &[Vec<(String, String)>],
-    votes: usize,
-) -> Vec<(String, String)> {
+fn majority_links(ballots: &[Vec<(String, String)>], votes: usize) -> Vec<(String, String)> {
     let mut order: Vec<(String, String)> = Vec::new();
     let mut counts: HashMap<(String, String), usize> = HashMap::new();
     for ballot in ballots {
@@ -419,7 +416,11 @@ mod tests {
 
     #[test]
     fn majority_links_unanimous_and_empty() {
-        let ballots = vec![vec![link("a", "b")], vec![link("a", "b")], vec![link("a", "b")]];
+        let ballots = vec![
+            vec![link("a", "b")],
+            vec![link("a", "b")],
+            vec![link("a", "b")],
+        ];
         assert_eq!(majority_links(&ballots, 3), vec![link("a", "b")]);
 
         let empty_ballots: Vec<Vec<(String, String)>> = vec![vec![], vec![], vec![]];

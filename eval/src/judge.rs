@@ -529,7 +529,9 @@ mod tests {
         let legacy = legacy_sections();
         assert_eq!(legacy.preamble, "You are a grading judge.");
         assert!(
-            legacy.dialogue.is_empty() && legacy.answerable.is_empty() && legacy.abstention.is_empty()
+            legacy.dialogue.is_empty()
+                && legacy.answerable.is_empty()
+                && legacy.abstention.is_empty()
         );
     }
 
@@ -671,8 +673,7 @@ mod tests {
                 answerable_expected
             );
 
-            let abstention_expected = format!(
-                "QUESTION: Q?\n\
+            let abstention_expected = "QUESTION: Q?\n\
                  NOTE: This question CANNOT be answered from the knowledge base — it is out of scope, not \
                  covered by the corpus, or a non-technical / routing request. There is no gold answer.\n\
                  The CORRECT behavior is for the assistant to state it has no answer / the information is \
@@ -683,7 +684,7 @@ mod tests {
                  `wrong` if it gives a substantive or fabricated technical answer as if it knew; \
                  `partial` if it declines but still adds unsupported specific claims.\n\
                  Reply with one line reason then `VERDICT: correct|partial|wrong`."
-            );
+                .to_string();
             assert_eq!(
                 build_user("Q?", "", "A", None, false, credit_abstention, &[], &s),
                 abstention_expected
