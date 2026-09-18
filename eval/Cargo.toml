@@ -44,10 +44,27 @@ constraint = ["glossa/constraint", "dep:glossa-constraint"]
 # AC-only); with it, a real model can load. See `just build-kb-constraint` for the analogous
 # opt-in pattern.
 nli = ["glossa/nli"]
+# GPU passthrough for glossa-nli's execution-provider features (see glossa-nli/Cargo.toml). Cargo
+# cannot CLI-enable a transitive dependency's feature (`cargo build -p kb-eval --features
+# glossa/nli-cuda` is not valid), so kb-eval carries a DIRECT optional `glossa-nli` dep (below)
+# purely so these features have something local to name. Cargo's feature unification then gives
+# the ONE shared `glossa-nli` instance (the one `glossa` itself depends on) `nli-ort + nli-cuda`,
+# so `glossa`'s `InProcessNli` compiles with CUDA support — without `glossa`'s own Cargo.toml ever
+# carrying a GPU feature (that's what keeps `cargo test -p glossa --all-features` CPU-only). Build
+# with e.g. `cargo build -p kb-eval --features nli-cuda`.
+nli-cuda = ["nli", "dep:glossa-nli", "glossa-nli/nli-cuda"]
+nli-directml = ["nli", "dep:glossa-nli", "glossa-nli/nli-directml"]
+nli-coreml = ["nli", "dep:glossa-nli", "glossa-nli/nli-coreml"]
 
 [dependencies]
 glossa = { path = ".." }
 glossa-constraint = { path = "../constraint", optional = true }
+# Direct optional dep purely to give the `nli-cuda`/`nli-directml`/`nli-coreml` passthrough
+# features (above) a local crate name to enable a feature on — kb-eval never calls glossa-nli
+# directly (it only ever goes through `glossa::gate`/`resolve_scorer`); Cargo's feature
+# unification is what makes this reach the shared instance glossa itself depends on. See the
+# `nli-cuda` feature comment above for the full mechanism.
+glossa-nli = { path = "../glossa-nli", optional = true }
 anyhow = "1"
 regex = "1"
 toml = "1.1"

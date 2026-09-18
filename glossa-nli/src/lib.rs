@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use ort::execution_providers::ExecutionProviderDispatch;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
@@ -68,10 +69,13 @@ struct Inner {
     batch_budget_tokens: usize,
 }
 
-/// Process-global load-once cache, keyed by canonicalized `model_dir`. Constructing two
-/// `InProcessNli` for the same directory reuses one `Inner` (one tokenizer, one ONNX session)
-/// instead of building a second one.
-static MODEL_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Inner>>>> = OnceLock::new();
+/// Process-global load-once cache, keyed by `(canonicalized model_dir, providers)`. Constructing
+/// two `InProcessNli` for the same directory AND the same ordered execution-provider list reuses
+/// one `Inner` (one tokenizer, one ONNX session) instead of building a second one. `providers` is
+/// part of the key (not just `model_dir`) because a different EP set is a different ONNX session
+/// (spec §2.1a) — without this, a second `load` with different EPs would wrongly reuse the first
+/// session's provider set.
+static MODEL_CACHE: OnceLock<Mutex<HashMap<(PathBuf, Vec<String>), Arc<Inner>>>> = OnceLock::new();
 
 /// An in-process NLI scorer. Constructed from a local `model_dir` (`model.onnx` +
 /// `tokenizer.json`) and the entailment class index (from the model's `id2label`, config-pinned
@@ -83,12 +87,22 @@ pub struct InProcessNli {
 
 impl InProcessNli {
     /// Load the model + tokenizer from `model_dir`. `entail_index` is the softmax index of the
-    /// entailment class. Reuses a cached `Inner` for the same (canonicalized) `model_dir` rather
-    /// than building a second ONNX session.
-    pub fn load(model_dir: &Path, entail_index: usize) -> anyhow::Result<Self> {
-        let cache_key = model_dir
-            .canonicalize()
-            .unwrap_or_else(|_| model_dir.to_path_buf());
+    /// entailment class. `providers` is the ordered list of runtime execution-provider names
+    /// (already normalized/lowercased by the caller's config — see `VerifyConfig`), e.g. `["cuda",
+    /// "cpu"]`; an empty slice or `["cpu"]` means CPU-only, today's behaviour. Reuses a cached
+    /// `Inner` for the same `(canonicalized model_dir, providers)` rather than building a second
+    /// ONNX session — see [`MODEL_CACHE`].
+    pub fn load(
+        model_dir: &Path,
+        entail_index: usize,
+        providers: &[String],
+    ) -> anyhow::Result<Self> {
+        let cache_key = (
+            model_dir
+                .canonicalize()
+                .unwrap_or_else(|_| model_dir.to_path_buf()),
+            providers.to_vec(),
+        );
         let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
         if let Some(inner) = cache
@@ -103,9 +117,9 @@ impl InProcessNli {
         }
 
         // Build outside the lock (tokenizer + session load can be slow); then reconcile with the
-        // cache. If another caller raced us to the same dir, keep whichever landed first so the
-        // cache never ends up holding two sessions for one model_dir.
-        let built = Arc::new(Self::build_inner(model_dir)?);
+        // cache. If another caller raced us to the same (dir, providers), keep whichever landed
+        // first so the cache never ends up holding two sessions for one key.
+        let built = Arc::new(Self::build_inner(model_dir, providers)?);
         let mut guard = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
@@ -116,7 +130,7 @@ impl InProcessNli {
         })
     }
 
-    fn build_inner(model_dir: &Path) -> anyhow::Result<Inner> {
+    fn build_inner(model_dir: &Path, providers: &[String]) -> anyhow::Result<Inner> {
         let tokenizer_path = model_dir.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             // `tokenizers::Result`'s error is a boxed trait object, not guaranteed
@@ -130,12 +144,22 @@ impl InProcessNli {
         tokenizer.with_padding(None);
 
         let model_path = model_dir.join("model.onnx");
+        let eps = execution_provider_dispatch(providers);
         // ort's `SessionBuilder`-typed error (`ort::Error<SessionBuilder>`) carries a
         // `NonNull<OrtSessionOptions>` and is therefore NOT `Send + Sync`, so `?` cannot convert it
         // into `anyhow::Error` (whose `From<E>` requires `E: Send + Sync + 'static`). Map every
         // builder step through `Display` first, exactly as `commit_from_file` already does.
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
+            // Deliberately NO `.error_on_failure()` on any EP: a GPU EP that can't register (no
+            // GPU / driver / runtime on this machine) MUST fall through to ORT's implicit CPU EP
+            // rather than error the whole session — that silent fallback is exactly ORT's default
+            // behaviour for `with_execution_providers` and is the fail-open contract this crate
+            // requires (see module doc). `eps` is empty (CPU-only) whenever `providers` is empty,
+            // is only `["cpu"]`, or names a GPU EP whose Cargo feature isn't compiled into this
+            // build — see [`execution_provider_dispatch`].
+            .with_execution_providers(eps)
+            .map_err(|e| anyhow::anyhow!("onnx session execution providers: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
             .with_intra_threads(1)
@@ -399,6 +423,73 @@ impl InProcessNli {
     }
 }
 
+/// Build the ORT execution-provider dispatch list for `providers`, in the caller's order,
+/// cfg-gated on which `nli-cuda` / `nli-directml` / `nli-coreml` Cargo features are compiled into
+/// this build. `"cpu"`, unknown names, and any GPU name whose feature isn't compiled are simply
+/// skipped — they end up on ORT's implicit CPU execution provider, which is always available and
+/// requires no explicit entry here. This is the same name filter as [`compiled_gpu_providers`]
+/// (kept in sync — see its doc), just producing live `ExecutionProviderDispatch` values instead of
+/// names, so it can't be unit-tested without a real `ort` build; `compiled_gpu_providers` is.
+fn execution_provider_dispatch(providers: &[String]) -> Vec<ExecutionProviderDispatch> {
+    providers
+        .iter()
+        .filter_map(|p| dispatch_for_name(p))
+        .collect()
+}
+
+/// Per-name EP-dispatch lookup used by [`execution_provider_dispatch`]. Written as a chain of
+/// early returns (rather than a `match`) so that with NO GPU feature compiled in, `name` is still
+/// referenced by live (if unreachable-by-cfg) code in every build — avoiding an `unused_variables`
+/// warning that a fully cfg-stripped `match` arm set would otherwise leave behind.
+fn dispatch_for_name(name: &str) -> Option<ExecutionProviderDispatch> {
+    #[cfg(feature = "nli-cuda")]
+    if name == "cuda" {
+        return Some(ort::ep::CUDA::default().build());
+    }
+    #[cfg(feature = "nli-directml")]
+    if name == "directml" {
+        return Some(ort::ep::DirectML::default().build());
+    }
+    #[cfg(feature = "nli-coreml")]
+    if name == "coreml" {
+        return Some(ort::ep::CoreML::default().build());
+    }
+    let _ = name; // reachable when no GPU feature above ran (or matched nothing)
+    None // cpu (implicit), unknown, or a feature not compiled in → skip.
+}
+
+/// Pure name-level mirror of [`execution_provider_dispatch`]'s filtering, with no `ort`/session
+/// access — this is what's actually unit-tested (below), since building real
+/// `ExecutionProviderDispatch` values requires a compiled EP feature and isn't meaningfully
+/// assertable without a GPU. Returns the subset of `providers` that WOULD be registered as GPU
+/// execution providers given the features compiled into this build, in the same relative order as
+/// the input; `"cpu"` and unknown names are always dropped (they fall to CPU either way).
+fn compiled_gpu_providers(providers: &[String]) -> Vec<&'static str> {
+    providers
+        .iter()
+        .filter_map(|p| compiled_gpu_name(p))
+        .collect()
+}
+
+/// Per-name lookup used by [`compiled_gpu_providers`]; mirrors [`dispatch_for_name`]'s cfg gates
+/// exactly, minus the `ort` construction (see that function's doc for the early-return rationale).
+fn compiled_gpu_name(name: &str) -> Option<&'static str> {
+    #[cfg(feature = "nli-cuda")]
+    if name == "cuda" {
+        return Some("cuda");
+    }
+    #[cfg(feature = "nli-directml")]
+    if name == "directml" {
+        return Some("directml");
+    }
+    #[cfg(feature = "nli-coreml")]
+    if name == "coreml" {
+        return Some("coreml");
+    }
+    let _ = name;
+    None
+}
+
 /// One `(window, hypothesis)` row queued for batched execution, tagged with the index of the
 /// hypothesis it belongs to (for the MAX-pool in `entail`).
 struct Row {
@@ -494,7 +585,7 @@ mod tests {
         // §2a.2); a literal is fine here since this test targets one known model dir.
         const ENTAIL_IDX: usize = 0;
 
-        let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX)
+        let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX, &["cpu".to_string()])
             .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
         let scores = nli
             .entail(
@@ -594,6 +685,66 @@ mod tests {
         );
     }
 
+    // ---- compiled_gpu_providers: pure, no model, no ort session -----------------------------
+
+    /// `"cuda"` survives the filter iff `nli-cuda` is compiled into this test binary; `"cpu"` is
+    /// always dropped (it's ORT's implicit fallback, never an explicit dispatch entry). CI builds
+    /// this crate with default features (`nli-ort` only, no GPU EP) so the `#[cfg(not(...))]` arm
+    /// is what actually runs there; a local GPU build (`--features nli-cuda`) exercises the other.
+    #[test]
+    fn compiled_gpu_providers_cuda_gated_by_compiled_feature() {
+        let input = vec!["cuda".to_string(), "cpu".to_string()];
+        let out = compiled_gpu_providers(&input);
+        #[cfg(feature = "nli-cuda")]
+        assert_eq!(out, vec!["cuda"], "nli-cuda compiled in: cuda must survive");
+        #[cfg(not(feature = "nli-cuda"))]
+        assert!(
+            out.is_empty(),
+            "nli-cuda NOT compiled in: cuda must fall through to CPU, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn compiled_gpu_providers_drops_unknown_names() {
+        let input = vec!["not_a_real_ep".to_string(), "cpu".to_string()];
+        assert!(compiled_gpu_providers(&input).is_empty());
+    }
+
+    #[test]
+    fn compiled_gpu_providers_empty_input_yields_empty_output() {
+        let input: Vec<String> = Vec::new();
+        assert!(compiled_gpu_providers(&input).is_empty());
+    }
+
+    /// Order is preserved among whatever survives the filter, regardless of which subset of GPU
+    /// features happen to be compiled in — checked by verifying each surviving name's relative
+    /// position in `out` matches its position in `input`, rather than hard-coding a feature set.
+    #[test]
+    fn compiled_gpu_providers_preserves_relative_order() {
+        let input = vec![
+            "unknown".to_string(),
+            "coreml".to_string(),
+            "cpu".to_string(),
+            "cuda".to_string(),
+            "directml".to_string(),
+        ];
+        let out = compiled_gpu_providers(&input);
+        let mut last_pos: Option<usize> = None;
+        for name in &out {
+            let pos = input.iter().position(|p| p == name).expect(
+                "every surviving name must come from the input list \
+                 (compiled_gpu_providers must not invent names)",
+            );
+            if let Some(last) = last_pos {
+                assert!(
+                    last < pos,
+                    "order not preserved: {out:?} vs input {input:?}"
+                );
+            }
+            last_pos = Some(pos);
+        }
+    }
+
     // ---- batched entail vs per-row reference: env-gated real model ---------------------------
 
     /// Builds a `Row` with an arbitrary `hyp_idx` — the parity/padding tests below score rows
@@ -618,7 +769,7 @@ mod tests {
         // one-row-per-batch / sequential — see NLI_BATCH_TOKENS). This is what makes the
         // entail-vs-per-row assertion below exercise the real batched path rather than a batch of 1.
         std::env::set_var("GLOSSA_NLI_BATCH_TOKENS", "16384");
-        let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX)
+        let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX, &["cpu".to_string()])
             .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
 
         // A long, repetitive premise forces >=2 windows; hypotheses of clearly different lengths

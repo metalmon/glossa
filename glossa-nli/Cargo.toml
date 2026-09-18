@@ -13,6 +13,17 @@ default = ["nli-ort"]
 # error (see lib.rs). Only nli-ort is implemented in this plan.
 nli-ort = ["dep:ort", "dep:tokenizers"]
 nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has something to guard)
+# GPU execution providers for the nli-ort engine (runtime-selected via `[verify.nli]
+# execution_providers`, see `InProcessNli::load`'s `providers` param) — each pulls in `nli-ort`
+# (still ONE engine; the XOR guard above is untouched) plus the matching `ort` EP feature.
+# Registration is fail-open: a GPU EP that can't init at runtime (no GPU/driver) falls through to
+# ORT's implicit CPU EP on its own (see lib.rs; no `.error_on_failure()` anywhere). Nothing in
+# `glossa`'s own Cargo.toml enables these — see glossa/Cargo.toml's `nli` feature comment and
+# eval/Cargo.toml's passthrough features, which is how `cargo test -p glossa --all-features` stays
+# CPU-only while `cargo build -p kb-eval --features nli-cuda` gets a GPU-capable `InProcessNli`.
+nli-cuda = ["nli-ort", "ort/cuda"]
+nli-directml = ["nli-ort", "ort/directml"]
+nli-coreml = ["nli-ort", "ort/coreml"]
 
 [dependencies]
 anyhow = "1"
