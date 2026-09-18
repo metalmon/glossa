@@ -18,13 +18,53 @@ build compiles zero ML dependencies):
 cargo build -p kb-eval --features nli      # builds kbx with the NLI engine
 ```
 
-Inference uses the ONNX Runtime loaded **at runtime** from a shared library
-(`ort` `load-dynamic`), so point `ORT_DYLIB_PATH` at an `onnxruntime` dylib whose
-major version is ABI-compatible with the pinned `ort` release:
+The default `nli` build is **self-contained on CPU**: `ort`'s `download-binaries`
+links the ONNX Runtime into the binary, so you just run it — no dll to place, no
+`ORT_DYLIB_PATH`.
+
+## GPU execution providers
+
+GPU is opt-in per platform. The provider is chosen **at runtime** from the
+ordered `[verify.nli].execution_providers` list (env `GLOSSA_NLI_EP`), and ORT
+falls through the list to CPU — a provider that can't initialize (no GPU, no
+driver, no runtime) is skipped, never an error. So GPU is always a strict
+speed-up over a guaranteed CPU floor (fail-open).
+
+| build feature | EP | covers | linking | ONNX Runtime |
+|:--|:--|:--|:--|:--|
+| `nli` (default) | CPU | everywhere | bundled (download-binaries) | linked in — self-contained |
+| `nli-directml` | DirectML | **all Windows GPUs** (NVIDIA/AMD/Intel, DX12) | bundled | linked in — self-contained |
+| `nli-cuda` | CUDA | NVIDIA (Win/Linux) | load-dynamic | you provide (onnxruntime-gpu) |
+| `nli-rocm` | ROCm | AMD/Linux | load-dynamic | you provide |
+| `nli-coreml` | CoreML | Apple | bundled | linked in |
+
+Build example: `cargo build -p kb-eval --features nli-cuda`.
+
+**One GPU backend per binary.** CUDA (load-dynamic) and DirectML (bundled) are
+mutually-exclusive linking strategies and ship as separate ONNX Runtime builds,
+so a single binary carries ONE GPU EP, not a CUDA→DirectML chain. Pick per
+platform: **on Windows, `nli-directml` is the portable default** (one artifact
+covers every GPU vendor, then CPU); `nli-cuda` is a separate "faster on NVIDIA"
+build. On Linux use `nli-cuda`/`nli-rocm`; on macOS `nli-coreml`.
+
+**Runtime for the load-dynamic EPs (CUDA/ROCm).** glossa does NOT bundle the CUDA
+runtime — install it the standard way and point `ORT_DYLIB_PATH` at the
+GPU-enabled `onnxruntime` dll:
 
 ```bash
-export ORT_DYLIB_PATH=/path/to/onnxruntime.dll   # or libonnxruntime.so
+pip install onnxruntime-gpu          # provides onnxruntime + providers_cuda dll
+# also install the matching CUDA + cuDNN 9.x and put their bin/ on PATH,
+# per ONNX Runtime's CUDA EP requirements (version matrix below)
+export ORT_DYLIB_PATH=/path/to/onnxruntime.dll
+kbx nli check <corpus>               # confirms the EP loads (or why it fell back)
 ```
+
+Follow the official, version-matched setup — do NOT guess CUDA/cuDNN versions:
+- CUDA EP requirements + CUDA/cuDNN compatibility matrix: <https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html>
+- Install guide: <https://onnxruntime.ai/docs/install/>
+
+(`nli-directml`/`nli-coreml` need no `ORT_DYLIB_PATH` — their runtime is linked in
+and DirectML/CoreML are OS components.)
 
 ## Bring your own model
 
